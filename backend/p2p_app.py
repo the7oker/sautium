@@ -710,24 +710,27 @@ async def health() -> dict:
     `birth_cert` (the certificate, never the proof) is what a peer that
     dials this node records it by (desktop/p2p/witness.py). `sharing` is the
     owner's P2P sharing switch: a launcher on the same host names this node
-    in its LAN beacon only while it is on (desktop/p2p/lan_discovery.py)."""
+    in its LAN beacon only while it is on (desktop/p2p/lan_discovery.py). A
+    node that passes nothing on says nothing of what it holds either — no
+    dump, no slice count, no holdings summary."""
     from config import settings
     from p2p_identity import served_certificate
-    counts = await _counts()
+    serving = serving_enabled()
+    counts = await _counts() if serving else {}
     node_id = node_pubkey_hex()
     cert = served_certificate(settings)
     return {
         "status": "ok",
         "type": "sautium-peer",
         "node_id": node_id,
-        "sharing": serving_enabled(),
+        "sharing": serving,
         "birth_cert": cert if cert is not None and node_id and cert["pubkey"] == node_id else None,
         **counts,
         "capabilities": SYNC_CAPABILITIES,
         # Version + counts of the holdings filter (None until built): the
         # asker prices fetching it against sending its own gaps.
         "holdings": (carry_queries.holdings_summary()
-                     if carry_queries is not None else None),
+                     if serving and carry_queries is not None else None),
     }
 
 

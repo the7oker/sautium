@@ -660,13 +660,23 @@ class SyncServer:
         Worker publishes every certificate anyway."""
         from desktop.p2p.birth_cert import served_certificate
         cert = served_certificate()
+        serving = self._serving_enabled()
+        if not serving:
+            # A node that passes nothing on says nothing of what it holds
+            # either: who it is, and that it does not serve.
+            return self._json_response(request, {
+                "status": "ok", "node_id": self.node_id, "type": "sautium-peer", "sharing": False,
+                "birth_cert": (cert if cert is not None
+                               and cert["pubkey"].lower() == self.node_id.lower() else None),
+                "capabilities": sync_queries.CAPABILITIES, "holdings": None,
+            })
         mb_slices, lb_dump, (lb_slices, lb_version) = \
             await asyncio.get_event_loop().run_in_executor(None, self._slice_counts)
         return self._json_response(request, {
             "status": "ok",
             "node_id": self.node_id,
             "type": "sautium-peer",
-            "sharing": self._serving_enabled(),
+            "sharing": True,
             "birth_cert": (cert if cert is not None
                            and cert["pubkey"].lower() == self.node_id.lower() else None),
             "mb_dump": self.mb_dump_version,

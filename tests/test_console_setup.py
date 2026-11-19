@@ -144,18 +144,141 @@ def test_a_first_run_writes_the_birth_and_what_the_image_carries():
 def test_a_node_that_lives_is_not_born_again_and_keeps_its_password():
     held = {"POSTGRES_PASSWORD": "kept", "SAUTIUM_IMAGE_MODELS": "0", "MUSIC_LIBRARY_PATH": "/srv/music",
             "DEFAULT_PROVIDER": "anthropic", "LASTFM_API_KEY": "the person's"}
-    plan = _plan(held, preset=None, volume_exists=True)
+    assert setup.keeps_music_line(held)
+    plan = _plan(held, preset=None, volume_exists=True, roots=False)
     for key in ("POSTGRES_PASSWORD", "SAUTIUM_BIRTH_PRESET", "MUSIC_LIBRARY_PATH", "DEFAULT_PROVIDER",
                 "LASTFM_API_KEY"):
         assert key not in plan, key
+    # An install made by hand keeps its music line and its compose files: no roots, no folder to pick
+    assert plan["COMPOSE_FILE"] == "docker-compose.pi.yml"
+    assert "COMPOSE_FILE" not in _plan({**held, "COMPOSE_FILE": "docker-compose.pi.yml:mine.yml"},
+                                       preset=None, volume_exists=True, roots=False)
+    assert not setup.keeps_music_line({}) and not setup.keeps_music_line({"MUSIC_LIBRARY_PATH": ""})
+    assert not setup.keeps_music_line({"MUSIC_LIBRARY_PATH": setup.NO_LIBRARY})
     assert plan["SAUTIUM_IMAGE_MODELS"] == "0"                # the image stays what it was
     # A volume with no password line in .env: none is invented over the database's own
     assert "POSTGRES_PASSWORD" not in _plan({}, volume_exists=True)
     assert "SAUTIUM_BIRTH_PRESET" not in _plan({}, volume_exists=True)
     # --preset full on an install set up without the models: the image gains them, nothing is born
-    grown = _plan(held, preset=None, asked_preset="full", volume_exists=True)
+    grown = _plan(held, preset=None, asked_preset="full", volume_exists=True, roots=False)
     assert (grown["SAUTIUM_IMAGE_MODELS"], grown["SAUTIUM_IMAGE_STREAMING"]) == ("1", "1")
     assert "SAUTIUM_BIRTH_PRESET" not in grown
+
+
+def test_the_birth_is_decided_until_the_node_is_born_and_never_after():
+    born = setup.birth_of
+    assert born({}, None, "nano", False) == "nano" and born({}, None, None, False) is None
+    # An earlier run's line stands for the next run — a build that failed is started again as it was —
+    assert born({"SAUTIUM_BIRTH_PRESET": "nano"}, None, None, False) == "nano"
+    # — until --preset says otherwise: the line and the image's arguments then move together
+    assert born({"SAUTIUM_BIRTH_PRESET": "nano"}, "full", "nano", False) is None
+    unborn = _plan({"SAUTIUM_BIRTH_PRESET": "nano"}, preset=None, asked_preset="full")
+    assert unborn["SAUTIUM_BIRTH_PRESET"] == "" and unborn["SAUTIUM_IMAGE_MODELS"] == "1"
+    assert born({}, "nano", None, False) == "nano"
+    # A node that lives is what it was born: neither the flag nor the machine's reading changes that
+    assert born({"SAUTIUM_BIRTH_PRESET": "nano"}, "full", None, True) == "nano"
+    assert born({}, "nano", "nano", True) is None
+    with pytest.raises(setup.Stop, match="knows nano"):
+        born({"SAUTIUM_BIRTH_PRESET": "tiny"}, None, None, False)
+
+
+@pytest.fixture
+def machine_ready(checkout, monkeypatch):
+    """The setup's whole run on a checkout, with the machine, Docker and
+    systemd replaced: what it writes is what the tests read."""
+    ran = []
+    for name, value in (
+            ("check_checkout", lambda: None), ("check_machine", lambda: None), ("release_step", lambda: None),
+            ("docker_state", lambda: ("ok", "Docker 29.1 with Compose 2.40.")),
+            ("machine", lambda: {"ram_gib": 3.7, "docker_root": "/var/lib/docker", "docker_root_free_gb": 100.0,
+                                 "docker_root_removable": False}),
+            ("machine_line", lambda m, preset: "a small board"),
+            ("database_volume_exists", lambda: False), ("node_running", lambda: False),
+            ("ports_taken", lambda: []), ("undervoltage_now", lambda: False),
+            ("lingering", lambda: True), ("automount_installed", lambda: True),
+            ("build", lambda state, env: ran.append("build")), ("start", lambda: ran.append("start")),
+            ("last_screen", lambda m, preset, passes_on: ran.append(("screen", preset, passes_on)))):
+        monkeypatch.setattr(setup, name, value)
+    monkeypatch.setattr(setup.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(setup.agent, "install", lambda root: 0)
+    return types.SimpleNamespace(root=checkout, ran=ran)
+
+
+def test_a_first_run_makes_a_node_that_picks_its_folder(machine_ready, tmp_path):
+    music = tmp_path / "Music"
+    music.mkdir()
+    assert setup.main(["--music", str(music), "--yes"]) == 0
+    env = setup.agent.read_env(machine_ready.root / ".env")
+    assert env["COMPOSE_FILE"] == "docker-compose.pi.yml:host/compose.roots.yml"
+    assert env["MUSIC_LIBRARY_PATH"] == setup.NO_LIBRARY and env["SAUTIUM_BIRTH_PRESET"] == "nano"
+    assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [str(music), setup.AUTOMOUNT_BASE]
+    assert machine_ready.ran == ["build", "start", ("screen", "nano", False)]
+    assert setup.load_state()["done"] is True
+
+
+def test_an_install_made_by_hand_keeps_its_music_line(machine_ready, monkeypatch, tmp_path, capsys):
+    """Its files keep their paths: the setup gives it no roots, no folder to
+    pick and no automount, and --music is refused with the way to change over."""
+    (machine_ready.root / ".env").write_text("MUSIC_LIBRARY_PATH=/srv/music\nPOSTGRES_PASSWORD=kept\n")
+    monkeypatch.setattr(setup, "database_volume_exists", lambda: True)
+    monkeypatch.setattr(setup, "automount_installed", lambda: False)
+    assert setup.main(["--yes"]) == 0
+    env = setup.agent.read_env(machine_ready.root / ".env")
+    assert env["MUSIC_LIBRARY_PATH"] == "/srv/music" and env["COMPOSE_FILE"] == "docker-compose.pi.yml"
+    assert not (machine_ready.root / "host" / "compose.roots.yml").exists()
+    assert "SAUTIUM_LIBRARY_ROOTS" not in (machine_ready.root / ".env").read_text()
+    assert "automount" not in capsys.readouterr().out
+    assert machine_ready.ran[:2] == ["build", "start"]
+    machine_ready.ran.clear()
+    music = tmp_path / "Music"
+    music.mkdir()
+    assert setup.main(["--music", str(music), "--yes"]) == 1
+    assert "delete that line from .env" in capsys.readouterr().out and machine_ready.ran == []
+
+
+def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine_ready, monkeypatch, capsys):
+    """Bound as it is, the node would not start before someone signs in to
+    the desktop: the setup prints the one fstab line and stops, and names the
+    folder to give it afterwards."""
+    found = json.dumps({"filesystems": [{"source": "/dev/sda1", "target": "/media/pi/Elements",
+                                         "fstype": "exfat", "uuid": "4A21-0000"}]})
+    plan = setup.boot_mount("/media/pi/Elements/Music/Jazz", found, 1000, 1000)
+    assert plan == {
+        "point": "/mnt/sautium-4A21-0000", "folder": "/mnt/sautium-4A21-0000/Music/Jazz",
+        "line": "UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat "
+                "ro,nofail,nosuid,nodev,noexec,uid=1000,gid=1000,fmask=0133,dmask=0022 0 0"}
+    ext4 = setup.boot_mount("/media/pi/disk", json.dumps({"filesystems": [{
+        "target": "/media/pi/disk", "fstype": "ext4", "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}), 1000, 1000)
+    assert ext4["line"].endswith(" ext4 ro,nofail,nosuid,nodev,noexec,noload 0 0") and ext4["folder"] == ext4["point"]
+    # What cannot be read whole, a filesystem the automount does not know, a UUID that is not one: no line
+    for bad in ("", "{}", json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "btrfs", "uuid": "ab-cd"}]}),
+                json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "vfat", "uuid": "4A21 0000; reboot"}]}),
+                json.dumps({"filesystems": [{"target": "/media/pi/other", "fstype": "vfat", "uuid": "4A21-0000"}]})):
+        assert setup.boot_mount("/media/pi/x/Music", bad, 1000, 1000) is None, bad
+    assert setup.desktop_mounted("/media/pi/Elements/Music") and setup.desktop_mounted("/run/media/pi/E/Music")
+    assert not any(setup.desktop_mounted(p) for p in (
+        "/media/sautium/4A21-0000/Music", "/mnt/music", "/home/pi/Music", "/media/pi", "/srv/music"))
+
+    monkeypatch.setattr(setup.os.path, "isdir", lambda p: True)
+    monkeypatch.setattr(setup.os.path, "realpath", lambda p: str(p))
+    monkeypatch.setattr(setup, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, found.encode(), b""))
+    assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 1
+    said = capsys.readouterr().out
+    assert "    echo 'UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat ro,nofail," in said
+    assert "| sudo tee -a /etc/fstab" in said and "    sudo mount /mnt/sautium-4A21-0000" in said
+    assert "    sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab" in said       # its undo
+    assert "then run:  ./sautium --music /mnt/sautium-4A21-0000/Music" in said
+    assert machine_ready.ran == [] and not (machine_ready.root / ".env").exists()
+
+
+def test_a_desktop_that_mounts_disks_itself_is_not_given_a_second_automount(checkout, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "lingering", lambda: True)
+    monkeypatch.setattr(setup, "automount_installed", lambda: False)
+    monkeypatch.setattr(setup, "desktop_automounter", lambda: True)
+    setup.root_steps(types.SimpleNamespace(yes=True), {})
+    said = capsys.readouterr().out
+    assert "this machine's desktop mounts them itself" in said and "sudo install" not in said
+    assert not (checkout / "host" / "automount").exists()
 
 
 def test_the_env_file_keeps_every_line_the_setup_does_not_own(checkout):
@@ -181,7 +304,7 @@ def test_a_root_is_a_folder_of_music_never_a_part_of_the_system(checkout, tmp_pa
     for refused in ("/", "/home", "/usr", "/var", "/etc", "/run", "/proc", "/sys", "/dev", "/mnt", "/media",
                     "/usr/share", "/etc/ssl", "relative/music", str(checkout), str(checkout / "data"),
                     str(checkout.parent), str(tmp_path / "none"), str(music) + ":x", str(music) + " x",
-                    "/home/$USER/Music"):
+                    "/home/$USER/Music", "/run/media", "/run/user"):
         assert setup.root_refusal(refused, checkout) is not None, refused
     home = Path.home()
     if home.parts[:2] == ("/", "home") and len(home.parts) == 3:
@@ -190,6 +313,39 @@ def test_a_root_is_a_folder_of_music_never_a_part_of_the_system(checkout, tmp_pa
     link = tmp_path / "music-link"
     link.symlink_to("/etc")
     assert setup.root_refusal(str(link), checkout) is not None
+    # Docker's own data: the folder, one that holds it, one inside it
+    docker = tmp_path / "ssd" / "docker"
+    (docker / "volumes").mkdir(parents=True)
+    (tmp_path / "ssd" / "Music").mkdir()
+    for refused in (docker, tmp_path / "ssd", docker / "volumes"):
+        assert "Docker's own data" in setup.root_refusal(str(refused), checkout, docker_root=str(docker))
+    assert setup.root_refusal(str(tmp_path / "ssd" / "Music"), checkout, docker_root=str(docker)) is None
+    with pytest.raises(setup.Stop, match="Docker's own data"):
+        setup.chosen_roots(str(tmp_path / "ssd"), [], str(docker))
+
+
+def test_a_folder_is_named_as_people_name_folders(checkout, tmp_path):
+    """A space, any alphabet: carried whole into the override and read back
+    from it. Only the two characters the roots' list and compose read as
+    their own are refused."""
+    yaml = pytest.importorskip("yaml")
+    named = [tmp_path / "My Music", tmp_path / "Музика" / "Джаз", tmp_path / "音楽 🎵", tmp_path / "it's \"live\""]
+    for folder in named:
+        folder.mkdir(parents=True)
+        assert setup.root_refusal(str(folder), checkout) is None, folder
+    roots = [str(f) for f in named]
+    text = setup.roots_override(roots)
+    parsed = yaml.safe_load(text)["services"]["backend"]
+    assert parsed["environment"]["SAUTIUM_LIBRARY_ROOTS"].split(":") == roots
+    assert [v["source"] for v in parsed["volumes"]] == roots == [v["target"] for v in parsed["volumes"]]
+    (checkout / "host" / "compose.roots.yml").write_text(text, encoding="utf-8")
+    assert setup.held_roots(checkout / "host" / "compose.roots.yml") == roots
+    for refused in ("a:b", "pri$e", "new\nline"):
+        (tmp_path / refused).mkdir()
+        assert "cannot carry" in setup.root_refusal(str(tmp_path / refused), checkout)
+    # … and a link that leads to such a folder is refused as the folder is
+    (tmp_path / "plain").symlink_to(tmp_path / "a:b")
+    assert "cannot carry" in setup.root_refusal(str(tmp_path / "plain"), checkout)
 
 
 def test_the_override_binds_each_root_at_its_own_path_read_only(checkout, tmp_path):
@@ -312,6 +468,25 @@ def test_the_hosts_request_is_signed_as_the_nodes_door_checks_it(checkout, monke
     assert setup.signed_get("/api/auth/pin") is None                   # no secret: nothing is sent unsigned
 
 
+def test_the_addresses_shown_are_doors_from_another_device():
+    listing = "\n".join([
+        "1: lo    inet 127.0.0.1/8 scope host lo",
+        "2: eth0    inet 192.168.7.20/24 brd 192.168.7.255 scope global eth0",
+        "3: wlan0    inet 10.1.2.3/24 scope global wlan0",
+        "4: docker0    inet 172.17.0.1/16 scope global docker0",
+        "5: br-0a1b2c3d4e5f    inet 172.18.0.1/16 scope global br-0a1b2c3d4e5f",
+        "6: tailscale0    inet 100.64.0.10/32 scope global tailscale0",
+        "7: wwan0    inet 203.0.113.9/24 scope global wwan0",
+        "8: br0    inet 192.168.8.5/24 scope global br0"])             # a LAN bridge a person made is a door
+    assert setup.lan_addresses("10.1.2.3", listing) == ["10.1.2.3", "192.168.7.20", "192.168.8.5"]
+    assert setup.lan_addresses(None, listing) == ["192.168.7.20", "10.1.2.3", "192.168.8.5"]
+    assert setup.lan_addresses("203.0.113.9", listing)[0] == "192.168.7.20"      # a public route's source is not shown
+    assert setup.lan_addresses(None, "") == []
+    bridge = setup.machine_tier.container_bridge
+    assert all(bridge(n) for n in ("docker0", "br-0a1b2c3d4e5f", "veth9f3a", "virbr0", "docker_gwbridge"))
+    assert not any(bridge(n) for n in ("eth0", "wlan0", "br0", "bridge0", "end0", "enp3s0", "tailscale0"))
+
+
 def test_a_tailnets_funnel_and_key_are_read_from_tailscales_own_answers():
     assert setup.funnel_on('{"AllowFunnel": {"node.example.ts.net:443": true}}', "")
     assert not setup.funnel_on('{"TCP": {"443": {"HTTPS": true}}}', "")           # served on the tailnet only
@@ -344,6 +519,7 @@ def test_the_setup_refuses_root_and_runs_no_sudo(monkeypatch, capsys):
 def test_the_root_steps_are_printed_whole_and_yes_never_waits(checkout, monkeypatch, capsys):
     monkeypatch.setattr(setup, "lingering", lambda: False)
     monkeypatch.setattr(setup, "automount_installed", lambda: False)
+    monkeypatch.setattr(setup, "desktop_automounter", lambda: False)
     monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("--yes waited for a key"))
     setup.root_steps(types.SimpleNamespace(yes=True), {})
     printed = capsys.readouterr().out
@@ -506,6 +682,39 @@ def test_a_run_started_again_does_not_build_what_is_built(checkout, monkeypatch)
     assert setup.load_state() == {}
 
 
+def test_a_second_run_attaches_to_its_own_build_and_to_no_other_process(checkout, monkeypatch):
+    monkeypatch.setattr(setup.agent, "head", lambda root: "c" * 40)
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:local")
+    monkeypatch.setattr(setup.agent, "compose_cmd", lambda root=None: ["docker", "compose"])
+    monkeypatch.setattr(setup, "run", lambda args, **kw: subprocess.CompletedProcess(args, 1, b"", b""))
+    env = {"SAUTIUM_IMAGE_MODELS": "0", "SAUTIUM_IMAGE_ASSISTANT_CLI": "0", "SAUTIUM_IMAGE_STREAMING": "0"}
+    key = setup.image_key(env)
+    started, waited = [], []
+
+    def popen(args, **kw):
+        started.append(args)
+        (checkout / "host" / "setup-build.exit").write_text("0\n")
+        return types.SimpleNamespace(pid=os.getpid())
+    monkeypatch.setattr(setup.subprocess, "Popen", popen)
+    monkeypatch.setattr(setup, "wait_for", waited.append)
+    me = setup.born(os.getpid())
+    assert me and me.isdigit() and setup.born(2 ** 22 + 7) is None
+    # The stored number now belongs to another process (it started at another tick): a new build
+    (checkout / "host" / "setup-build.exit").write_text("1\n")      # the stale answer of the build that died
+    state = {"build": {"key": key, "pid": os.getpid(), "born": "1"}}
+    setup.build(state, env)
+    assert len(started) == 1 and state == {"built": key}
+    # The same process as when the state was written: attached, nothing started
+    (checkout / "host" / "setup-build.exit").write_text("0\n")
+    state = {"build": {"key": key, "pid": os.getpid(), "born": me}}
+    setup.build(state, env)
+    assert len(started) == 1 and waited == [os.getpid(), os.getpid()]
+    # A state written before the start time was kept names no build to attach to
+    state = {"build": {"key": key, "pid": os.getpid()}}
+    setup.build(state, env)
+    assert len(started) == 2
+
+
 @pytest.fixture
 def installed(checkout, monkeypatch):
     """A node as a setup left it, with Docker and systemd replaced by a
@@ -538,7 +747,8 @@ def test_remove_takes_what_runs_and_keeps_the_data(installed, capsys):
     assert "agent uninstall" in joined
     assert (installed.root / "data" / "backup" / "x.sbk").exists() and (installed.root / ".env").exists()
     assert not (installed.root / "host" / "bin").exists()
-    assert not (installed.root / "host" / "compose.roots.yml").exists()
+    # The roots override stays with the .env that names it: the folder's compose commands still work
+    assert (installed.root / "host" / "compose.roots.yml").exists()
     assert "sudo loginctl disable-linger" in said and "remove --data takes those" in said
     assert not any("sudo" in line for line in joined)
     # Run again: nothing left to take, and it says so
@@ -558,8 +768,50 @@ def test_the_data_goes_only_after_the_nodes_nickname(installed, monkeypatch, cap
     joined = [" ".join(a) for a in installed.asked]
     assert "docker compose down --remove-orphans --rmi local --volumes" in joined
     assert not (installed.root / "data").exists() and not (installed.root / ".env").exists()
+    assert not (installed.root / "host" / "compose.roots.yml").exists()
     assert installed.root.exists()                                     # the folder itself is the person's to delete
     assert "rm -rf " in capsys.readouterr().out
+
+
+def test_a_compose_step_that_fails_is_said_and_the_data_stays_beside_a_volume_that_stayed(
+        installed, monkeypatch, capsys):
+    def failing(args, **kw):
+        installed.asked.append(args)
+        return subprocess.CompletedProcess(args, 1, b"", b"WARN old\nopen host/compose.roots.yml: no such file\x1b[0m\n")
+    monkeypatch.setattr(setup, "run", failing)
+    monkeypatch.setattr("builtins.input", lambda prompt: "owner")
+    assert setup.main(["remove", "--data"]) == 1
+    said = capsys.readouterr().out
+    assert "could not stop the node: open host/compose.roots.yml: no such file" in said and "\x1b" not in said
+    assert "nothing of the node's data was deleted" in said and "data removed" not in said
+    assert (installed.root / "data" / "backup" / "x.sbk").exists() and (installed.root / ".env").exists()
+    # Without --data the same failure is said, and what it could take it still takes
+    assert setup.main(["remove"]) == 0
+    assert "could not remove the containers" in capsys.readouterr().out
+
+
+def test_update_leaves_a_name_and_opens_nothing_a_container_left(installed, capsys):
+    requests = installed.root / "run" / "requests"
+    requests.mkdir(parents=True)
+    (installed.root / "host" / "agent.log").write_text("earlier\n")
+    assert setup.main(["update"]) == 0
+    assert (requests / "update").is_file() and (requests / "update").stat().st_size == 0
+    assert ["systemctl", "--user", "start", "--wait", "sautium-host-agent.service"] in installed.asked
+    assert "earlier" not in capsys.readouterr().out               # only what the agent wrote since
+    # A FIFO, a folder or a link a container left under the name: none is opened, the request stands
+    for leave in (lambda p: os.mkfifo(p), lambda p: p.mkdir(), lambda p: p.symlink_to("/etc/hostname")):
+        (requests / "update").unlink() if not (requests / "update").is_dir() or (requests / "update").is_symlink() \
+            else (requests / "update").rmdir()
+        leave(requests / "update")
+        assert setup.main(["update"]) == 0
+    # The folder itself a link: refused
+    shutil.rmtree(installed.root / "run")
+    (installed.root / "run").mkdir()
+    (installed.root / "run" / "requests").symlink_to(installed.root / "data")
+    assert setup.main(["update"]) == 1
+    assert not (installed.root / "data" / "update").exists()
+    (installed.root / "host" / "agent.env").unlink()
+    assert setup.main(["update"]) == 1 and "no host agent" in capsys.readouterr().out
 
 
 def test_status_says_what_is_there_and_changes_nothing(installed, monkeypatch, capsys):
@@ -585,8 +837,12 @@ def test_the_wrapper_runs_the_setup_isolated():
     text = wrapper.read_text()
     assert text.startswith("#!/bin/sh\n") and 'exec python3 -I "$here/scripts/setup.py" "$@"' in text
     assert subprocess.run(["sh", "-n", str(wrapper)]).returncode == 0
-    # Standard library alone: the setup runs before anything is installed
+    # Standard library alone: the setup runs before anything is installed —
+    # by whatever python3 the system has, down to the one it says it needs
     import ast
+    assert "sys.version_info < (3, 9)" in SOURCE
+    for path in ("scripts/setup.py", "scripts/host_agent.py", "desktop/machine_tier.py"):
+        ast.parse((REPO / path).read_text(encoding="utf-8"), feature_version=(3, 9))
     tree = ast.parse(SOURCE)
     imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names} | {
         n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}

@@ -3,16 +3,17 @@
 The file stays on the node — `data/backup`, its own bind — and leaves by a
 disk the person plugs in or, later, a share; no route serves it. What runs is
 the one implementation of "make a backup": `python -m backup create
---password-env … --progress-json --cancel-on-stdin` (backend/backup.py), a
+--password-stdin --progress-json --cancel-on-stdin` (backend/backup.py), a
 child of this process, as the launcher runs it (desktop/backup_task.py).
 
-The account's password reaches the child in ITS environment alone: this
-process's own environment never holds it. The child also gets back what the
-lifespan dropped from this process's environment (serving.hold_secrets) and a
-backup needs — the database's login and, for an account given in .env, the
-account itself — and nothing else of config.SECRET_ENV. The child makes
-itself undumpable and pops the password as it starts (backup.main,
-backup._password).
+The account's password reaches the child as the first line of its pipe:
+no environment holds it, this process's or the child's, so no other process
+of the node's user (the assistant's CLI is one) can read it from /proc while
+the child starts. The child also gets back what the lifespan dropped from
+this process's environment (serving.hold_secrets) and a backup needs — the
+database's login and, for an account given in .env, the account itself —
+and nothing else of config.SECRET_ENV; it makes itself undumpable as it
+starts (backup.main).
 
 One job at a time. Its progress is process memory, said on the Library
 stream; a cancel closes the child's stdin, which the child reads as the
@@ -34,7 +35,6 @@ from desktop import node_backup as nb
 
 logger = logging.getLogger(__name__)
 
-PASSWORD_ENV = "SAUTIUM_BACKUP_PASSWORD"
 # How many of the newest backups "Keep the newest" leaves
 KEEP_NEWEST = 3
 
@@ -49,11 +49,11 @@ def _wake() -> None:
     notify_library_subscribers()
 
 
-def _child_env(password: str) -> Dict[str, str]:
-    """This process's environment, the backup's password, and what a backup
-    needs of the credentials the lifespan dropped from it."""
+def _child_env() -> Dict[str, str]:
+    """This process's environment and what a backup needs of the credentials
+    the lifespan dropped from it. Never the account's password: that goes
+    down the child's pipe."""
     env = dict(os.environ)
-    env[PASSWORD_ENV] = password
     env["POSTGRES_USER"] = settings.postgres_user
     env["POSTGRES_PASSWORD"] = settings.postgres_password
     # An account given in .env has no key on disk: the job derives it as
@@ -66,7 +66,7 @@ def _child_env(password: str) -> Dict[str, str]:
 
 
 def _command() -> list:
-    return [sys.executable, "-m", "backup", "create", "--password-env", PASSWORD_ENV,
+    return [sys.executable, "-m", "backup", "create", "--password-stdin",
             "--progress-json", "--cancel-on-stdin"]
 
 
@@ -79,9 +79,17 @@ def start(password: str) -> bool:
         if _state["running"]:
             return False
         proc = subprocess.Popen(
-            _command(), cwd=str(Path(__file__).resolve().parent), env=_child_env(password),
+            _command(), cwd=str(Path(__file__).resolve().parent), env=_child_env(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,      # stderr: the node's own log
             text=True, encoding="utf-8", errors="replace")
+        # The first line of the pipe is the password; what follows is the
+        # cancel channel. A child that died at once has no reader: its end
+        # is what _follow reports.
+        try:
+            proc.stdin.write(password + "\n")
+            proc.stdin.flush()
+        except OSError:
+            pass
         _proc = proc
         _state.update(running=True, phase="starting", bytes=None, total=None,
                       cancel_requested=False, error=None, done=None)

@@ -450,9 +450,10 @@ See:
   `backend/routers/settings.py` `_DEFAULTS`): `sync.pass_on` ("Pass on what
   this node holds", since 2026-11-19 — the serving side of sharing, split
   from the taking side: off, the node still asks and takes, and answers no
-  peer sync route, says `sharing: false` in `/health`, beacons and announces
-  no tail and offers no carrier anything; default on, off in a node born
-  Nano; shown only where it is off or the node is Nano), `sync.announce_limit` (rare
+  peer sync route, says `sharing: false` and nothing of what it holds in
+  `/health`, beacons and announces no tail and offers no carrier anything;
+  default on, off in a node born Nano — whose preset also turns
+  `p2p.relay_enabled` off; shown only where it is off or the node is Nano), `sync.announce_limit` (rare
   artist DHT tail; 150 = half the traversal lane, announced only under the
   computed `p2p.rare_mode`), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
   each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
@@ -574,10 +575,14 @@ See:
   at its own host path, `rslave`, and lists them in `SAUTIUM_LIBRARY_ROOTS`;
   the owner picks the library's folder under them in the Web UI (a row of
   `library_roots`), and `MUSIC_LIBRARY_PATH` then names an empty folder. A
-  path a page names is resolved and must stay under a root; under roots the
-  scanner follows no link out of them. A disk plugged in later is seen by a
+  path a page names — the folder picked, a scan's scope — is resolved and
+  must stay under a root; under roots the scanner follows no link out of
+  them. An install whose `.env` names `MUSIC_LIBRARY_PATH` itself (made by
+  hand) keeps that line and gets no roots: its files keep their paths. A disk plugged in later is seen by a
   `poll()` on the mount table (`backend/mount_watch.py`), never a timer. The
-  setup never runs `sudo`: it prints root steps. `SAUTIUM_BIRTH_PRESET`
+  setup never runs `sudo`: it prints root steps (lingering; the automount,
+  not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
+  `--music` folder on a disk such a desktop mounts). `SAUTIUM_BIRTH_PRESET`
   (`nano`) is read once per database (`db_migrate`, `birth_preset_v1`).
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`

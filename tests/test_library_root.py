@@ -169,6 +169,11 @@ def test_the_choice_is_a_row_and_the_librarys_folder_at_once(tree, db):
     assert library_root.chosen() == path
     db.execute("SELECT count(*) FROM library_roots")
     assert db.fetchone()[0] == 2
+    # A choice stored while the clock ran ahead (or made now, on a board that woke in the past) does not
+    # outrank a later one: the newest choice is later than every stored one
+    db.execute("UPDATE library_roots SET chosen_at = now() + interval '3 years' WHERE subpath <> ''")
+    assert library_root.choose(str(tree.music)) == library_root.chosen() == str(tree.music)
+    assert library_root.choose(path) == library_root.chosen() == path
 
 
 def test_a_folder_outside_the_roots_is_never_chosen(tree, db):
@@ -265,6 +270,46 @@ def test_a_link_that_leaves_the_roots_is_not_scanned(tree, caplog):
     # 03.flac points outside the roots; 04.flac at a file inside them
     assert _found(scanner, tree.music) == ["01.flac", "02.FLAC", "04.flac"]
     assert "03.flac is a link that leaves the folders this node reads" in caplog.text
+
+
+def test_a_scans_scope_is_a_folder_inside_the_library(tree, monkeypatch, caplog):
+    """The walk judges entries; the scope's own folder, which a request
+    names, is judged here: no `..` anywhere, no link out of the roots."""
+    scanner = pytest.importorskip("scanner")
+    walker = scanner.LibraryScanner(str(tree.music))
+    assert scanner.scope_admitted(tree.music, "Jazz/Album") and scanner.scope_admitted(tree.music, "Jazz")
+    for outside in ("../../outside", "Jazz/../../../outside", "..", "Jazz\\..\\..", "Jazz/way-out"):
+        assert not scanner.scope_admitted(tree.music, outside), outside
+        with pytest.raises(ValueError, match="not inside the library"):
+            walker.find_audio_files(subpath=outside)
+        audio, _cues, _unread = walker.find_audio_files(scopes=[(outside, True)])
+        assert audio == [], outside
+    assert "is not inside the library — not walked" in caplog.text
+    assert [p.name for p in walker.find_audio_files(subpath="Jazz")[0]] != []
+    # With no roots a folder link inside the library is a scope as before; `..` is one nowhere
+    monkeypatch.setattr(settings, "sautium_library_roots", "")
+    assert scanner.scope_admitted(tree.music, "Jazz/way-out")
+    assert not scanner.scope_admitted(tree.music, "Jazz/../../outside")
+
+
+def test_the_scan_route_refuses_a_scope_outside_the_library(tree, monkeypatch):
+    import asyncio
+    monkeypatch.chdir(BACKEND)
+    main = pytest.importorskip("main")
+    from fastapi import HTTPException
+    from playback import hqp_benchmark
+    monkeypatch.setattr(settings, "music_library_path", str(tree.music))
+    monkeypatch.setattr(hqp_benchmark, "measures_here", lambda: False)
+    monkeypatch.setattr("scanner.refuse_if_unreachable", lambda: None)
+    asked = []
+    monkeypatch.setattr(main, "request_scan", lambda scopes, **kw: asked.append(scopes) or False)
+    for outside in ("../../outside", "Jazz/way-out"):
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(main.scan_start(subpath=outside))
+        assert refused.value.status_code == 400
+    assert asked == []
+    asyncio.run(main.scan_start(subpath="/Jazz/Album/"))
+    assert asked == [{"Jazz/Album": True}]
 
 
 def test_a_node_with_no_roots_follows_a_link_as_before(tree, monkeypatch):

@@ -110,9 +110,14 @@ def choose(path: str) -> str:
         raise Refused("That folder is not one this node may read")
     mount = next(r for r in roots() if real == r or real.startswith(r.rstrip("/") + "/"))
     subpath = real[len(mount):].strip("/")
+    # The newest choice is the folder (chosen): later than every stored one
+    # whatever the clock says — a board with no battery starts in the past
+    # until the network sets its time.
     db_execute("""
-        INSERT INTO library_roots (mount, subpath) VALUES (%s, %s)
-        ON CONFLICT (mount, subpath) DO UPDATE SET chosen_at = now()""", (mount, subpath))
+        INSERT INTO library_roots (mount, subpath, chosen_at)
+        SELECT %s, %s, GREATEST(now(), COALESCE(max(chosen_at) + interval '1 microsecond', now()))
+        FROM library_roots
+        ON CONFLICT (mount, subpath) DO UPDATE SET chosen_at = EXCLUDED.chosen_at""", (mount, subpath))
     settings.music_library_path = real
     logger.info("music folder chosen: %s", real)
     return real

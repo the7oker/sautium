@@ -27,6 +27,7 @@ def _own_addresses() -> List[Dict[str, str]]:
     import psutil
     from claude_code_runner import IN_DOCKER
     from config import settings
+    from desktop.machine_tier import container_bridge, home_address
     found: Dict[str, str] = {}
     if IN_DOCKER and not settings.sautium_host_network:
         # A bridge's own address is no door from outside: the host's are told
@@ -35,10 +36,12 @@ def _own_addresses() -> List[Dict[str, str]]:
                 addr = ipaddress.ip_address(raw.strip())
             except ValueError:
                 continue                         # a name: never resolved here
-            if isinstance(addr, ipaddress.IPv4Address) and addr.is_private and not addr.is_loopback:
+            if home_address(str(addr)):
                 found[str(addr)] = "lan"
     else:
         for name, addrs in psutil.net_if_addrs().items():
+            if container_bridge(name):
+                continue                         # Docker's own bridge on a host-networked node
             for a in addrs:
                 if a.family != socket.AF_INET:
                     continue
@@ -48,7 +51,7 @@ def _own_addresses() -> List[Dict[str, str]]:
                 if addr in _CGNAT:
                     if name.lower().startswith("tailscale"):
                         found[a.address] = "tailnet"
-                elif addr.is_private:
+                elif home_address(a.address):
                     found[a.address] = "lan"
     return [{"address": address, "kind": kind}
             for address, kind in sorted(found.items(), key=lambda item: (item[1], item[0]))]

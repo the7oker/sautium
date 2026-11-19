@@ -832,6 +832,53 @@ def test_the_code_from_the_mail_gives_such_a_node_its_identity_with_no_restart(n
     assert not (node.folder / identity_proof.PROOF_FILENAME).exists()
 
 
+def test_an_address_already_verified_brings_its_certificate_with_no_new_code(node, monkeypatch):
+    """A restore, or a verification made on another device of this key: the
+    account says "verified" and no certificate of it is on this disk. The
+    worker reads the Worker once and is ready; where the Worker holds none
+    for this key, the record is cleared and the verification asked again —
+    never "verified" beside an identity that waits for it for good."""
+    _no_model(monkeypatch)
+    _account(node)
+    info = json.loads((node.folder / "node_info.json").read_text())
+    info["email"] = "owner@example.org"
+    (node.folder / "node_info.json").write_text(json.dumps(info))
+    p2p_identity.forget_cached()
+    monkeypatch.setattr(identity_pow, "pow_mine",
+                        lambda *a, **k: pytest.fail("a node that runs no model mined"))
+    cur = node.conn.cursor()
+    cur.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    assert cur.rowcount == 1
+
+    def run_worker():
+        async def scene():
+            await p2p_router.start_identity_worker()
+            await p2p_router._identity_worker.task
+            await p2p_router.close_identity_worker()
+        monkeypatch.setattr(p2p_router, "_identity_worker", None)
+        monkeypatch.setattr(p2p_router, "_identity_worker_closed", False)
+        asyncio.run(scene())
+        return _state(node.conn)
+
+    # The Worker holds no verified record for this key: asked once, the record cleared
+    state = run_worker()
+    assert state["status"] == "needs_email"
+    assert [c[1] for c in node.worker.calls].count("/check-email") == 1
+    cur.execute("SELECT email_verified FROM user_profile WHERE id = 1")
+    assert cur.fetchone()[0] is False
+    # … and a node with no such record asks the Worker nothing
+    asked = len(node.worker.calls)
+    assert run_worker()["status"] == "needs_email" and len(node.worker.calls) == asked
+    # The Worker does hold it: the certificate comes, and the node is ready by it
+    node.worker.verified_email.add(info["public_key_hex"].lower())
+    cur.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    state = run_worker()
+    assert (state["status"], state["detail"]) == ("ready", "email")
+    assert p2p_identity.load_certificate(settings)["method"] == "email"
+    cur.execute("SELECT email_verified FROM user_profile WHERE id = 1")
+    assert cur.fetchone()[0] is True
+
+
 def test_a_node_that_runs_no_model_keeps_the_identity_it_already_holds(node, monkeypatch):
     """A proof mined on a bigger machine (a card moved, a restore) is this
     node's identity: the worker checks it as on any node, and is `ready`."""

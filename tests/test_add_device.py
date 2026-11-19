@@ -48,7 +48,9 @@ def links(monkeypatch):
     monkeypatch.setattr(psutil, "net_if_addrs", lambda: {
         "lo": _iface("127.0.0.1"), "eth0": _iface("192.0.2.10", "10.1.2.3", "169.254.7.7"),
         "tailscale0": _iface("100.64.0.10"), "usb0": _iface("100.80.0.2"),      # a phone's tether
-        "wwan0": _iface("203.0.113.9")})                                         # a public address
+        "wwan0": _iface("203.0.113.9"),                                          # a public address
+        # Docker's own bridges on a host-networked node: this machine's, no door from another device
+        "docker0": _iface("172.17.0.1"), "br-0a1b2c3d4e5f": _iface("172.18.0.1"), "veth9f3a": _iface("172.19.0.2")})
     monkeypatch.setattr(claude_code_runner, "IN_DOCKER", True)
     monkeypatch.setattr(settings, "sautium_host_network", True)
     return module

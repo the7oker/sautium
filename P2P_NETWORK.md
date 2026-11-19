@@ -214,8 +214,11 @@ cycles, and the DHT holds the rare-artist tail — a node that does not give
 does not take; since 2026-11-19 a second switch, `sync.pass_on` ("Pass on what
 this node holds"), splits the two sides for a node born small: off, the node
 still asks and takes, and every peer sync route answers 403, `/health` says
-`sharing: false`, the LAN beacon and the DHT's rare-artist tail are held and
-the walk offers no carrier anything — it tells the network less, never more.
+`sharing: false` and nothing of what the node holds (no dump, no slice count,
+no holdings summary), the LAN beacon and the DHT's rare-artist tail are held
+and the walk offers no carrier anything — it tells the network less, never
+more. A node born Nano also relays for nobody (`p2p.relay_enabled` off in its
+preset, the owner's switch like the rest).
 What a node took without evaluating its author's proof is never passed on,
 whatever either switch says), the
 diag sink, the post-run hook (both runtimes request the MB and LB slice cycles; before

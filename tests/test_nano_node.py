@@ -98,10 +98,11 @@ def test_a_node_born_nano_gets_its_switches_before_the_seed_and_downloads_none(d
 
     out = db_migrate.apply_pending()
     assert out["birth_preset"] == {"preset": "nano", "written": [
-        "compute.models", "discovery.phantom_layer", "sync.pass_on"]}
+        "compute.models", "discovery.phantom_layer", "sync.pass_on", "p2p.relay_enabled"]}
     assert out["seed"] == {"complete": False, "skipped": "phantom_layer_off"}
     assert _settings(db) == {"compute.models": False, "discovery.phantom_layer": False,
-                             "sync.pass_on": False, "node.birth_preset": "nano"}
+                             "sync.pass_on": False, "p2p.relay_enabled": False,
+                             "node.birth_preset": "nano"}
     assert hardware_profile.models_switch() is False
 
     # The owner turns the models on; no later start writes the preset again
@@ -117,7 +118,7 @@ def test_the_preset_keeps_a_row_the_owner_already_has(db, scratch_dsn, monkeypat
     conn = psycopg2.connect(scratch_dsn)
     try:
         assert db_migrate._apply_birth_preset(conn) == {
-            "preset": "nano", "written": ["compute.models", "sync.pass_on"]}
+            "preset": "nano", "written": ["compute.models", "sync.pass_on", "p2p.relay_enabled"]}
     finally:
         conn.close()
     assert _settings(db)["discovery.phantom_layer"] is True
@@ -424,8 +425,47 @@ def test_the_peer_surface_says_it_does_not_share_while_it_passes_nothing_on():
     """/health's `sharing` is what a walker and a slice requester pick sources
     by: a node that passes nothing on is walked by nobody."""
     source = (BACKEND / "p2p_app.py").read_text(encoding="utf-8")
-    assert '"sharing": serving_enabled(),' in source
-    assert "sharing_enabled" not in source
+    assert "sharing_enabled" not in source and '"sharing": serving,' in source
+
+
+def test_a_node_that_passes_nothing_on_says_nothing_of_what_it_holds(monkeypatch):
+    """Both surfaces' /health: who the node is and that it does not serve —
+    no dump, no slice count, no holdings summary."""
+    import asyncio
+    from desktop.p2p import birth_cert, sync_queries
+    from desktop.p2p.sync_server import SyncServer
+    held = {"mb_dump": "20261101", "mb_slices": 7, "lb_dump": None, "lb_slices": 3, "lb_slices_version": "v"}
+    monkeypatch.setattr(sync_queries, "holdings_summary", lambda: {"version": 4, "tracks": 100})
+    monkeypatch.setattr(birth_cert, "served_certificate", lambda *a: None)
+    server = SyncServer.__new__(SyncServer)
+    server.node_id, server.mb_dump_version = "ab" * 32, "20261101"
+    server._json_response = lambda request, body: body
+    server._slice_counts = lambda: (7, None, (3, "v"))
+    answers = {}
+    for serving in (True, False):
+        server._serving_enabled = lambda: serving
+        answers[serving] = asyncio.run(server.handle_health(None))
+    assert answers[True]["sharing"] is True and answers[True]["mb_slices"] == 7
+    assert answers[True]["holdings"] == {"version": 4, "tracks": 100}
+    quiet = answers[False]
+    assert quiet["sharing"] is False and quiet["node_id"] == "ab" * 32 and quiet["holdings"] is None
+    assert not set(held) & set(quiet)
+
+    p2p_app = pytest.importorskip("p2p_app")
+    import p2p_identity
+
+    async def counts():
+        return held
+    monkeypatch.setattr(p2p_app, "_counts", counts)
+    monkeypatch.setattr(p2p_app, "node_pubkey_hex", lambda: "cd" * 32)
+    monkeypatch.setattr(p2p_identity, "served_certificate", lambda settings: None)
+    monkeypatch.setattr(p2p_app, "carry_queries", sync_queries)
+    monkeypatch.setattr(p2p_app, "serving_enabled", lambda: True)
+    loud = asyncio.run(p2p_app.health())
+    assert loud["sharing"] is True and loud["mb_slices"] == 7 and loud["holdings"]["tracks"] == 100
+    monkeypatch.setattr(p2p_app, "serving_enabled", lambda: False)
+    quiet = asyncio.run(p2p_app.health())
+    assert quiet["sharing"] is False and quiet["holdings"] is None and not set(held) & set(quiet)
 
 
 def test_the_launchers_server_reads_the_same_two_sides(db, scratch_dsn):

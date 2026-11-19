@@ -23,6 +23,11 @@ The .env's reading and writing are the host agent's (scripts/host_agent.py,
 loaded from beside this file): one parser of that file, not two.
 """
 
+import sys
+
+if sys.version_info < (3, 9):       # before anything a later Python alone has (os.pidfd_open)
+    sys.exit("./sautium needs Python 3.9 or newer; this is " + sys.version.split()[0])
+
 import argparse
 import hashlib
 import hmac
@@ -37,7 +42,6 @@ import shlex
 import shutil
 import socket
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -93,6 +97,11 @@ def run(args: List[str], *, timeout: int = 120, check: bool = False, cwd: Path =
         return subprocess.CompletedProcess(args, 127, b"", f"{args[0]}: not found".encode())
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(args, 124, b"", f"{args[0]}: no answer in {timeout} s".encode())
+
+
+def printable(text: str) -> str:
+    """A tool's line as the terminal may show it: no control character."""
+    return "".join(c if c.isprintable() else " " for c in text)[:400]
 
 
 def out(result: subprocess.CompletedProcess) -> str:
@@ -382,18 +391,20 @@ point="$uuid"
 if findmnt -n "$BASE/$point" >/dev/null 2>&1; then point="$uuid-$name"; fi   # a second volume claiming the UUID
 mkdir -p "$BASE/.names" "$STATE"
 mkdir -p "$BASE/$point"
+# The volume's label, a stranger's text, as a file the node reads as text —
+# before the mount, whose change of the mount table is what wakes the node
+blkid -o value -s LABEL "$dev" 2>/dev/null | head -c 120 > "$BASE/.names/$point" || true
 if ! mount -t "$fs" -o "$opts" "$dev" "$BASE/$point"; then
     # An exFAT driver that does not know time_offset: mounted without it, said
     if [ "$fs" = exfat ] && mount -t exfat -o "$safe,$owned" "$dev" "$BASE/$point"; then
         echo "sautium-automount: $name mounted without time_offset (this kernel's exfat refused it)" >&2
     else
+        rm -f "$BASE/.names/$point"
         rmdir "$BASE/$point" 2>/dev/null || true
         exit 1
     fi
 fi
 printf '%s\\n' "$point" > "$STATE/$name"
-# The volume's label, a stranger's text, as a file the node reads as text
-blkid -o value -s LABEL "$dev" 2>/dev/null | head -c 120 > "$BASE/.names/$point" || true
 """
 
 
@@ -441,34 +452,56 @@ def automount_block(files: Dict[str, Path]) -> None:
 OWN_OF_THE_SYSTEM = ("/", "/app", "/home", "/usr", "/var", "/run", "/etc", "/proc", "/sys", "/dev",
                      "/bin", "/sbin", "/lib", "/lib64", "/boot", "/root", "/opt", "/srv", "/tmp")
 # Broader than a folder a person would call music
-TOO_BROAD = ("/mnt", "/media")
+TOO_BROAD = ("/mnt", "/media", "/run/media")
 
 
-def root_refusal(path: str, checkout: Path = ROOT) -> Optional[str]:
+def root_refusal(path: str, checkout: Path = ROOT, docker_root: Optional[str] = None) -> Optional[str]:
     """Why `path` may not be a root the node reads music under, or None. The
     roots are the mount, and the mount is the boundary: nothing that is, or
-    holds, a part of the system or this checkout, and nothing as broad as a
-    whole home."""
+    holds, a part of the system, Docker's own data or this checkout, and
+    nothing as broad as a whole home. The name itself may be any a folder
+    has — a space, any alphabet — but for the two characters the roots' list
+    and the compose file read as their own (`:` and `$`)."""
     if not os.path.isabs(path):
         return "give the folder's whole path, from /"
-    if re.search(r"[\s:,$\"'\\]|[^\x20-\x7e]", path):
-        return "the path has a character the setup cannot carry (a space, : , $ a quote, or a non-Latin letter): name the folder plainly"
+    if re.search(r"[:$]", path) or not path.isprintable():
+        return "the path has a character the setup cannot carry (a colon, a $ or a control character)"
     real = os.path.realpath(path)
+    if re.search(r"[:$]", real) or not real.isprintable():
+        return "the folder it leads to has a character the setup cannot carry (a colon, a $ or a control character)"
     if not os.path.isdir(real):
         return "there is no such folder"
     parts = Path(real).parts
-    for own in OWN_OF_THE_SYSTEM + (str(checkout),):
+
+    def holds_or_is(own: str) -> bool:
         own_real = os.path.realpath(own)
-        if real == own_real or (own_real + "/").startswith(real.rstrip("/") + "/"):
+        return real == own_real or (own_real + "/").startswith(real.rstrip("/") + "/")
+
+    def inside(own: str) -> bool:
+        return (real + "/").startswith(os.path.realpath(own).rstrip("/") + "/")
+
+    for own in OWN_OF_THE_SYSTEM + (str(checkout),):
+        if holds_or_is(own):
             return f"it is, or holds, {own}: a folder of the system or of Sautium itself, not a folder of music"
-    if real == os.path.realpath(str(checkout)) or (real + "/").startswith(os.path.realpath(str(checkout)) + "/"):
+    if inside(str(checkout)):
         return "it lies inside the Sautium folder"
-    if real in TOO_BROAD or (len(parts) == 3 and parts[1] == "home"):
+    if docker_root and (holds_or_is(docker_root) or inside(docker_root)):
+        return (f"it is, holds or lies inside Docker's own data ({docker_root}): every container's files "
+                "would be readable there. Name the folder the music is in")
+    if real in TOO_BROAD or (len(parts) == 3 and parts[1] == "home") or (
+            len(parts) == 4 and parts[1:3] == ("run", "media")):
         return "it is a whole home or every mounted disk at once: name the folder the music is in"
     for system in ("/proc", "/sys", "/dev", "/run", "/etc", "/usr", "/boot", "/bin", "/sbin", "/lib"):
-        if (real + "/").startswith(system + "/"):
+        # A desktop mounts a signed-in person's disks under /run/media/<user>/<disk>
+        if inside(system) and not (system == "/run" and len(parts) >= 5 and parts[1:3] == ("run", "media")):
             return f"it lies inside {system}"
     return None
+
+
+def quoted(text: str) -> str:
+    """A string as YAML's double-quoted scalar and JSON both read it: the
+    letters themselves, never an escape a YAML reader would not join."""
+    return json.dumps(text, ensure_ascii=False)
 
 
 def roots_override(roots: List[str]) -> str:
@@ -480,14 +513,14 @@ def roots_override(roots: List[str]) -> str:
              "# Each is mounted read-only at its own path; change them with",
              "# ./sautium --music <folder>, never by hand.",
              "services:", "  backend:", "    environment:",
-             f"      SAUTIUM_LIBRARY_ROOTS: {json.dumps(':'.join(roots))}"]
+             f"      SAUTIUM_LIBRARY_ROOTS: {quoted(':'.join(roots))}"]
     if any(os.path.isdir(r) for r in roots):
         lines.append("    volumes:")
     # A root that is not there yet (the automount's folder before the
     # automount is installed) is named and not bound: Docker would make it
     for root in [r for r in roots if os.path.isdir(r)]:
-        lines += ["      - type: bind", f"        source: {json.dumps(root)}",
-                  f"        target: {json.dumps(root)}", "        read_only: true",
+        lines += ["      - type: bind", f"        source: {quoted(root)}",
+                  f"        target: {quoted(root)}", "        read_only: true",
                   "        bind:", "          propagation: rslave"]
     return "\n".join(lines) + "\n"
 
@@ -502,19 +535,43 @@ def held_roots(override: Path) -> List[str]:
         return []
 
 
-def chosen_roots(music: Optional[str], held: List[str]) -> List[str]:
+def chosen_roots(music: Optional[str], held: List[str], docker_root: Optional[str] = None) -> List[str]:
     """The roots of this install: the folders an earlier run named, a folder
     named now, and — always — the automount's folder, where plugged disks
     appear once the person installed the automount."""
     roots = [r for r in held if r != AUTOMOUNT_BASE]
     if music:
-        why = root_refusal(music)
+        why = root_refusal(music, docker_root=docker_root)
         if why:
             raise Stop(f"--music {music}: {why}")
         real = os.path.realpath(music)
         if real not in roots:
             roots.append(real)
     return roots + [AUTOMOUNT_BASE]
+
+
+def keeps_music_line(held: Dict[str, str]) -> bool:
+    """An install whose .env names its music folder (made by hand, before the
+    setup) keeps reading it there: no roots, no folder to pick in the Web UI.
+    Roots would move every file to another path, and the library would be
+    read again from its first file."""
+    return held.get("MUSIC_LIBRARY_PATH", "") not in ("", NO_LIBRARY)
+
+
+def birth_of(held: Dict[str, str], asked: Optional[str], read: Optional[str], volume_exists: bool) -> Optional[str]:
+    """The preset this node is, or will be, born with: what its .env holds
+    once it lives; before that, --preset when given, else an earlier run's
+    line, else what was read off the machine."""
+    line = held.get("SAUTIUM_BIRTH_PRESET", "").strip().lower()
+    if line not in ("", "nano"):
+        raise Stop(f".env's SAUTIUM_BIRTH_PRESET is {printable(line)!r}: the setup knows nano, or no such line")
+    if volume_exists:
+        return line or None
+    if asked:
+        return "nano" if asked == "nano" else None
+    if "SAUTIUM_BIRTH_PRESET" in held:
+        return line or None
+    return read
 
 
 # -- .env ------------------------------------------------------------------------------
@@ -537,20 +594,21 @@ def database_volume_exists() -> bool:
 
 
 def env_plan(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optional[str],
-             ram_gib: float, assistant: str, volume_exists: bool) -> Dict[str, str]:
+             ram_gib: float, assistant: str, volume_exists: bool, roots: bool = True) -> Dict[str, str]:
     """The keys the setup owns and their values, given what .env holds. A key
     it does not own is never in the plan. The database's password is made
     only at the volume's birth, and a node that already lives is not born
-    again: `preset` (read off the machine) is written only before that
-    birth. What the IMAGE carries follows the birth at first, what .env
-    holds afterwards, and `asked_preset` (--preset) whenever it is given —
-    the way an install set up without the models gets them."""
+    again: `preset` (birth_of) is written only before that birth. What the
+    IMAGE carries follows the birth at first, what .env holds afterwards,
+    and `asked_preset` (--preset) whenever it is given — the way an install
+    set up without the models gets them. `roots` false (keeps_music_line):
+    the music line and the compose files stay as they are."""
     plan: Dict[str, str] = {}
     if "POSTGRES_PASSWORD" not in held and not volume_exists:
         plan["POSTGRES_PASSWORD"] = secrets.token_urlsafe(24)
     plan.update(pg_settings(ram_gib))
-    if not volume_exists and "SAUTIUM_BIRTH_PRESET" not in held and preset:
-        plan["SAUTIUM_BIRTH_PRESET"] = preset
+    if not volume_exists and (preset or "SAUTIUM_BIRTH_PRESET" in held):
+        plan["SAUTIUM_BIRTH_PRESET"] = preset or ""
     if asked_preset is not None:
         small = asked_preset == "nano"
     elif "SAUTIUM_IMAGE_MODELS" in held:
@@ -562,11 +620,13 @@ def env_plan(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optio
     plan["CLAUDE_CODE_ENABLED"] = "true" if assistant == "claude" else "false"
     if "DEFAULT_PROVIDER" not in held:
         plan["DEFAULT_PROVIDER"] = "none"
-    plan["COMPOSE_FILE"] = f"{COMPOSE_FILE}:{ROOTS_OVERRIDE}"
-    if "MUSIC_LIBRARY_PATH" not in held:
+    if roots:
+        plan["COMPOSE_FILE"] = f"{COMPOSE_FILE}:{ROOTS_OVERRIDE}"
         # The base file's own mount needs a folder: an empty one of the
         # node's, while the node reads its music under the roots
         plan["MUSIC_LIBRARY_PATH"] = NO_LIBRARY
+    elif "COMPOSE_FILE" not in held:
+        plan["COMPOSE_FILE"] = COMPOSE_FILE
     return plan
 
 
@@ -621,6 +681,18 @@ def wait_for(pid: int) -> None:
         os.close(fd)
 
 
+def born(pid: int) -> Optional[str]:
+    """When the process `pid` started, in the kernel's own ticks since boot
+    (/proc/<pid>/stat, the field after the name's last bracket + 20) — what
+    tells a build this setup started from another process that has since
+    been given its number."""
+    try:
+        with open(f"/proc/{int(pid)}/stat", "rb") as f:
+            return f.read(4096).rsplit(b")", 1)[1].split()[19].decode()
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def build(state: dict, env: Dict[str, str]) -> None:
     """The image, built detached with its log in ./host/: a dropped terminal
     does not end it, and a second run attaches to the same build."""
@@ -631,7 +703,8 @@ def build(state: dict, env: Dict[str, str]) -> None:
     host = agent.host_dir(ROOT)
     log, code = host / "setup-build.log", host / "setup-build.exit"
     running = state.get("build") or {}
-    if not (running.get("key") == key and running.get("pid") and os.path.exists(f"/proc/{running['pid']}")):
+    if not (running.get("key") == key and running.get("pid") and running.get("born")
+            and born(running["pid"]) == running["born"]):
         code.unlink(missing_ok=True)
         command = " ".join(shlex.quote(part) for part in agent.compose_cmd(ROOT) + ["build", "backend"])
         # One retry: a build lost to a passing download failure is common
@@ -640,7 +713,7 @@ def build(state: dict, env: Dict[str, str]) -> None:
         child = subprocess.Popen(["sh", "-c", script], cwd=str(ROOT), stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
-        running = {"key": key, "pid": child.pid}
+        running = {"key": key, "pid": child.pid, "born": born(child.pid)}
         state["build"] = running
         save_state(state)
         say(f"Building Sautium's image (several minutes; its log: {log}) …")
@@ -680,14 +753,20 @@ def own_addresses() -> List[str]:
             first = s.getsockname()[0]
         except OSError:
             pass
+    return lan_addresses(first, out(run(["ip", "-o", "-4", "addr", "show"])))
+
+
+def lan_addresses(first: Optional[str], ip_addr: str) -> List[str]:
+    """The private addresses of `ip -o -4 addr show` that are a door from
+    another device — never a container runtime's bridge, never a tailnet's
+    (named apart) — the default route's own first."""
     found = []
-    for line in out(run(["ip", "-o", "-4", "addr", "show"])).splitlines():
-        match = re.search(r"\binet (\d+\.\d+\.\d+\.\d+)/", line)
-        if match:
-            found.append(match.group(1))
-    usable = [a for a in ([first] if first else []) + found
-              if not ipaddress.ip_address(a).is_loopback and not ipaddress.ip_address(a).is_link_local]
-    return list(dict.fromkeys(usable))
+    for line in ip_addr.splitlines():
+        match = re.search(r"^\d+:\s+(\S+)\s+inet (\d+\.\d+\.\d+\.\d+)/", line)
+        if match and not machine_tier.container_bridge(match.group(1)):
+            found.append(match.group(2))
+    usable = [a for a in found if machine_tier.home_address(a)]
+    return sorted(dict.fromkeys(usable), key=lambda a: a != first)
 
 
 def tailnet_address() -> Optional[str]:
@@ -823,10 +902,82 @@ def release_step() -> None:
     say(f"    git -c gpg.ssh.allowedSignersFile=release_signers verify-tag {newest}")
 
 
-def root_steps(args, state: dict) -> None:
+def desktop_automounter() -> bool:
+    """Whether this system's desktop mounts plugged disks itself: udisks2
+    under a graphical session (a Raspberry Pi OS with desktop; a Lite system
+    has neither). Two automounters would mount the same disk twice."""
+    return (out(run(["systemctl", "get-default"])) == "graphical.target"
+            and run(["systemctl", "is-active", "--quiet", "udisks2.service"]).returncode == 0)
+
+
+# A music disk mounted at boot (fstab) with the automount's own options: by
+# filesystem, the driver and what follows "ro,nofail,nosuid,nodev,noexec".
+# exFAT without its time option: a kernel that refused it would refuse the
+# whole line, and a line that fails is a disk that is not there.
+FSTAB_FILESYSTEMS = {
+    "vfat": ("vfat", ",uid={uid},gid={gid},fmask=0133,dmask=0022,tz=UTC"),
+    "exfat": ("exfat", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
+    "ntfs": ("ntfs3", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
+    "ntfs3": ("ntfs3", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
+    "fuseblk": ("ntfs3", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
+    "ext4": ("ext4", ",noload"),
+}
+
+
+def boot_mount(real: str, findmnt_json: str, uid: int, gid: int) -> Optional[dict]:
+    """For a folder on a disk the desktop mounts: the /etc/fstab line that
+    mounts that disk at every start instead — by UUID, read-only, `nofail`
+    (a disk that is not plugged in delays no boot) — where it then lies, and
+    the folder's path there. None where the mount cannot be read whole or is
+    not a filesystem the automount knows. `findmnt_json`: `findmnt -J -o
+    SOURCE,TARGET,FSTYPE,UUID -T <folder>`."""
+    try:
+        mount = json.loads(findmnt_json)["filesystems"][0]
+        target, fstype, uuid = str(mount["target"]), str(mount["fstype"]), str(mount["uuid"] or "")
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+    if fstype not in FSTAB_FILESYSTEMS or not re.fullmatch(r"[0-9A-Za-z-]{4,40}", uuid):
+        return None
+    if not (real == target or real.startswith(target.rstrip("/") + "/")):
+        return None
+    driver, extra = FSTAB_FILESYSTEMS[fstype]
+    point = f"/mnt/sautium-{uuid}"
+    line = f"UUID={uuid} {point} {driver} ro,nofail,nosuid,nodev,noexec{extra.format(uid=uid, gid=gid)} 0 0"
+    return {"point": point, "line": line, "folder": point + real[len(target.rstrip("/")):]}
+
+
+def boot_mount_block(music: str, found: dict) -> None:
+    its_line = shlex.quote("\\|^UUID=[^ ]* " + found["point"] + " |d")      # sed's address for that one line
+    block("The music disk, mounted when the machine starts",
+          f"{music} is on a disk this machine's desktop mounts only while you are signed in to it.\n"
+          "Sautium starts with the machine, before that. This mounts the same disk at every start,\n"
+          f"read-only, at {found['point']} (a disk that is not plugged in delays nothing).",
+          [f"sudo mkdir -p {found['point']}",
+           f"echo {shlex.quote(found['line'])} | sudo tee -a /etc/fstab",
+           "sudo systemctl daemon-reload",
+           f"sudo mount {found['point']}"],
+          [f"sudo umount {found['point']}",
+           f"sudo sed -i {its_line} /etc/fstab",
+           f"sudo rmdir {found['point']}",
+           "sudo systemctl daemon-reload"])
+    say(f"To check it:  findmnt --fstab {found['point']}")
+    say()
+
+
+def desktop_mounted(real: str) -> bool:
+    """A folder on a disk the desktop mounts for the person signed in to it:
+    under /media/<user>/ or /run/media/<user>/."""
+    parts = Path(real).parts
+    return (len(parts) > 3 and parts[1] == "media" and parts[2] != "sautium") or (
+        len(parts) > 4 and parts[1:3] == ("run", "media"))
+
+
+def root_steps(args, state: dict, automount: bool = True) -> None:
     """The optional root steps: each printed once as a whole block, then —
     where a person is at the terminal — waited for and checked. Declined,
-    each leaves a working node. `--yes` never waits."""
+    each leaves a working node. `--yes` never waits. No automount is offered
+    to an install that reads its music by its .env line: plugged disks
+    appear under a root, and it has none."""
     uid, gid = os.getuid(), os.getgid()
     user = os.environ.get("USER") or str(uid)
     shown = []
@@ -837,7 +988,13 @@ def root_steps(args, state: dict) -> None:
               [f"sudo loginctl enable-linger {shlex.quote(user)}"],
               [f"sudo loginctl disable-linger {shlex.quote(user)}"])
         shown.append("linger")
-    if not automount_installed():
+    desktop = automount and not automount_installed() and desktop_automounter()
+    if desktop:
+        say()
+        say("Plugged disks: this machine's desktop mounts them itself, under /media/<your name>, while you")
+        say("are signed in to it — so Sautium's own automount is not offered here. Name such a disk's music")
+        say("folder with --music; Sautium reads it while the desktop has it mounted.")
+    if automount and not automount_installed() and not desktop:
         automount_block(automount_files(agent.host_dir(ROOT) / "automount", uid, gid))
         shown.append("automount")
     if not shown:
@@ -875,10 +1032,25 @@ def cmd_setup(args) -> int:
     m = machine()
     held = agent.read_env(ROOT / ".env")
     volume = database_volume_exists()
-    preset = {"nano": "nano", "full": None}.get(args.preset) if args.preset else machine_tier.birth_preset(
-        m["ram_gib"], m["docker_root_removable"], m["docker_root_free_gb"])[0]
-    if volume or "SAUTIUM_BIRTH_PRESET" in held:
-        preset = held.get("SAUTIUM_BIRTH_PRESET") or None      # a node that lives is not born again
+    preset = birth_of(held, args.preset, machine_tier.birth_preset(
+        m["ram_gib"], m["docker_root_removable"], m["docker_root_free_gb"])[0], volume)
+    by_line = keeps_music_line(held)
+    if args.music and not by_line and os.path.isdir(args.music) and desktop_mounted(os.path.realpath(args.music)):
+        # Bound as it is, the node would not start whenever the disk is not
+        # mounted — every start of the machine before someone signs in
+        real = os.path.realpath(args.music)
+        found = boot_mount(real, out(run(["findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID", "-T", real])),
+                           os.getuid(), os.getgid())
+        if found is None:
+            raise Stop(f"--music {args.music}: it is on a disk this machine's desktop mounts only while you are "
+                       "signed in, and Sautium starts with the machine. Mount the disk at every start (a line of "
+                       "/etc/fstab: read-only, nofail) and name the folder where it then lies")
+        boot_mount_block(args.music, found)
+        raise Stop("then run:  ./sautium --music " + shlex.quote(found["folder"]))
+    if by_line and args.music:
+        raise Stop("this install reads its music where MUSIC_LIBRARY_PATH in .env says, and --music is for an "
+                   "install that picks its folder in Sautium. To change over, delete that line from .env and run "
+                   "this again: Sautium then reads the whole library again from the folder you choose")
     say(f"This machine: {machine_line(m, preset)}. Change it later in Sautium: More › Profile.")
     need = NEED_GB[preset]
     if not volume and m["docker_root_free_gb"] is not None and m["docker_root_free_gb"] < need:
@@ -897,14 +1069,15 @@ def cmd_setup(args) -> int:
     state = load_state()
     host = agent.host_dir(ROOT)
     host.mkdir(mode=0o700, exist_ok=True)
-    root_steps(args, state)
+    root_steps(args, state, automount=not by_line)
 
-    roots = chosen_roots(args.music, held_roots(ROOT / ROOTS_OVERRIDE))
-    agent._write_private(ROOT / ROOTS_OVERRIDE, roots_override(roots).encode(), 0o644)
-    (ROOT / "data" / "no-library").mkdir(parents=True, exist_ok=True)
+    if not by_line:
+        roots = chosen_roots(args.music, held_roots(ROOT / ROOTS_OVERRIDE), m.get("docker_root"))
+        agent._write_private(ROOT / ROOTS_OVERRIDE, roots_override(roots).encode(), 0o644)
+        (ROOT / "data" / "no-library").mkdir(parents=True, exist_ok=True)
     assistant = args.assistant or ("claude" if held.get("SAUTIUM_IMAGE_ASSISTANT_CLI") == "1" else "none")
     plan = env_plan(held, preset=preset, asked_preset=args.preset, ram_gib=m["ram_gib"],
-                    assistant=assistant, volume_exists=volume)
+                    assistant=assistant, volume_exists=volume, roots=not by_line)
     changed = write_env(plan)
     if changed:
         say(".env: " + ", ".join(k for k in changed if k != "POSTGRES_PASSWORD")
@@ -967,8 +1140,16 @@ def cmd_update(args) -> int:
         fd = os.open(requests, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as e:
         raise Stop(f"the requests folder cannot be opened ({e.strerror}): run ./sautium")
+    # A folder the node's container writes: the name is made, never opened.
+    # One already there — whatever a container left under it, a FIFO or a
+    # link — is the same request to the agent, which reads names alone.
     try:
-        os.close(os.open("update", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=fd))
+        os.close(os.open("update", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
+                         | os.O_CLOEXEC, 0o600, dir_fd=fd))
+    except FileExistsError:
+        pass
+    except OSError as e:
+        raise Stop(f"the request could not be left ({e.strerror}): run ./sautium")
     finally:
         os.close(fd)
     say("Asked for the newest signed release; the host agent is working (an update takes minutes) …")
@@ -979,7 +1160,7 @@ def cmd_update(args) -> int:
     with open(log, "rb") as f:
         f.seek(before)
         for line in f.read(65536).decode("utf-8", "replace").splitlines():
-            say("  " + line)
+            say("  " + printable(line))
     return 0
 
 
@@ -1011,6 +1192,11 @@ def cmd_status(args) -> int:
     low = undervoltage_now()
     if low:
         say("Power: the supply is under its voltage right now.")
+    # The last update's answer, as the host agent wrote it to its own log
+    log = (agent._read_bounded(agent.host_dir(ROOT) / "agent.log", 4 * 1024 * 1024) or b"").decode("utf-8", "replace")
+    last = [line for line in log.splitlines() if re.match(r"\[host-agent\] \S+ \S+ update: ", line)][-1:]
+    if last:
+        say("Last update: " + printable(last[0].split("] ", 1)[1]))
     return 0
 
 
@@ -1034,12 +1220,24 @@ def cmd_remove(args) -> int:
         if typed != (nickname or "REMOVE"):
             raise Stop("nothing was removed: that is not the node's nickname")
     done = []
+
+    def compose(what: str, *step: str, timeout: int) -> bool:
+        result = run(agent.compose_cmd(ROOT) + list(step), timeout=timeout)
+        if result.returncode:
+            said = result.stderr.decode("utf-8", "replace").strip().splitlines()
+            say(f"  could not {what}: {printable(said[-1]) if said else 'docker compose said nothing'}")
+        return result.returncode == 0
+
     # The node stopped first: its own stop removes its port mapping at the router
-    if run(agent.compose_cmd(ROOT) + ["stop"], timeout=300).returncode == 0:
+    if compose("stop the node", "stop", timeout=300):
         done.append("the node stopped")
     down = ["down", "--remove-orphans", "--rmi", "local"] + (["--volumes"] if args.data else [])
-    if run(agent.compose_cmd(ROOT) + down, timeout=600).returncode == 0:
+    if compose("remove the containers", *down, timeout=600):
         done.append("containers, networks and images removed" + (", and the database" if args.data else ""))
+    elif args.data:
+        # The database is the volume: its files are not deleted beside a volume that stayed
+        raise Stop("the database's volume was not removed, so nothing of the node's data was deleted. "
+                   "Mend what docker compose said above and run this again")
     for image in {env.get("SAUTIUM_BACKEND_IMAGE"), agent.DEFAULT_IMAGE} - {None, ""}:
         run(["docker", "image", "rm", image])
     if (agent.host_dir(ROOT) / "agent.env").exists() or (agent.unit_dir() / "sautium-host-agent.path").exists():
@@ -1047,9 +1245,12 @@ def cmd_remove(args) -> int:
         done.append("the host agent's units and starter removed")
     for path in (agent.host_dir(ROOT) / "bin", agent.host_dir(ROOT) / "automount"):
         shutil.rmtree(path, ignore_errors=True)
-    for name in (ROOTS_OVERRIDE, "host/setup.state", "host/setup-build.log", "host/setup-build.exit"):
+    for name in ("host/setup.state", "host/setup-build.log", "host/setup-build.exit"):
         (ROOT / name).unlink(missing_ok=True)
     if args.data:
+        # .env names the roots override in COMPOSE_FILE: the two go together,
+        # or every later compose command in this folder fails on a file gone
+        (ROOT / ROOTS_OVERRIDE).unlink(missing_ok=True)
         # The node ran as this checkout's owner: its files are this user's
         left = []
         for folder in ("data", "backend/data", "run"):
@@ -1070,6 +1271,18 @@ def cmd_remove(args) -> int:
         say("    sudo systemctl daemon-reload")
         say("    sudo udevadm control --reload")
     say()
+    if args.data and sys.stdin.isatty():
+        # Last, and only after the data went by the nickname: the folder itself
+        try:
+            typed = input(f"Delete this folder too ({ROOT})? Type yes: ").strip().lower()
+        except EOFError:
+            typed = ""
+        if typed == "yes":
+            os.chdir("/")
+            shutil.rmtree(ROOT, ignore_errors=True)
+            say("Nothing of Sautium is left on this machine." if not ROOT.exists()
+                else f"What could not be deleted is still in {ROOT} (another user's files): sudo rm -rf it.")
+            return 0
     say(f"What is left: this folder ({ROOT})" + ("" if args.data else ", with the node's data in it (./data, "
         "backend/data, the database's volume): ./sautium remove --data takes those") + ".")
     say("Delete the folder itself when you no longer want it: rm -rf " + shlex.quote(str(ROOT)))

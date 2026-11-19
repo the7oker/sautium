@@ -87,6 +87,7 @@ MIN_FREE_BYTES = 3 * 1024 ** 3
 # One key, one meaning: "this node is playing". Held by the backend's session
 # while its load meter reports playback; waited on by a running backup.
 PLAYBACK_LOCK_KEY = 0x53415554        # "SAUT"
+MAKING_LOCK_KEY = 0x5342434B          # "SBCK": one backup of a node being made
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +198,16 @@ class PlaybackHold:
         self._conn = psycopg2.connect(dsn)
         self._conn.autocommit = True
 
+    def sole_maker(self) -> None:
+        """One backup of a node at a time, whoever makes it — the Web UI's
+        job, the weekly task, a hand-run CLI: this session's lock until it
+        closes. A second maker would take the first's part file for a dead
+        job's and delete it under it."""
+        with self._conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (MAKING_LOCK_KEY,))
+            if not cur.fetchone()[0]:
+                raise nb.Refused("another backup of this node is being made — wait for it to end")
+
     def wait(self, on_pause: Optional[Callable[[], None]] = None) -> None:
         with self._conn.cursor() as cur:
             cur.execute("SELECT pg_try_advisory_lock(%s)", (PLAYBACK_LOCK_KEY,))
@@ -267,23 +278,7 @@ def create(password: str, *, out_dir: Optional[Path] = None,
         raise nb.WrongPassword("wrong password")
     kek = nb.derive_kek(password, ident["username"])
 
-    out = Path(out_dir) if out_dir else backup_dir()
-    out.mkdir(parents=True, exist_ok=True)
-    # A .part is a job that died with its process (a live one removes its own
-    # on failure) — never a file worth keeping.
-    for stale in out.glob("*" + nb.PART_SUFFIX):
-        stale.unlink(missing_ok=True)
-    have = sorted(out.glob("*" + nb.FILE_SUFFIX), key=lambda p: p.stat().st_mtime)
-    last = have[-1].stat().st_size if have else 0
-    need = max(2 * last, MIN_FREE_BYTES) if last else MIN_FREE_BYTES
-    free = shutil.disk_usage(out).free
-    if free < need:
-        raise nb.Refused(f"not enough space in {out}: {_fmt_bytes(free)} free, "
-                         f"{_fmt_bytes(need)} needed")
-
     hold = PlaybackHold(settings.database_url)
-    cancel._hold = hold
-    version = build_identity()
 
     def wait_ok() -> None:
         if cancel.event.is_set():
@@ -291,6 +286,23 @@ def create(password: str, *, out_dir: Optional[Path] = None,
         hold.wait(on_pause=lambda: progress("paused", reason="playback"))
 
     try:
+        hold.sole_maker()
+        out = Path(out_dir) if out_dir else backup_dir()
+        out.mkdir(parents=True, exist_ok=True)
+        # A .part is a job that died with its process (a live one removes its
+        # own on failure, and no other is being made: sole_maker) — never a
+        # file worth keeping.
+        for stale in out.glob("*" + nb.PART_SUFFIX):
+            stale.unlink(missing_ok=True)
+        have = sorted(out.glob("*" + nb.FILE_SUFFIX), key=lambda p: p.stat().st_mtime)
+        last = have[-1].stat().st_size if have else 0
+        need = max(2 * last, MIN_FREE_BYTES) if last else MIN_FREE_BYTES
+        free = shutil.disk_usage(out).free
+        if free < need:
+            raise nb.Refused(f"not enough space in {out}: {_fmt_bytes(free)} free, "
+                             f"{_fmt_bytes(need)} needed")
+        cancel._hold = hold
+        version = build_identity()
         return nb.create_backup(
             out, target=pg_target(), kek=kek, username=ident["username"],
             pubkey=ident["pubkey"], identity_dir=identity_dir(),
@@ -309,6 +321,13 @@ def _password(args, *, prompt: str) -> str:
     """The account password: from the variable named, which then leaves this
     process's environment, so pg_dump and pg_restore, started after, never
     inherit it — or asked for."""
+    if getattr(args, "password_stdin", False):
+        # The Web UI's job: the first line of its pipe, never an environment
+        # a process of the same user could read before this one closed it
+        value = sys.stdin.readline().rstrip("\r\n")
+        if not value:
+            sys.exit("no password on standard input")
+        return value
     var = args.password_env or ("SAUTIUM_BACKUP_PASSWORD"
                                 if os.environ.get("SAUTIUM_BACKUP_PASSWORD") else None)
     if var:
@@ -685,6 +704,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="one JSON object per line on stdout instead of the terminal counter")
     c.add_argument("--cancel-on-stdin", action="store_true",
                    help="a `cancel` line (or EOF) on stdin cancels the job")
+    c.add_argument("--password-stdin", action="store_true",
+                   help="the password is the first line of stdin (before any `cancel` line)")
     i = sub.add_parser("inspect", parents=[pw], help="show what a backup holds")
     i.add_argument("file")
     i.add_argument("--no-password", action="store_true", help="header only")

@@ -92,7 +92,10 @@ def check_if_due() -> bool:
         return False
     try:
         host_channel.ask("check")
-    except host_channel.NoChannel as e:
+    except (host_channel.NoChannel, OSError) as e:
+        # The request's own name unusable (a folder there, a link, a
+        # read-only mount): this check is not asked, and neither the node's
+        # start nor the background pass that calls this is the worse for it
         logger.warning("the daily check for updates was not asked: %s", e)
         return False
     db_execute("INSERT INTO host_requests (verb, asked_at) VALUES ('check', now()) "

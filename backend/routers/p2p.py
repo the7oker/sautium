@@ -1416,6 +1416,28 @@ def _email_road() -> bool:
     return not hardware_profile.resolve().ml_available and not _holds_identity()
 
 
+async def _verified_email_certificate() -> bool:
+    """On the email road with the account's address recorded as verified and
+    no certificate of it on this disk (a restore; a verification on another
+    device of this key): one read of the Worker's /check-email, which stores
+    the certificate it returns — the read the proof road makes
+    (_worker_certificate). True when the node then holds its identity. Where
+    the Worker answers and has no certificate for this key, the record is
+    not this key's: it is cleared, so the Email row offers the verification
+    again instead of saying "verified" beside an identity that waits for it."""
+    row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+    if not (row and row.get("email_verified")):
+        return False
+    result = await _unless_braked(_worker_check_email(_get_identity() or {}))
+    if await asyncio.to_thread(_holds_identity):
+        return True
+    if result is not None:
+        _db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+        logger.info("identity: the address was recorded as verified, and the Worker holds no "
+                    "certificate of it for this key — the verification is asked for again")
+    return False
+
+
 async def identity_proof_task(worker: _IdentityWorker) -> None:
     """The worker's body: make sure this node holds its identity certificate
     and, for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
@@ -1429,7 +1451,7 @@ async def identity_proof_task(worker: _IdentityWorker) -> None:
     from desktop.p2p import identity_proof
     import p2p_identity
 
-    if await asyncio.to_thread(_email_road):
+    if await asyncio.to_thread(_email_road) and not await _verified_email_certificate():
         from datetime import datetime, timezone
         _publish_identity_state({"status": "needs_email", "detail": None, "method": None,
                                  "updated_at": datetime.now(timezone.utc).isoformat()})

@@ -12,6 +12,8 @@ owner's to change afterwards.
 Every figure is in GiB, the unit the box and the spec sheet use.
 """
 
+import ipaddress
+import re
 from typing import Optional, Tuple
 
 TIERS = ("full", "standard", "lite")
@@ -51,3 +53,27 @@ def birth_preset(ram_gib: float, data_root_removable: bool,
     if data_root_free_gb is not None and data_root_free_gb < NANO_BELOW_FREE_GB:
         return "nano", f"under {NANO_BELOW_FREE_GB} GB free for Docker's data"
     return None, "enough memory and disk for the full node"
+
+
+_CONTAINER_BRIDGE = re.compile(r"(docker\d*|docker_gwbridge|br-[0-9a-f]{12}|veth\w*|virbr\d+|lxcbr\d+|cni\d*|podman\d*)$")
+
+
+def container_bridge(interface: str) -> bool:
+    """Whether a network interface is a container runtime's own (Docker's
+    bridge, a compose network's, a pair's end): its address is this machine's
+    and no door from another device."""
+    return _CONTAINER_BRIDGE.match(interface) is not None
+
+
+_HOME_NETWORKS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def home_address(address: str) -> bool:
+    """Whether an IPv4 address is one a home network gives out (RFC 1918).
+    Not `is_private`: that also says yes to documentation and benchmark
+    ranges, and to the shared space a carrier or a tailnet uses."""
+    try:
+        addr = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return isinstance(addr, ipaddress.IPv4Address) and any(addr in net for net in _HOME_NETWORKS)

@@ -220,15 +220,26 @@ def shutdown():
 
 # -- the downloaded models, as files ----------------------------------------------------
 
+def store_is_own() -> bool:
+    """Whether the model cache is this node's alone: on a node its image
+    holds, where the cache root is the node's own folder (./data/cache). A
+    launcher reads the machine's Hugging Face and torch caches, every
+    program's on that machine — never this node's to count or to remove."""
+    import claude_code_runner
+    return claude_code_runner.IN_DOCKER
+
+
 def store_dirs() -> list:
     """Where this node's downloaded models lie: the Hugging Face hub cache,
     the converted translator beside it (translation._ct2_model_dir) and
     torch hub's checkpoints (the instrument pair's) — each under the cache
-    root of the node's user (Docker: ./data/cache). Never the node's own
-    rows: a profile decides what is computed, and these are what computing
-    downloaded."""
+    root of the node's user (Docker: ./data/cache); none where the cache is
+    not the node's own (store_is_own). Never the node's own rows: a profile
+    decides what is computed, and these are what computing downloaded."""
     import os
     from pathlib import Path
+    if not store_is_own():
+        return []
     hub = os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")
     root = Path(hub).parent if hub else Path.home() / ".cache"
     return [root / "huggingface", root / "sautium-ct2", root / "torch"]

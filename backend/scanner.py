@@ -73,6 +73,19 @@ def link_admitted(path: str) -> bool:
     import library_root
     return not library_root.picks() or library_root.within(path) is not None
 
+
+def scope_admitted(library_path, rel: str) -> bool:
+    """Whether a scan's scope names a folder inside the library: no `..` on
+    its way anywhere, and — on a node that reads its music under roots — no
+    link that leaves them. The walk judges the entries inside a scope
+    (link_admitted); this judges the scope's own folder, which a request
+    names."""
+    if ".." in rel.replace("\\", "/").split("/"):
+        return False
+    import library_root
+    return not library_root.picks() or library_root.within(os.path.join(str(library_path), rel)) is not None
+
+
 # A Docker bind is fixed when its container starts: a drive reconnected under
 # a running node stays invisible to it until the restart.
 UNREACHABLE = ("The music folder is empty or not mounted, so nothing was scanned. "
@@ -1352,6 +1365,8 @@ class LibraryScanner:
         if scopes is None:
             if subpath:
                 scan_path = self.library_path / subpath
+                if not scope_admitted(self.library_path, subpath):
+                    raise ValueError(f"Subpath is not inside the library: {subpath}")
                 if not scan_path.exists():
                     raise ValueError(f"Subpath does not exist: {scan_path}")
                 logger.info(f"Searching for audio files in {scan_path} (subpath: {subpath})")
@@ -1383,6 +1398,9 @@ class LibraryScanner:
         folders = []
         for rel, recursive in scopes:
             root = (self.library_path / rel) if rel else self.library_path
+            if rel and not scope_admitted(self.library_path, rel):
+                logger.warning("scan scope %s is not inside the library — not walked", rel)
+                continue
             if rel and not root.is_dir():
                 if gone is not None:
                     gone.append(rel)

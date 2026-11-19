@@ -2363,9 +2363,10 @@ def _hardware_state() -> Dict[str, Any]:
     state["image"] = {"models": profile.models != "absent",
                       "assistant_cli": shutil.which("claude") is not None,
                       "streaming": streaming_service.demo_runtime()}
-    # The downloaded models on a node that runs none: its owner may remove them
-    if not profile.ml_available:
-        import model_cache
+    # The downloaded models on a node that runs none, where the cache is the
+    # node's own: its owner may remove them
+    import model_cache
+    if not profile.ml_available and model_cache.store_is_own():
         state["models_cache_bytes"] = model_cache.store_bytes()
     state["machine"] = _machine_name()
     state["software"] = _software()
@@ -2433,9 +2434,13 @@ def put_models_switch(req: ModelsPrefs) -> Dict[str, Any]:
 def delete_models_cache() -> Dict[str, Any]:
     """"Downloaded models · Remove", on a node that runs none: its owner's
     explicit act on files in the node's own cache folder. Refused while a
-    model can still be loaded from them."""
+    model can still be loaded from them, and where that folder is not the
+    node's own (a launcher's is the machine's, shared with every program)."""
     import hardware_profile
     import model_cache
+    if not model_cache.store_is_own():
+        raise HTTPException(status_code=409,
+                            detail="The models here are in this machine's shared cache, not Sautium's own")
     if hardware_profile.resolve().ml_available:
         raise HTTPException(status_code=409,
                             detail="The models are in use: turn them off and restart Sautium first")
@@ -2951,7 +2956,8 @@ def get_databases() -> Dict[str, Any]:
     /phantoms: that payload counts the whole phantom layer (~0.4 s) and this
     screen wakes on every load-progress tick. A new dump family is a key
     here and an entry in the UI's DUMP_FAMILIES."""
-    return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section()}
+    # `nano`: the screen says why the dumps are not offered there
+    return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section(), "nano": _nano()}
 
 
 # ============================================================

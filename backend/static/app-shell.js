@@ -17174,6 +17174,11 @@
     return null;
   }
 
+  const DUMPS_NOT_ON_NANO = 'Not offered on this node. The MusicBrainz catalogue alone is a 7.5 GB download '
+    + 'that takes about 21 GB in the database and hours to load — more than a Nano node is set up for. This node '
+    + 'settles artist and album names, and listening statistics, from other Sautium nodes\' answers instead. '
+    + 'Turning the AI models on (More › Profile) makes this a full node, and the databases are offered again.';
+
   async function renderDatabases(root) {
     const data = await _fetchDumps();
     if (!data) {
@@ -17182,6 +17187,24 @@
       return;
     }
     const families = Object.keys(DUMP_FAMILIES);
+    // A Nano node is not offered the dumps: a download of tens of GB and
+    // hours of loading on a machine set up to do neither. One it already
+    // holds (a restore, an owner who loaded it before) is shown as anywhere.
+    const held = families.some(f => {
+      const d = data[DUMP_FAMILIES[f].key] || {};
+      return d.loaded || (d.update && d.update.running);
+    });
+    if (data.nano && !held) {
+      root.innerHTML = `
+        <section class="screen screen-settings">
+          ${_settingsHeader('Offline databases')}
+          <div class="form-group">
+            <div class="form-row stacked"><div class="row-stack-sub">${escapeProfileHtml(DUMPS_NOT_ON_NANO)}</div></div>
+          </div>
+        </section>`;
+      _wireBack(root);
+      return;
+    }
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Offline databases')}
@@ -17333,19 +17356,28 @@
     const holder = root.querySelector('[data-hw-block]');
     if (!holder) return;
     if (_hwBlockSub) _hwBlockSub.abort();
+    // A wake of the Library stream is also a scan's or a backup's progress,
+    // several a second: it re-reads the host agent's answers alone, and the
+    // block is drawn again only where what it shows has changed.
     _hwBlockSub = libraryWake.on(() => {
       if (!document.contains(holder)) { _hwBlockSub.abort(); _hwBlockSub = null; return; }
-      paint();
+      paint(false);
     });
+    let hw = null, host = { available: false, requests: {}, offered: null }, shown = null;
 
-    async function paint() {
-      let hw = null, host = { available: false, requests: {}, offered: null };
+    async function paint(whole = true) {
       try {
-        const [rh, ro] = await Promise.all([fetch('/api/settings/hardware'), fetch('/api/host')]);
-        if (rh.ok) hw = await rh.json();
+        if (whole || !hw) {
+          const rh = await fetch('/api/settings/hardware');
+          if (rh.ok) hw = await rh.json();
+        }
+        const ro = await fetch('/api/host');
         if (ro.ok) host = await ro.json();
       } catch (_) {}
-      if (!hw) { holder.innerHTML = ''; return; }
+      if (!hw) { holder.innerHTML = ''; shown = null; return; }
+      const state = JSON.stringify([hw, host]);
+      if (state === shown) return;
+      shown = state;
       const d = hw.detected || {};
       const cache = hw.models_cache_bytes || 0;
       holder.innerHTML = `

@@ -88,6 +88,10 @@ def test_the_block_reads_what_the_install_carries_and_what_runs(db, tmp_path, mo
     assert state["machine"] == "Raspberry Pi 5 Model B Rev 1.0"
     assert state["software"]["version"] == "0.3.0" and "commit" in state["software"]
     assert state["models_cache_bytes"] == 4_200_000_000 and state["restartable"] is True
+    # A launcher's model cache is the machine's, not the node's: no size is told, so no Remove is offered
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", False)
+    assert "models_cache_bytes" not in settings_router.get_hardware_profile()
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", True)
     # A node whose models run is told no cache size: nothing there is its owner's to remove
     monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("on", name="standard"))
     monkeypatch.setattr(settings_router, "_CPUINFO", str(tmp_path / "none"))
@@ -123,6 +127,7 @@ def test_a_restart_ends_the_process_only_after_its_answer_and_only_in_the_image(
 
 def test_the_downloaded_models_are_counted_once_and_removed_by_the_owner_alone(tmp_path, monkeypatch):
     settings_router = pytest.importorskip("routers.settings")
+    import claude_code_runner
     import model_cache
     from fastapi import HTTPException
     hub = tmp_path / "cache" / "huggingface" / "hub"
@@ -139,6 +144,15 @@ def test_the_downloaded_models_are_counted_once_and_removed_by_the_owner_alone(t
     (kept / "build").write_bytes(b"not a model")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "cache" / "huggingface"))
     monkeypatch.delenv("HF_HUB_CACHE", raising=False)
+    # A launcher reads the machine's caches, every program's: none of it is counted, offered or removed
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", False)
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("off"))
+    assert model_cache.store_dirs() == [] and model_cache.store_bytes() == 0
+    with pytest.raises(HTTPException) as refused:
+        settings_router.delete_models_cache()
+    assert refused.value.status_code == 409 and (blobs / "abc").exists()
+    assert model_cache.remove_store() == 0 and (blobs / "abc").exists()
+    monkeypatch.setattr(claude_code_runner, "IN_DOCKER", True)
     assert model_cache.store_bytes() == 1500
 
     monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("on"))
@@ -202,8 +216,16 @@ def test_the_node_asks_for_a_check_once_a_day_by_itself(agent, monkeypatch):
     assert host.check_if_due() is False and list(requests.iterdir()) == []
     c.execute("UPDATE host_requests SET asked_at = now() - interval '25 hours'")
     assert host.check_if_due() is True
-    monkeypatch.setattr(host_channel, "_KEY", None)
+    # A name the request cannot be left under (a folder a container made there): not asked, said, and
+    # nothing raised into the node's start or the background pass
+    (requests / "check").unlink()
+    (requests / "check").mkdir()
     c.execute("UPDATE host_requests SET asked_at = now() - interval '25 hours'")
+    assert host.check_if_due() is False
+    c.execute("SELECT asked_at < now() - interval '1 day' FROM host_requests WHERE verb = 'check'")
+    assert c.fetchone()[0] is True                                   # not recorded as asked
+    (requests / "check").rmdir()
+    monkeypatch.setattr(host_channel, "_KEY", None)
     assert host.check_if_due() is False
 
 

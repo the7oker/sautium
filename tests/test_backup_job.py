@@ -22,6 +22,7 @@ import os
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,9 @@ from config import settings  # noqa: E402
 STAND_IN = r"""
 import json, os, sys
 seen = {k: os.environ.get(k) for k in ("SAUTIUM_BACKUP_PASSWORD", "POSTGRES_PASSWORD", "POSTGRES_USER", "P2P_PASSWORD")}
-open(os.environ["STAND_IN_OUT"], "w").write(json.dumps({"env": seen, "argv": sys.argv[1:]}))
+typed = sys.stdin.readline().rstrip("\n")       # --password-stdin: the pipe's first line
+open(os.environ["STAND_IN_OUT"], "w").write(json.dumps(
+    {"env": seen, "argv": sys.argv[1:], "typed": typed, "environ": sorted(os.environ.values())}))
 def say(**line):
     sys.stdout.write(json.dumps(line) + "\n"); sys.stdout.flush()
 say(phase="counting")
@@ -92,29 +95,43 @@ def _ended(seconds: float = 20) -> dict:
     return backup_job.state()["job"]
 
 
-def test_the_password_lives_in_the_jobs_environment_alone(job):
+def test_the_password_goes_down_the_jobs_pipe_and_into_no_environment(job):
     assert backup_job.start("the account's") is True
     ended = _ended()
     assert ended["done"] == {"name": "sautium-backup-abc-2026-11-19.sbk", "size": 4000}
     assert ended["error"] is None and job.woken
     seen = json.loads(job.seen.read_text())
-    assert seen["env"] == {"SAUTIUM_BACKUP_PASSWORD": "the account's", "POSTGRES_PASSWORD": "the database's",
+    assert seen["typed"] == "the account's"
+    # No environment holds it — the child's is readable by the node's user while the child starts
+    assert seen["env"] == {"SAUTIUM_BACKUP_PASSWORD": None, "POSTGRES_PASSWORD": "the database's",
                            "POSTGRES_USER": "musicai", "P2P_PASSWORD": None}
-    assert "the account's" not in os.environ.values()
-    assert "SAUTIUM_BACKUP_PASSWORD" not in os.environ and "POSTGRES_PASSWORD" not in os.environ
-    # The command names the variable, never the password (the module's own,
-    # read from its source: the fixture's stands in for it here)
+    assert "the account's" not in seen["environ"] and "the account's" not in os.environ.values()
+    assert "POSTGRES_PASSWORD" not in os.environ
+    # Nor the command line (the module's own, read from its source: the fixture's stands in for it here)
     assert seen["argv"] == ["create"]
     source = (BACKEND / "backup_job.py").read_text(encoding="utf-8")
-    assert '"--password-env", PASSWORD_ENV' in source and '"--cancel-on-stdin"' in source
+    assert '"create", "--password-stdin",' in source and '"--cancel-on-stdin"' in source
+    assert "--password-env" not in source
+
+
+def test_the_cli_reads_the_password_as_the_pipes_first_line(monkeypatch):
+    import io
+    backup = pytest.importorskip("backup")
+    args = types.SimpleNamespace(password_stdin=True, password_env=None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("the account's\ncancel\n"))
+    assert backup._password(args, prompt="") == "the account's"
+    assert sys.stdin.readline() == "cancel\n"                     # the rest is the cancel channel's
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    with pytest.raises(SystemExit, match="no password on standard input"):
+        backup._password(args, prompt="")
 
 
 def test_an_account_given_in_env_is_handed_to_the_job_too(job, monkeypatch):
     monkeypatch.setattr(settings, "p2p_username", "owner")
     monkeypatch.setattr(settings, "p2p_password", "the env account's")
-    env = backup_job._child_env("typed")
-    assert (env["P2P_USERNAME"], env["P2P_PASSWORD"], env["SAUTIUM_BACKUP_PASSWORD"]) == (
-        "owner", "the env account's", "typed")
+    env = backup_job._child_env()
+    assert (env["P2P_USERNAME"], env["P2P_PASSWORD"]) == ("owner", "the env account's")
+    assert "SAUTIUM_BACKUP_PASSWORD" not in env
     assert "P2P_EMAIL" not in env
 
 

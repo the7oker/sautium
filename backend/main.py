@@ -1943,16 +1943,18 @@ async def scan_start(
     """Queue a scan (request_scan): started at once, or after the job that
     runs. Its progress is pushed on the Library stream; /scan/status reads it."""
     from playback import hqp_benchmark
-    from scanner import LibraryUnreachable, refuse_if_unreachable
+    from scanner import LibraryUnreachable, refuse_if_unreachable, scope_admitted
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
+    scope = (subpath or "").replace("\\", "/").strip("/")
+    if scope and not await asyncio.to_thread(scope_admitted, settings.music_library_path, scope):
+        raise HTTPException(status_code=400, detail="That folder is not inside the music folder")
     try:
         # off the event loop: a scandir of a dead network mount can stall
         await asyncio.to_thread(refuse_if_unreachable)
     except LibraryUnreachable as e:
         raise HTTPException(status_code=409, detail=str(e))
-    queued = request_scan({(subpath or "").replace("\\", "/").strip("/"): True},
-                          prune=prune, reread=not skip_existing)
+    queued = request_scan({scope: True}, prune=prune, reread=not skip_existing)
     return {"success": True, "queued": queued,
             "message": "Scan queued" if queued else "Scan started"}
 

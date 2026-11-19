@@ -22,6 +22,7 @@ its body through `boxed`, and the latter the password through `step_up`
 
 import asyncio
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -202,7 +203,9 @@ async def device_links(request: Request) -> dict:
     signed in shows them; the other device then signs in with the account's
     password. Nothing is minted."""
     import device_links as links
-    port = request.url.port or 80
+    # The port the page reached the node on; a page that came through a
+    # front (a name, the scheme's own port) is given the node's own door
+    port = request.url.port or int(os.getenv("UVICORN_PORT") or 8800)
     return {"links": await asyncio.to_thread(links.links, port)}
 
 

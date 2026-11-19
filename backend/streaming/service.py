@@ -382,7 +382,8 @@ def provider_name(key: str) -> str:
     """Display name behind a provider id or a health key (a shared upstream
     reports under its cooldown_source): the manifest name of the provider it
     names, else the key itself."""
-    for p in (_registry.enabled() if _registry is not None else []):
+    registry = _registry        # read once: the switch's stop clears it from another thread
+    for p in (registry.enabled() if registry is not None else []):
         if p.manifest.id == key or health_key(p) == key:
             return p.manifest.name
     return key
@@ -442,9 +443,10 @@ def providers_aside() -> list:
     Its notice is the provider's own voice, under its own id: a shared
     upstream's health key (`health_key`) is cleared by any provider on that
     upstream answering, and an account's state is not the catalog's."""
-    if _registry is None:
+    registry = _registry
+    if registry is None:
         return []
-    return [(p, aside) for p in sorted(_registry.enabled(), key=lambda p: p.manifest.id)
+    return [(p, aside) for p in sorted(registry.enabled(), key=lambda p: p.manifest.id)
             if (aside := p.stepped_aside()) is not None]
 
 
@@ -467,9 +469,10 @@ def providers_preferred() -> list:
     (>=3 strikes), drop them this round entirely. Consumer-side policy over
     api_cooldown — enrichment pauses on cooling_down(), streaming reorders on
     status()."""
-    if _registry is None:
+    registry = _registry
+    if registry is None:
         return []
-    provs = sorted((p for p in _registry.enabled() if p.stepped_aside() is None),
+    provs = sorted((p for p in registry.enabled() if p.stepped_aside() is None),
                    key=lambda p: (p.manifest.excerpt, not p.manifest.lossless, p.manifest.id))
     # cooling_down() is the cheap cache gate; only read the richer status()
     # (a DB hit) on the rare occasions a source is actually cooling.
@@ -490,10 +493,11 @@ def providers_preferred() -> list:
 def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
     """A specific provider by id, or — with no id — the preferred one: a lossless
     source ranks above a lossy one (YouTube)."""
-    if _registry is None:
+    registry = _registry
+    if registry is None:
         return None
     if provider_id:
-        return _registry.get(provider_id)
+        return registry.get(provider_id)
     provs = providers_preferred()
     return provs[0] if provs else None
 

@@ -137,10 +137,12 @@ def _mark(conn, name: str) -> None:
 
 # What a node is born with, by the name its setup read off the machine and
 # wrote to .env (SAUTIUM_BIRTH_PRESET; PI-NODE-2B). "nano": no model runs, the
-# streaming library is off, and the node passes nothing on — each an owner's
-# switch from then on, changed in its own place in the Web UI.
+# streaming library is off, and the node passes nothing on and relays for
+# nobody — each an owner's switch from then on, changed in its own place in
+# the Web UI.
 BIRTH_PRESETS = {
-    "nano": {"compute.models": False, "discovery.phantom_layer": False, "sync.pass_on": False},
+    "nano": {"compute.models": False, "discovery.phantom_layer": False, "sync.pass_on": False,
+             "p2p.relay_enabled": False},
 }
 
 
