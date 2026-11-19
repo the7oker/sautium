@@ -200,7 +200,7 @@ def test_one_backup_of_a_node_is_made_at_a_time_whoever_makes_it(backup_mod, scr
         return True
     monkeypatch.setattr(device_auth, "verify_password", right)
     monkeypatch.setattr(backup_mod.nb, "derive_kek", lambda password, username: b"k" * 32)
-    monkeypatch.setattr(backup_mod.settings, "database_url", scratch_dsn)
+    monkeypatch.setattr(type(backup_mod.settings), "database_url", property(lambda self: scratch_dsn))
     monkeypatch.setattr(backup_mod, "build_identity", lambda: {"commit": "c" * 40, "build": "test"})
     monkeypatch.setattr(backup_mod, "pg_target", lambda: None)
     monkeypatch.setattr(backup_mod, "identity_dir", lambda: tmp_path)

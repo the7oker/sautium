@@ -186,6 +186,9 @@ def node(scratch_dsn, tmp_path, monkeypatch):
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
     monkeypatch.setattr(device_auth, "_setup_code", None)
     monkeypatch.setattr(device_auth, "_identity_missing", False)
+    # The module's tests share one database: no test starts on an address another one verified
+    with psycopg2.connect(scratch_dsn) as reset, reset.cursor() as cur:
+        cur.execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
     monkeypatch.setattr(device_auth, "_epoch_cache", None)
     monkeypatch.setattr(device_auth, "_grants", {})
 

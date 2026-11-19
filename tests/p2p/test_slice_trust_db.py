@@ -943,6 +943,8 @@ def test_a_slice_whose_authors_proof_this_node_never_evaluated_is_not_served(con
     kept = _honest("Kept Name")
     assert "error" not in _offer(scratch_dsn, author, kept)
     monkeypatch.setattr(slice_checks, "servable", lambda conn, family, key, own: True)   # checked against MB
+    with conn.cursor() as cur:               # a slice the cycle fetched, not one for the owner's own lookup
+        cur.execute("UPDATE mb_slice_blobs SET local_only = FALSE")
     served = mb_slice_queries.serve_slices(conn, ["Kept Name"], own_pubkey=OWN)
     assert list(served["slices"]) == ["Kept Name"]                # an author this node verified: passed on
     with conn.cursor() as cur:
