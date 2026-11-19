@@ -260,7 +260,7 @@ _ENRICHMENT_SOURCES = {
         SELECT tm.recording_mbid AS id, tm.xmin::text AS read_as, tm.track_id::text AS entity,
                '' AS source, tm.created_at AS fetched_at,
                tm.recording_mbid::text AS recording_mbid,
-               tm.confidence::text AS confidence
+               tm.confidence::text AS confidence, tm.matcher_version
         FROM track_mbids tm
         WHERE tm.signature IS NULL AND NOT tm.imported""", "track_mbids"),
 }

@@ -32,7 +32,8 @@ def test_copies_are_byte_identical():
 
 def test_each_kind_has_a_version_of_its_own():
     assert (rs.SEGMENT_RECORD_VERSION, rs.FEATURES_RECORD_VERSION,
-            rs.INSTRUMENTS_RECORD_VERSION, rs.ENRICHMENT_RECORD_VERSION) == (3, 4, 1, 2)
+            rs.INSTRUMENTS_RECORD_VERSION, rs.ENRICHMENT_RECORD_VERSION,
+            rs.TRACK_MBID_RECORD_VERSION, rs.MATCHER_VERSION) == (3, 4, 1, 2, 3, 2)
     assert not hasattr(rs, "AUDIO_RECORD_VERSION")
 
 
@@ -93,10 +94,17 @@ def test_chromaprint_is_required_and_in_alphabet(bad):
         rs.instruments_payload(AUTHOR, TRACK, bad, 189, 2, INSTRUMENTS_HASH)
 
 
-def test_enrichment_payload_stays_v2():
+def test_enrichment_payload_stays_v2_and_a_binding_is_v3_with_its_methodology():
+    assert rs.enrichment_payload(AUTHOR, "album", TRACK, "", FEATURES_HASH,
+                                 "2026-09-18T10:00:00Z").startswith(b"sautium-record:v2:album:")
     payload = rs.enrichment_payload(AUTHOR, "track_mbid", TRACK, "",
                                     FEATURES_HASH, "2026-09-18T10:00:00Z")
-    assert payload.startswith(b"sautium-record:v2:track_mbid:")
+    assert payload.startswith(b"sautium-record:v3:track_mbid:")
+    # the matcher's methodology is inside the hashed fields: a stale binding
+    # cannot pass for a newer one
+    one = {"recording_mbid": TRACK, "confidence": "positional", "matcher_version": 1}
+    assert rs.canonical_enrichment_blob("track_mbid", one) != rs.canonical_enrichment_blob(
+        "track_mbid", {**one, "matcher_version": 2})
     # The Last.fm kinds left the grammar 2026-09-19 — node-local, never sealed.
     with pytest.raises(ValueError):
         rs.enrichment_payload(AUTHOR, "artist_bio", TRACK, "lastfm",

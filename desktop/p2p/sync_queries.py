@@ -563,7 +563,7 @@ def pull_track_mbids(conn, track_uuids: list[str], own=None) -> dict:
         conn, "track_mbids",
         f"""SELECT tm.track_id::text AS track_uuid,
                    tm.recording_mbid::text AS recording_mbid,
-                   tm.confidence::text AS confidence,
+                   tm.confidence::text AS confidence, tm.matcher_version,
                    tm.created_at AS fetched_at, tm.author_pubkey,
                    tm.signature, tm.batch_root, tm.merkle_proof
             FROM track_mbids tm
@@ -778,7 +778,11 @@ _LACKS = {
     "segments": "NOT " + HOLDS_SEGMENTS,
     "audio_features": "NOT " + HOLDS_FEATURES,
     "instruments": "NOT " + HOLDS_INSTRUMENTS,
-    "track_mbids": "NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t})",
+    # a binding is held when it is this node's own or of the newest matcher
+    # (record_sig.MATCHER_VERSION): an imported one of an older methodology
+    # is a gap its author's newer binding fills
+    "track_mbids": ("NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t}"
+                    f" AND (NOT tm.imported OR tm.matcher_version >= {record_sig.MATCHER_VERSION}))"),
 }
 
 

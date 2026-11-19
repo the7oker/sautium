@@ -158,7 +158,13 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   something.
 - **MusicBrainz** — metadata and the optional local database dump (data under
   CC0 / CC BY-NC-SA as published by MetaBrainz); API use follows the
-  MusicBrainz rate and user-agent rules.
+  MusicBrainz rate and user-agent rules. Two pieces of its CC0 core data ship
+  in the tree (since 2026-11-19): the names of its labels of type Rights
+  Society, with their aliases (`backend/rights_societies/rights_societies.json`,
+  from the 2026-11-11 dump), and the rows of ten releases the tests load
+  (`tests/fixtures/canon_classical/mb.json`). The list of MusicBrainz's
+  special-purpose artists in `backend/canon/positional.py` is the one
+  musicbrainz-server's `Constants.pm` holds (`SPECIAL_ARTIST_GIDS`).
 - **Cover Art Archive** — album art, fetched by the node and served to its
   clients from there.
 - **Deezer public API** — artist images, catalog lookup (barcode → album

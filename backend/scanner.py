@@ -5,6 +5,7 @@ Creates canonical entities (Artist, Track, Album) with deterministic UUIDs
 and physical entities (AlbumVariant, MediaFile) per file on disk.
 """
 
+import json
 import logging
 import os
 import re
@@ -32,7 +33,7 @@ from models import (
 )
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one
-from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, is_lossless as check_lossless
+from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, normalize, is_lossless as check_lossless
 import file_stat
 from album_identity import assign_dir_albums, dir_disc, group_key
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
@@ -670,6 +671,8 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             track_total=metadata.get("track_total"),
                             disc_total=metadata.get("disc_total"),
                             isrc=metadata.get("isrc"),
+                            barcode=metadata.get("barcode"),
+                            tags_read_rev=TAGS_READ_REV,
                             # Original tags — ground truth for re-normalization / correction
                             raw_track_name=metadata.get("title"),
                             raw_artist=metadata.get("artist"),
@@ -783,7 +786,8 @@ _HELD_SQL = text("""
                              CAST(:mtimes AS bigint[]), CAST(:ctimes AS bigint[])))
     SELECT w.path, array_agg(mf.cue_start_seconds) AS starts,
            bool_or(mf.stat_mtime_ns IS NULL OR mf.file_size_bytes IS DISTINCT FROM w.size
-                   OR mf.stat_mtime_ns <> w.mtime OR mf.stat_ctime_ns IS DISTINCT FROM w.ctime)
+                   OR mf.stat_mtime_ns <> w.mtime OR mf.stat_ctime_ns IS DISTINCT FROM w.ctime
+                   OR mf.tags_read_rev < :rev)   -- a reader that sees more reads it again
                AS changed,
            min(mf.cue_stat) AS cue_stat        -- one sheet stat for all of an image's slices
       FROM w JOIN media_files mf ON mf.file_path = w.path
@@ -810,7 +814,8 @@ _REREAD_SQL = text("""
         channels = :channels, duration_seconds = :duration_seconds,
         cue_end_seconds = :cue_end_seconds, track_number = :track_number,
         disc_number = :disc_number, track_total = :track_total, disc_total = :disc_total,
-        isrc = :isrc, raw_track_name = :raw_track_name, raw_artist = :raw_artist,
+        isrc = :isrc, barcode = :barcode, tags_read_rev = :tags_read_rev,
+        raw_track_name = :raw_track_name, raw_artist = :raw_artist,
         raw_album_artist = :raw_album_artist, raw_album = :raw_album, raw_year = :raw_year,
         raw_genre = :raw_genre, decode_refused = false, cover_processed_at = NULL,
         -- the canon reads the file again when what it decides on moved: a
@@ -841,6 +846,35 @@ _REREAD_SQL = text("""
 _MATERIAL_LENGTH_TOLERANCE = 0.5
 
 
+def _split_tracks(db, entries) -> Set[str]:
+    """The tracks this re-read splits: every file of the track (here and at
+    an HQPlayer) is in the batch and moves, and they move to two or more
+    track identities — a merged work's movements, once TITLE's values are
+    joined (CANON-CLASSICAL-DESIGN §1.4). Decided before any file moves, so
+    no walk order changes it. All of a track's files moving to one identity
+    is a rename, which the track follows."""
+    moving: Dict[str, Set[str]] = defaultdict(set)
+    files: Dict[str, int] = defaultdict(int)
+    for _dir, md, row in entries:
+        if not md.get("title") or not (md.get("artist") or md.get("album_artist")):
+            continue
+        new = str(track_uuid(md["title"], md.get("artist") or md.get("album_artist")))
+        old = (str(track_uuid(row.raw_track_name, row.raw_artist or row.raw_album_artist))
+               if row.raw_track_name else None)
+        if old != new:
+            moving[row.track_id].add(new)
+            files[row.track_id] += 1
+    candidates = [t for t, keys in moving.items() if len(keys) >= 2]
+    if not candidates:
+        return set()
+    held = db.execute(text("""
+        SELECT t.id::text AS track,
+               (SELECT count(*) FROM media_files f WHERE f.track_id = t.id)
+             + (SELECT count(*) FROM hqp_library_files f WHERE f.track_id = t.id) AS n
+          FROM tracks t WHERE t.id = ANY(CAST(:t AS uuid[]))"""), {"t": candidates})
+    return {r.track for r in held if r.n == files[r.track]}
+
+
 def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments: Dict[str, Tuple],
                     stats: Dict[str, int], moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]],
                     touched_albums: Set[str]) -> None:
@@ -856,6 +890,19 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
     from canon.identity import rehome_file_track
     stats.setdefault("reread", 0)
     with get_db_context() as db:
+        splits = _split_tracks(db, entries)
+        if splits:
+            # one recording for every movement of a work, signed: wrong for
+            # all of them but one, and arbitrary for that one — each new track
+            # is bound on its own evidence by the canon (§1.4)
+            for sql in ("DELETE FROM track_mbids WHERE track_id = ANY(CAST(:t AS uuid[]))",
+                        # and off the files, or a pass that binds from the files
+                        # (bind_owned_recordings) would bind it back
+                        "UPDATE media_files SET recording_mbid = NULL WHERE track_id = ANY(CAST(:t AS uuid[]))",
+                        "UPDATE hqp_library_files SET recording_mbid = NULL "
+                        "WHERE track_id = ANY(CAST(:t AS uuid[]))"):
+                db.execute(text(sql), {"t": sorted(splits)})
+            stats["split"] = stats.get("split", 0) + len(splits)
         for dir_path, md, row in entries:
             if not md.get("title") or not (md.get("artist") or md.get("album_artist")):
                 logger.warning(f"Missing title or artist for {md['file_path']}, its row kept as it was")
@@ -882,6 +929,7 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         "track_number": track_ov if track_ov is not None else md.get("track_number"),
                         "disc_number": disc, "track_total": md.get("track_total"),
                         "disc_total": md.get("disc_total"), "isrc": md.get("isrc"),
+                        "barcode": md.get("barcode"), "tags_read_rev": TAGS_READ_REV,
                         "raw_track_name": md.get("title"), "raw_artist": md.get("artist"),
                         "raw_album_artist": md.get("album_artist"), "raw_album": md.get("album"),
                         "raw_year": md.get("date"), "raw_genre": md.get("genre")})
@@ -892,7 +940,7 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                     if old_key != track_uuid(md["title"], track_artist):
                         # first: the analysis of the file's material moves with it
                         track = rehome_file_track(db, row.id, row.track_id, md["title"],
-                                                  track_artist)
+                                                  track_artist, split=row.track_id in splits)
                         db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
                                    {"id": row.id})
                         stats["moved"] = stats.get("moved", 0) + (track != row.track_id)
@@ -1102,6 +1150,104 @@ def _int_or_none(value) -> Optional[int]:
     return n if n > 0 else None
 
 
+# The revision of what the reader takes from a file's tags. A file read
+# under an older one is read again by the next scan, in place, as a changed
+# file is: a reader that sees more (TITLE's values joined, the barcode)
+# reaches every file once (CANON-CLASSICAL-DESIGN §1). Rev 1: 2026-11-18.
+TAGS_READ_REV = 1
+
+
+def tag_values(audio, vorbis_key: str, id3_key: str = None, mp4_key: str = None) -> List[str]:
+    """A tag's values as the container keeps them, in its order, empty ones
+    dropped: a Vorbis field list, an ID3 frame's text list (a v2.4
+    multi-value frame — its `str()` joins with NUL, which PostgreSQL
+    refuses; v2.3's `/` is never split), an MP4 atom list (a trkn/disk pair
+    keeps its first number), an APE item's NUL-separated values."""
+    for key, of_tags in ((vorbis_key, False), (id3_key, True), (mp4_key, True)):
+        if not key or (of_tags and audio.tags is None):
+            continue
+        try:
+            val = audio.tags.get(key) if of_tags else audio.get(key)
+        except (ValueError, KeyError):
+            # VorbisComment refuses a non-ASCII key such as ©nam
+            continue
+        if not val:
+            continue
+        if hasattr(val, "text"):
+            items = val.text
+        elif isinstance(val, str) or not isinstance(val, Sequence):
+            items = [val]
+        else:
+            items = val
+        out = []
+        for item in items:
+            if isinstance(item, tuple):
+                item = item[0]
+            out += [v for v in str(item).split("\x00") if v.strip()]
+        if out:
+            return out
+    return []
+
+
+def joined_title(values: List[str]) -> Optional[str]:
+    """TITLE's values as one title, `Work: Movement` — MusicBrainz's form of
+    a classical title, which the matcher compares recording names with
+    (CANON-CLASSICAL-DESIGN §1.1). A value equal to the one before it is
+    skipped; one that starts with the one before it and a separator
+    replaces it (`["Work", "Work: Movement"]`). One value stays as it is."""
+    parts: List[str] = []
+    for v in values:
+        if parts:
+            prev = normalize(parts[-1])
+            if normalize(v) == prev:
+                continue
+            head = v[:len(parts[-1])]
+            if normalize(head) == prev and re.match(r"\s*[:\-–—/,;.]", v[len(parts[-1]):]):
+                parts[-1] = v
+                continue
+        parts.append(v)
+    return ": ".join(parts) if parts else None
+
+
+# Rights societies (TONO, GEMA, JASRAC, …): MusicBrainz's labels of that
+# type with their aliases, folded (scripts/make_rights_societies.py; every
+# node has the list, dump or not). A publishing credit is no artist
+# (CANON-CLASSICAL-DESIGN §4.2, D4).
+_RIGHTS_SOCIETIES = frozenset(json.loads(
+    (Path(__file__).resolve().parent / "rights_societies" / "rights_societies.json")
+    .read_text(encoding="utf-8"))["names"])
+# The parts of an artist value, as the canon's name fallback splits a
+# collaboration (canon.content._collab_members), separators kept.
+_CREDIT_PARTS = re.compile(r"( & | and | with | / |,|;)")
+
+
+def without_rights_societies(value: Optional[str]) -> Optional[str]:
+    """An ARTIST or ALBUMARTIST value as the artist it names: one whose
+    first part is a rights society is a publishing credit ("TONO /
+    Manuscript": the society, then the publication status) and reads as
+    absent; a society as a later part is dropped from the compound. A whole
+    value that is only a society's name ("Tono" is an artist too) stays."""
+    if not value:
+        return value
+    pieces = _CREDIT_PARTS.split(value)
+    if len(pieces) == 1:
+        return value
+    if normalize(pieces[0]) in _RIGHTS_SOCIETIES:
+        return None
+    kept = [pieces[0]]
+    for sep, part in zip(pieces[1::2], pieces[2::2]):
+        if normalize(part) not in _RIGHTS_SOCIETIES:
+            kept += [sep, part]
+    return "".join(kept).strip()
+
+
+def _barcode(value: Optional[str]) -> Optional[str]:
+    """The barcode's digits (BARCODE, else UPC, else EAN): taggers write it
+    spaced, dashed or with a leading apostrophe."""
+    digits = re.sub(r"\D", "", value or "")
+    return digits or None
+
+
 def _declared_totals(audio, get_tag) -> Tuple[Optional[int], Optional[int]]:
     """The track and disc totals the file's own tags declare — "n/N" in the
     number tags (Vorbis, ID3 TRCK/TPOS, MP4 trkn/disk), or TRACKTOTAL /
@@ -1174,40 +1320,10 @@ class LibraryScanner:
             if info and hasattr(info, 'bits_per_sample'):
                 bit_depth = info.bits_per_sample
 
-            # Universal tag getter: handles Vorbis (FLAC/OGG), ID3 (MP3/DSF),
-            # MP4 (M4A/AAC), and APE (WavPack/Musepack) tag formats
             def get_tag(vorbis_key: str, id3_key: str = None,
                         mp4_key: str = None, default=None):
-                """Get tag value from any supported format."""
-                # Try Vorbis-style key first (works for FLAC, OGG, easy=True)
-                val = audio.get(vorbis_key)
-                if val:
-                    return str(val[0]) if isinstance(val, list) else str(val)
-                # Try ID3 frame (MP3, DSF, AIFF)
-                if id3_key and audio.tags:
-                    frame = audio.tags.get(id3_key)
-                    if frame:
-                        return str(frame)
-                # Try MP4 atom (M4A, AAC, ALAC)
-                # Note: VorbisComment (FLAC/OGG) raises ValueError for non-ASCII
-                # keys like ©nam, so we guard with try/except.
-                if mp4_key and audio.tags:
-                    try:
-                        val = audio.tags.get(mp4_key)
-                    except (ValueError, KeyError):
-                        val = None
-                    if val:
-                        item = val[0] if isinstance(val, list) else val
-                        # MP4 trkn/disk are tuples like (track_num, total)
-                        if isinstance(item, tuple):
-                            return str(item[0])
-                        return str(item)
-                return default
-
-            def get_tag_int(vorbis_key: str, id3_key: str = None,
-                           mp4_key: str = None) -> Optional[str]:
-                """Get tag that should be parsed as int (track/disc number)."""
-                return get_tag(vorbis_key, id3_key, mp4_key)
+                values = tag_values(audio, vorbis_key, id3_key, mp4_key)
+                return values[0] if values else default
 
             metadata = {
                 # File information — translate to native OS path for DB storage
@@ -1230,11 +1346,11 @@ class LibraryScanner:
                 "bitrate": int(info.bitrate / 1000) if info and hasattr(info, 'bitrate') and info.bitrate else None,
 
                 # Metadata tags — universal across formats
-                "title": get_tag("title", "TIT2", "\xa9nam"),
-                "artist": get_tag("artist", "TPE1", "\xa9ART"),
+                "title": joined_title(tag_values(audio, "title", "TIT2", "\xa9nam")),
+                "artist": without_rights_societies(get_tag("artist", "TPE1", "\xa9ART")),
                 "album": get_tag("album", "TALB", "\xa9alb"),
-                "album_artist": (get_tag("albumartist", "TPE2", "aART")
-                                 or get_tag("album artist")),
+                "album_artist": without_rights_societies(get_tag("albumartist", "TPE2", "aART")
+                                                         or get_tag("album artist")),
                 "genre": get_tag("genre", "TCON", "\xa9gen"),
                 "date": get_tag("date", "TDRC", "\xa9day"),
                 "track_number": get_tag("tracknumber", "TRCK", "trkn"),
@@ -1243,6 +1359,7 @@ class LibraryScanner:
                           or get_tag("publisher", "TPUB")),
                 "catalog_number": get_tag("catalognumber"),
                 "isrc": get_tag("isrc", "TSRC"),
+                "barcode": _barcode(get_tag("barcode") or get_tag("upc") or get_tag("ean")),
             }
 
             metadata["track_total"], metadata["disc_total"] = _declared_totals(audio, get_tag)
@@ -1600,7 +1717,8 @@ class LibraryScanner:
                         "paths": hosts,
                         "sizes": [disk_stats[str(walked[h])].size for h in hosts],
                         "mtimes": [disk_stats[str(walked[h])].mtime_ns for h in hosts],
-                        "ctimes": [disk_stats[str(walked[h])].ctime_ns for h in hosts]}):
+                        "ctimes": [disk_stats[str(walked[h])].ctime_ns for h in hosts],
+                        "rev": TAGS_READ_REV}):
                     held[r.path] = r
         logger.info(f"Found {len(held)} of the walk's {len(hosts)} files in the database")
 

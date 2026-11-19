@@ -1161,6 +1161,13 @@ async def lifespan(app: FastAPI):
     # while the node was down — and each folder that changes after.
     import library_watch
     await asyncio.to_thread(library_watch.start, request_scan)
+    # Files read under an older reader (scanner.TAGS_READ_REV) are read again
+    # by any scan; a node whose library sends no events would wait for the
+    # owner's next one, so the start queues it while any such row is left.
+    from scanner import TAGS_READ_REV
+    if db_query_one("SELECT 1 AS x FROM media_files WHERE tags_read_rev < %(r)s LIMIT 1",
+                    {"r": TAGS_READ_REV}):
+        request_scan()
 
     yield
 

@@ -1,0 +1,145 @@
+{
+ "counted_from": {
+  "files": 43145,
+  "date": "2026-11-18",
+  "script": "form_catalogue.py @ 369a8de",
+  "source": "CLASSICAL-AUDIT's read-only tag dump of the whole music folder",
+  "classical": "the files under the library's Classical genre folder"
+ },
+ "forms": {
+  "library": {
+   "ALBUMARTIST": {
+    "absent": 25292,
+    "1 value": 17786,
+    "one name": 16645,
+    "N names joined by ' & '": 538,
+    "Various": 525,
+    "another script": 433,
+    "N names joined by '/'": 280,
+    "N names joined by ', ' and ' & '": 159,
+    "N names joined by ' and '": 106,
+    "N names joined by ', '": 77,
+    "2+ values": 67,
+    "N names joined by ' / '": 31,
+    "Name (alias)": 27,
+    "N names joined by '; '": 17
+   },
+   "ARTIST": {
+    "1 value": 42815,
+    "one name": 40081,
+    "another script": 2100,
+    "N names joined by ' & '": 1497,
+    "N names joined by ', '": 443,
+    "N names joined by '/'": 346,
+    "absent": 261,
+    "N names joined by ' and '": 238,
+    "N names joined by ', ' and ' & '": 219,
+    "2+ values": 69,
+    "Various": 41,
+    "N names joined by '; '": 36,
+    "Name (alias)": 17,
+    "N names joined by ' / '": 12,
+    "Ensemble: members": 12,
+    "a rights society first": 4
+   },
+   "COMPOSER": {
+    "absent": 38523,
+    "full name": 4176,
+    "surname only": 333,
+    "composer; arranger": 93,
+    "prose": 84,
+    "Last, First": 29
+   },
+   "TITLE": {
+    "1 value": 42700,
+    "another script": 2273,
+    "Work - Movement": 618,
+    "Work: Movement": 344,
+    "absent": 307,
+    "No.": 235,
+    "roman movement numeral": 226,
+    "catalogue number op": 181,
+    "2 values": 131,
+    "catalogue number bwv": 80,
+    "catalogue number d": 38,
+    "catalogue number k": 22,
+    "Work, Movement": 7,
+    "3+ values": 7,
+    "catalogue number rv": 5,
+    "arabic movement numeral": 1
+   },
+   "container": {
+    "FLAC": 38699,
+    "MP3 ID3 v2.4.0": 2603,
+    "MP3 ID3 v2.3.0": 1278,
+    "MP4": 335,
+    "DSF ID3 v2.3.0": 86,
+    "MonkeysAudio": 63,
+    "WAVE ID3 v2.3.0": 35,
+    "?": 31,
+    "WavPack": 10,
+    "DSDIFF": 5
+   },
+   "defects": {
+    "one track number on several files (files)": 3396,
+    "two files of one title in a folder (files)": 360,
+    "two files of one title in a folder (folders)": 79
+   },
+   "identifiers": {
+    "none": 39245,
+    "isrc present": 3749,
+    "upc present": 1159,
+    "barcode present": 537,
+    "catalognumber present": 303
+   },
+   "numbers": {
+    "track total present": 25358,
+    "track total absent": 17787,
+    "disc number present": 5194,
+    "track number absent": 643
+   }
+  },
+  "classical": {
+   "ALBUMARTIST": {
+    "absent": 92,
+    "1 value": 53,
+    "one name": 40,
+    "N names joined by ' & '": 13,
+    "Various": 10
+   },
+   "ARTIST": {
+    "1 value": 145,
+    "one name": 116,
+    "N names joined by ', '": 16,
+    "N names joined by ' & '": 13
+   },
+   "COMPOSER": {
+    "absent": 120,
+    "full name": 25
+   },
+   "TITLE": {
+    "1 value": 145,
+    "catalogue number op": 44,
+    "roman movement numeral": 34,
+    "Work - Movement": 33,
+    "No.": 31,
+    "Work: Movement": 6,
+    "catalogue number rv": 3
+   },
+   "container": {
+    "FLAC": 145
+   },
+   "defects": {
+    "two files of one title in a folder (files)": 2,
+    "two files of one title in a folder (folders)": 1
+   },
+   "identifiers": {
+    "none": 145
+   },
+   "numbers": {
+    "track total absent": 113,
+    "track total present": 32
+   }
+  }
+ }
+}

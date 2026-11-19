@@ -86,6 +86,20 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      danceability came to be derived from the segments instead of analysed
      (2026-11-10); from then on the triggers on embedding_segments keep the
      scores.
+     The bindings step (`track_mbids_v2`, 2026-11-18, CANON-CLASSICAL) is the
+     cutover to the track_mbid record v3, the matcher's methodology inside
+     its signed bytes (record_sig.MATCHER_VERSION): every imported binding is
+     deleted — they come again from their authors, a newer methodology's
+     replacing an older's — and the seals of the node's own are shed, for
+     the notary to sign them in v3 under the methodology they were made by
+     (1). The `imported` flag tells the two apart, so no key is read. The
+     canon step (`canon_classical_v1`, the same day) wakes every owned
+     artist's canon (last_mb_sync cleared): the matcher changed for the whole
+     library (a lengthless recording no duration evidence, the numeral rule,
+     the positional tier), and canonicalize_pending takes them by its
+     watermark, resumable as it is. The files' re-read under the new reader
+     needs no step: a row under scanner.TAGS_READ_REV is a changed file to
+     the next scan, and the start queues one while any is left (main).
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
@@ -139,6 +153,29 @@ def _rederive_play_stats(conn) -> int:
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT track_id::text FROM listening_history")
         return refresh_play_stats(cur, [r[0] for r in cur.fetchall()])
+
+
+def _wake_owned_canon(conn) -> int:
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE artists ar SET last_mb_sync = NULL
+                        WHERE ar.last_mb_sync IS NOT NULL AND EXISTS (
+                              SELECT 1 FROM track_artists ta JOIN owned_files f ON f.track_id = ta.track_id
+                               WHERE ta.artist_id = ar.id AND ta.role = 'primary')""")
+        woken = cur.rowcount
+    conn.commit()
+    return woken
+
+
+def _cut_over_bindings(conn) -> dict:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM track_mbids WHERE imported")
+        deleted = cur.rowcount
+        cur.execute("""UPDATE track_mbids SET author_pubkey = NULL, signature = NULL,
+                                              batch_root = NULL, merkle_proof = NULL
+                        WHERE signature IS NOT NULL""")
+        shed = cur.rowcount
+    conn.commit()
+    return {"imported_deleted": deleted, "own_seals_shed": shed}
 
 
 def _repair_naive_listen_times(conn) -> int:
@@ -725,6 +762,14 @@ def apply_pending() -> dict:
                 out["variant_groups"] = backfill_variant_groups(cur)
             conn.commit()
             _mark(conn, "variant_raw_group_v1")
+
+        if not _marked(conn, "track_mbids_v2"):
+            out["track_mbids_v2"] = _cut_over_bindings(conn)
+            _mark(conn, "track_mbids_v2")
+
+        if not _marked(conn, "canon_classical_v1"):
+            out["canon_woken"] = _wake_owned_canon(conn)
+            _mark(conn, "canon_classical_v1")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

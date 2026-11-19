@@ -77,7 +77,7 @@ def seal_track(cur, author_key, track: str, model: str, *, recording: str,
         signed.append(("instruments", None, rs.sign(rs.instruments_payload(
             author, track, chromaprint, duration, instruments_version,
             rs.blake2b_hex(rs.canonical_instruments_blob(instruments))), author_key)))
-    binding = {"recording_mbid": recording, "confidence": "name_exact"}
+    binding = {"recording_mbid": recording, "confidence": "name_exact", "matcher_version": rs.MATCHER_VERSION}
     signed.append(("binding", None, rs.sign(rs.enrichment_payload(
         author, "track_mbid", track, "",
         rs.blake2b_hex(rs.canonical_enrichment_blob("track_mbid", binding)), BOUND_AT), author_key)))
@@ -112,9 +112,9 @@ def seal_track(cur, author_key, track: str, model: str, *, recording: str,
                         (track, psycopg2.extras.Json(instruments), source, instruments_version,
                          *seal))
         else:
-            cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, created_at,
-                                                    author_pubkey, signature, batch_root,
+            cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version,
+                                                    created_at, author_pubkey, signature, batch_root,
                                                     merkle_proof, imported)
-                           VALUES (%s, %s, 'name_exact', %s, %s, %s, %s, %s, %s)""",
-                        (recording, track, BOUND_AT, *seal, not first_hand))
+                           VALUES (%s, %s, 'name_exact', %s, %s, %s, %s, %s, %s, %s)""",
+                        (recording, track, rs.MATCHER_VERSION, BOUND_AT, *seal, not first_hand))
     return root

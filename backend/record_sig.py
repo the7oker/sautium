@@ -59,10 +59,17 @@ from typing import Optional
 #   instruments are a record of their own.
 #   instruments v1 (2026-11-10): the instrument tagger's raw score per label.
 #   enrichment v2: unchanged since the v2 re-sign — no material hash in it.
+#   track_mbid v3 (2026-11-18, CANON-CLASSICAL): the matcher's methodology
+#   that made the binding (matcher_version) is inside the signed bytes, so a
+#   binding of a newer matcher replaces an imported one of an older; album
+#   and album_track stay enrichment v2.
 SEGMENT_RECORD_VERSION = 3
 FEATURES_RECORD_VERSION = 4
 INSTRUMENTS_RECORD_VERSION = 1
 ENRICHMENT_RECORD_VERSION = 2
+TRACK_MBID_RECORD_VERSION = 3
+_ENRICHMENT_VERSION = {"album": ENRICHMENT_RECORD_VERSION, "album_track": ENRICHMENT_RECORD_VERSION,
+                       "track_mbid": TRACK_MBID_RECORD_VERSION}
 
 # The newest analysis methodology of each per-track record kind this release
 # computes — audio_analysis.ANALYSIS_VERSION and ensemble_instruments.
@@ -75,6 +82,10 @@ ENRICHMENT_RECORD_VERSION = 2
 # a node when the node updates.
 FEATURES_ANALYSIS_VERSION = 2
 INSTRUMENTS_ANALYSIS_VERSION = 2
+# The canon matcher's methodology a track_mbid binding carries, by the same
+# rule: 1 the matcher before 2026-11-18, 2 CANON-CLASSICAL's (a lengthless
+# recording no duration evidence, the numeral rule, the positional tier).
+MATCHER_VERSION = 2
 
 # The Worker timestamp string format. v2 (2026-07-10) appends the submitter's
 # ip_hash (uuid5(NAMESPACE, "ip:"+ip), computed by the Worker) after the date —
@@ -306,7 +317,7 @@ def enrichment_payload(
     if kind not in ENRICHMENT_KINDS:
         raise ValueError(f"unknown enrichment kind: {kind}")
     return ":".join([
-        "sautium-record", f"v{ENRICHMENT_RECORD_VERSION}", kind, author_pubkey_hex.lower(),
+        "sautium-record", f"v{_ENRICHMENT_VERSION[kind]}", kind, author_pubkey_hex.lower(),
         entity_uuid.lower(), (source or "").lower(),
         content_hash_hex.lower(), _fmt_fetched_at(fetched_at),
     ]).encode("utf-8")
@@ -322,7 +333,8 @@ ENRICHMENT_ORDER = {
     # `source` is "" and fetched_at = created_at for all three. album/
     # album_track seals feed the pusher's full-snapshot gate; track_mbid
     # also travels (v4). confidence is inside the signed bytes — an
-    # unsigned tier could be inflated in transit.
+    # unsigned tier could be inflated in transit, and so is matcher_version
+    # (track_mbid v3): a stale binding must not pass for a newer one.
     # cover_url travels but is NOT sealed: a CAA front-image URL is a
     # deterministic derivative of rg_mbid (re-derivable by anyone), and an
     # owned album's cover lives in its files anyway — sealing it would
@@ -330,7 +342,7 @@ ENRICHMENT_ORDER = {
     "album":             ["rg_mbid", "title", "release_year", "confidence"],
     "album_track":       ["album_uuid", "disc", "position", "length_ms",
                           "recording_mbid"],
-    "track_mbid":        ["recording_mbid", "confidence"],
+    "track_mbid":        ["recording_mbid", "confidence", "matcher_version"],
 }
 
 

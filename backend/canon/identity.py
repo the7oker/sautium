@@ -396,7 +396,7 @@ def _move_file_analysis(db: Session, media_file_id: int, old: str, new: str) -> 
 
 
 def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: str,
-                      artist_name: str) -> str:
+                      artist_name: str, split: bool = False) -> str:
     """A file read again whose tags now name another track (a title or an
     artist fixed in a tag editor): the track a fresh import would place it
     on. When it was its track's last file the track follows it —
@@ -406,13 +406,18 @@ def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: st
     rip, the HQPlayer's copy) only this file moves, with the analysis made
     from its material (_move_file_analysis); the listens stay — a listen is
     of the track. Either way the track's primary credit is the tags' artist.
-    Returns the track the file is on."""
+
+    `split` (the re-read batch moves every file of the track to tracks of
+    two or more identities — TITLE's values joined, CANON-CLASSICAL-DESIGN
+    §1.4): every file goes as one that keeps others goes, the last one too,
+    so no walk order decides which movement inherits the whole work; and its
+    own listens go with it. Returns the track the file is on."""
     from transliterate import latinize
     new = str(track_uuid(title, artist_name))
     if new == old_track:
         return new
     artist = str(_ensure_artist(db, artist_name))
-    keeps_others = db.execute(text("""
+    keeps_others = split or db.execute(text("""
         SELECT EXISTS (SELECT 1 FROM media_files WHERE track_id = :t AND id <> :mf)
             OR EXISTS (SELECT 1 FROM hqp_library_files WHERE track_id = :t)"""),
         {"t": old_track, "mf": media_file_id}).scalar()
@@ -437,6 +442,16 @@ def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: st
                         "WHERE media_file_id = :mf AND track_id = :old"),
                    {"mf": media_file_id, "old": old_track})
         elect_analysis_source(db, old_track)
+    if split:
+        # a listen made from this file was of this movement; one with no file
+        # (an imported scrobble named the work) stays on the old track
+        moved = db.execute(text("UPDATE listening_history SET track_id = :new "
+                                "WHERE media_file_id = :mf AND track_id = :old"),
+                           {"new": new, "mf": media_file_id, "old": old_track}).rowcount
+        if moved:
+            from play_stats import refresh_play_stats
+            with db.connection().connection.cursor() as cur:
+                refresh_play_stats(cur, [old_track, new])
     db.execute(text("""DELETE FROM track_artists
                         WHERE track_id = :t AND role = 'primary' AND artist_id <> :a"""),
                {"t": new, "a": artist})
