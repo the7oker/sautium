@@ -2,7 +2,9 @@
 (record_sig track_mbid v3, MATCHER_VERSION; CANON-CLASSICAL-DESIGN §5.4):
 the import gate refuses a binding of a methodology this release does not
 compute, an imported binding of an older methodology is replaced by a newer
-one — never this node's own — and the cutover at the first start deletes
+one a pull brings — never this node's own —, the carry asks for no binding
+of a track that holds one (the importer would drop a peer's older one pushed
+again), and the cutover at the first start deletes
 every imported binding and sheds the own ones' seals for the notary.
 
 Before this slice the importer was ON CONFLICT DO NOTHING and the planner
@@ -32,10 +34,12 @@ def _row(conn, recording):
 def test_a_binding_of_a_methodology_no_release_computes_is_refused(conn, recorder, scratch_dsn):
     author = _key()
     _witnessed(recorder, author)
-    track, recording, payload = _served(conn, author, "track_mbids")
-    assert payload["items"][0]["matcher_version"] == rs.MATCHER_VERSION
-    payload["items"][0]["matcher_version"] = rs.MATCHER_VERSION + 1
+    # validly sealed, by a matcher this release does not compute
+    track, recording, payload = _served(conn, author, "track_mbids", matcher_version=rs.MATCHER_VERSION + 1)
+    assert payload["items"][0]["matcher_version"] == rs.MATCHER_VERSION + 1
     assert _pull(scratch_dsn, _Peer(pub(_key()), recorder), "track_mbids", track, payload) == 0
+    assert _row(conn, recording) is None
+    track, recording, payload = _served(conn, author, "track_mbids")
     del payload["items"][0]["matcher_version"]                    # the format before v3
     assert _pull(scratch_dsn, _Peer(pub(_key()), recorder), "track_mbids", track, payload) == 0
     assert _row(conn, recording) is None
@@ -51,9 +55,9 @@ def test_a_newer_methodology_replaces_an_imported_older_one_never_an_own(conn, r
         cur.execute("INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version, imported, "
                     "signature) VALUES (%s, %s, 'overlap_verified', 1, TRUE, repeat('b', 128))",
                     (recording, stale))
-        # the planner: an imported binding of an older matcher is a gap
+        # the carry: a track that holds a binding, of whatever matcher, lacks none
         cur.execute(f"SELECT {sync_queries._LACKS['track_mbids'].format(t='%s::uuid')}", (stale,))
-        assert cur.fetchone() == (True,)
+        assert cur.fetchone() == (False,)
     assert _pull(scratch_dsn, _Peer(pub(_key()), recorder), "track_mbids", track, payload) == 1
     assert _row(conn, recording) == (track, rs.MATCHER_VERSION, True, True)
     with conn.cursor() as cur:

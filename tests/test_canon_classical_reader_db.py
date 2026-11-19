@@ -119,9 +119,13 @@ def test_a_publishing_credit_falls_to_the_album_artist(cur, library, tone):
 
 def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
     """Read under the old reader (the first TITLE value, revision 0), the
-    three movements are one track with three listens and one signed binding;
-    the next scan reads them again — each file to its own movement's track
-    with its own listen, the binding gone, whatever the walk's order."""
+    three movements are one track with three listens, one signed binding and
+    the owned tracklist's three slots; the next scan reads them again — each
+    file to its own movement's track with its own listen and its own slot,
+    the binding gone, whatever the walk's order. A whole walk records the
+    reader it read the library under (the start's re-read, main)."""
+    import psycopg2.extras
+    import sign_audio
     _clean(cur)
     for n, mvt in enumerate(("I. Allegro", "II. Largo", "III. Allegro"), 1):
         _flac(tone, library / "Spring" / f"0{n}.flac", title=["Concerto No. 1 in E major, RV 269", mvt],
@@ -138,6 +142,10 @@ def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
                 "VALUES ('2f9f2a0e-0000-4000-8000-000000000001', %s, 'overlap_verified', repeat('a', 128))",
                 (merged,))
     cur.execute("UPDATE media_files SET recording_mbid = '2f9f2a0e-0000-4000-8000-000000000001'")
+    slots = cur.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    assert len(sign_audio._materialize_owned_tracklists(slots)) == 3
+    cur.execute("SELECT value FROM user_settings WHERE key = %s", (scanner.TAGS_READ_KEY,))
+    assert cur.fetchone() == (0,)
     stats = _scan()
     assert stats["reread"] == 3 and stats.get("split") == 1
     cur.execute("""SELECT t.title, (SELECT count(*) FROM listening_history h WHERE h.track_id = t.id
@@ -154,4 +162,13 @@ def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
     assert cur.fetchone() == (0,)
     cur.execute("SELECT track_id::text FROM media_files WHERE track_number = 2")
     assert cur.fetchone() == (str(track_uuid("Concerto No. 1 in E major, RV 269: II. Largo", "Anne Akiko Meyers")),)
+    # the merged track's slots went with the split: each movement takes its own
+    cur.execute("SELECT count(*) FROM album_tracks WHERE track_id = %s", (merged,))
+    assert cur.fetchone() == (0,)
+    assert len(sign_audio._materialize_owned_tracklists(slots)) == 3
+    cur.execute("SELECT at.position, at.track_id = mf.track_id FROM album_tracks at "
+                "JOIN media_files mf ON mf.track_number = at.position ORDER BY at.position")
+    assert cur.fetchall() == [(1, True), (2, True), (3, True)]
+    cur.execute("SELECT value FROM user_settings WHERE key = %s", (scanner.TAGS_READ_KEY,))
+    assert cur.fetchone() == (scanner.TAGS_READ_REV,)
     assert _scan()["reread"] == 0                    # read once

@@ -866,7 +866,8 @@ Seals that support that gate: `album` (`rg_mbid:title:year:confidence`;
 derivative of rg_mbid, so the importer may fill a blank one with
 `coverartarchive.org/release-group/{rg}/front-500`, exactly what the phantom
 minter writes), `album_track` (album:disc:position:**length_ms**:recording),
-`track_mbid` (recording:confidence).
+`track_mbid` (recording:confidence:matcher_version — the matcher's methodology
+that made the binding, since 2026-11-19).
 
 The owned layer lives in `album_variants`, so tracklist rows for owned tracks
 did not exist — `sign_audio` **materializes** them from file tags before every

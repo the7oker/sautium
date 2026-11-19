@@ -321,9 +321,9 @@ See:
   beside its recording's, the album's own group before timed over
   lengthless —, the positional pass).
   The gate refuses a binding without one or above this release's; an
-  imported binding of an older matcher is a gap the sync fills
-  (`sync_queries._LACKS`), and one of a newer matcher replaces it, never this
-  node's own. A node's first start on that release deleted the imported
+  imported binding of a newer matcher replaces an imported one of an older,
+  never this node's own, and the sync asks for no binding of a track that
+  holds one (`sync_queries._LACKS`: nothing pulled only to be dropped). A node's first start on that release deleted the imported
   bindings and shed its own seals (`db_migrate`'s `track_mbids_v2`, no key
   needed: `imported` tells them apart) and woke every owned artist's canon
   (`canon_classical_v1`); the canon restates its own rows of an older matcher
@@ -333,7 +333,9 @@ See:
   (`backend/rights_societies/rights_societies.json`, MusicBrainz's labels of
   type Rights Society, made by `scripts/make_rights_societies.py`) and keeps
   the barcode; a file read by an older reader (`scanner.TAGS_READ_REV`) is
-  read again at the next start, and a track whose files now name two or more
+  read again by the next scan that meets it — a node whose mount sends no
+  events queues one at its start until a whole walk has read the library
+  under that reader —, and a track whose files now name two or more
   identities is split. The **positional pass** (`canon/positional.py`, after
   the cascade, on the copies it left without a group) binds a copy to the
   one release group of its bound artists whose release's — or one medium's
@@ -341,8 +343,10 @@ See:
   position fits the file's length (Digital Media 0.5 s, or [−0.5, 1.5) s where MB
   keeps whole seconds; every other medium 2 s), `mb_match_confidence =
   'positional'`; MusicBrainz's special-purpose artists are never its
-  candidates, and a copy it abstained on is asked again only when what it
-  was asked with changes (`album_variants.positional_asked`).
+  candidates; the album's copies are asked together (one group per album),
+  an album still arriving waits as in the cascade, and a copy it abstained
+  on is asked again only when what it was asked with changes
+  (`album_variants.positional_asked`).
 - **A copy at the HQPlayer is a VARIANT, and "owned" means `owned_files`.**
   Since 2026-09-27 an album's copy in the library of the HQPlayer the node
   drives (a disk on an Embedded box, a mounted share, a hi-res subset copied

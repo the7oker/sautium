@@ -161,7 +161,7 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   MusicBrainz rate and user-agent rules. Two pieces of its CC0 core data ship
   in the tree (since 2026-11-19): the names of its labels of type Rights
   Society, with their aliases (`backend/rights_societies/rights_societies.json`,
-  from the 2026-11-11 dump), and the rows of ten releases the tests load
+  from the 2026-11-11 dump), and the rows of fourteen releases the tests load
   (`tests/fixtures/canon_classical/mb.json`). The list of MusicBrainz's
   special-purpose artists in `backend/canon/positional.py` is the one
   musicbrainz-server's `Constants.pm` holds (`SPECIAL_ARTIST_GIDS`).

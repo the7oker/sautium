@@ -121,12 +121,13 @@ def _forget(conn, track) -> None:
         cur.execute("DELETE FROM analysis_sources WHERE track_id = %s", (track,))
 
 
-def _served(conn, author_key, category="segments", own=None) -> tuple:
+def _served(conn, author_key, category="segments", own=None, **sealed) -> tuple:
     """`author_key`'s sealed analysis of a new track as a peer serves it,
-    then forgotten here: (track, recording, the payload)."""
+    then forgotten here: (track, recording, the payload). `sealed` goes to
+    seal_track."""
     track, recording = _track(conn)
     with conn.cursor() as cur:
-        seal_track(cur, author_key, track, MODEL, recording=recording)
+        seal_track(cur, author_key, track, MODEL, recording=recording, **sealed)
     payload = sync_queries.PULL_HANDLERS[category](conn, [track], own=own)
     _forget(conn, track)
     return track, recording, payload

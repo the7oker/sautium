@@ -313,6 +313,180 @@ def test_on_a_slice_fed_node_a_medium_s_bind_checks_that_medium_s_tracklist(node
         assert [r[0] for r in cur.fetchall()] == recs
 
 
+def test_an_album_still_arriving_waits_for_its_files_unless_the_scan_is_explicit(node):
+    """Round 1 H1: four of six declared files bound the copy to the release
+    its first four fit, for good — the same-titled single a partial album
+    fills (LIBRARY-WATCH-DESIGN §3.5). A watcher's pass leaves it."""
+    conn, _fake = node
+    from canon import positional
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        _polarity(cur)
+        cur.execute("UPDATE media_files SET track_total = 6")
+        s, leader, ens = _mb(cur)
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")])
+    st = positional.run(take_arriving=False)
+    assert (st["copies"], st["bound_albums"]) == (0, 0)
+    assert positional.run()["bound_albums"] == 1
+
+
+def test_a_copy_that_changes_is_asked_with_its_album_s_other_copies(node):
+    """Round 1 H2: two copies fitting two groups bound neither; when one of
+    them changed, it was asked alone and bound the album to its group."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        v2 = _second_copy(cur, album, shift=30)
+        s, leader, ens = _mb(cur)
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")])
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")],
+                 lengths=tuple(ms + 30000 for ms in LENGTHS))
+        assert _run()["album_conflict"] == 1
+        cur.execute("UPDATE media_files SET barcode = '7041888520030' WHERE album_variant_id = %s", (v2,))
+        st = _run()
+        assert (st["asked"], st["bound_albums"], st["album_conflict"]) == (2, 0, 1)
+        cur.execute("SELECT musicbrainz_id FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (None,)
+
+
+def _second_copy(cur, album, shift=0.0):
+    """Another copy of `album`: its first copy's files, `shift` seconds longer."""
+    cur.execute("INSERT INTO album_variants (album_id, directory_path, raw_title) "
+                "VALUES (%s, %s, 'Polarity') RETURNING id", (album, f"/music/Hoff/Polarity +{shift}"))
+    v = cur.fetchone()[0]
+    cur.execute("""INSERT INTO media_files (track_id, album_variant_id, file_path, sample_rate, bit_depth,
+                                            duration_seconds, track_number, disc_number)
+                   SELECT DISTINCT ON (track_number) track_id, %s, file_path || %s, 96000, 24,
+                          duration_seconds + %s, track_number, 1
+                     FROM media_files ORDER BY track_number, id""", (v, f".{v}", shift))
+    return v
+
+
+def test_a_later_copy_of_an_album_the_tier_bound_binds_to_its_group_or_not_at_all(node):
+    """Round 1 M1: a copy of an album the tier had bound — one that waited
+    while a sibling bound it, or one added since — was never asked again.
+    It binds to the album's group, or stays unbound; the album keeps one."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        s, leader, ens = _mb(cur)
+        rg = str(uuid.uuid4())
+        rel, recs = _release(s, cur, rg, "Polarity", [(ens, "Hoff Ensemble")])
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")],
+                 lengths=tuple(ms + 30000 for ms in LENGTHS))
+        assert _run()["bound_albums"] == 1
+        v2 = _second_copy(cur, album)
+        v3 = _second_copy(cur, album, shift=30)
+        st = _run()
+        assert (st["bound_albums"], st["bound_copies"], st["abstained"]) == (0, 1, 1)
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (rg,)
+        cur.execute("SELECT id, release_mbid::text FROM album_variants WHERE id IN (%s, %s) ORDER BY id",
+                    (v2, v3))
+        assert cur.fetchall() == [(v2, rel), (v3, None)]
+        cur.execute("SELECT recording_mbid::text FROM media_files WHERE album_variant_id = %s "
+                    "ORDER BY track_number", (v2,))
+        assert [r[0] for r in cur.fetchall()] == recs
+        assert _run()["asked"] == 0                   # the abstention is kept
+
+
+def test_on_a_slice_fed_node_a_data_track_is_no_position(node):
+    """Round 1 M3: the slice's fit leaves an enhanced CD's data track out;
+    MusicBrainz's answer counted it, so the bind never confirmed."""
+    conn, fake = node
+    with conn.cursor() as cur:
+        album = _polarity(cur)
+        s, leader, ens = _mb(cur)
+        rg = str(uuid.uuid4())
+        rel, recs = _release(s, cur, rg, "Polarity", [(ens, "Hoff Ensemble")], fmt=CD)
+        cur.execute("""INSERT INTO mb_track (id, gid, recording, medium, position, number, name, artist_credit,
+                                             length, is_data_track)
+                       SELECT t.id + 1000000, gen_random_uuid(), t.recording, t.medium, 5, '5', 'Data',
+                              t.artist_credit, 60000, true
+                         FROM mb_track t JOIN mb_medium m ON m.id = t.medium
+                         JOIN mb_release r ON r.id = m.release AND r.gid = %s WHERE t.position = 4""", (rel,))
+        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids) VALUES ('hoff ensemble', 1) "
+                    "ON CONFLICT DO NOTHING")
+    fake.artist(ENSEMBLE, "Hoff Ensemble")
+    fake.release_group(rg, "Polarity", credit(("Hoff Ensemble", ENSEMBLE)))
+    fake.release(rel, "Polarity", rg, credit(("Hoff Ensemble", ENSEMBLE)),
+                 [{"title": f"Movement {i}", "length": ms, "recording": r}
+                  for i, (ms, r) in enumerate(zip(LENGTHS, recs), 1)]
+                 + [{"title": "Data", "length": 60000, "recording": str(uuid.uuid4()), "data": True}])
+    assert _run()["waiting"] == 1
+    drain()
+    assert _run()["bound_albums"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (rg,)
+
+
+@pytest.mark.parametrize("named, bound", (("closer", True), ("farther", False)))
+def test_a_barcode_naming_a_group_another_fits_closer_abstains(node, named, bound):
+    """T7's last clause (§3.3), round 1 M6: a witness breaks a tie among the
+    groups that fit, never the positions — a barcode naming the group the
+    positions fit worse is a contradiction, and nothing binds."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        s, leader, ens = _mb(cur)
+        closer, farther = str(uuid.uuid4()), str(uuid.uuid4())
+        # 312.5 s to the millisecond: 0.49 s from the first file against 0.99 s
+        _release(s, cur, closer, "Polarity", [(ens, "Hoff Ensemble")],
+                 lengths=(312500,) + LENGTHS[1:], barcode="7041888520023")
+        _release(s, cur, farther, "Polarity (Live)", [(ens, "Hoff Ensemble")], barcode="7041888520030")
+        cur.execute("UPDATE media_files SET barcode = %s",
+                    ("7041888520023" if named == "closer" else "7041888520030",))
+        st = _run()
+        assert st["bound_albums"] == (1 if bound else 0)
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == ((closer if bound else None),)
+
+
+def test_a_file_of_another_album_on_a_shared_track_keeps_its_own_recording(node):
+    """T19 (§12.1 Q3): "The Elder" and "Within" are one track each with a
+    file on Polarity (the ensemble's 405 s and 360 s) and one on the leader's
+    solo Stories (289 s and 276 s). The positional bind is per file: Stories'
+    files and their binding stay as they were."""
+    conn, _fake = node
+    from mb_fakes import Library
+    titles = ("The Elder", "Within", "Movement 3", "Movement 4")
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        lib = Library(cur, "Jan Gunnar Hoff")
+        polarity = lib.album("Polarity", list(zip(titles, FILES)))
+        ens = _bind_artist(cur, "Hoff Ensemble", ENSEMBLE)
+        cur.execute("UPDATE album_artists SET artist_id = %s WHERE album_id = %s", (ens, polarity))
+        cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES (%s, %s, 'overlap_verified')",
+                    (LEADER, lib.id))
+        stories = lib.album("Stories", [("The Elder", 288.7), ("Within", 275.6), ("Prelude", 190.0)])
+        own = str(uuid.uuid4())
+        cur.execute("""UPDATE media_files mf SET recording_mbid = %s FROM album_variants av
+                        WHERE av.id = mf.album_variant_id AND av.album_id = %s AND mf.track_number = 1""",
+                    (own, stories))
+        cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version)
+                       SELECT %s, track_id, 'overlap_verified', 2 FROM media_files WHERE recording_mbid = %s""",
+                    (own, own))
+        s, leader, ensemble = _mb(cur)
+        rg = str(uuid.uuid4())
+        _rel, recs = _release(s, cur, rg, "Polarity", [(ensemble, "Hoff Ensemble")])
+        assert _run()["bound_albums"] == 1
+        cur.execute("""SELECT al.id::text, mf.track_number, mf.recording_mbid::text
+                         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                         JOIN albums al ON al.id = av.album_id ORDER BY al.title, mf.track_number""")
+        rows = cur.fetchall()
+        assert [r[2] for r in rows if r[0] == polarity] == recs
+        assert [r[2] for r in rows if r[0] == stories] == [own, None, None]
+        cur.execute("SELECT musicbrainz_id FROM albums WHERE id = %s", (stories,))
+        assert cur.fetchone() == (None,)
+        cur.execute("SELECT recording_mbid::text FROM track_mbids WHERE track_id = "
+                    "(SELECT track_id FROM media_files WHERE recording_mbid = %s)", (own,))
+        assert sorted(r[0] for r in cur.fetchall()) == sorted([own, recs[0]])
+
+
 def test_the_cascade_leaves_an_album_the_positional_tier_bound(node):
     conn, _fake = node
     with conn.cursor() as cur:
@@ -536,8 +710,6 @@ def test_a_fuzzy_title_that_disagrees_on_its_movement_is_no_candidate(node):
                      "Concerto No. 1 in E major, RV 269 “La primavera”: II. Largo",
                      "Sonata No. 14, Op. 27 No. 2", "Piano Sonata No. 14 in C-sharp minor, Op. 27 No. 2"))
         assert cur.fetchone() == (True, False)
-    cur = conn.cursor()
-    cur.execute("SET pg_trgm.similarity_threshold = 0.3")
     plan = content.resolve_artist(lib.id, "Anne Akiko Meyers")
     recs = {r for a in plan["albums"] for r in a["recordings"].values()}
     assert wrong not in recs
@@ -545,9 +717,9 @@ def test_a_fuzzy_title_that_disagrees_on_its_movement_is_no_candidate(node):
 
 def test_the_data_step_wakes_every_owned_artist_once_and_the_start_queues_the_re_read(node):
     """T14 (DESIGN §5.1): every owned artist's canon is due again (the
-    matcher changed library-wide), an artist with no file is not; the
-    re-read is state, not the marker — a row under the reader's revision is
-    a changed file to the next scan."""
+    matcher changed library-wide), an artist with no file is not; a row under
+    the reader's revision is a changed file to the next scan (the whole
+    walk's marker: test_canon_classical_reader_db)."""
     conn, _fake = node
     import db_migrate
     import scanner

@@ -778,11 +778,11 @@ _LACKS = {
     "segments": "NOT " + HOLDS_SEGMENTS,
     "audio_features": "NOT " + HOLDS_FEATURES,
     "instruments": "NOT " + HOLDS_INSTRUMENTS,
-    # a binding is held when it is this node's own or of the newest matcher
-    # (record_sig.MATCHER_VERSION): an imported one of an older methodology
-    # is a gap its author's newer binding fills
-    "track_mbids": ("NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t}"
-                    f" AND (NOT tm.imported OR tm.matcher_version >= {record_sig.MATCHER_VERSION}))"),
+    # any binding is held, of whatever matcher: as for the analysis records
+    # (HELD_RECORD), the planner asks for nothing the importer would drop —
+    # a peer's older binding pushed again would be — and a newer one replaces
+    # an older imported one when a pull brings it (_import_track_mbids)
+    "track_mbids": "NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t})",
 }
 
 

@@ -4094,6 +4094,9 @@ CREATE TABLE IF NOT EXISTS mbws_tracks (
     length_ms    INTEGER,
     recording    UUID,
     media_format TEXT,
+    -- a data track of an enhanced CD (MusicBrainz's "data-tracks"): no
+    -- position of the audio a copy holds (canon.positional)
+    is_data      BOOLEAN  NOT NULL DEFAULT false,
     PRIMARY KEY (release, disc, position)
 );
 CREATE INDEX IF NOT EXISTS idx_mbws_tracks_recording ON mbws_tracks (recording);

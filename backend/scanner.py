@@ -896,6 +896,12 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
             # all of them but one, and arbitrary for that one — each new track
             # is bound on its own evidence by the canon (§1.4)
             for sql in ("DELETE FROM track_mbids WHERE track_id = ANY(CAST(:t AS uuid[]))",
+                        # the owned tracklist's slots the merged track took from
+                        # these files (sign_audio._materialize_owned_tracklists):
+                        # each movement's track takes its own once its file moves
+                        "DELETE FROM album_tracks at USING album_variants av, media_files mf "
+                        "WHERE mf.album_variant_id = av.id AND at.album_id = av.album_id "
+                        "AND at.track_id = mf.track_id AND mf.track_id = ANY(CAST(:t AS uuid[]))",
                         # and off the files, or a pass that binds from the files
                         # (bind_owned_recordings) would bind it back
                         "UPDATE media_files SET recording_mbid = NULL WHERE track_id = ANY(CAST(:t AS uuid[]))",
@@ -1155,6 +1161,8 @@ def _int_or_none(value) -> Optional[int]:
 # file is: a reader that sees more (TITLE's values joined, the barcode)
 # reaches every file once (CANON-CLASSICAL-DESIGN §1). Rev 1: 2026-11-18.
 TAGS_READ_REV = 1
+# The revision the last whole walk read the library under (user_settings).
+TAGS_READ_KEY = "scanner.tags_read_rev"
 
 
 def tag_values(audio, vorbis_key: str, id3_key: str = None, mp4_key: str = None) -> List[str]:
@@ -1963,6 +1971,14 @@ class LibraryScanner:
                         f"{stats['skipped']} skipped, {stats['errors']} errors")
         else:
             stats["processed"] = total_files
+            if not scopes and not subpath and not limit:
+                # a whole walk read every file it met under this reader: the
+                # start's re-read is done (main), whatever it could not read
+                with get_db_context() as db:
+                    db.execute(text("""INSERT INTO user_settings (key, value) VALUES (:k, CAST(:v AS jsonb))
+                                       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"""),
+                               {"k": TAGS_READ_KEY, "v": json.dumps(TAGS_READ_REV)})
+                    db.commit()
             _report(f"Done: {stats['added']} added, {stats['skipped']} skipped, {stats['errors']} errors")
             logger.info(
                 f"Scan complete: {stats['processed']} processed, "

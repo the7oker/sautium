@@ -99,7 +99,8 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      the positional tier), and canonicalize_pending takes them by its
      watermark, resumable as it is. The files' re-read under the new reader
      needs no step: a row under scanner.TAGS_READ_REV is a changed file to
-     the next scan, and the start queues one while any is left (main).
+     the next scan, and the start queues one until a whole walk has read the
+     library under it (main, scanner.TAGS_READ_KEY).
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated

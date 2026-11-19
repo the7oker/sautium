@@ -84,7 +84,8 @@ class FakeMusicBrainz:
                 tracks: Iterable[dict], *, status="Official", barcode=None,
                 urls: Sequence[str] = (), date=None, media_format="CD") -> str:
         """tracks: {"title", "length", "recording"} with optional "credit"
-        (the release's by default), "disc" and "position"."""
+        (the release's by default), "disc", "position" and "data" (an
+        enhanced CD's data track, in the medium's "data-tracks")."""
         media: dict = {}
         for i, t in enumerate(tracks):
             disc = t.get("disc", 1)
@@ -94,8 +95,10 @@ class FakeMusicBrainz:
                 "id": t["recording"], "title": t.get("recording_title", t["title"]),
                 "length": t["length"], "artist-credit": copy.deepcopy(tcredit)}
             self.entities["recording"].setdefault(t["recording"], rec)
-            medium["tracks"].append({"id": t.get("id") or mbid(),
-                                     "position": t.get("position", len(medium["tracks"]) + 1),
+            listed = medium.setdefault("data-tracks", []) if t.get("data") else medium["tracks"]
+            listed.append({"id": t.get("id") or mbid(),
+                                     "position": t.get("position", len(medium["tracks"])
+                                                       + len(medium.get("data-tracks") or []) + 1),
                                      "title": t["title"], "length": t["length"],
                                      "artist-credit": copy.deepcopy(tcredit),
                                      "recording": copy.deepcopy(rec)})

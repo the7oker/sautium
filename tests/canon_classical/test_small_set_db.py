@@ -116,18 +116,18 @@ def test_the_generator_is_a_function_of_its_seed():
 
 # (release, its title form, the credit's names the files carry — a classical release's credit opens with
 # the composer, the files' ARTIST names the performer)
-@pytest.mark.parametrize("mbid, title_form, performers, every_position", [
-    (fx.APPASSIONATA, "Work: Movement", 0, True),    # T9: a group with no primary type
-    (fx.BEETHOVEN_1_2, "2 values", 1, True),         # T10: each disc onto its own group,
-    (fx.BEETHOVEN_4_5, "Work: Movement", 1, True),   # never the Vol. 2 duplicate
-    (fx.GOLDBERG, "2 values", 1, True),              # T1 + T6: 32 positions, two TITLE values
-    (fx.MEYERS, "Work: Movement", 1, True),          # D2: Meyers' own recordings, not Zukerman's
+@pytest.mark.parametrize("mbid, title_form, performers", [
+    (fx.APPASSIONATA, "Work: Movement", 0),    # T9: a group with no primary type
+    (fx.BEETHOVEN_1_2, "2 values", 1),         # T10: each disc onto its own group,
+    (fx.BEETHOVEN_4_5, "Work: Movement", 1),   # never the Vol. 2 duplicate
+    (fx.GOLDBERG, "2 values", 1),              # T1 + T6: 32 positions, two TITLE values
+    (fx.MEYERS, "Work: Movement", 1),          # D2: Meyers' own recordings, not Zukerman's
     # §12.1's release, its files and its credit one: the cascade binds it — "The Elder" too, MusicBrainz's
     # track 405 s against its recording's 396.5 s, by the track's length (§12.7)
-    (fx.POLARITY, "Work: Movement", 0, True),
+    (fx.POLARITY, "Work: Movement", 0),
 ])
 def test_each_release_binds_to_itself_position_by_position(dump_node, library, silence, mbid, title_form,
-                                                            performers, every_position):
+                                                            performers):
     rel = fx.release(mbid)
     rel = {**rel, "artists": rel["artists"][performers:]}
     case = generate(rel, title_form, "one name", {"drift": 0.3}, seed=20261118)
@@ -136,12 +136,7 @@ def test_each_release_binds_to_itself_position_by_position(dump_node, library, s
     _canon()
     rg, _how = _album_of(dump_node, case)
     assert rg == case.rg
-    got = _recordings(dump_node, case)
-    if every_position:
-        assert got == case.recordings
-    else:                                            # no position bound wrong
-        assert {p: r for p, r in got.items() if r is not None} == {
-            p: r for p, r in case.recordings.items() if got[p] is not None}
+    assert _recordings(dump_node, case) == case.recordings
 
 
 # The master's own two (§12.7): the files' titles as there — Disc 10's name City Life's movements its own way,

@@ -13,6 +13,9 @@
 -- title_numbers / title_numbers_disagree: the numeral rule of the matcher.
 -- album_variants: the positional pass's last abstention on the copy, as the
 -- candidates it was asked with — asked again only when they change.
+-- mbws_tracks: a data track of an enhanced CD, which is no position of the
+-- audio a copy holds (a release answered before keeps false: its data
+-- tracks count until MusicBrainz's answer is stored again).
 
 ALTER TABLE media_files ADD COLUMN IF NOT EXISTS tags_read_rev SMALLINT NOT NULL DEFAULT 0;
 ALTER TABLE media_files ADD COLUMN IF NOT EXISTS barcode TEXT;
@@ -20,6 +23,8 @@ ALTER TABLE media_files ADD COLUMN IF NOT EXISTS barcode TEXT;
 ALTER TYPE mb_match_confidence ADD VALUE IF NOT EXISTS 'positional' BEFORE 'ai';
 
 ALTER TABLE track_mbids ADD COLUMN IF NOT EXISTS matcher_version SMALLINT NOT NULL DEFAULT 1;
+
+ALTER TABLE mbws_tracks ADD COLUMN IF NOT EXISTS is_data BOOLEAN NOT NULL DEFAULT false;
 
 CREATE OR REPLACE FUNCTION seal_guard_track_mbids() RETURNS trigger AS $$
 BEGIN

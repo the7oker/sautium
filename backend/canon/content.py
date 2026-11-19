@@ -59,6 +59,18 @@ _LOCAL_BINDING_WINS = """
       AND (track_mbids.track_id, track_mbids.confidence, track_mbids.matcher_version)
           IS DISTINCT FROM (EXCLUDED.track_id, EXCLUDED.confidence, EXCLUDED.matcher_version)"""
 
+# What bind_owned_recordings, which binds from what the files already carry,
+# may replace: a peer's binding, never this node's own — the files' recording
+# says nothing of which matcher stamped it, so restating an own row would
+# relabel an older matcher's binding as the current one's.
+_FILES_BINDING_WINS = """
+    ON CONFLICT (recording_mbid) DO UPDATE SET
+        track_id = EXCLUDED.track_id, confidence = EXCLUDED.confidence,
+        matcher_version = EXCLUDED.matcher_version, imported = FALSE
+    WHERE track_mbids.imported
+      AND (track_mbids.track_id, track_mbids.confidence, track_mbids.matcher_version)
+          IS DISTINCT FROM (EXCLUDED.track_id, EXCLUDED.confidence, EXCLUDED.matcher_version)"""
+
 # This node's own bindings of the tracks an apply just bound that no file of
 # the track carries any more (CANON-CLASSICAL-DESIGN §5.2): an earlier pass's
 # binding a later one moved. A track two files bind to two recordings keeps
@@ -197,7 +209,8 @@ grp AS (    -- the recordings of each album's group in _agroup
 SELECT DISTINCT ON (c.album_id, c.track_id) c.album_id, c.track_id, c.rec_mbid, c.artist_mbid,
        c.dd IS NOT NULL AS timed
 FROM cand c LEFT JOIN grp ON grp.album_id = c.album_id AND grp.recording = c.rid
-ORDER BY c.album_id, c.track_id, c.exact DESC, (grp.recording IS NULL), (c.dd IS NULL), c.sim DESC, c.dd
+ORDER BY c.album_id, c.track_id, c.exact DESC, (grp.recording IS NULL), (c.dd IS NULL), c.sim DESC, c.dd,
+         c.rec_mbid   -- equal on every key (MusicBrainz's duplicates, lengthless twins): the MBID, not the plan
 """
 
 
@@ -244,7 +257,7 @@ cand AS (
         AND NOT title_numbers_disagree(r.nums, o.nums)
 )
 SELECT DISTINCT ON (track_id) track_id, rec_mbid, artist_mbid, exact, dd IS NOT NULL AS timed
-FROM cand ORDER BY track_id, exact DESC, (dd IS NULL), sim DESC, dd
+FROM cand ORDER BY track_id, exact DESC, (dd IS NULL), sim DESC, dd, rec_mbid
 """
 
 
@@ -298,11 +311,13 @@ cand AS (   -- title candidates within a GENEROUS duration band (the band is a p
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= {_RG_DURTOL})
 ),
 fit AS (   -- per (owned album, owned track, release): how close the release's closest track to
-           -- it is, by the MB track's length (the recording's where the track has none); one
-           -- with neither counts as the band's edge, so a lengthless release never wins the
-           -- length tie-break over a timed one that fits
+           -- it is, in whole milliseconds (an exact sum: equal tracks tie, and the MBID decides),
+           -- by the MB track's length (the recording's where the track has none); one with
+           -- neither counts as the band's edge, so a lengthless release never wins the length
+           -- tie-break over a timed one that fits
     SELECT c.album_id, c.track_id, md.release AS rel_id,
-           min(coalesce(abs(coalesce(mt.length, c.rlen)/1000.0 - c.dur), {_RG_DURTOL})) AS d
+           min(coalesce(abs(coalesce(mt.length, c.rlen) - round(c.dur * 1000)::int),
+                        {_RG_DURTOL} * 1000)) AS d
     FROM cand c
     JOIN mb_track mt ON mt.recording = c.rec_id
     JOIN mb_medium md ON md.id = mt.medium
@@ -923,7 +938,7 @@ def bind_owned_recordings(artist_id: str) -> None:
         JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
         WHERE ta.artist_id = %(a)s::uuid AND mf.recording_mbid IS NOT NULL
         ORDER BY mf.recording_mbid, mf.track_id
-    """ + _LOCAL_BINDING_WINS, {"a": artist_id, "mv": MATCHER_VERSION})
+    """ + _FILES_BINDING_WINS, {"a": artist_id, "mv": MATCHER_VERSION})
 
 
 def merge_collisions(dry_run: bool = True, waiting: set = None, artist_ids: list = None) -> list:
@@ -2224,7 +2239,7 @@ def split_collaborations(dry_run: bool = False) -> dict:
     owned = db_query("""
         SELECT DISTINCT a.id::text AS id, a.name FROM artists a
         WHERE (a.name ~ ' & ' OR a.name ~ ', ' OR a.name ~ ' and '
-               OR a.name ~ ' with ' OR a.name ~ ' / ')
+               OR a.name ~ ' with ' OR a.name ~ ' / ' OR a.name ~ '; ')
           AND EXISTS (SELECT 1 FROM track_artists ta
                 JOIN owned_files mf ON mf.track_id = ta.track_id
                 WHERE ta.artist_id = a.id AND ta.role = 'primary')
@@ -2463,8 +2478,14 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=(),
             logger.error("canon failed for %r: %s", aname, e)
     # After the cascade, over every copy it left unbound (CANON-CLASSICAL-
     # DESIGN §12.6 Q13); before the editions, which then name what it bound.
+    # One transaction over every copy: a failure there is the pass's, logged
+    # and counted as an artist's is, and never stops the bookkeeping below.
     from canon import positional
-    st["positional"] = positional.run(waiting=waiting)
+    try:
+        st["positional"] = positional.run(waiting=waiting, take_arriving=take_arriving)
+    except Exception as e:
+        st["errors"] += 1
+        logger.error("canon: the positional pass failed: %s", e)
     if done:
         apply_editions(dry_run=False, artist_ids=done, waiting=waiting,   # scoped edition split + RG rename
                        take_arriving=take_arriving)
