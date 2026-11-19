@@ -13,7 +13,9 @@ Various Artists stays with the cascade).
 The rule (§3.1, the tolerances of §12.6 Q15):
   - candidates: the releases whose credit names a candidate artist, Bootleg
     and Pseudo-Release excluded, with the copy's position count (data tracks
-    are no position);
+    are no position) — and each medium of such a release of several media,
+    with that count (§12.7: a copy of one disc of a box fits the box's group
+    as well as a one-disc release of the same recordings, and so abstains);
   - fit: every position has a length (the track's, else the recording's) and
     it agrees with the file's within the medium's tolerance — Digital Media
     to 0.5 s where MusicBrainz keeps the length to the millisecond, and in
@@ -128,9 +130,11 @@ SELECT f.v, f.album_id::text AS album_id, al.title, al.catalog_number, av.positi
  GROUP BY f.v, f.album_id, al.title, al.catalog_number, av.positional_asked
 """
 
-# The candidate releases of each copy in _pcopies, with what the decision
-# reads of them. A release's positions are its non-data tracks in (medium,
-# track) order.
+# The candidates of each copy in _pcopies: a release (`med` NULL), and each
+# medium of a release of several (§12.7: a copy of one disc of a box fits the
+# box's group too, so a one-disc release carrying the same recordings is no
+# longer the only group it fits). A candidate's positions are its non-data
+# tracks in (medium, track) order.
 _CANDIDATES_SQL = """
 CREATE TEMP TABLE _pcand ON COMMIT DROP AS
 WITH cr AS (
@@ -140,33 +144,41 @@ WITH cr AS (
       JOIN mb_artist_credit_name acn ON acn.artist = a.id
       JOIN mb_release r ON r.artist_credit = acn.artist_credit
        AND (r.status IS NULL OR r.status NOT IN (3, 4))),
-rn AS (
-    SELECT md.release AS rel, count(*) AS n
+mn AS (
+    SELECT md.release AS rel, md.id AS med, count(*) AS n
       FROM (SELECT DISTINCT rel FROM cr) d JOIN mb_medium md ON md.release = d.rel
       JOIN mb_track mt ON mt.medium = md.id
      WHERE NOT coalesce(mt.is_data_track, false)
-     GROUP BY md.release)
-SELECT cr.v, cr.rel FROM cr JOIN rn ON rn.rel = cr.rel JOIN _pcopies c ON c.v = cr.v
+     GROUP BY md.release, md.id),
+rn AS (SELECT rel, sum(n) AS n, count(*) AS media FROM mn GROUP BY rel)
+SELECT cr.v, cr.rel, NULL::int AS med
+  FROM cr JOIN rn ON rn.rel = cr.rel JOIN _pcopies c ON c.v = cr.v
  WHERE rn.n = cardinality(c.durs)
+UNION ALL
+SELECT cr.v, cr.rel, mn.med
+  FROM cr JOIN rn ON rn.rel = cr.rel AND rn.media > 1 JOIN mn ON mn.rel = cr.rel
+  JOIN _pcopies c ON c.v = cr.v
+ WHERE mn.n = cardinality(c.durs)
 """
 
 _FITS_SQL = f"""
 WITH p AS (
-    SELECT k.v, k.rel, mt.recording,
-           row_number() OVER (PARTITION BY k.v, k.rel ORDER BY md.position, mt.position) AS pos,
+    SELECT k.v, k.rel, k.med, mt.recording,
+           row_number() OVER (PARTITION BY k.v, k.rel, k.med ORDER BY md.position, mt.position) AS pos,
            coalesce(mt.length, rc.length) AS len, md.format
-      FROM _pcand k JOIN mb_medium md ON md.release = k.rel
+      FROM _pcand k JOIN mb_medium md ON md.release = k.rel AND (k.med IS NULL OR md.id = k.med)
       JOIN mb_track mt ON mt.medium = md.id AND NOT coalesce(mt.is_data_track, false)
       JOIN mb_recording rc ON rc.id = mt.recording),
 c AS (SELECT v, pos, dur FROM _pcopies, unnest(durs) WITH ORDINALITY AS u(dur, pos)),
 fit AS (
-    SELECT p.v, p.rel, array_agg(p.recording ORDER BY p.pos) AS recs,
+    SELECT p.v, p.rel, p.med, array_agg(p.recording ORDER BY p.pos) AS recs,
            sum(abs(c.dur - p.len / 1000.0)) AS err
       FROM p JOIN c ON c.v = p.v AND c.pos = p.pos
       LEFT JOIN mb_medium_format f ON f.id = p.format
-     GROUP BY p.v, p.rel
+     GROUP BY p.v, p.rel, p.med
     HAVING bool_and(p.len IS NOT NULL AND {_FIT}))
-SELECT fit.v, fit.rel, r.gid::text AS rel_mbid, rg.gid::text AS rg_mbid, fit.err,
+SELECT fit.v, fit.rel, (SELECT md.position FROM mb_medium md WHERE md.id = fit.med) AS disc,
+       r.gid::text AS rel_mbid, rg.gid::text AS rg_mbid, fit.err,
        (SELECT array_agg(rec.gid::text ORDER BY u.i) FROM unnest(fit.recs) WITH ORDINALITY u(id, i)
           JOIN mb_recording rec ON rec.id = u.id) AS recordings,
        regexp_replace(coalesce(r.barcode, ''), '\\D', '', 'g') AS barcode,
@@ -215,7 +227,7 @@ def decide(copy: dict, fits: list):
     elif len(copy["durs"]) < WITNESS_UNDER and not by_witness \
             and max(f["namesim"] or 0 for f in fits) < NAME_MIN:
         return None, "no_second_witness"
-    pick = min(by_witness or fits, key=lambda f: (f["err"], f["rel"]))
+    pick = min(by_witness or fits, key=lambda f: (f["err"], f["rel"], f["disc"] or 0))
     return pick, "bound"
 
 
@@ -243,7 +255,8 @@ def run(waiting: set = None) -> dict:
                             f"abase = coalesce(nullif(p.abase, ''), {_norm('al.title')}) "
                             "FROM album_variants av JOIN albums al ON al.id = av.album_id WHERE av.id = p.v")
                 cur.execute(_CANDIDATES_SQL)
-                cur.execute("SELECT v, array_agg(rel ORDER BY rel) AS rels FROM _pcand GROUP BY v")
+                cur.execute("SELECT v, array_agg(rel || ':' || coalesce(med, 0) ORDER BY rel, med) AS rels "
+                            "FROM _pcand GROUP BY v")
                 rels = {r["v"]: r["rels"] for r in cur.fetchall()}
                 cur.execute(_MB_DATA_SQL)
                 mb_data = cur.fetchone()["v"]
@@ -271,7 +284,8 @@ def run(waiting: set = None) -> dict:
 def _confirmed(copy: dict, pick: dict, asks) -> object:
     """On a node without the dump: the release as MusicBrainz answers it —
     filed under the group the slice said, credited to a candidate artist, and
-    its tracklist still fitting the copy within 2 s. WAIT while the answer is
+    its tracklist (the picked medium's, for a medium) still fitting the copy
+    within 2 s. WAIT while the answer is
     missing; False when it refutes the slice."""
     rel = confirm.release(pick["rel_mbid"], asks)
     if rel is confirm.WAIT:
@@ -281,7 +295,7 @@ def _confirmed(copy: dict, pick: dict, asks) -> object:
     same = confirm.same("release_group", pick["rg_mbid"], rel.data["group"]["mbid"], asks)
     if same is confirm.WAIT:
         return confirm.WAIT
-    tracks = rel.data.get("tracks") or []
+    tracks = [t for t in rel.data.get("tracks") or [] if pick["disc"] is None or t["disc"] == pick["disc"]]
     if not same or not confirm.credited(rel.data.get("credit") or [], copy["cands"]) \
             or len(tracks) != len(copy["durs"]):
         return False

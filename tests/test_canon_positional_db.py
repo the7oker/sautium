@@ -222,6 +222,97 @@ def test_copies_of_one_album_fitting_two_groups_bind_neither(node):
         assert (st["bound_albums"], st["album_conflict"]) == (0, 1)
 
 
+def _box(s, cur, group_gid, title, artists, disc=2, other=(180000, 220000, 260000)):
+    """A release of two media: `disc` holds LENGTHS (the copy's), the other
+    medium `other`. Returns (release gid, release id, the recordings of `disc`)."""
+    c = s.credit(*artists)
+    g = s.release_group(group_gid, title, c)
+    first = LENGTHS if disc == 1 else other
+    rel_gid = str(uuid.uuid4())
+    recs1 = [str(uuid.uuid4()) for _ in first]
+    rid = s.release(rel_gid, title, g, c, [(f"Piece {i}", ms, r) for i, (ms, r) in
+                                           enumerate(zip(first, recs1), 1)])
+    second = other if disc == 1 else LENGTHS
+    recs2 = [str(uuid.uuid4()) for _ in second]
+    mid = 9_000_000 + rid
+    cur.execute("INSERT INTO mb_medium (id, release, position, track_count) VALUES (%s, %s, 2, %s)",
+                (mid, rid, len(second)))
+    for pos, (ms, r) in enumerate(zip(second, recs2), 1):
+        cur.execute("INSERT INTO mb_recording (id, gid, name, artist_credit, length) VALUES (%s, %s, %s, %s, %s)",
+                    (mid * 100 + pos, r, f"Movement {pos}", c, ms))
+        cur.execute("INSERT INTO mb_track (id, gid, recording, medium, position, number, name, artist_credit, "
+                    "length) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (mid * 100 + pos, str(uuid.uuid4()), mid * 100 + pos, mid, pos, str(pos),
+                     f"Movement {pos}", c, ms))
+    cur.execute("UPDATE mb_medium SET format = %s WHERE release = %s", (DM, rid))
+    return rel_gid, rid, recs1 if disc == 1 else recs2
+
+
+def test_one_disc_of_a_box_fits_the_box_s_group_too_and_abstains(node):
+    """§12.7 (the 50-bind gate, 2026-11-19): HitStory (Disc 1) bound to the
+    one-disc Elv1s, whose recordings MusicBrainz's three-disc Hitstory carries
+    as its first medium. A medium of a release of several is a candidate as
+    well, so the copy fits two groups and no witness names one."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur, title="Polarity (Disc 1)")
+        s, leader, ens = _mb(cur)
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")])
+        _box(s, cur, str(uuid.uuid4()), "The Box", [(ens, "Hoff Ensemble")], disc=1)
+        st = _run()
+        assert (st["bound_albums"], st["abstained"]) == (0, 1)
+        cur.execute("SELECT musicbrainz_id FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (None,)
+
+
+def test_a_copy_of_one_disc_of_a_box_binds_to_the_box_by_that_medium(node):
+    """Works, 1965-1995's Disc 10 without City Life / Proverb beside it: the
+    medium's positions fit, the box's group binds, its release is the copy's,
+    and each position takes the medium's recording, not the first disc's."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur, title="Disc 2")
+        s, leader, ens = _mb(cur)
+        rg = str(uuid.uuid4())
+        rel, _rid, recs = _box(s, cur, rg, "The Box", [(ens, "Hoff Ensemble")], disc=2)
+        st = _run()
+        assert (st["bound_albums"], st["bound_copies"]) == (1, 1)
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (rg,)
+        cur.execute("SELECT release_mbid::text FROM album_variants WHERE album_id = %s", (album,))
+        assert cur.fetchone() == (rel,)
+        cur.execute("SELECT recording_mbid::text FROM media_files ORDER BY track_number")
+        assert [r[0] for r in cur.fetchall()] == recs
+
+
+def test_on_a_slice_fed_node_a_medium_s_bind_checks_that_medium_s_tracklist(node):
+    conn, fake = node
+    with conn.cursor() as cur:
+        album = _polarity(cur, title="Disc 2")
+        s, leader, ens = _mb(cur)
+        rg = str(uuid.uuid4())
+        rel, _rid, recs = _box(s, cur, rg, "The Box", [(ens, "Hoff Ensemble")], disc=2)
+        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids) VALUES ('hoff ensemble', 1) "
+                    "ON CONFLICT DO NOTHING")
+    fake.artist(ENSEMBLE, "Hoff Ensemble")
+    fake.release_group(rg, "The Box", credit(("Hoff Ensemble", ENSEMBLE)))
+    fake.release(rel, "The Box", rg, credit(("Hoff Ensemble", ENSEMBLE)),
+                 [{"title": f"Piece {i}", "length": ms, "recording": str(uuid.uuid4()), "disc": 1}
+                  for i, ms in enumerate((180000, 220000, 260000), 1)]
+                 + [{"title": f"Movement {i}", "length": ms, "recording": r, "disc": 2}
+                    for i, (ms, r) in enumerate(zip(LENGTHS, recs), 1)], media_format="Digital Media")
+    assert _run()["waiting"] == 1
+    drain()
+    assert _run()["bound_albums"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (rg,)
+        cur.execute("SELECT recording_mbid::text FROM media_files ORDER BY track_number")
+        assert [r[0] for r in cur.fetchall()] == recs
+
+
 def test_the_cascade_leaves_an_album_the_positional_tier_bound(node):
     conn, _fake = node
     with conn.cursor() as cur:
@@ -348,6 +439,52 @@ def test_a_lengthless_recording_loses_to_a_timed_one_and_anchors_no_duration_pas
         cur.execute("UPDATE mb_track SET length = NULL")
     (a,) = content.resolve_artist(lib.id, "Anne Akiko Meyers")["albums"]
     assert a["pass"] == "title"                       # no duration pass verified it on no lengths
+
+
+def test_the_albums_own_group_ranks_before_a_timed_recording_off_it(node):
+    """§12.7 (the 50-move sample, "Случай в ресторане"): a bound album's
+    recording on its own group, lengthless, gave way to a timed one of the
+    same name off the group. The group the resolve binds ranks first; a timed
+    recording still anchors the duration pass that verifies the album."""
+    conn, _fake = node
+    from canon import content
+    names = ("Spring: I. Allegro", "Spring: II. Largo", "Spring: III. Allegro")
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        lib, album, s, c = _meyers(cur, [(n, sec) for n, sec in zip(names, (210.0, 160.0, 250.0))])
+        cur.execute("UPDATE albums SET title = 'Live in Milton Keynes' WHERE id = %s", (album,))
+        g = s.release_group(str(uuid.uuid4()), "Live in Milton Keynes", c)
+        live = [str(uuid.uuid4()) for _ in names]
+        s.release(str(uuid.uuid4()), "Live in Milton Keynes", g, c,
+                  [(n, ms, r) for n, ms, r in zip(names, (210200, None, None), live)])
+        g2 = s.release_group(str(uuid.uuid4()), "The Four Seasons", c)
+        studio = [str(uuid.uuid4()) for _ in names]
+        s.release(str(uuid.uuid4()), "The Four Seasons", g2, c,
+                  [(n, ms, r) for n, ms, r in zip(names, (210400, 159800, 250300), studio)])
+        cur.execute("SELECT gid::text FROM mb_release_group WHERE id = %s", (g,))
+        live_rg = cur.fetchone()[0]
+    (a,) = content.resolve_artist(lib.id, "Anne Akiko Meyers")["albums"]
+    assert (a["rg_mbid"], a["pass"]) == (live_rg, "strict")
+    assert set(a["recordings"].values()) == set(live)
+
+
+def test_a_track_timed_apart_from_its_recording_fits_by_the_track_s_length(node):
+    """§12.7 (Polarity's "The Elder": 405 s as a track, 396.5 s as a
+    recording): the strict pass's 8 s reach the file by the track's length."""
+    conn, _fake = node
+    from canon import content
+    names = ("Spring: I. Allegro", "Spring: II. Largo", "Spring: III. Allegro")
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        lib, album, s, c = _meyers(cur, [(n, sec) for n, sec in zip(names, (210.0, 405.1, 250.0))])
+        g = s.release_group(str(uuid.uuid4()), "The Four Seasons", c)
+        recs = [str(uuid.uuid4()) for _ in names]
+        s.release(str(uuid.uuid4()), "The Four Seasons", g, c,
+                  [(n, ms, r) for n, ms, r in zip(names, (210400, 405000, 250300), recs)])
+        cur.execute("UPDATE mb_recording SET length = 396500 WHERE gid = %s", (recs[1],))
+    (a,) = content.resolve_artist(lib.id, "Anne Akiko Meyers")["albums"]
+    assert a["pass"] == "strict"
+    assert set(a["recordings"].values()) == set(recs)
 
 
 def test_a_fuzzy_title_that_disagrees_on_its_movement_is_no_candidate(node):

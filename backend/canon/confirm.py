@@ -343,7 +343,7 @@ def release_premise(album_id: str, artist_id: str, artist_mbids: Iterable[str],
     (_covers); and the canon's own cascade (canon.content._CASCADE) verifies
     the album's tracks against the release's tracklist — its titles and
     lengths, the artist's own tracks only."""
-    from canon.content import _CASCADE, _MATCH_SQL, _norm, _owned_counts
+    from canon.content import _AGROUP_SQL, _CASCADE, _MATCH_SQL, _norm, _owned_counts
     mbids = [str(m) for m in artist_mbids]
     group = rel.get("group") or {}
     credit = group.get("credit") or rel["credit"]
@@ -362,13 +362,16 @@ def release_premise(album_id: str, artist_id: str, artist_mbids: Iterable[str],
         cur.execute("DROP TABLE IF EXISTS _recs")
         cur.execute(f"""
             CREATE TEMP TABLE _recs AS
-            SELECT v.rec_mbid, %(artist)s::text AS artist_mbid,
+            SELECT NULL::int AS id, v.rec_mbid, %(artist)s::text AS artist_mbid,
                    {_norm('v.title')} AS rname, v.length, title_numbers(v.title) AS nums
               FROM unnest(CAST(%(r)s AS text[]), CAST(%(n)s AS text[]), CAST(%(l)s AS int[]))
                    AS v(rec_mbid, title, length)""",
                     {"artist": mbids[0], "r": [r[0] for r in recs], "n": [r[1] for r in recs],
                      "l": [r[2] for r in recs]})
         cur.execute("CREATE INDEX ON _recs USING gin (rname gin_trgm_ops)")
+        # one release's tracklist: no group to rank by (_MATCH_SQL reads an empty one)
+        cur.execute("DROP TABLE IF EXISTS _agroup")
+        cur.execute(_AGROUP_SQL)
         try:
             for label, dur, fdur, sim, minm, frac, cap in _CASCADE:
                 cur.execute("SET pg_trgm.similarity_threshold = %s", (sim,))
@@ -384,6 +387,7 @@ def release_premise(album_id: str, artist_id: str, artist_mbids: Iterable[str],
         finally:
             cur.execute("RESET pg_trgm.similarity_threshold")
             cur.execute("DROP TABLE IF EXISTS _recs")
+            cur.execute("DROP TABLE IF EXISTS _agroup")
 
 
 # --------------------------------------------------------------------------

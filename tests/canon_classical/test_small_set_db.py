@@ -122,10 +122,9 @@ def test_the_generator_is_a_function_of_its_seed():
     (fx.BEETHOVEN_4_5, "Work: Movement", 1, True),   # never the Vol. 2 duplicate
     (fx.GOLDBERG, "2 values", 1, True),              # T1 + T6: 32 positions, two TITLE values
     (fx.MEYERS, "Work: Movement", 1, True),          # D2: Meyers' own recordings, not Zukerman's
-    # §12.1's release, its files and its credit one: the cascade binds it — and leaves "The Elder" unbound,
-    # MusicBrainz's track 405 s against its recording's 396.5 s, past the strict pass's 8 s (the cascade reads
-    # the recording's length where the names agree; CANON-CLASSICAL-PROPOSAL, for the design session)
-    (fx.POLARITY, "Work: Movement", 0, False),
+    # §12.1's release, its files and its credit one: the cascade binds it — "The Elder" too, MusicBrainz's
+    # track 405 s against its recording's 396.5 s, by the track's length (§12.7)
+    (fx.POLARITY, "Work: Movement", 0, True),
 ])
 def test_each_release_binds_to_itself_position_by_position(dump_node, library, silence, mbid, title_form,
                                                             performers, every_position):
@@ -143,6 +142,38 @@ def test_each_release_binds_to_itself_position_by_position(dump_node, library, s
     else:                                            # no position bound wrong
         assert {p: r for p, r in got.items() if r is not None} == {
             p: r for p, r in case.recordings.items() if got[p] is not None}
+
+
+# The master's own two (§12.7): the files' titles as there — Disc 10's name City Life's movements its own way,
+# so the cascade covers too few of them to name a group, and Steve Reich bound as the master has him (by his
+# other albums; MusicBrainz's a3031680-…)
+REICH = "a3031680-c359-458f-a641-70ccbaec6a74"
+WORKS_DISC_10 = ["Proverb", "Nagoya Marimbas", "City Life (Part I)", "City Life (Part II)", "City Life (Part III)",
+                 "City Life (Part IV)", "City Life (Part V)"]
+
+
+@pytest.mark.parametrize("box, disc, single, album, titles, bound", [
+    (fx.HITSTORY, 1, fx.ELV1S, "HitStory (Disc 1)", None, None),
+    (fx.WORKS_1965_1995, 10, fx.CITY_LIFE, "Disc 10", WORKS_DISC_10, ("Steve Reich", REICH)),
+])
+def test_one_disc_of_a_box_never_binds_the_one_disc_release_of_its_recordings(dump_node, library, silence, box,
+                                                                                disc, single, album, titles, bound):
+    """§12.7's fixture cases: the positional tier bound each to the one-disc release (the 50-bind gate's two
+    wrong binds); a medium of a box is a candidate too, so the copy fits two groups and abstains."""
+    case = generate({**fx.release(box, medium=disc), "title": album}, "Work: Movement", "one name",
+                    {"drift": 0.3}, seed=20261120)
+    if titles:
+        case = case._replace(files=[f._replace(tags={**f.tags, "title": [t]}) for f, t in zip(case.files, titles)])
+    _write(library, silence, case)
+    scanner.LibraryScanner().scan_and_import()
+    if bound:
+        from uuid_utils import artist_uuid
+        dump_node.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
+                          "VALUES (%s, %s, 'overlap_verified')", (bound[1], str(artist_uuid(bound[0]))))
+    _canon()
+    rg, how = _album_of(dump_node, case)
+    assert rg != fx.release(single)["rg"]
+    assert rg in (None, case.rg)
 
 
 def test_one_barcode_on_two_releases_binds_only_the_one_whose_positions_fit(dump_node, library, silence):

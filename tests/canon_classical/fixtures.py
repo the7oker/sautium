@@ -20,6 +20,11 @@ BEETHOVEN_4_5 = "c2953d75-92e0-4541-90b3-8a149975c012"
 BEETHOVEN_VOL_2 = "d735d66b-1a2d-4540-aab9-9d0fe14dc667"     # the duplicate group
 SPES = "fe1c6411-8747-42ad-a9c1-04b8df229a98"                # one barcode,
 JACO = "bbada3c5-5ed4-488d-acde-96cc3dbf35e1"                # two releases
+# §12.7's two failed binds of the 50-bind gate: one disc of a box, and the one-disc release carrying its recordings
+HITSTORY = "09ce2468-229a-4752-b7c1-0bdab7767d77"            # three media, the first Elv1s' 31
+ELV1S = "a80c2124-5073-3628-b783-6aba8d945764"
+WORKS_1965_1995 = "cebd2f0d-1bea-4d46-b92e-aa0830b01509"     # ten media, the tenth City Life / Proverb's 7
+CITY_LIFE = "1834697e-d64d-45b0-a800-058de6fb9846"
 
 
 def data() -> dict:
@@ -37,16 +42,17 @@ def load(cur) -> None:
                 t["rows"], page_size=500)
 
 
-def release(mbid: str) -> dict:
+def release(mbid: str, medium: int = None) -> dict:
     """{"mbid", "rg", "title", "artists", "tracks": [(title, length ms, recording mbid)], "barcode"} — what the
-    generator takes, read from the fixture rows themselves."""
+    generator takes, read from the fixture rows themselves; with `medium`, that medium's tracks alone."""
     t = {name: [dict(zip(x["columns"], r)) for r in x["rows"]] for name, x in data()["tables"].items()}
     rel = next(r for r in t["mb_release"] if r["gid"] == mbid)
     rg = next(g for g in t["mb_release_group"] if g["id"] == rel["release_group"])
     names = sorted((n for n in t["mb_artist_credit_name"] if n["artist_credit"] == rel["artist_credit"]),
                    key=lambda n: int(n["position"]))
     recs = {r["id"]: r for r in t["mb_recording"]}
-    media = sorted((m for m in t["mb_medium"] if m["release"] == rel["id"]), key=lambda m: int(m["position"]))
+    media = sorted((m for m in t["mb_medium"] if m["release"] == rel["id"]
+                    and (medium is None or int(m["position"]) == medium)), key=lambda m: int(m["position"]))
     tracks = []
     for m in media:
         for tr in sorted((x for x in t["mb_track"] if x["medium"] == m["id"] and x["is_data_track"] != "True"),

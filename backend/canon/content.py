@@ -112,25 +112,34 @@ SELECT rec.id, rec.gid::text AS rec_mbid, cc.artist_mbid,
        {_norm('rec.name')} AS rname, rec.length, title_numbers(rec.name) AS nums
 FROM mb_recording rec JOIN cand_credit cc ON cc.artist_credit = rec.artist_credit
 UNION
--- per-release TRACK name variants (regional/romanized retitles): identity stays
--- the recording, only the matchable NAME comes from the track; the differs-filter
--- keeps just the rows that add information (most track names equal the recording's)
+-- per-release TRACK variants: identity stays the recording, only the matchable
+-- NAME or LENGTH comes from the track — a regional/romanized retitle, or a
+-- track MusicBrainz times apart from its recording (CANON-CLASSICAL-DESIGN
+-- §12.7: Polarity's "The Elder", 405 s as a track and 396.5 s as a recording),
+-- so a file fits by either. The differs-filter keeps just the rows that add
+-- information: most tracks carry the recording's name, and a length within a
+-- second of it changes no pass's verdict
 SELECT rec.id, rec.gid::text, cc.artist_mbid,
        {_norm('mt.name')}, coalesce(mt.length, rec.length), title_numbers(mt.name)
 FROM mb_track mt
 JOIN cand_credit cc ON cc.artist_credit = mt.artist_credit
 JOIN mb_recording rec ON rec.id = mt.recording
 WHERE {_norm('mt.name')} <> {_norm('rec.name')}
+   OR (mt.length IS NOT NULL AND (rec.length IS NULL OR abs(mt.length - rec.length) >= 1000))
 """
 
 # Match owned tracks (scoped to %(albums)s) against the temp _recs.
 # ta2: only the artist's own tracks — a mixed directory must not dilute coverage.
 # A recording with no length is never duration evidence (CANON-CLASSICAL-DESIGN
 # §2.1): its `dd` is NULL, it ranks after every timed candidate, and `timed`
-# tells the cascade's duration-anchored passes not to count it. A candidate
+# tells the cascade's duration-anchored passes not to count it. The album's
+# own group ranks before that (§12.7): a recording on a release of the group in
+# _agroup — the one the resolve bound the album to, when it picks again — is
+# never replaced by a timed one off it. A candidate
 # whose title disagrees with the file's on a catalogue number, a No. or a
 # movement numeral is no candidate in any arm (§2.2: a fuzzy "Spring: I." is
 # not "… No. 1: II. Largo"); among fuzzy hits the closer title wins first.
+_AGROUP_SQL = "CREATE TEMP TABLE _agroup (album_id text PRIMARY KEY, rg uuid NOT NULL)"
 _MATCH_SQL = f"""
 WITH owned AS (
     SELECT a.id::text AS album_id, t.id::text AS track_id,
@@ -150,12 +159,12 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
             -- exact (=) and fuzzy (%%) are separate scans so each uses its _recs(rname)
             -- index. `matched` collapses to the single best pick per track (recording-norm
             -- + coverage gate); RG resolution is a SEPARATE concern (see _RG_SQL).
-    SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, TRUE AS exact,
+    SELECT o.album_id, o.track_id, r.id AS rid, r.rec_mbid, r.artist_mbid, TRUE AS exact,
            abs(r.length/1000.0 - o.dur) AS dd, 1.0::real AS sim
     FROM owned o JOIN _recs r ON r.rname = o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
     UNION ALL
-    SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
+    SELECT o.album_id, o.track_id, r.id, r.rec_mbid, r.artist_mbid, FALSE,
            abs(r.length/1000.0 - o.dur), similarity(r.rname, o.ntitle)
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(fdurtol)s)
@@ -167,7 +176,7 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
     -- ("The Terminator: Tunnel Chase" ⊃ owned "Tunnel Chase"). The weakest
     -- name evidence, so duration corroboration is REQUIRED and tight (never
     -- loosened by the pass durtol — on drifted vinyl rips the arm stays silent)
-    SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
+    SELECT o.album_id, o.track_id, r.id, r.rec_mbid, r.artist_mbid, FALSE,
            abs(r.length/1000.0 - o.dur), 0.0::real
     FROM owned o JOIN _recs r ON r.rname <> o.ntitle
         AND ((length(r.rname) >= 10 AND position(r.rname in o.ntitle) > 0)
@@ -175,11 +184,20 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
         AND r.length IS NOT NULL AND o.dur IS NOT NULL
         AND abs(r.length/1000.0 - o.dur) <= 5
         AND NOT title_numbers_disagree(r.nums, o.nums)
+),
+grp AS (    -- the recordings of each album's group in _agroup
+    SELECT DISTINCT ag.album_id, mt.recording
+    FROM _agroup ag
+    JOIN mb_release_group g ON g.gid = ag.rg
+    JOIN mb_release rl ON rl.release_group = g.id
+    JOIN mb_medium md ON md.release = rl.id
+    JOIN mb_track mt ON mt.medium = md.id
+    WHERE ag.album_id = ANY(%(albums)s::text[])
 )
-SELECT DISTINCT ON (album_id, track_id) album_id, track_id, rec_mbid, artist_mbid,
-       dd IS NOT NULL AS timed
-FROM cand
-ORDER BY album_id, track_id, exact DESC, (dd IS NULL), sim DESC, dd
+SELECT DISTINCT ON (c.album_id, c.track_id) c.album_id, c.track_id, c.rec_mbid, c.artist_mbid,
+       c.dd IS NOT NULL AS timed
+FROM cand c LEFT JOIN grp ON grp.album_id = c.album_id AND grp.recording = c.rid
+ORDER BY c.album_id, c.track_id, c.exact DESC, (grp.recording IS NULL), (c.dd IS NULL), c.sim DESC, c.dd
 """
 
 
@@ -590,6 +608,8 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
             cur.execute("CREATE INDEX ON _recs (rname)")                       # exact (=)
             cur.execute("CREATE INDEX ON _recs USING gin (rname gin_trgm_ops)")  # fuzzy (%)
             cur.execute("ANALYZE _recs")
+            cur.execute("DROP TABLE IF EXISTS _agroup")
+            cur.execute(_AGROUP_SQL)
             try:
                 cache: dict = {}
                 for label, dur, fdur, sim, minm, frac, cap in _CASCADE:
@@ -610,7 +630,7 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
                         nm = (len(m["recs"]) if label == "title" else m["timed"]) if m else 0
                         floor = min(minm, ntr) if cap else minm
                         if m and nm >= floor and nm / ntr >= frac:
-                            resolved[aid] = {**m, "matched": nm, "pass": label}
+                            resolved[aid] = {**m, "matched": nm, "pass": label, "key": key}
                             pending.discard(aid)
                 # RG once over the verified albums — decoupled from the verifying pass
                 if resolved:
@@ -626,10 +646,26 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
                     rg = {r["album_id"]: (r["rg_mbid"], r["rel_mbid"]) for r in cur.fetchall()}
                     for aid, r in resolved.items():
                         r["rg"], r["rel"] = rg.get(aid, (None, None))
+                    # The recordings again, the album's group first (§12.7), under
+                    # the tolerances of the pass that verified it: the same tracks
+                    # match, only which of a track's candidates is picked moves.
+                    grouped = {aid: r for aid, r in resolved.items() if r["rg"]}
+                    if grouped:
+                        psycopg2.extras.execute_values(cur, "INSERT INTO _agroup VALUES %s",
+                                                       [(aid, r["rg"]) for aid, r in grouped.items()])
+                        for key in {r["key"] for r in grouped.values()}:
+                            dur, fdur, sim = key
+                            albums = [aid for aid, r in grouped.items() if r["key"] == key]
+                            cur.execute("SET pg_trgm.similarity_threshold = %s", (sim,))
+                            cur.execute(_MATCH_SQL, {"artist": str(artist_id), "albums": albums,
+                                                     "durtol": dur, "fdurtol": fdur})
+                            for aid, m in _group(cur.fetchall()).items():
+                                grouped[aid].update(recs=m["recs"], amb=m["amb"])
             finally:
                 cur.execute("RESET pg_trgm.similarity_threshold")  # don't leak to the pool
                 cur.execute("DROP TABLE IF EXISTS _recs")
                 cur.execute("DROP TABLE IF EXISTS _abase")
+                cur.execute("DROP TABLE IF EXISTS _agroup")
 
     albums = []
     for aid, (title, ntr) in owned.items():

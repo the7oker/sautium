@@ -317,7 +317,9 @@ See:
 - **A binding names its matcher** (since 2026-11-19, CANON-CLASSICAL): the
   `track_mbid` record is v3, its payload carrying `matcher_version`
   (`record_sig.MATCHER_VERSION`, 2 — the matcher that reads a classical
-  album: the numbers in a title, the timed cascade, the positional pass).
+  album: the numbers in a title, the timed cascade — a track's length
+  beside its recording's, the album's own group before timed over
+  lengthless —, the positional pass).
   The gate refuses a binding without one or above this release's; an
   imported binding of an older matcher is a gap the sync fills
   (`sync_queries._LACKS`), and one of a newer matcher replaces it, never this
@@ -334,8 +336,9 @@ See:
   read again at the next start, and a track whose files now name two or more
   identities is split. The **positional pass** (`canon/positional.py`, after
   the cascade, on the copies it left without a group) binds a copy to the
-  one release group of its bound artists whose release's every position
-  fits the file's length (Digital Media 0.5 s, or [−0.5, 1.5) s where MB
+  one release group of its bound artists whose release's — or one medium's
+  of a release of several: a box's disc fits the box's group too — every
+  position fits the file's length (Digital Media 0.5 s, or [−0.5, 1.5) s where MB
   keeps whole seconds; every other medium 2 s), `mb_match_confidence =
   'positional'`; MusicBrainz's special-purpose artists are never its
   candidates, and a copy it abstained on is asked again only when what it
