@@ -271,8 +271,8 @@ modulators, the atlas, and words each fact for the HQPlayer screen's pickers
 and a card per name: HQPlayer's own facts from its live lists (the rating, the
 focus words in HQPlayer's order, the ratio class, a modulator's generation)
 and, while the node holds an atlas file, the measured ones. It reads the file
-shipped beside it (`backend/hqp_atlas.json`, not in the tree as of
-2026-10-17) or, only while none is shipped, the node's own copy at
+shipped beside it (`backend/hqp_atlas.json`, in the tree since the atlas's
+first release, 2026-11-19) or, only while none is shipped, the node's own copy at
 `HQP_ATLAS_OVERLAY`: on Docker `./data/atlas/hqp_atlas.json`, mounted
 read-only at `/app/data/atlas/` (a directory, so a node without the file gets
 an empty folder, never a directory named like the file); under the launcher
@@ -298,9 +298,20 @@ release dated), a subset this module would refuse, or one whose releases are
 not each dated as the manifest dates them (an entry without a published date
 among them) refuses the sync, and nothing is written; the bytes checked are
 the bytes copied, and each file is replaced whole, the data first (a version
-file is the data's when its `app_sha256` is). It publishes nothing: both files
-stay out of git (`.gitignore`) and out of an image (`backend/.dockerignore`)
-until the release that ships them.
+file is the data's when its `app_sha256` is). It publishes nothing by itself:
+a release's commit carries both files, in the tree and in an image since the
+first, 2026-11-19.
+
+The atlas data in the shipped file — Sautium's measurements and the curated
+words that are part of the dataset, such as the notes and the stated
+purposes — is licensed under Creative Commons Attribution 4.0 International
+(CC BY 4.0, https://creativecommons.org/licenses/by/4.0/), as the atlas's
+method page states. Attribute it as "Sautium HQPlayer atlas,
+https://sautium.net/hqplayer/atlas/, CC BY 4.0". Quotations, HQPlayer's names
+and descriptions and the manual's marks belong to their authors; where a
+source licenses its copies, its Sources line names that licence (Roon
+Community's posts: CC BY-NC-SA 3.0). The code that reads the file is under
+this repository's `LICENSE`.
 
 The HQPlayer screen's own read, `GET /api/hqplayer/state?dsp=1`, joins it by
 name in HQPlayer's order: each row of the filter and shaper lists gains
@@ -2761,4 +2772,5 @@ class TrackStatus:
 - **HQPlayer Desktop**: Signalyst (https://www.signalyst.com/)
 - **SDK**: HQPlayer Control API SDK v5.29.2 (HQP5) / v6.0.1 (HQP6)
 - **License**: the integration code is Sautium's own, under the
-  PolyForm Noncommercial License 1.0.0 (`LICENSE`)
+  PolyForm Noncommercial License 1.0.0 (`LICENSE`); the atlas's shipped
+  data, `backend/hqp_atlas.json`, is CC BY 4.0 (§ The atlas)

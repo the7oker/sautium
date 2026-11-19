@@ -636,6 +636,9 @@ docker compose down
 ## License
 
 [PolyForm Noncommercial License 1.0.0](LICENSE) — free for noncommercial use.
+The HQPlayer atlas's data in `backend/hqp_atlas.json` is CC BY 4.0, its
+quotations under their sources' terms
+([HQPlayer integration § The atlas](docs/HQPLAYER_INTEGRATION.md)).
 
 ## Acknowledgments
 

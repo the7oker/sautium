@@ -27,10 +27,8 @@ mcp-wsl.json
 # Bring-your-own provider plugins: the owner's own repositories.
 streaming/providers/
 
-# The HQPlayer atlas's shipped file and its version enter the tree with their
-# release, never before (.gitignore); a copy put where they go stays out of an
-# image too.
-hqp_atlas.json
-hqp_atlas.version.json
+# The HQPlayer atlas's shipped file and its version go into an image: a node
+# built for elsewhere has no mounted tree to read them from.
+
 # scripts/sync-atlas.sh's staging files, left behind only when it is killed
 .hqp_atlas*
