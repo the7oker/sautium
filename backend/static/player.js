@@ -162,6 +162,12 @@
           // data) — the shell diffs it into toasts and rows.
           window.dispatchEvent(new CustomEvent('sautium:notice',
             { detail: msg.d }));
+        } else if (msg.t === 'identity') {
+          // This node's identity state (the proof being mined, paused, a
+          // verified email needed, ready): Friends and the chat headers say
+          // why nothing connects meanwhile.
+          window.dispatchEvent(new CustomEvent('sautium:identity',
+            { detail: msg.d }));
         } else if (msg.t === 'hello') {
           // A (re)connected stream. A playlist read the status chain still
           // waits on was asked before it, on a connection the page has left,

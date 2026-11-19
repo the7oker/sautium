@@ -129,6 +129,10 @@ _LACKING_REFUSALS = {
     "certificate": ("identity certificate required", "identity certificate invalid"),
     "proof": ("identity proof required",),
 }
+# An issuer too small to check a proof-of-work identity
+# (identity_registry.UNVERIFIABLE): the same answer until OUR identity is
+# another — a verified email, which every node knows by its signature.
+_UNVERIFIABLE_REFUSAL = "identity proof cannot be checked on this node"
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,7 @@ class ChatClient:
         # certificate, its proof), and the identity they were parked under
         self._identity_wait_invites: set = set()
         self._identity_wait_for: Optional[tuple] = None
+        self._reachability_said: Optional[tuple] = None    # the verdict last logged at info
         self._dht_refresh_inflight: set = set()
         # The resolver pass a contact last nudged in (its monotonic start),
         # by friend id: a contact nudges at most one pass in NUDGE_RETRY_S
@@ -808,8 +813,9 @@ class ChatClient:
             # it as its anti-sybil gate.
             per_friend = dict(handshake_data)
             join_token = friend.get("join_token_id")
-            if join_token and lacking and invite in self._identity_wait_invites:
-                logger.debug(f"Handshake for {invite} waits for our identity {lacking}")
+            if join_token and invite in self._identity_wait_invites:
+                logger.debug(f"Handshake for {invite} waits for our identity "
+                             f"{lacking or 'to be one its node can check'}")
                 continue
             if join_token:
                 ts = int(time.time())
@@ -880,10 +886,22 @@ class ChatClient:
                                         # again for the same answer.
                                         self._identity_wait_invites.add(invite)
                                         logger.info(
+                                            f"Handshake for {invite} parked until our node has its "
+                                            "identity (a mined proof, or a verified email)"
+                                            if lacking == "proof" else
                                             f"Handshake for {invite} parked until our identity "
-                                            + ("proof is mined" if lacking == "proof"
-                                               else "certificate is issued"))
+                                            "certificate is issued")
                                         break      # same answer from every address
+                                    if err == _UNVERIFIABLE_REFUSAL:
+                                        # Its node cannot check a mined proof,
+                                        # now or later: asked again only when
+                                        # our identity is another
+                                        self._identity_wait_invites.add(invite)
+                                        logger.info(
+                                            f"Handshake for {invite} parked: its node is too small "
+                                            "to check a proof-of-work identity — a verified email "
+                                            "is known to every node")
+                                        break
                                     logger.info(
                                         f"Handshake for {invite} refused by "
                                         f"{ip}:{port}: {err}")
@@ -1591,7 +1609,12 @@ class ChatClient:
             "p2p.reachability_detail": detail,
             "p2p.reachability_checked_at": datetime.now(timezone.utc).isoformat(),
         })
-        logger.info(f"Reachability: {status} ({detail})")
+        # A verdict is news once: the same one again (a node that waits for
+        # its identity re-checks every minute) is per-pass noise
+        said = (status, detail)
+        logger.log(logging.DEBUG if said == self._reachability_said else logging.INFO,
+                   f"Reachability: {status} ({detail})")
+        self._reachability_said = said
 
     async def _probe_reachability_via_master(self) -> _ProbeResult:
         """Definitive test — ask the master to connect back to our peer

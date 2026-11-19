@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     # no bridge, no gateway every host-local connection arrives from — a front
     # on this machine reaches the peer surface on loopback, where it binds.
     sautium_host_network: bool = False
+    # The folders this node may read music from, colon-separated, each bound
+    # read-only at its own host path by the console setup's compose override
+    # (library_root.py). Set, the owner chooses the library's folder under
+    # them in the Web UI and music_library_path is that stored choice; unset,
+    # the folder is the one MUSIC_LIBRARY_PATH names.
+    sautium_library_roots: str = ""
     p2p_username: str = ""
     p2p_password: str = ""
 
@@ -379,12 +385,30 @@ class AccessLineWithoutQuery(logging.Filter):
         return True
 
 
+# What a Docker image's health check asks, every 30 s for the node's life
+# (the Dockerfiles' HEALTHCHECK): a path of its own, so its access line can
+# be told from a person's request and left out of the log.
+HEALTH_PROBE_PATH = "/healthz"
+
+
+class AccessLineNotTheProbe(logging.Filter):
+    """uvicorn's access log without the image's health check: 120 lines an
+    hour that say nothing, and on a node at rest the whole of its disk
+    writes (measured on a Pi 5: a flush a line)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        return not (isinstance(args, tuple) and len(args) == 5
+                    and args[2] == HEALTH_PROBE_PATH and args[4] == 204)
+
+
 # Logging configuration
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
     "filters": {
         "access_without_query": {"()": AccessLineWithoutQuery},
+        "access_not_the_probe": {"()": AccessLineNotTheProbe},
     },
     "formatters": {
         "default": {
@@ -416,7 +440,7 @@ LOGGING_CONFIG = {
         "uvicorn.access": {
             "level": "INFO",
             "handlers": ["console"],
-            "filters": ["access_without_query"],
+            "filters": ["access_without_query", "access_not_the_probe"],
             "propagate": False,
         },
         # httpx names every request's whole URL at INFO: an address being

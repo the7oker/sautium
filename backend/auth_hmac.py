@@ -128,6 +128,8 @@ _serials = itertools.count()
 
 WHITELIST_EXACT = {
     "/health",
+    # The image's health check (config.HEALTH_PROBE_PATH): 204, no body
+    "/healthz",
     "/",
     # Browsers fetch this on their own, outside the signing fetch wrapper.
     # No route serves it — whitelisting turns a misleading 401 in the access

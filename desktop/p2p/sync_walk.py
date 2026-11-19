@@ -405,6 +405,7 @@ class SyncWalk:
         *,
         identity: Callable[[], Optional[object]],
         sharing_enabled: Callable[[], bool],
+        passing_on: Optional[Callable[[], bool]] = None,
         dht=None,
         lan=None,
         manual_peers: Optional[list[str]] = None,
@@ -418,9 +419,13 @@ class SyncWalk:
             CLIENT; also how the walk recognises its own address (a DHT
             lookup returns us too, and the Docker surface has no observed
             external IP to subtract).
-        sharing_enabled: the "P2P sharing" switch — a node that does not
-            give does not take: off, the walk asks no peer and no DHT key
-            and carries nothing, exactly as serving stops.
+        sharing_enabled: the "P2P sharing" switch — off, the walk asks no
+            peer and no DHT key and carries nothing, exactly as serving
+            stops.
+        passing_on: sharing AND "pass on what this node holds" — off while
+            sharing is on, the walk still asks and takes, and offers no
+            carrier anything of this node's (a node born small; its owner's
+            switch). Unset, it is the sharing switch.
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
         skip_addrs: () -> addresses the DHT may list that are not peers
@@ -439,6 +444,7 @@ class SyncWalk:
         self.manual_peers = list(manual_peers or [])
         self._identity = identity
         self._sharing_enabled = sharing_enabled
+        self._passing_on = passing_on or sharing_enabled
         self._skip_addrs = skip_addrs
         self._diag_record = diag_record
         self._after_run = after_run
@@ -1037,7 +1043,7 @@ class SyncWalk:
         # network. Never fatal to the sync that just succeeded. The switch
         # is read again — the owner may have turned sharing off during the
         # pull — and before every part the push sends.
-        if "carry" in sync_client.peer_capabilities and self._sharing_enabled():
+        if "carry" in sync_client.peer_capabilities and self._passing_on():
             try:
                 await asyncio.get_event_loop().run_in_executor(
                     None, partial(self._push_to_carrier, peer_api, _progress))
@@ -1064,7 +1070,7 @@ class SyncWalk:
                 for c in candidates
                 for mbid in (c.get("recordings") or [])
             })
-            if not recordings or not self._sharing_enabled():
+            if not recordings or not self._passing_on():
                 return 0
             answer = peer_api.carry_offer(recordings) or {}
             wanted = answer.get("wanted") or {}
@@ -1077,7 +1083,7 @@ class SyncWalk:
             def push(category: str, payload: dict) -> int:
                 took = 0
                 for part in push_parts(payload):
-                    if not self._sharing_enabled():
+                    if not self._passing_on():
                         limited["stop"] = True          # turned off: nothing more leaves
                         break
                     answer = peer_api.carry_push(category.replace("_", "-"), part) or {}
@@ -1087,7 +1093,7 @@ class SyncWalk:
                         # went off meanwhile.
                         limited["waited"] = True
                         time.sleep(min(int(answer["retry_after"]), 120))
-                        if not self._sharing_enabled():
+                        if not self._passing_on():
                             limited["stop"] = True
                             break
                         answer = peer_api.carry_push(category.replace("_", "-"), part) or {}

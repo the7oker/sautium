@@ -19,7 +19,7 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -174,6 +174,48 @@ def notify_notice_subscribers() -> None:
                 continue
 
 
+# /api/events subscribers of this node's identity state (the worker's
+# p2p.identity; NOTIFY sautium_identity): Friends and every chat header say
+# why nothing connects while the node has no identity it can use.
+_identity_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+_identity_sse_lock = threading.Lock()
+
+
+def identity_sse_register(evt, loop) -> None:
+    with _identity_sse_lock:
+        _identity_sse_clients.append((evt, loop))
+
+
+def identity_sse_unregister(evt, loop) -> None:
+    with _identity_sse_lock:
+        try:
+            _identity_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
+
+
+def notify_identity_subscribers() -> None:
+    with _identity_sse_lock:
+        for evt, loop in list(_identity_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                continue
+
+
+def identity_event() -> Dict[str, Any]:
+    """This node's identity as the worker last published it, for the page:
+    its status and detail, the lottery's progress, and whether the account's
+    email is verified — the other way to an identity, offered beside a proof
+    that is still being mined or waits for memory. No status while no
+    worker ever published (no account yet, P2P off)."""
+    state = _read("p2p.identity") or {}
+    row = db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+    return {"status": state.get("status"), "detail": state.get("detail"),
+            "attempts": state.get("attempts"), "p_done": state.get("p_done"),
+            "email_verified": bool(row and row.get("email_verified"))}
+
+
 def notify_library_subscribers() -> None:
     """Thread-safe wake of every connected Library SSE client.
     Workers call this after start / phase transition / completion."""
@@ -239,6 +281,8 @@ codex_cli.auth.on_change(_codex_signin_changed)
 def _on_sync_notify(notifies: list) -> None:
     if any(note.channel == "sautium_notices" for note in notifies):
         notify_notice_subscribers()
+    if any(note.channel == "sautium_identity" for note in notifies):
+        notify_identity_subscribers()
     notify_library_subscribers()
 
 
@@ -264,6 +308,12 @@ def stop_sync_listener() -> None:
 # run users get a sensible Settings screen with no prior writes.
 _DEFAULTS: Dict[str, Any] = {
     "sync.p2p_enabled":          True,
+    # "Pass on what this node holds": the serving side of sharing — the peer
+    # routes, what /health says, the LAN beacon, the DHT's tail, the carry
+    # this node offers (routers/sync.serving_enabled). Off, the node still
+    # asks and takes. A node born small starts with it off (db_migrate's
+    # birth preset); everywhere else it is on and not shown.
+    "sync.pass_on":              True,
     "sync.auto_interval_min":    30,
     # Size of the rare-artist DHT announce tail (0/null = node key only).
     # 150 = half the traversal lane (dht_service MIN_ANNOUNCE_SPACING): a
@@ -309,6 +359,12 @@ _DEFAULTS: Dict[str, Any] = {
     # exists stays. Removal is the explicit Settings action
     # (POST /phantoms/prune) — no startup job ever drops it.
     "discovery.phantom_layer":   True,
+    # "AI models on this machine" (hardware_profile.MODELS_SETTING): off, the
+    # node loads no model and analyses nothing — the state a small board is
+    # born with (db_migrate's birth preset). Read once at the process's
+    # start, so a change takes a restart; never read through _read by the
+    # profile, which must not import this module.
+    "compute.models":            True,
     # Provider/model default to None so the first-run UI shows
     # "Not selected" instead of pretending Claude is picked when the
     # wizard offered an explicit "no AI" option. An install-time pick
@@ -560,8 +616,12 @@ def _phantom_section() -> Dict[str, Any]:
         FROM (SELECT count(*) AS total FROM tracks) t,
              (SELECT count(DISTINCT track_id) AS tracks FROM owned_files) o
     """)
+    from streaming import service as streaming_service
     return {
         "enabled":    bool(_read("discovery.phantom_layer")),
+        # False on an install set up without the demo channel's runtime
+        # (deno): what streams there is the 30 s excerpt
+        "demo_runtime": streaming_service.demo_runtime(),
         "tracks":     int(row["tracks"]),
         "artists":    int(row["artists"]),
         "albums":     int(row["albums"]),
@@ -632,8 +692,16 @@ async def _library_state() -> Dict[str, Any]:
         SELECT count(*) AS copies, count(DISTINCT album_id) AS albums
         FROM album_variants WHERE absent_since IS NOT NULL""")
 
+    import library_root
+    from claude_code import is_launcher_mode
     return {
         "music_path":         music_path,
+        # Who names the music folder: "pick" — the owner, here, under the
+        # roots the console setup mounted (library_root; music_path is ""
+        # until a folder is chosen); "launcher" — the launcher's window;
+        # "setup" — the node's .env (a Docker node's MUSIC_LIBRARY_PATH)
+        "music_folder":       ("pick" if library_root.picks()
+                               else "launcher" if is_launcher_mode() else "setup"),
         # Library counts (matches launcher's Library block 2×2)
         "total_tracks":       stats.get("total_tracks", 0),
         "total_artists":      stats.get("total_artists", 0),
@@ -924,6 +992,7 @@ def _sync_state() -> Dict[str, Any]:
 
     return {
         "p2p_enabled":             bool(_read("sync.p2p_enabled")),
+        "pass_on":                 bool(_read("sync.pass_on")),
         "auto_interval_min":       _read("sync.auto_interval_min"),
         "announce_limit":          _read("sync.announce_limit"),
         "carry_limit":             _read("sync.carry_limit"),
@@ -1229,7 +1298,8 @@ def _notices_state() -> Dict[str, Any]:
                       if not (it["key"] in _REPORTS and it["seen"])]}
 
 
-_REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures")
+_REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures",
+            "power.undervoltage")
 
 
 def _login_failures_notice() -> Optional[Dict[str, Any]]:
@@ -1446,6 +1516,12 @@ def _notice_items() -> List[Dict[str, Any]]:
     login_failures = _login_failures_notice()
     if login_failures is not None:
         items.append(login_failures)
+    # A Raspberry Pi's supply dropped under its voltage since this start
+    # (power_watch): a report, dropped once seen
+    import power_watch
+    undervoltage = power_watch.notice()
+    if undervoltage is not None:
+        items.append(undervoltage)
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]
@@ -2201,12 +2277,44 @@ def put_albums_sort(req: AlbumsSortUpdate) -> Dict[str, Any]:
 # Hardware profile (full / standard / lite — HARDWARE-TIERS.md)
 # ============================================================
 
+def _hardware_state() -> Dict[str, Any]:
+    """The profile this process resolved at its start, and the owner's model
+    switch as it is stored now: the two differ from a change of the switch
+    until the restart that applies it (`restart_required`)."""
+    import hardware_profile
+    profile = hardware_profile.resolve()
+    state = profile.describe()
+    wanted = hardware_profile.models_switch()
+    state["models_switch"] = wanted
+    state["restart_required"] = profile.models != "absent" and wanted != profile.ml_available
+    return state
+
+
 @router.get("/hardware")
 def get_hardware_profile() -> Dict[str, Any]:
-    """Read-only: selection is automatic (SAUTIUM_PROFILE env is the only
-    override, for diagnostics). Feeds the info block on the Library screen."""
+    """The tier's selection is automatic (SAUTIUM_PROFILE env is the only
+    override, for diagnostics); the model axis is the owner's switch
+    (PUT /hardware/models). Feeds the Hardware profile block."""
+    return _hardware_state()
+
+
+class ModelsPrefs(BaseModel):
+    on: bool
+
+
+@router.put("/hardware/models")
+def put_models_switch(req: ModelsPrefs) -> Dict[str, Any]:
+    """"AI models on this machine". Stored now, applied at the next start:
+    the profile is resolved once a process, before anything imports torch.
+    Off removes nothing stored — the node's own analysis stays, sealed and
+    served; it only stops making more. An install set up without the models
+    has no switch to move."""
     import hardware_profile
-    return hardware_profile.resolve().describe()
+    if hardware_profile.resolve().models == "absent":
+        raise HTTPException(status_code=409,
+                            detail="This install was set up without the AI models")
+    _write(hardware_profile.MODELS_SETTING, bool(req.on))
+    return _hardware_state()
 
 
 # ============================================================
@@ -2536,6 +2644,7 @@ def load_hqplayer_from_db() -> None:
 
 class SyncPrefs(BaseModel):
     p2p_enabled:             Optional[bool] = None
+    pass_on:                 Optional[bool] = None
     auto_interval_min:       Optional[int]  = None  # null disables
     announce_limit:          Optional[int]  = None  # rare-artist tail size
     carry_limit:             Optional[int]  = None  # foreign tracks carried
@@ -2547,8 +2656,11 @@ class SyncPrefs(BaseModel):
 
 @router.put("/sync")
 def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
-    if req.p2p_enabled is not None:
-        _write("sync.p2p_enabled", bool(req.p2p_enabled))
+    if req.pass_on is not None:
+        _write("sync.pass_on", bool(req.pass_on))
+    if req.p2p_enabled is not None or req.pass_on is not None:
+        if req.p2p_enabled is not None:
+            _write("sync.p2p_enabled", bool(req.p2p_enabled))
         # The launcher's LAN beacon and its serving follow the switch now
         # (desktop/p2p/p2p_manager._sharing_changed), not at a cache's expiry,
         # and so does this process's peer surface — and every requester of
@@ -2697,6 +2809,48 @@ def get_databases() -> Dict[str, Any]:
     return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section()}
 
 
+# ============================================================
+# The music folder, chosen under the node's roots (library_root.py)
+# ============================================================
+
+@router.get("/library/folders")
+def get_library_folders(under: Optional[str] = Query(None, max_length=4096)) -> Dict[str, Any]:
+    """The folder sheet's listing: the places a choice can start at, or the
+    folders of `under`. Only what stays under a root is ever listed; every
+    name in the answer is a stranger's text."""
+    import library_root
+    try:
+        return library_root.folders(under)
+    except library_root.Refused as e:
+        raise HTTPException(status_code=400 if library_root.picks() else 409, detail=str(e))
+
+
+class LibraryRootChoice(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+
+
+@router.put("/library/root")
+def put_library_root(req: LibraryRootChoice) -> Dict[str, Any]:
+    """"Use this folder": stored, the folder watcher armed on it, and the
+    library scanned for what is there. What the catalogue holds from another
+    folder is not touched — a Rescan asks about it, as for any music it no
+    longer finds."""
+    import library_root
+    import library_watch
+    from main import request_scan
+    try:
+        path = library_root.choose(req.path)
+    except library_root.Refused as e:
+        raise HTTPException(status_code=400 if library_root.picks() else 409, detail=str(e))
+    library_watch.stop()
+    library_watch.start(request_scan)
+    # Where the mount delivers no events the watch queues nothing: asked here
+    request_scan({"": True}, explicit=True)
+    db_execute("NOTIFY sautium_notices")
+    notify_library_subscribers()
+    return {"music_path": path}
+
+
 class PhantomPrefs(BaseModel):
     enabled: bool
 
@@ -2713,6 +2867,11 @@ def get_phantom_state() -> Dict[str, Any]:
 @router.put("/phantoms")
 def put_phantom_prefs(req: PhantomPrefs) -> Dict[str, Any]:
     _write("discovery.phantom_layer", bool(req.enabled))
+    # Streaming follows the library: its providers, yt-dlp's build and the
+    # refresh loop start and stop here
+    from config import settings as app_settings
+    from streaming import service as streaming_service
+    streaming_service.follow_switch(app_settings)
     if req.enabled:
         # Imported scrobbles waiting on names only the phantom layer can place.
         from canon import scrobbles

@@ -189,8 +189,9 @@ EXPOSE 19001/udp
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# (a path of its own, whose access line the node leaves out of its log)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1
+    CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/healthz || exit 1
 
 # Default command (can be overridden in docker-compose.yml)
 CMD ["python", "entrypoint.py"]

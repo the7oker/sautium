@@ -25,15 +25,28 @@ A machine with <12 GB system RAM is demoted one tier: on CUDA the
 whole-track audio buffers live in system RAM, and the model set +
 Postgres + OS don't fit a full/standard working set below that.
 
-`ml_available` is the separate axis: whether torch imports at all. It is
-False on nodes where the ML wheels do not exist for the platform (Intel
-macOS — PyTorch stopped at 2.2.2 there, see backend/requirements-ml.txt), and
-such a node is lite by tier anyway. Every ML-gated property folds it in, so
-one check keeps a torch-less install off the model paths even when
-SAUTIUM_PROFILE forces a tier the machine cannot honour.
+`models` is the separate axis — whether the model stack runs here — and
+`ml_available` is its one reading (`models == 'on'`):
+- 'absent': torch is not installed. The ML wheels do not exist for the
+  platform (Intel macOS — PyTorch stopped at 2.2.2 there, see
+  backend/requirements-ml.txt), or the image was built without them
+  (Dockerfile.mac's MODELS=0);
+- 'off': installed, and the owner switched "AI models on this machine" off
+  (user_settings `compute.models`, PI-NODE-2B) — the choice a small board is
+  born with (db_migrate's birth preset). Read once per process, here, before
+  anything imports torch: an off node never loads it (181 MiB at rest on a
+  Pi 5), and a change of the switch takes a restart;
+- 'on': everything else.
+A node whose models are off or absent is lite by tier (no accelerator is
+looked for). Every ML-gated property folds `ml_available` in, so one check
+keeps such a node off the model paths even when SAUTIUM_PROFILE forces a tier
+the machine cannot honour. Lite with no models is what a person meets as
+"Nano" (`nano`): it analyses nothing, and sound features arrive from other
+nodes.
 """
 
 import functools
+import importlib.util
 import logging
 import os
 from dataclasses import dataclass
@@ -42,6 +55,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 PROFILES = ("full", "standard", "lite")
+MODELS_SETTING = "compute.models"
 _GIB = 1024 ** 3
 
 _IO_WORKER_CAP = {"full": 16, "standard": 8, "lite": 4}
@@ -66,7 +80,17 @@ class HardwareProfile:
     accel_memory_gb: float       # total VRAM / unified memory / RAM, GiB
     ram_gb: float                # GiB
     cores: int
-    ml_available: bool           # torch imports — the model stack can run
+    models: str = "on"           # on | off (the owner's switch) | absent (not installed)
+
+    @property
+    def ml_available(self) -> bool:
+        """The model stack runs here: installed, and not switched off."""
+        return self.models == "on"
+
+    @property
+    def nano(self) -> bool:
+        """The smallest node: lite, and no model runs."""
+        return self.name == "lite" and not self.ml_available
 
     @property
     def prewarm_keys(self) -> tuple:
@@ -143,6 +167,8 @@ class HardwareProfile:
     def describe(self) -> dict:
         return {
             "profile": self.name,
+            "nano": self.nano,
+            "models": self.models,
             "source": self.source,
             "detected": {
                 "device": self.device,
@@ -215,24 +241,37 @@ def _total_ram_gb() -> float:
         return 16.0
 
 
+def models_switch() -> bool:
+    """The owner's switch "AI models on this machine": on while never set."""
+    from db_pool import db_query_one
+    row = db_query_one("SELECT value FROM user_settings WHERE key = %(k)s", {"k": MODELS_SETTING})
+    return row is None or row["value"] is not False
+
+
 def _detect_hardware() -> tuple:
     """(device, accelerator name, total accel memory GiB, total RAM GiB,
-    cores, torch present)."""
+    cores, models: on | off | absent)."""
     ram_gb = _total_ram_gb()
     cores = os.cpu_count() or 4
+    # The switch before the import: an off node never loads torch
+    if importlib.util.find_spec("torch") is None:
+        return "cpu", None, ram_gb, ram_gb, cores, "absent"
+    if not models_switch():
+        return "cpu", None, ram_gb, ram_gb, cores, "off"
     try:
         import torch
         from device import get_device
         device = get_device()
     except Exception:
-        # torch-less install — every ML feature is unavailable anyway.
-        return "cpu", None, ram_gb, ram_gb, cores, False
+        # An install whose torch does not import — every ML feature is
+        # unavailable anyway.
+        return "cpu", None, ram_gb, ram_gb, cores, "absent"
     if device == "cuda":
         _free, total = torch.cuda.mem_get_info()
-        return device, torch.cuda.get_device_name(0), total / _GIB, ram_gb, cores, True
+        return device, torch.cuda.get_device_name(0), total / _GIB, ram_gb, cores, "on"
     # MPS unified memory == system RAM; CPU works out of RAM anyway.
     name = "Apple Silicon (Metal)" if device == "mps" else None
-    return device, name, ram_gb, ram_gb, cores, True
+    return device, name, ram_gb, ram_gb, cores, "on"
 
 
 def _auto_tier(device: str, accel_gb: float, ram_gb: float) -> str:
@@ -258,7 +297,7 @@ def _configured_profile() -> tuple:
 @functools.lru_cache(maxsize=1)
 def resolve() -> HardwareProfile:
     """Process-lifetime profile. First call logs the decision."""
-    device, accel_name, accel_gb, ram_gb, cores, ml_available = _detect_hardware()
+    device, accel_name, accel_gb, ram_gb, cores, models = _detect_hardware()
     configured, source = _configured_profile()
     if configured == "auto":
         name = _auto_tier(device, accel_gb, ram_gb)
@@ -268,13 +307,13 @@ def resolve() -> HardwareProfile:
     profile = HardwareProfile(
         name=name, source=source, device=device, accel_name=accel_name,
         accel_memory_gb=accel_gb, ram_gb=ram_gb, cores=cores,
-        ml_available=ml_available,
+        models=models,
     )
     logger.info(
         "Hardware profile: %s (%s; %s %.1fGiB accel, %.1fGiB RAM, %d cores, "
-        "ml=%s) — prewarm=%s local_analysis=%s stream=%s",
+        "models=%s) — prewarm=%s local_analysis=%s stream=%s",
         profile.name, profile.source, profile.device, profile.accel_memory_gb,
-        profile.ram_gb, profile.cores, "yes" if ml_available else "no",
+        profile.ram_gb, profile.cores, models,
         ",".join(profile.prewarm_keys) or "none",
         profile.local_analysis, profile.stream_enrich_mode,
     )

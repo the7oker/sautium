@@ -140,7 +140,8 @@ class SyncServer:
         self._search_global: list[float] = []
         self._slice_global: dict[str, list[float]] = {
             "/api/mb/slice": [], "/api/lb/slice": []}
-        self._sharing = True
+        self._sharing = True          # the taking side: this node asks the network
+        self._serving = True          # the passing-on side: it answers and offers
         self._sharing_checked = 0.0
         self._pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
         self._pool_lock = threading.Lock()
@@ -523,18 +524,19 @@ class SyncServer:
         finally:
             self._pool.putconn(conn, close=broken)
 
-    def sharing_changed(self) -> bool:
-        """The switch as it is now, past the cache — the owner just moved it
-        (NOTIFY sautium_sharing), and serving follows at once too."""
+    def sharing_changed(self) -> tuple:
+        """(taking, passing on) as they are now, past the cache — the owner
+        just moved a switch (NOTIFY sautium_sharing), and serving follows at
+        once too."""
         self._sharing_checked = 0.0
-        return self._sharing_enabled()
+        return self._sharing_enabled(), self._serving
 
     def _sharing_enabled(self) -> bool:
-        """The "P2P sharing" switch from Settings. Peer endpoints have no
-        login by design, so this flag is the only thing between "off" and a
-        full inventory dump — a launcher must honour it exactly like the
-        backend does. Cached briefly: one sync run fires many pulls.
-        Unreadable settings fail closed."""
+        """The "P2P sharing" switch from Settings, the TAKING side: this node
+        asks the network. Read with its second switch, "pass on what this
+        node holds" (sync.pass_on; _serving_enabled) — the same pair the
+        backend reads (routers/sync._switches). Cached briefly: one sync run
+        fires many pulls. Unreadable settings fail closed."""
         now = time.time()
         if now - self._sharing_checked < 10.0:
             return self._sharing
@@ -542,15 +544,24 @@ class SyncServer:
         try:
             with self._db() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT value FROM user_settings "
-                                "WHERE key = 'sync.p2p_enabled'")
-                    row = cur.fetchone()
+                    cur.execute("SELECT key, value FROM user_settings "
+                                "WHERE key IN ('sync.p2p_enabled', 'sync.pass_on')")
+                    rows = dict(cur.fetchall())
                 # Absent row means the default, which is on.
-                self._sharing = True if row is None else bool(row[0])
+                self._sharing = bool(rows.get("sync.p2p_enabled", True))
+                self._serving = self._sharing and bool(rows.get("sync.pass_on", True))
         except Exception as e:
             logger.warning("sharing flag unreadable (%s) — refusing to serve", e)
-            self._sharing = False
+            self._sharing = self._serving = False
         return self._sharing
+
+    def _serving_enabled(self) -> bool:
+        """The PASSING-ON side: sharing on, and "pass on what this node
+        holds" on. Peer endpoints have no login by design, so this is the
+        only thing between "off" and a full inventory dump — a launcher must
+        honour it exactly like the backend does."""
+        self._sharing_enabled()
+        return self._serving
 
     @staticmethod
     def _admit(bucket: dict, ip: str, limit: int) -> bool:
@@ -655,7 +666,7 @@ class SyncServer:
             "status": "ok",
             "node_id": self.node_id,
             "type": "sautium-peer",
-            "sharing": self._sharing_enabled(),
+            "sharing": self._serving_enabled(),
             "birth_cert": (cert if cert is not None
                            and cert["pubkey"].lower() == self.node_id.lower() else None),
             "mb_dump": self.mb_dump_version,
@@ -750,7 +761,7 @@ class SyncServer:
     async def handle_inventory(self, request: web.Request) -> web.Response:
         """POST /api/sync/inventory — what this node holds for these tracks."""
 
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
 
@@ -783,7 +794,7 @@ class SyncServer:
         (sync_queries.get_holdings): what this node holds, compressed, so a
         peer with millions of gaps tests them locally and asks the exact
         inventory only about the hits."""
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
         try:
@@ -798,7 +809,7 @@ class SyncServer:
     async def handle_pull(self, request: web.Request) -> web.Response:
         """POST /api/sync/pull/{category} — pull enrichment data."""
 
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
 
@@ -864,7 +875,7 @@ class SyncServer:
         The round trip exists so a pusher never ships what we already hold
         or never cared about: 16 bytes per recording to ask, ~46 KB per
         track to send blind."""
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
         try:
@@ -890,7 +901,7 @@ class SyncServer:
         every record must carry a seal that checks out, or the importer
         drops it."""
         ip = request.remote or "unknown"
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
         budget = self._carry_budget()
@@ -941,7 +952,7 @@ class SyncServer:
         matching (see mb_slice_queries.search_artists) keeps one query per
         human search cheap for the volunteer node. Budgeted separately
         from the main per-IP bucket — see SEARCH_RATE_* rationale."""
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
         if not self.mb_dump_version:
@@ -975,7 +986,7 @@ class SyncServer:
         carry the ORIGINAL author's signature either way. A signer this node
         penalized is refused with the evidence."""
 
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
         refused = await self._slice_refusal(request)
@@ -1024,7 +1035,7 @@ class SyncServer:
         a requester that knows a newer dump exists. A signer this node
         penalized is refused with the evidence."""
 
-        if not self._sharing_enabled():
+        if not self._serving_enabled():
             return self._json_response(
                 request, {"error": "sharing disabled"}, status=403)
         refused = await self._slice_refusal(request)

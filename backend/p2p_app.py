@@ -39,7 +39,7 @@ from db_pool import get_conn, in_chat_lane, in_peer_lane
 from serving import is_shared, request_target
 from routers.sync import (
     SYNC_CAPABILITIES, carry_queries, lb_dump_version, lb_inventory, lb_router,
-    mb_dump_version, mb_router, node_pubkey_hex, router, sharing_enabled,
+    mb_dump_version, mb_router, node_pubkey_hex, router, serving_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -720,7 +720,7 @@ async def health() -> dict:
         "status": "ok",
         "type": "sautium-peer",
         "node_id": node_id,
-        "sharing": sharing_enabled(),
+        "sharing": serving_enabled(),
         "birth_cert": cert if cert is not None and node_id and cert["pubkey"] == node_id else None,
         **counts,
         "capabilities": SYNC_CAPABILITIES,

@@ -17,10 +17,6 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
 
 import psycopg2
-try:
-    import torch
-except ImportError:
-    torch = None
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -29,7 +25,8 @@ from pathlib import Path as _Path
 
 from auth_hmac import HMACAuthMiddleware, ensure_secret
 from auth_hmac import secret_path as _secret_path
-from config import settings, get_settings, ui_build, build_identity, LOGGING_CONFIG
+from config import (settings, get_settings, ui_build, build_identity, LOGGING_CONFIG,
+                    HEALTH_PROBE_PATH)
 from db_pool import db_query_one
 import csp
 import device_auth
@@ -143,12 +140,13 @@ def _build_sync_walk():
     address by the key /health returns."""
     from desktop.p2p.sync_walk import SyncWalk
     from p2p_identity import peer_identity
-    from routers.sync import sharing_enabled
+    from routers.sync import serving_enabled, sharing_enabled
 
     return SyncWalk(
         settings.database_url,
         identity=lambda: peer_identity(settings),
         sharing_enabled=sharing_enabled,
+        passing_on=serving_enabled,
         lan=_lan_discovery,
         diag_record=_diag_record,
         after_run=_after_walk,
@@ -547,15 +545,6 @@ async def lifespan(app: FastAPI):
             f"Missing required settings: {', '.join(missing_settings)}"
         )
 
-    # Check GPU availability
-    if torch and torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-        logger.info(f"GPU available: {gpu_name} ({gpu_memory:.1f} GB)")
-    elif torch:
-        logger.warning("No GPU detected. Audio embedding will be slow.")
-    else:
-        logger.warning("PyTorch not installed. Audio embedding features unavailable.")
 
     # The database is a precondition, not a step to log around: the process
     # that launched uvicorn waited for postgres first (Docker: entrypoint.py;
@@ -571,6 +560,10 @@ async def lifespan(app: FastAPI):
     # node — Docker or launcher-run — see backend/db_migrate.py.
     import db_migrate
     db_migrate.apply_pending()
+    # A node that reads its music under roots: the folder its owner chose is
+    # the library's from here on, before anything reads a path
+    import library_root
+    await asyncio.to_thread(library_root.apply)
     # After a crash recovery no table has an analysis on record; the API
     # need not wait for the statistics to come back.
     threading.Thread(target=db_migrate.analyze_unrecorded, args=(settings.database_url,),
@@ -587,8 +580,16 @@ async def lifespan(app: FastAPI):
     # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
     # Drives the pre-warm set below plus pool sizes, phantom minting and
     # stream-enrichment mode at their call sites.
+    # This module imports no torch: the profile does, and only where the
+    # models are installed and the owner's switch is on (tests hold a node
+    # with the switch off to never loading it).
     import hardware_profile
     _profile = hardware_profile.resolve()
+    if not _profile.ml_available:
+        logger.info("AI models %s on this node: nothing is analysed here, no query is embedded",
+                    "switched off" if _profile.models == "off" else "not installed")
+    elif _profile.device == "cpu":
+        logger.warning("No GPU detected. Audio embedding will be slow.")
     # Without a cap torch claims every core for intra-op parallelism and
     # starves the decode pool + event loop: CPU-only machines, and an MPS
     # node's CPU copy of the text encoder.
@@ -667,15 +668,20 @@ async def lifespan(app: FastAPI):
     from playback.manager import start_files_listener, stop_files_listener
     start_files_listener()
 
-    # Start streaming-preview service (media proxy + provider registry).
-    # No-op unless streaming_preview_enabled — costs nothing when off.
+    # A disk plugged in after this start, on a node that reads under roots
+    import mount_watch
+    mount_watch.start()
+
+    # A Raspberry Pi's weak supply, said once (no thread anywhere else)
+    import power_watch
+    power_watch.start()
+
+    # The streaming-preview service (provider registry, yt-dlp's build and
+    # its refresh loop) follows the owner's streaming library: up while it is
+    # on, and its switch's route brings it up or down later.
     try:
         from streaming import service as streaming_service
-        if streaming_service.init(settings):
-            # yt-dlp's stable build, put in place at start and kept current
-            # for the life of the process (see the loop's own note on why
-            # start-only refreshes are not enough).
-            asyncio.create_task(streaming_service.ytdlp_refresh_loop())
+        streaming_service.follow_switch(settings, asyncio.get_running_loop())
     except Exception as e:
         logger.warning(f"Streaming preview init failed: {e}")
 
@@ -883,15 +889,16 @@ async def lifespan(app: FastAPI):
         ]
 
         if _lan_discovery is not None:
-            from routers.sync import sharing_enabled, sharing_hooks
+            from routers.sync import serving_enabled, sharing_hooks
             try:
                 await _lan_discovery.start()
-                _lan_discovery.set_beaconing(sharing_enabled())
+                # The beacon names this node only while it passes on
+                _lan_discovery.set_beaconing(serving_enabled())
                 # The switch moves in a request's worker thread; the beacon
                 # lives on this loop.
                 loop = asyncio.get_running_loop()
                 sharing_hooks.append(lambda: loop.call_soon_threadsafe(
-                    _lan_discovery.set_beaconing, sharing_enabled()))
+                    _lan_discovery.set_beaconing, serving_enabled()))
                 logger.info("LAN discovery on the host's network (peer port %d)", announce_port)
             except OSError as e:
                 logger.warning(f"LAN discovery could not start: {e}")
@@ -902,9 +909,9 @@ async def lifespan(app: FastAPI):
     if settings.p2p_enabled and HAS_LIBTORRENT and settings.p2p_sync_port:
         try:
             from desktop.p2p.dht_state import DhtStateStore
-            from routers.sync import sharing_enabled
+            from routers.sync import serving_enabled
             _dht_service = DHTService(
-                sharing_enabled=sharing_enabled,
+                sharing_enabled=serving_enabled,
                 listen_port=settings.p2p_dht_port,
                 http_port=announce_port,
                 state_store=DhtStateStore(settings.database_url),
@@ -1090,7 +1097,8 @@ async def lifespan(app: FastAPI):
         # truth for "what does Sautium itself hold".
         from device import empty_cache
         empty_cache()
-        if torch is not None and torch.cuda.is_available():
+        import torch
+        if torch.cuda.is_available():
             logger.info(
                 "Pre-warm chain complete — backend VRAM: %.2f GB "
                 "allocated, %.2f GB reserved",
@@ -1165,8 +1173,9 @@ async def lifespan(app: FastAPI):
     # The accelerator's heavy passes as well (device.heavy_pass): none goes
     # from now on, a stream's analysis waiting for the run is told so, the
     # run ends at its next batch, and the queued streams go with the process.
-    if torch is not None:
-        import device
+    # (the module is loaded only where a model ran: it imports torch)
+    device = sys.modules.get("device")
+    if device is not None:
         device.close_heavy_passes()
     # Imported at the start unless that failed (said there): never again here
     streaming_service = sys.modules.get("streaming.service")
@@ -1343,6 +1352,12 @@ async def root() -> HTMLResponse:
     )
 
 
+@app.get(HEALTH_PROBE_PATH, status_code=204, include_in_schema=False)
+async def health_probe() -> None:
+    """The image's health check: the process serves. It says nothing of the
+    node (unsigned, like `/`), and its access line is not logged."""
+
+
 @app.get("/health")
 async def health_check() -> Dict[str, Any]:
     """Detailed health check including database, GPU, and P2P status.
@@ -1369,8 +1384,10 @@ async def health_check() -> Dict[str, Any]:
         health_status["checks"]["database"] = f"error: {str(e)}"
         health_status["status"] = "degraded"
 
-    # GPU check
-    if torch and torch.cuda.is_available():
+    # GPU check — of the torch this process loaded, if it did (models on)
+    import hardware_profile
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_available():
         health_status["checks"]["gpu"] = {
             "available": True,
             "name": torch.cuda.get_device_name(0),
@@ -1381,7 +1398,7 @@ async def health_check() -> Dict[str, Any]:
     else:
         health_status["checks"]["gpu"] = {
             "available": False,
-            "torch_installed": torch is not None,
+            "torch_installed": hardware_profile.resolve().models != "absent",
         }
 
     # Music library check
@@ -2335,6 +2352,18 @@ async def canonicalize_endpoint() -> Dict[str, Any]:
     return {"started": False, "running": True}
 
 
+def _require_models() -> None:
+    """Refuse a route that runs a model on a node where none does."""
+    import hardware_profile
+    models = hardware_profile.resolve().models
+    if models != "on":
+        raise HTTPException(
+            status_code=400,
+            detail=("AI models are switched off on this node" if models == "off"
+                    else "This node has no AI models installed")
+                   + " — analysis arrives from other Sautium nodes")
+
+
 @app.post("/embeddings/generate")
 async def generate_embeddings_endpoint(
     limit: Optional[int] = None,
@@ -2350,6 +2379,7 @@ async def generate_embeddings_endpoint(
     Returns:
         Statistics about the pass.
     """
+    _require_models()
     from embeddings import sonic_pass
 
     try:
@@ -2479,14 +2509,9 @@ async def enrich_start(limit: Optional[int] = None) -> Dict[str, Any]:
     no ML runtime at all is refused — both UIs hide the button there
     (`/stats` → analysis_available).
     """
+    _require_models()
     import hardware_profile
-    profile = hardware_profile.resolve()
-    if not profile.ml_available:
-        raise HTTPException(
-            status_code=400,
-            detail="No ML runtime on this node — analysis arrives via P2P import",
-        )
-    local_analysis = profile.local_analysis
+    local_analysis = hardware_profile.resolve().local_analysis
     from playback import hqp_benchmark
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
@@ -2537,6 +2562,7 @@ async def enrich_tracks_endpoint(
     """Run enrichment synchronously (for CLI/Docker use). Prefer /enrich/start for UI.
     The instrument pass follows the owner's switch unless skipped here."""
     import asyncio
+    _require_models()
     from track_enrichment import TrackEnrichmentPipeline
 
     def _run():

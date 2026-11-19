@@ -106,8 +106,14 @@ def _h_search_tracks(query: str = "", artist: str = "", album: str = "",
 
 
 def _search(target: str, **params) -> list[dict]:
+    return _search_noted(target, **params)[0]
+
+
+def _search_noted(target: str, **params) -> tuple:
+    """(results, the engine's state in words — assistant_queries.search_note)"""
     from routers.discovery import run_search
-    return run_search(target, **params).get("results", [])
+    data = run_search(target, **params)
+    return data.get("results", []), aq.search_note(data)
 
 
 def _h_search_similar(track_id: str, limit: int = 15, vocalist: str = "",
@@ -147,31 +153,32 @@ def _h_search_semantic(query: str, limit: int = 15, vocalist: str = "", gender: 
                        year_from: int = None, year_to: int = None, quality: str = "",
                        corpus: str = "owned") -> str:
     try:
-        rows = _search("track", sound=query, limit=limit, vocalist=vocalist, gender=gender,
-                       genres=genres, instruments=instruments, bpm_min=bpm_min,
-                       bpm_max=bpm_max, year_from=year_from, year_to=year_to,
-                       quality=quality or None, corpus=corpus)
-        return aq.format_track_list(
-            rows, f"Semantic search for '{query}' ({len(rows)} results):")
+        rows, note = _search_noted(
+            "track", sound=query, limit=limit, vocalist=vocalist, gender=gender,
+            genres=genres, instruments=instruments, bpm_min=bpm_min,
+            bpm_max=bpm_max, year_from=year_from, year_to=year_to,
+            quality=quality or None, corpus=corpus)
+        return aq.with_note(aq.format_track_list(
+            rows, f"Semantic search for '{query}' ({len(rows)} results):"), note)
     except Exception as e:
         return f"Error in semantic search: {e}"
 
 
 def _h_search_lyrics(query: str, limit: int = 15) -> str:
     try:
-        rows = _search("track", lyrics=query, limit=limit)
-        return aq.format_track_list(
-            rows, f"Lyrics search for '{query}' ({len(rows)} results):")
+        rows, note = _search_noted("track", lyrics=query, limit=limit)
+        return aq.with_note(aq.format_track_list(
+            rows, f"Lyrics search for '{query}' ({len(rows)} results):"), note)
     except Exception as e:
         return f"Error in lyrics search: {e}"
 
 
 def _h_search_artists(query: str, limit: int = 10, by_bio: bool = False) -> str:
     try:
-        rows = _search("artist", q=query, limit=limit,
-                       **({"scope": "bio"} if by_bio else {}))
-        return aq.format_artist_list(
-            rows, f"Artist search for '{query}' ({len(rows)} results):")
+        rows, note = _search_noted("artist", q=query, limit=limit,
+                                   **({"scope": "bio"} if by_bio else {}))
+        return aq.with_note(aq.format_artist_list(
+            rows, f"Artist search for '{query}' ({len(rows)} results):"), note)
     except Exception as e:
         return f"Error in artist search: {e}"
 

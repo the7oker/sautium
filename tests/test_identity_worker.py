@@ -52,7 +52,7 @@ import p2p_chat  # noqa: E402
 import p2p_identity  # noqa: E402
 from config import settings  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey  # noqa: E402
-from desktop.p2p import birth_cert, identity_pow, identity_proof  # noqa: E402
+from desktop.p2p import birth_cert, identity_pow, identity_proof, identity_registry  # noqa: E402
 from routers import p2p as p2p_router  # noqa: E402
 from tests import slice_certs  # noqa: E402
 from tests.p2p.test_identity_proof import TEST_PARAMS  # noqa: E402
@@ -541,7 +541,7 @@ class _Issuer:
     handshake without a certificate (in `missing_word`), a pow one without
     its proof, and accepts one that carries both."""
 
-    def __init__(self, tls_dir: Path, missing_word: str):
+    def __init__(self, tls_dir: Path, missing_word: str, small: bool = False):
         import ssl
 
         import uvicorn
@@ -561,6 +561,13 @@ class _Issuer:
         async def handshake(request: Request):
             body = await request.json()
             self.seen.append((time.monotonic(), body))
+            if small:
+                # A node too small to check a mined proof knows an identity
+                # verified by email, and says so of any other
+                if (body.get("birth_cert") or {}).get("method") == "email":
+                    return {"accepted": True, "public_key_hex": self.pub, "username": "issuer",
+                            "invite_code": self.invite}
+                return JSONResponse({"error": identity_registry.UNVERIFIABLE}, status_code=403)
             if not body.get("birth_cert"):
                 return JSONResponse({"error": missing_word}, status_code=403)
             if not body.get("identity_proof"):
@@ -597,8 +604,8 @@ def parked(node, scratch_dsn, tmp_path, monkeypatch):
     from desktop.p2p import chat_client as cc
     from desktop.p2p.chat_service import ChatService
 
-    def make(missing_word="identity certificate required"):
-        issuer = _Issuer(tmp_path / "tls", missing_word)
+    def make(missing_word="identity certificate required", small=False):
+        issuer = _Issuer(tmp_path / "tls", missing_word, small)
         made.append(issuer)
         identity = _account(node)
         with node.conn.cursor() as cur:
@@ -756,3 +763,247 @@ def test_a_launchers_restart_racing_its_stop_starts_nothing(monkeypatch):
     monkeypatch.setattr(birth_cert, "load_certificate", lambda: pytest.fail("nothing to start"))
     manager._start_identity_proof_worker = lambda cert: pytest.fail("nothing to start")
     manager._restart_identity_proof_worker()
+
+
+# ---------------------------------------------------------------------------
+# The roads: a node that runs no model never mines (PI-NODE-2B §2.3)
+# ---------------------------------------------------------------------------
+
+def _no_model(monkeypatch, models="off"):
+    import hardware_profile
+    profile = hardware_profile.HardwareProfile(
+        name="lite", source="auto", device="cpu", accel_name=None, accel_memory_gb=4.0,
+        ram_gb=4.0, cores=4, models=models)
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: profile)
+
+
+@pytest.mark.parametrize("models", ["off", "absent"])
+def test_a_node_that_runs_no_model_never_mines_and_tells_the_worker_nothing(node, monkeypatch, models):
+    """Nano's road is the email: no certificate asked for, no proof mined,
+    and the state says what the person can do."""
+    _no_model(monkeypatch, models)
+    _account(node)
+    monkeypatch.setattr(identity_proof, "ensure_identity_proof",
+                        lambda *a, **k: pytest.fail("a node that runs no model mined"))
+
+    async def start():
+        await p2p_router.start_identity_worker()
+        await p2p_router._identity_worker.task
+    asyncio.run(start())
+    state = _state(node.conn)
+    assert (state["status"], state["method"]) == ("needs_email", None)
+    assert node.worker.calls == []
+    assert p2p_identity.load_certificate(settings) is None
+    assert not (node.folder / identity_proof.PROOF_FILENAME).exists()
+
+
+def test_the_code_from_the_mail_gives_such_a_node_its_identity_with_no_restart(node, scratch_dsn,
+                                                                              monkeypatch):
+    """verify-code is the event: the worker starts again on the re-signed
+    certificate and says `ready · email`, which wakes the chat client. The
+    certificate is asked for only now, by the person's own act."""
+    _no_model(monkeypatch)
+    _account(node)
+    info = json.loads((node.folder / "node_info.json").read_text())
+    info["email"] = "owner@example.org"
+    (node.folder / "node_info.json").write_text(json.dumps(info))
+    p2p_identity.forget_cached()
+    monkeypatch.setattr(identity_pow, "pow_mine",
+                        lambda *a, **k: pytest.fail("a node that runs no model mined"))
+    woken = []
+    monkeypatch.setattr(p2p_chat, "_client", type("Client", (), {"resolve_soon": lambda self: woken.append(1)})())
+
+    async def scene():
+        try:
+            await p2p_router.start_identity_worker()
+            await p2p_router._identity_worker.task
+            assert _state(node.conn)["status"] == "needs_email" and node.worker.calls == []
+            grant = device_auth.grant("email", 60)
+            answer = await p2p_router.email_verify_code(opened=(
+                p2p_router.VerifyCodeRequest(code="ABC123", grant=grant), lambda body: body))
+            assert answer["verified"]
+            await asyncio.to_thread(_await_identity, scratch_dsn,
+                                    lambda s: _ready(s) and s["detail"] == "email")
+        finally:
+            if p2p_router._identity_worker is not None:
+                p2p_router._identity_worker.stop.set()
+    asyncio.run(scene())
+    assert p2p_identity.load_certificate(settings)["method"] == "email" and woken
+    assert not (node.folder / identity_proof.PROOF_FILENAME).exists()
+
+
+def test_a_node_that_runs_no_model_keeps_the_identity_it_already_holds(node, monkeypatch):
+    """A proof mined on a bigger machine (a card moved, a restore) is this
+    node's identity: the worker checks it as on any node, and is `ready`."""
+    _account(node)
+
+    async def earn():
+        await p2p_router.start_identity_worker()
+        await p2p_router._identity_worker.task
+        await p2p_router.close_identity_worker()
+    asyncio.run(earn())
+    cert = _proof_binds_its_certificate(node)
+    assert cert["method"] == "pow"
+    _no_model(monkeypatch)
+    assert p2p_router._holds_identity() and not p2p_router._email_road()
+    monkeypatch.setattr(p2p_router, "_identity_worker", None)
+    monkeypatch.setattr(p2p_router, "_identity_worker_closed", False)
+    monkeypatch.setattr(identity_pow, "pow_mine",
+                        lambda *a, **k: pytest.fail("the proof held was mined again"))
+
+    async def again():
+        await p2p_router.start_identity_worker()
+        await p2p_router._identity_worker.task
+    asyncio.run(again())
+    state = _state(node.conn)
+    assert (state["status"], state["detail"]) == ("ready", "proof")
+
+
+def test_a_certificate_with_no_proof_is_no_identity_to_keep(node, monkeypatch):
+    """The certificate a send-code asked for and no code followed: such a
+    node still mines nothing."""
+    _account(node)
+    assert asyncio.run(p2p_router._get_own_birth_cert())["method"] == "pow"
+    _no_model(monkeypatch)
+    assert not p2p_router._holds_identity() and p2p_router._email_road()
+
+
+# ---------------------------------------------------------------------------
+# A node that can never check a proof says so (PI-NODE-2B §3.2)
+# ---------------------------------------------------------------------------
+
+def _gate(scratch_dsn, limit_kib, available_kib=None):
+    from desktop.p2p.identity_registry import IdentityGate, psycopg2_conn_factory
+    return IdentityGate(lambda: psycopg2_conn_factory(scratch_dsn), birth_cert.verify_certificate,
+                        mem_limit_kib=lambda: limit_kib,
+                        mem_available_kib=lambda: available_kib)
+
+
+def _identity(method="pow"):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    pubkey = Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+    return pubkey, _issue(pubkey, method, EASY)
+
+
+def test_a_machine_whose_whole_memory_is_under_the_guard_refuses_a_proof_for_good(node, scratch_dsn):
+    """Not "busy, come back in 30 s" for ever: a stated refusal, with no
+    Retry-After — and said before the proof is asked for."""
+    guard = identity_proof.MEM_GUARD_KIB
+    small = _gate(scratch_dsn, guard - 1)
+    assert not small.can_evaluate
+    pubkey, cert = _identity()
+    for proof in (None, identity_proof.make_proof(cert, bytes(identity_pow.NONCE_LEN))):
+        admission = asyncio.run(small.admit(pubkey, cert, proof, "192.0.2.1"))
+        assert (admission.status, admission.detail, admission.http_status, admission.retry_after) == (
+            "unverifiable", identity_registry.UNVERIFIABLE, 403, None)
+    # An identity verified by email it knows at once, by the signature
+    pubkey, cert = _identity("email")
+    assert asyncio.run(small.admit(pubkey, cert, None, "192.0.2.1")).status == "verified"
+
+
+def test_a_machine_that_is_only_short_of_memory_now_still_says_busy(node, scratch_dsn):
+    guard = identity_proof.MEM_GUARD_KIB
+    for limit in (guard, None):                       # at the guard, or unknown: it may yet
+        gate = _gate(scratch_dsn, limit, available_kib=guard - 1)
+        assert gate.can_evaluate
+        pubkey, cert = _identity()
+        assert asyncio.run(gate.admit(pubkey, cert, None, "192.0.2.1")).status == "proof_required"
+        admission = asyncio.run(gate.admit(
+            pubkey, cert, identity_proof.make_proof(cert, bytes(identity_pow.NONCE_LEN)), "192.0.2.1"))
+        assert (admission.status, admission.detail, admission.http_status) == (
+            "busy", "verifier short of memory", 503)
+        assert admission.retry_after
+
+
+def test_the_memory_limit_is_the_cgroups_where_one_is_set(tmp_path, monkeypatch):
+    import builtins
+    real = builtins.open
+    files = {}
+
+    def fake(path, *a, **kw):
+        if str(path) in files:
+            if files[str(path)] is None:
+                raise FileNotFoundError(path)
+            return real(files[str(path)], *a, **kw)
+        return real(path, *a, **kw)
+
+    def write(name, text):
+        (tmp_path / name).write_text(text)
+        return tmp_path / name
+    monkeypatch.setattr(builtins, "open", fake)
+    files["/proc/meminfo"] = write("meminfo", "MemTotal:       16000000 kB\nMemAvailable: 1 kB\n")
+    files["/sys/fs/cgroup/memory/memory.limit_in_bytes"] = None
+    files["/sys/fs/cgroup/memory.max"] = write("max", "max\n")
+    assert identity_pow.mem_limit_kib() == 16000000
+    files["/sys/fs/cgroup/memory.max"] = write("capped", f"{2 * 1024 ** 3}\n")
+    assert identity_pow.mem_limit_kib() == 2 * 1024 * 1024
+    files["/sys/fs/cgroup/memory.max"] = None
+    files["/sys/fs/cgroup/memory/memory.limit_in_bytes"] = write("v1", f"{1 << 62}\n")   # v1's "no limit"
+    assert identity_pow.mem_limit_kib() == 16000000
+
+
+def test_a_guest_parks_on_a_node_too_small_to_check_it_until_its_identity_is_another(node, parked,
+                                                                                      scratch_dsn):
+    """The same answer every pass, so it is asked once; a verified email is
+    another identity, and the next pass goes through."""
+    from desktop.p2p import chat_client as cc
+    assert cc._UNVERIFIABLE_REFUSAL == identity_registry.UNVERIFIABLE
+    assert identity_registry.UNVERIFIABLE.startswith("identity")       # the client's own branch
+    issuer, client, identity = parked(small=True)
+    pubkey = identity["public_key_hex"].lower()
+
+    async def passes():
+        client._loop = asyncio.get_running_loop()
+        await p2p_router.start_identity_worker()
+        await p2p_router._identity_worker.task                # a proof mined: all this node can show
+        await client._do_resolve_pending()
+        await client._do_resolve_pending()
+        await client._do_resolve_pending()
+        assert len(issuer.seen) == 1 and not _resolved(node, issuer)
+        email = _issue(pubkey, "email", 32)
+        assert p2p_identity.save_certificate(settings, email)
+        await client._do_resolve_pending()
+    asyncio.run(passes())
+    assert len(issuer.seen) == 2 and _resolved(node, issuer)
+
+
+def test_an_unchecked_authors_slice_is_never_passed_on_whatever_the_second_switch_says(node):
+    """Q5's condition: what a node took without evaluating its author's
+    proof stays its own copy. A slice is served under `author_certificate`,
+    which answers for an author this node verified — never for one it only
+    recorded, with "pass on what this node holds" on or off."""
+    from desktop.p2p import slice_trust
+    unchecked, cert = _identity()
+    proof = identity_proof.make_proof(cert, bytes(identity_pow.NONCE_LEN))
+    row = identity_registry.observe(node.conn, cert, proof=proof)
+    assert row["status"] == "unverified"                  # recorded with its proof, not evaluated
+    known, email = _identity("email")
+    identity_registry.observe(node.conn, email)
+    for pass_on in ("true", "false"):
+        with node.conn.cursor() as cur:
+            cur.execute("INSERT INTO user_settings (key, value) VALUES ('sync.pass_on', %s::jsonb) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (pass_on,))
+        assert slice_trust.author_certificate(node.conn, unchecked) is None
+        assert slice_trust.author_certificate(node.conn, known)[0]["method"] == "email"
+
+
+def test_a_reachability_verdict_is_said_once(node, caplog):
+    import logging
+
+    from desktop.p2p import chat_client as cc
+    client = cc.ChatClient.__new__(cc.ChatClient)
+    client._on_reachability, client._reachability_said = None, None
+    written = []
+
+    async def write(values):
+        written.append(values["p2p.reachability"])
+    client._write_settings = write
+
+    async def verdicts():
+        for status, detail in (("unknown", "master contact not resolved yet"),) * 3 + (("reachable", "probe"),):
+            await client._apply_reachability(status, detail)
+    with caplog.at_level(logging.DEBUG, logger="desktop.p2p.chat_client"):
+        asyncio.run(verdicts())
+    said = [(r.levelname, r.getMessage()) for r in caplog.records if "Reachability" in r.getMessage()]
+    assert [level for level, _ in said] == ["INFO", "DEBUG", "DEBUG", "INFO"]
+    assert written == ["unknown"] * 3 + ["reachable"]         # the setting is written every time

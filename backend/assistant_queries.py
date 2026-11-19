@@ -414,6 +414,27 @@ def format_track(row: dict) -> str:
     return line + ("\n  " + " | ".join(extras) if extras else "")
 
 
+def search_note(data: dict) -> str:
+    """Why a model-backed search (sound, lyrics' meaning, biographies)
+    answered what it did, for the agent to pass on — the engine's own state,
+    which a bare "(0 results)" hid: '' when there is nothing to say."""
+    if data.get("unavailable"):
+        return ("This search needs AI models, and none runs on this node (they are switched "
+                "off or not installed): nothing can be matched by sound, by the meaning of "
+                "lyrics or by biography here. Search by names, genres, instruments or tags "
+                "instead, and say why.")
+    if data.get("warming"):
+        return "The AI model this search needs is still loading — try again in a minute."
+    if data.get("limited"):
+        return ("Limited on this node: a non-English sound query matches genre descriptions "
+                "only. An English query searches the sound itself.")
+    return ""
+
+
+def with_note(text: str, note: str) -> str:
+    return f"{text}\n\n{note}" if note else text
+
+
 def format_track_list(rows: list[dict], header: str = "") -> str:
     if not rows:
         return (header + "\nNo tracks found.") if header else "No tracks found."

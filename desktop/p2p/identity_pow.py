@@ -158,6 +158,34 @@ def attempts_for_quantile(q: float, difficulty: int) -> int:
 # Benchmark — `python -m desktop.p2p.identity_pow --bench`
 # ----------------------------------------------------------------------------
 
+def mem_limit_kib() -> Optional[int]:
+    """The most memory this process may ever have: its cgroup's limit where
+    one is set (a capped container), else the machine's total; None if
+    unknown. What "this node can never run an evaluation" is decided from —
+    mem_available_kib is one moment's reading."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as f:
+                limit = f.read().strip()
+        except OSError:
+            continue
+        if limit != "max" and int(limit) < 1 << 60:
+            return int(limit) // 1024
+        break
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    try:
+        import psutil
+        return psutil.virtual_memory().total // 1024
+    except ImportError:
+        return None
+
+
 def mem_available_kib() -> Optional[int]:
     """Free-for-allocation memory (MemAvailable / psutil), None if unknown."""
     try:

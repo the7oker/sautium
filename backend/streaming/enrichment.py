@@ -425,7 +425,10 @@ class PreviewLyricsEnricher:
 
         # Embed the stored lyrics (no-ops if already embedded, or if the text
         # cleans to nothing / exceeds the junk-length cap) — a heavy pass of the
-        # accelerator like any text pass.
+        # accelerator like any text pass. A node with no model keeps the text.
+        from hardware_profile import resolve as _hw
+        if not _hw().ml_available:
+            return
         from device import heavy_pass
         from lyrics_embeddings import generate_lyrics_embeddings
         with heavy_pass("a stream's lyrics") as held:

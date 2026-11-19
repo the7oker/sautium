@@ -3980,6 +3980,19 @@
     // = disabled with a download hint on tap. Kept current via the
     // /api/events stream ('sautium:mb-changed') — the old one-shot fetch
     // left a fresh node's chip dead until a page reload.
+    // The three AI scopes exist only where a model runs: a node whose models
+    // are off or absent never loads one, so it offers none of them (the
+    // chips sit in the closed filters panel, so nothing is seen to go).
+    const scopes = fetch('/api/settings/hardware')
+      .then(r => r.ok ? r.json() : null)
+      .then(hw => {
+        if (!hw || hw.detected.ml_available) return;
+        for (const value of ['bio', 'sound', 'lyrics']) {
+          const chip = screen.querySelector(`#discoveryScopeRow .f-chip[data-value="${value}"]`);
+          if (chip) chip.hidden = true;
+        }
+      })
+      .catch(err => console.warn('hardware profile failed:', err));
     const mbStatus = fetch('/api/discovery/mb-status')
       .then(r => r.ok ? r.json() : { available: false, state: 'none' })
       .then(s => {
@@ -3989,8 +4002,14 @@
       .catch(err => console.warn('mb-status failed:', err));
     // The screen is painted once the shuffle shelf and the chip have
     // landed — render() publishes this as window.sautiumRendered.
-    return Promise.all([shuffle, mbStatus]);
+    return Promise.all([shuffle, mbStatus, scopes]);
   }
+
+  // A query that reached an AI scope on a node where no model runs (a link
+  // carried it; the chips are hidden there). Draft words for the owner's
+  // words review.
+  const DISCOVERY_NO_MODELS = 'This search needs AI models, and none runs on this node.'
+    + ' Search by names and titles instead.';
 
   function applyMbChipState(chip, s) {
     chip.dataset.mbState = s.state || (s.available ? 'local' : 'none');
@@ -4530,6 +4549,7 @@
           if ((data.results || []).length > 0) completion.hadAnyResults = true;
           if (data.warming) completion.warming = true;
           if (data.limited) completion.limited = true;
+          if (data.unavailable) completion.unavailable = true;
         })
         .catch(err => {
           if (queryId !== getActiveId()) return;
@@ -4544,7 +4564,9 @@
               // A bio-scope search has no tracks block to carry the per-block
               // warming note — say it here instead of a false "No matches."
               const emptyP = empty.querySelector('p');
-              if (emptyP) emptyP.textContent = completion.limited
+              if (emptyP) emptyP.textContent = completion.unavailable
+                ? DISCOVERY_NO_MODELS
+                : completion.limited
                 ? 'Limited on this device: non-English Sound queries match genre descriptions only.'
                 : completion.warming
                   ? 'AI model is warming up — search again in a minute.'
@@ -4725,7 +4747,9 @@
     // `limited` is DISTINCT from warming: this hardware profile never loads
     // the translator, so a non-English Sound query permanently matches
     // genre descriptions only — promising a warm-up would be a lie.
-    const stateNote = (descriptor.id === 'tracks' && data.limited)
+    const stateNote = (descriptor.id === 'tracks' && data.unavailable)
+      ? `<p class="d-loading-notice">${DISCOVERY_NO_MODELS}</p>`
+      : (descriptor.id === 'tracks' && data.limited)
       ? '<p class="d-loading-notice">Limited on this device: non-English'
         + ' Sound queries match genre descriptions only.</p>'
       : (descriptor.id === 'tracks' && data.warming)
@@ -7643,16 +7667,83 @@
   // re-derives it, so the Friends list and the Sync screen agree.
 
   // The line of a contact that is not online — the friend row's and the
-  // chat header's. Support's tells what becomes of what is written to it
-  // (row.mailbox, the server's word: B-92).
+  // chat header's.
   function offlineLabel(friend) {
-    const base = friend.last_seen ? `last seen ${lastSeenLabel(friend.last_seen)}` : 'offline';
-    return friend.mailbox ? `${base} · messages are kept` : base;
+    return friend.last_seen ? `last seen ${lastSeenLabel(friend.last_seen)}` : 'offline';
   }
+
+  // Support's line, in its row and its chat header: what becomes of a
+  // message, never a presence — "offline" reads as "nobody will get this",
+  // and Support answers when a person does (row.reach, the server's word:
+  // this node can deliver or deposit). Draft words for the owner's review.
+  function supportLine(friend) {
+    return friend.reach
+      ? 'Write any time — your message is kept until Support reads it'
+      : 'Your message waits on this node and is sent once it can reach Support';
+  }
+
+  // This node's own identity as its worker last said it (the page's event
+  // stream, 'sautium:identity'): while the node has none it can use, friends
+  // and Support cannot connect — Friends and every chat header say why, and
+  // what the person can do. A state is shown where it is; its two events are
+  // toasts: the identity ready, and the first message written while it is
+  // not. Draft words for the owner's words review.
+  const nodeIdentity = {
+    state: null,
+    _saidWaiting: false,
+    waiting() {
+      const s = this.state;
+      return !!(s && ['mining', 'paused', 'needs_email'].includes(s.status));
+    },
+    apply(d) {
+      const was = this.state;
+      this.state = d;
+      if (d.status === 'ready') {
+        this._saidWaiting = false;
+        if (!d.initial && was && was.status && was.status !== 'ready') {
+          notices.toast({ kind: 'success', title: 'Your node is ready',
+                          text: 'Friends and Support can connect now.', key: 'identity.ready' });
+        }
+      }
+    },
+    // Once per waiting period, not per message
+    wroteWhileWaiting() {
+      if (!this.waiting() || this._saidWaiting) return;
+      this._saidWaiting = true;
+      notices.toast({ kind: 'info', title: 'Saved',
+                      text: 'It will be sent once your node\'s identity is ready.',
+                      key: 'identity.waiting' });
+    },
+    offersEmail() {
+      const s = this.state;
+      return this.waiting() && (s.status === 'needs_email' || !s.email_verified);
+    },
+    line() {
+      const s = this.state;
+      if (!this.waiting()) return '';
+      if (s.status === 'needs_email') {
+        return 'This node has no network identity yet. Verify your email to connect with friends and Support.';
+      }
+      const email = s.email_verified ? '' : ' Or verify your email — either is enough.';
+      const until = 'Until it ends, friends and Support cannot connect; what you write waits here and goes by itself.';
+      if (s.status === 'paused') {
+        const why = { memory: 'not enough free memory', playback: 'music is playing',
+                      battery: 'on battery' }[s.detail] || 'waiting';
+        return `Your node is proving it is a real new node, and the calculation is paused: ${why}. `
+          + `It goes on by itself. ${until}${email}`;
+      }
+      const odds = Math.round((s.p_done || 0) * 100);
+      return 'Your node is proving it is a real new node: a one-time calculation that keeps '
+        + `fake identities out of the network. ${until} So far: ${odds}% of the usual odds.${email}`;
+    },
+  };
 
   // The chat header's status line: the friend row's words.
   function paintChatStatus(statusEl, friend) {
-    if (friend.is_online) {
+    if (friend.source === 'master') {
+      statusEl.textContent = supportLine(friend);
+      statusEl.style.color = 'var(--color-text-muted)';
+    } else if (friend.is_online) {
       statusEl.innerHTML = `<span class="status-dot"></span>online`;
       statusEl.style.color = 'var(--color-positive)';
     } else {
@@ -7698,9 +7789,11 @@
 
   function friendRowInner(friend) {
     const name = friend.display_name || friend.username || friend.invite_code || '?';
-    const status = friend.is_online
-      ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
-      : `<div class="friend-status">${escapeHtml(offlineLabel(friend))}</div>`;
+    const status = friend.source === 'master'
+      ? `<div class="friend-status">${escapeHtml(supportLine(friend))}</div>`
+      : friend.is_online
+        ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
+        : `<div class="friend-status">${escapeHtml(offlineLabel(friend))}</div>`;
     const ph = avatarPlaceholder(name);
     const unread = Number(friend.unread_count) || 0;
     const badge = unread > 0
@@ -7844,6 +7937,13 @@
         Add by invite code or by email.
       </div>
 
+      <div id="friendsIdentity" hidden>
+        <div class="hint" id="friendsIdentityText"></div>
+        <button class="manage-tokens-row" type="button" data-action="verify-email" hidden>
+          <span>Verify email</span><span class="chev">›</span>
+        </button>
+      </div>
+
       <div id="friendRequests" hidden>
         <div class="group-label">Added you</div>
         <div class="friends-list" id="friendRequestsList"></div>
@@ -7906,6 +8006,7 @@
     // manual reload and without a second connection to the origin.
     const detach = () => {
       window.removeEventListener('sautium:chat-changed', onChat);
+      window.removeEventListener('sautium:identity', paintIdentity);
       window.removeEventListener('sautium:route', onRoute);
     };
     const onChat = () => {
@@ -7916,7 +8017,20 @@
     const onRoute = () => {
       if (!document.contains(listEl)) detach();
     };
+    // Why nothing connects while the node has no identity it can use, at
+    // the list's head; gone at `ready`
+    const identityEl = screen.querySelector('#friendsIdentity');
+    const verifyBtn = identityEl.querySelector('[data-action="verify-email"]');
+    verifyBtn.addEventListener('click', () => navigate('profile'));
+    function paintIdentity() {
+      const text = nodeIdentity.line();
+      identityEl.hidden = !text;
+      identityEl.querySelector('#friendsIdentityText').textContent = text;
+      verifyBtn.hidden = !nodeIdentity.offersEmail();
+    }
+    paintIdentity();
     window.addEventListener('sautium:chat-changed', onChat);
+    window.addEventListener('sautium:identity', paintIdentity);
     window.addEventListener('sautium:route', onRoute);
 
     // Friends list: favorites first, then the first page, further pages
@@ -8636,6 +8750,7 @@
         </button>
       </div>
       <div class="chat-body-wrap">
+        <div class="hint" id="chatIdentity" hidden></div>
         <div class="thread" id="chatThread">
           <div class="e2ee-banner">
             ${SVG_LOCK}
@@ -8735,6 +8850,7 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({content: text}),
         });
+        nodeIdentity.wroteWhileWaiting();
         // SSE will refresh; refetch immediately for snappy feel.
         loadMessages();
       } catch (err) { console.warn('Send failed', err); }
@@ -8749,6 +8865,7 @@
     // stream per tab.
     const detach = () => {
       window.removeEventListener('sautium:chat-changed', onChat);
+      window.removeEventListener('sautium:identity', paintIdentity);
       window.removeEventListener('sautium:route', onRoute);
     };
     const onChat = () => {
@@ -8760,7 +8877,17 @@
     const onRoute = () => {
       if (!document.contains(threadEl)) detach();
     };
+    // The same line as Friends' head: why this message may wait
+    const identityEl = screen.querySelector('#chatIdentity');
+    function paintIdentity() {
+      const text = nodeIdentity.line();
+      identityEl.hidden = !text;
+      identityEl.textContent = text
+        + (text && nodeIdentity.offersEmail() ? ' Verify it in More › Profile.' : '');
+    }
+    paintIdentity();
     window.addEventListener('sautium:chat-changed', onChat);
+    window.addEventListener('sautium:identity', paintIdentity);
     window.addEventListener('sautium:route', onRoute);
   }
 
@@ -13169,6 +13296,14 @@
             'network is trying to guess the password.',
     };
   };
+  // A Raspberry Pi whose supply dropped under its voltage since the node's
+  // start (backend/power_watch.py): a report, gone once seen. Draft words
+  // for the owner's words review.
+  NOTICE_COPY['power.undervoltage'] = () => ({
+    title: 'The power supply is too weak',
+    text: 'This machine\'s supply dropped under its voltage: under load it can switch off, ' +
+          'and a disk can lose what it was writing. Use the board\'s official power supply.',
+  });
   // Raised only while the assistant runs on Codex (backend/codex_cli.py).
   NOTICE_COPY['codex.signed_out'] = () => ({
     title: 'Codex is signed out',
@@ -15903,7 +16038,13 @@
       const odds = Math.round((st.p_done || 0) * 100);
       return `securing… ${fmtNum(st.attempts || 0)} tries · ${odds}% odds`;
     }
-    if (st.status === 'paused') return `paused · ${st.detail === 'battery' ? 'on battery' : 'low memory'}`;
+    if (st.status === 'needs_email') return 'needs a verified email';
+    if (st.status === 'paused') {
+      // The memory pause may never end on a small board: the other way is said with it
+      if (st.detail === 'memory') return 'paused · not enough free memory — or verify your email';
+      return `paused · ${st.detail === 'playback' ? 'while music plays'
+        : st.detail === 'battery' ? 'on battery' : st.detail || 'waiting'}`;
+    }
     return st.status;
   }
   function identityDetail(st) {
@@ -15911,6 +16052,7 @@
     const parts = [];
     if (st.method) parts.push(`method: ${st.method}`);
     if (st.difficulty) parts.push(`E = ${st.difficulty} attempts expected`);
+    if (st.status === 'needs_email') parts.push('Verify your email in More › Profile: this node does not earn its identity by computing');
     if (st.proof_mined_at) parts.push(`proof mined ${st.proof_mined_at}`);
     if (st.started_at && st.status !== 'ready') parts.push(`since ${st.started_at}`);
     return parts.join(' · ');
@@ -17187,12 +17329,132 @@
   // would walk an empty folder, so the server refuses one. The notice set is
   // the one source, on render and on every snapshot (the library read wakes
   // the channel when it sees the folder gone first).
+  // Who names the folder decides the line under it (lib.music_folder, kept
+  // on the row): the owner here, under the roots the node's setup mounted
+  // ('pick'); the launcher's window; the node's .env ('setup').
+  const MUSIC_FOLDER_LINES = {
+    pick: '',
+    launcher: 'Configured in the launcher.',
+    setup: 'Named where this node was set up (MUSIC_LIBRARY_PATH in its .env).',
+  };
   function paintMusicPathRow(row, missing) {
     row.classList.toggle('notice-row', missing);
     row.classList.toggle('kind-error', missing);
-    row.querySelector('.row-stack-sub').textContent = missing
+    const sub = row.querySelector('.row-stack-sub');
+    sub.textContent = missing
       ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
-      : 'Configured in the launcher.';
+      : MUSIC_FOLDER_LINES[row.dataset.musicFolder] || '';
+    sub.hidden = !sub.textContent;
+  }
+
+  /* The folder sheet of a node that reads its music under roots (backend
+     library_root.py): the places a choice can start at — each disk plugged
+     in, each folder named at setup — then down through folders, and "Use
+     this folder". Every name is a stranger's text (a disk's label, a
+     folder's name): escaped, never part of a path the page builds — the
+     server hands each row's path, and resolves it again when it is sent.
+     The list of places follows the mount table live: a disk plugged in
+     while the sheet is open appears in it (the Library stream wakes it).
+     Draft words for the owner's words review. */
+  function openMusicFolderSheet(onChosen) {
+    if (document.querySelector('[data-folder-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.folderSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Music folder</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <div data-crumb style="font-size:calc(12.5*var(--px));color:var(--color-text-muted);line-height:1.5;"></div>
+          <div data-list></div>
+          <button class="profile-btn primary" data-use hidden>Use this folder</button>
+          <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">
+            Sautium can read every disk plugged into this machine. It writes to none of them.
+          </p>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const crumb = overlay.querySelector('[data-crumb]');
+    const list = overlay.querySelector('[data-list]');
+    const use = overlay.querySelector('[data-use]');
+    const msg = overlay.querySelector('[data-msg]');
+    let at = null;                       // the folder shown, null = the places
+    let seq = 0;
+    const row = (label, path, sub) => `
+      <button class="manage-tokens-row" type="button" data-path="${escapeProfileHtml(path)}">
+        <span>${escapeProfileHtml(label)}${sub ? ` <span style="color:var(--color-text-dim);">${escapeProfileHtml(sub)}</span>` : ''}</span><span class="chev">›</span>
+      </button>`;
+    async function show(under) {
+      const mine = ++seq;
+      let data;
+      try {
+        const r = await fetch('/api/settings/library/folders'
+          + (under ? `?under=${encodeURIComponent(under)}` : ''));
+        data = await r.json().catch(() => ({}));
+        if (mine !== seq) return;
+        if (!r.ok) {
+          // A folder that left with its disk: back to the places
+          if (under) return show(null);
+          msg.textContent = typeof data.detail === 'string' ? data.detail : 'Could not read the folders.';
+          return;
+        }
+      } catch (err) {
+        if (mine === seq) msg.textContent = String(err);
+        return;
+      }
+      at = data.under;
+      msg.textContent = '';
+      if (!at) {
+        crumb.textContent = data.places.length
+          ? 'Where is your music?'
+          : 'No disk is plugged in, and no folder was named when this node was set up. Plug a disk with music into this machine: it appears here.';
+        list.innerHTML = data.places.map(p => row(
+          p.kind === 'disk' ? (p.label || 'Disk') : p.name, p.path,
+          p.kind === 'disk' && p.size_bytes ? `— ${fmtBytes(p.size_bytes)}` : '')).join('');
+        use.hidden = true;
+        return;
+      }
+      const count = `${fmtNum(data.folders.length)} folder${data.folders.length === 1 ? '' : 's'} · `
+        + `${fmtNum(data.audio_files)}${data.capped ? '+' : ''} audio file${data.audio_files === 1 ? '' : 's'}`;
+      crumb.textContent = `${fmtPathForDisplay(at)} — ${count}`;
+      list.innerHTML = `
+        <button class="manage-tokens-row" type="button" data-up><span>‹ Back</span><span></span></button>`
+        + data.folders.map(f => row(f.name, f.path, '')).join('');
+      list.querySelector('[data-up]').dataset.path = data.parent || '';
+      use.hidden = false;
+    }
+    list.addEventListener('click', e => {
+      const btn = e.target.closest('[data-path]');
+      if (btn) show(btn.dataset.path || null);
+    });
+    // The Library stream wakes on the mount table's changes among much else
+    // (a scan's progress): only the list of places follows it — a folder's
+    // own listing counts its files, and is asked for by a tap alone.
+    const sub = libraryWake.on(() => { if (at === null) show(null); });
+    const close = () => { sub.abort(); overlay.remove(); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    use.addEventListener('click', () => onceInFlight(overlay, async () => {
+      try {
+        const r = await fetch('/api/settings/library/root', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ path: at }),
+        });
+        if (r.ok) { close(); onChosen(); return; }
+        const data = await r.json().catch(() => ({}));
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not chosen.';
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    }));
+    show(null);
   }
 
   async function renderLibrary(root) {
@@ -17221,9 +17483,15 @@
     // Treat that — and the Docker default '/music' when nothing was
     // bind-mounted — as "not configured" so we don't pretend a path
     // exists.
-    const isPathSet     = !!(lib.music_path && lib.music_path !== '/music');
-    const pathFull      = isPathSet ? fmtPathForDisplay(lib.music_path) : '';
-    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull) : 'Not set';
+    // A node whose owner picks the folder here has none until they do. One
+    // whose .env names it holds a folder even where only the container's
+    // own mount point is known (no MUSIC_HOST_PATH): said as that.
+    const picksFolder   = lib.music_folder === 'pick';
+    const isPathSet     = !!(lib.music_path && (lib.music_path !== '/music' || lib.music_folder === 'setup'));
+    const pathFull      = !isPathSet ? ''
+      : lib.music_path === '/music' ? 'The folder named at setup' : fmtPathForDisplay(lib.music_path);
+    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull)
+      : picksFolder ? 'Not chosen' : 'Not set';
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
     const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
@@ -17322,7 +17590,11 @@
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
-          No music folder yet — Home, streaming and friends work without one. To add your own files, open the <b>Desktop Launcher</b> and tap <b>Choose Music Folder</b>; files are only ever read.
+          ${picksFolder
+            ? 'No music folder yet — Home and friends work without one. To add your own files, tap <b>Choose</b> above and pick the folder your music is in; files are only ever read.'
+            : lib.music_folder === 'setup'
+              ? 'No music folder yet — Home, streaming and friends work without one. To add your own files, name the folder in this node\'s <b>.env</b> (MUSIC_LIBRARY_PATH) and start the node again; files are only ever read.'
+              : 'No music folder yet — Home, streaming and friends work without one. To add your own files, open the <b>Desktop Launcher</b> and tap <b>Choose Music Folder</b>; files are only ever read.'}
         </p>
       </div>` : `
       <div class="empty-library">
@@ -17350,10 +17622,11 @@
         ${_settingsHeader('Library')}
 
         <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked" data-music-path-row>
+          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}">
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
               <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
+              ${picksFolder ? `<button class="profile-btn secondary" type="button" data-action="choose-folder" data-guide="music_folder">${isPathSet ? 'Change' : 'Choose'}</button>` : ''}
             </div>
             <div class="row-stack-sub"></div>
           </div>
@@ -17382,6 +17655,8 @@
     `;
     paintMusicPathRow(root.querySelector('[data-music-path-row]'), !!notices.get('library.mount_missing'));
     _wireBack(root);
+    const chooseFolder = root.querySelector('[data-action="choose-folder"]');
+    if (chooseFolder) chooseFolder.addEventListener('click', () => openMusicFolderSheet(() => renderLibrary(root)));
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
     // A refused start says why: the folder unreachable, a scan already
@@ -18013,6 +18288,9 @@
     // Notices ride /api/events (player.js re-dispatches the snapshot); the
     // link state comes from the same stream's transport.
     window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));
+    // Registered before any screen's own listener: Friends and a chat
+    // header repaint from the state this one has already taken
+    window.addEventListener('sautium:identity', e => nodeIdentity.apply(e.detail || {}));
     window.addEventListener('sautium:link', e => {
       notices.strip('link', e.detail && e.detail.up ? null
         : 'Connection to the node lost — reconnecting…');

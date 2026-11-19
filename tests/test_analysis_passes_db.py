@@ -65,7 +65,7 @@ _REAL_LOAD_AUDIO = embeddings.AudioEmbeddingGenerator._load_audio
 def _profile(name="full", device="cpu", ml=True, cores=4):
     return hardware_profile.HardwareProfile(
         name=name, source="env", device=device, accel_name=None, accel_memory_gb=16.0,
-        ram_gb=16.0, cores=cores, ml_available=ml)
+        ram_gb=16.0, cores=cores, models="on" if ml else "absent")
 
 
 @pytest.fixture

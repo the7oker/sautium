@@ -242,7 +242,8 @@ class DHTService:
                  http_port: int = 19000, state_store=None):
         """
         Args:
-            sharing_enabled: the "P2P sharing" switch — off, the rare-artist
+            sharing_enabled: whether this node passes on what it holds
+                ("P2P sharing", and its second switch sync.pass_on) — off, the rare-artist
                 tail is held: it would advertise analysis the node refuses
                 to serve, and name the artists it holds analysis for.
             listen_port: UDP port for libtorrent DHT operations
