@@ -226,13 +226,14 @@ def _write_instructions(workdir: Path) -> Path:
     every spawn and re-read by codex on every spawn, resume included, so
     rule changes ship with code updates and reach sessions already in
     flight; the atomic rename keeps a concurrent spawn from reading a
-    torn file. A leftover
+    torn file; bytes, as the Claude runner's prompt file is (text mode on
+    Windows would end every line in CRLF). A leftover
     AGENTS.md from the earlier carrier goes away: codex would inject it
     as a second, user-role copy of the prompt."""
     from assistant_prompt import get_system_prompt
     path = workdir / INSTRUCTIONS_FILE
     tmp = workdir / (INSTRUCTIONS_FILE + ".tmp")
-    tmp.write_text(get_system_prompt("codex"), encoding="utf-8")
+    tmp.write_bytes(get_system_prompt("codex").encode("utf-8"))
     os.chmod(tmp, 0o644)
     tmp.replace(path)
     (workdir / "AGENTS.md").unlink(missing_ok=True)
@@ -641,7 +642,7 @@ def _write_text_instructions(workdir: Path, text: str) -> Path:
     path = workdir / f"text-{digest}.md"
     if not path.is_file():
         tmp = workdir / f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_bytes(text.encode("utf-8"))
         os.chmod(tmp, 0o644)
         tmp.replace(path)
     return path

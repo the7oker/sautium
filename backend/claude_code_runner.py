@@ -100,8 +100,9 @@ _ONE_SHOT_TURN = "Answer as the system prompt asks."
 # A CLI that records the system prompt (on by default since 2.1.312) resends
 # the first request's copy on every resume, whatever a later launch passes —
 # measured through this runner on 2.1.316: a resumed turn given prompt B sent
-# prompt A. A chat would keep its first turn's player context and catalogue
-# text for good, so recording is off wherever the CLI has the switch. Its
+# prompt A. A chat would keep its first turn's library size and the prompt of
+# the release it began on for good, so recording is off wherever the CLI has
+# the switch. Its
 # --help says so: 2.1.278 already lists it ("no effect where recording is not
 # yet enabled"), 2.1.241 refuses it as an unknown option.
 _SNAPSHOT_SWITCH = "--system-prompt-snapshot"
@@ -353,6 +354,15 @@ def _agent_kwargs() -> dict:
     return kwargs
 
 
+def _remove(path: str) -> None:
+    """A call's own file, after the call: a removal that fails leaves a file
+    behind, never a call that succeeded reported as failed."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning(f"Claude Code's call file {path} stays: {e}")
+
+
 @contextlib.contextmanager
 def _system_prompt_file(text: str):
     """`text` as the file a call's --system-prompt-file names, for as long as
@@ -364,11 +374,32 @@ def _system_prompt_file(text: str):
                                 dir=agent_workdir("claude-agent"))
     try:
         with os.fdopen(fd, "wb") as f:
+            if sys.platform != "win32":
+                os.fchmod(f.fileno(), 0o644)
             f.write(text.encode("utf-8"))
-        os.chmod(path, 0o644)
         yield path
     finally:
-        os.unlink(path)
+        _remove(path)
+
+
+@contextlib.contextmanager
+def _turn_input(text: str):
+    """A chat turn's message as the CLI's stdin (`-p` with no text reads it
+    there): a file the child inherits open, so the account it runs as needs
+    no right to it. Not a pipe: the CLI gives up on stdin 3 s after it
+    starts if nothing has arrived, which a feeder held up that long would
+    miss (measured on 2.1.241-2.1.316); a file has its bytes there from the
+    start. Written as bytes — a text-mode pipe or file on Windows writes
+    "\n" as CRLF."""
+    fd, path = tempfile.mkstemp(prefix="message-", suffix=".txt",
+                                dir=agent_workdir("claude-agent"))
+    try:
+        with os.fdopen(fd, "w+b") as f:
+            f.write(text.encode("utf-8"))
+            f.seek(0)
+            yield f
+    finally:
+        _remove(path)
 
 
 def call_claude_code(
@@ -435,13 +466,13 @@ def call_claude_code(
 
     try:
         kwargs = _agent_kwargs()
-        # Bytes both ways: a text-mode pipe on Windows writes "\n" as CRLF.
         kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=wallclock)
-        if stdin is not None:
-            del kwargs["stdin"]
-            kwargs["input"] = stdin.encode("utf-8")
-        with (library_turn() if tools == LIBRARY else contextlib.nullcontext()), \
-                _system_prompt_file(prompt) as prompt_file:
+        with contextlib.ExitStack() as call:
+            prompt_file = call.enter_context(_system_prompt_file(prompt))
+            if stdin is not None:
+                kwargs["stdin"] = call.enter_context(_turn_input(stdin))
+            if tools == LIBRARY:
+                call.enter_context(library_turn())
             result = subprocess.run([*cmd, "--system-prompt-file", prompt_file], **kwargs)
         stdout = result.stdout.decode("utf-8", "replace")
 
@@ -605,27 +636,13 @@ def spawn_failure(cli: str, e: OSError) -> str:
     return f"{cli} could not start: {e}"
 
 
-def _spawn_claude(cmd: list[str], message: str, stdout=subprocess.PIPE, stderr=subprocess.PIPE):
-    """A chat turn's subprocess, `message` fed to its stdin (`-p` with no
-    text reads it there) by a thread of its own: a pipe holds a few KiB and
-    the CLI reads only once it has started. Returns the Popen handle."""
+def _spawn_claude(cmd: list[str], stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE):
+    """A chat turn's subprocess, its message the open file `stdin`
+    (_turn_input). Returns the Popen handle."""
     kwargs = _agent_kwargs()
-    kwargs.update(stdin=subprocess.PIPE, stdout=stdout, stderr=stderr, text=True,
+    kwargs.update(stdin=stdin, stdout=stdout, stderr=stderr, text=True,
                   encoding="utf-8", errors="replace")
-    proc = subprocess.Popen(cmd, **kwargs)
-
-    def feed():
-        # The bytes under the text layer: a text-mode pipe on Windows writes
-        # "\n" as CRLF.
-        try:
-            with proc.stdin:
-                proc.stdin.buffer.write(message.encode("utf-8"))
-        except OSError as e:
-            logger.warning(f"Claude Code closed its input before the message was written "
-                           f"(its exit says why): {e}")
-
-    threading.Thread(target=feed, name="claude-stdin", daemon=True).start()
-    return proc
+    return subprocess.Popen(cmd, **kwargs)
 
 
 def call_claude_code_stream(
@@ -636,14 +653,16 @@ def call_claude_code_stream(
     model: Optional[str] = None,
 ) -> Iterator[StreamEvent]:
     """`_claude_code_stream` as one library turn (library_turn), its system
-    prompt in a file for as long as the turn runs."""
-    with library_turn(), _system_prompt_file(system_prompt) as prompt_file:
-        yield from _claude_code_stream(message, prompt_file, session_id, resume, model)
+    prompt and its message in files for as long as the turn runs."""
+    with library_turn(), _system_prompt_file(system_prompt) as prompt_file, \
+            _turn_input(message) as stdin:
+        yield from _claude_code_stream(message, prompt_file, stdin, session_id, resume, model)
 
 
 def _claude_code_stream(
     message: str,
     prompt_file: str,
+    stdin,
     session_id: Optional[str],
     resume: bool,
     model: Optional[str],
@@ -691,7 +710,7 @@ def _claude_code_stream(
     )
 
     try:
-        proc = _spawn_claude(cmd, message)
+        proc = _spawn_claude(cmd, stdin)
     except OSError as e:
         failure = spawn_failure("Claude Code", e)
         logger.error(failure)

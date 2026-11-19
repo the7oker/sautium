@@ -65,7 +65,8 @@ AI assistant is **not** a bottom tab. It is a **floating action button** in
 the bottom-right corner, shown while at least one AI provider is
 configured. Tap opens a chat sheet with the current session list. The chat
 receives no screen context: the request carries the message, and the
-server adds what is playing. Passing the open screen (`{screen, id}` —
+assistant asks what is playing itself (`get_player_state`, since
+2026-11-19). Passing the open screen (`{screen, id}` —
 Artist X, Album Y, HQPlayer settings) was designed in 2026-04 and is not
 built.
 
@@ -538,7 +539,8 @@ letters "AI".
 - Designed, not built: an **invisible context** passed to the prompt —
   current screen type and entity id (e.g., `{screen: "artist",
   artist_id: "<uuid>"}`). Today the request carries the message alone and
-  the server adds what is playing.
+  the assistant asks what is playing itself (`get_player_state`, since
+  2026-11-19).
 - Evolution: context-aware greeting ("You're browsing Sade. Want
   something similar but moodier?"), action chips for quick prompts,
   gesture to save conversations by theme.

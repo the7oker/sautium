@@ -80,11 +80,11 @@ def _native_binary_in(node_modules: Path) -> Optional[Path]:
 
 def get_codex_executable() -> Optional[Path]:
     """Path to the codex CLI. Prefers the native binary (skips the
-    node shim hop); a shim is an acceptable fallback because codex —
-    unlike claude with its ~13.5k-char --system-prompt — never pushes
-    argv anywhere near cmd.exe's 8191-char cap (the assistant prompt travels
-    as an instructions file on disk). Shim priority: the prefix's own
-    node_modules/.bin before whatever is on PATH."""
+    node shim hop); a shim is the fallback. The assistant prompt travels
+    as an instructions file on disk, so codex's argv is its flags and the
+    chat's message — under cmd.exe's 8191-character cap through a shim,
+    under CreateProcessW's 32,767 for the binary. Shim priority: the
+    prefix's own node_modules/.bin before whatever is on PATH."""
     nm_candidates: list = []
     shim_candidates: list = []
     # Linux is the Docker node, whose CLI is the image's, on PATH: a prefix

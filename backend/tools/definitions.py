@@ -748,7 +748,7 @@ def register_all():
         description=aq.PLAYER_STATE_DOC,
         parameters=[
             ToolParam("queue_offset", "integer", "The first queue slot to list (0-based, default 0)", required=False, default=0),
-            ToolParam("queue_limit", "integer", "How many queue slots to list (1..200, default 50)", required=False, default=50),
+            ToolParam("queue_limit", "integer", "How many queue slots to list (1..100, default 50); a page may end sooner", required=False, default=50),
         ],
         handler=_h_get_player_state,
     ))

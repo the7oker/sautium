@@ -182,16 +182,26 @@ def hqp_transport_text(command: str, outcome: dict, **values) -> str:
 
 
 # What the node says of its outputs and its player (playback backends' `id`,
-# playback.base.PlayerStatus.state): its own words. Anything else is marked.
+# their PlayerStatus.state): its own words. Anything else is marked.
 _OUTPUT_TYPES = frozenset({"hqplayer", "dlna", "local", "browser"})
-_PLAYER_STATES = frozenset({"stopped", "paused", "playing", "stopping", "unknown", "disconnected"})
-QUEUE_PAGE_MAX = 200
+_PLAYER_STATES = frozenset({"stopped", "paused", "playing", "stopping", "loading", "unknown",
+                            "disconnected"})
+QUEUE_PAGE_MAX = 100
+# get_player_state's answer stays whole on both CLIs: Claude Code hands the
+# model a stub past ~46,000 characters and an error past ~65,000; Codex cuts
+# a tool answer to its model's 10,000-token policy in the middle (measured
+# 2026-11-19 on 2.1.241-2.1.316 and 0.149). An outside value can escape to ten
+# characters each, so each is cut, and the queue page ends at the budget.
+OUTSIDE_CUT = 200
+ANSWER_BUDGET = 16_000
+_ROW_FRAME = 140          # a queue row's keys, index, UUID, duration, flag
 PLAYER_STATE_DOC = (
     "What the user's player is doing: the selected audio output (and whether the hqplayer_* tools "
     "work on it), the track playing and its position, and a page of the queue with each slot's "
     "track UUID. Nothing else tells you what plays — call this whenever the answer depends on it "
     "('this track', 'the queue', why playback does not start). Names and titles come marked as "
-    "data. queue_offset and queue_limit (1..200, default 50) page through a long queue.")
+    "data. queue_offset and queue_limit (1..100, default 50) page through a long queue; a page "
+    "may end sooner, and next_offset then says where the next one starts.")
 
 
 def _uuid_or_none(value) -> str | None:
@@ -206,32 +216,31 @@ def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50)
     at all: the hqplayer_* family commands the HQPlayer device and refuses while
     the sound goes elsewhere. The status names the selected output attached or
     not (PlaybackManager.output_info) — the model needs it precisely when a
-    sleeping renderer or a stalled HQPlayer is why playback will not start."""
-    mark = outside_text.Answer()
+    sleeping renderer or a stalled HQPlayer is why playback will not start. The
+    queue is the node's own and is listed whether or not an output reports."""
+    mark = outside_text.Answer(OUTSIDE_CUT)
     out = status.get("output") or {}
     otype = out.get("type")
-    state = status.get("state")
-    reporting = state not in ("disconnected", None)
+    state = status.get("state") or "disconnected"
+    reporting = state != "disconnected"
+    label = mark(out.get("label"))
     answer = {
         "notice": outside_text.NOTICE,
         "output": {
             "type": otype if otype is None or otype in _OUTPUT_TYPES else mark(otype),
-            "label": mark(out.get("label")),
+            "label": label,
             "attached": bool(out.get("attached", reporting)),
             "reporting": reporting,
             "tools": ("HQPlayer transport/DSP tools are available." if otype == "hqplayer" else
                       "hqplayer_* tools will refuse — use play_track / play_album / play_similar / "
                       "add_to_queue, which follow this output."),
         },
+        "state": state if state in _PLAYER_STATES else mark(state),
+        "now_playing": None,
     }
-    if not reporting:
-        return mark.dumps(answer)
-
     slot = status.get("track_index")
-    current = slot - 1 if isinstance(slot, int) and slot >= 1 else None
-    answer["state"] = state if state in _PLAYER_STATES else mark(state)
-    answer["now_playing"] = None
-    if status.get("song"):
+    current = slot - 1 if reporting and isinstance(slot, int) and slot >= 1 else None
+    if reporting and status.get("song"):
         answer["now_playing"] = {
             "track_id": _uuid_or_none(status.get("track_id")),
             "title": mark(status["song"]),
@@ -246,12 +255,10 @@ def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50)
     rows = playlist.get("tracks") or []
     offset = max(0, int(offset))
     limit = min(max(1, int(limit)), QUEUE_PAGE_MAX)
-    page = rows[offset:offset + limit]
-    answer["queue"] = {
-        "count": len(rows),
-        "offset": offset,
-        "more": offset + len(page) < len(rows),
-        "tracks": [{
+    spent = len(outside_text.NOTICE) + 700 + mark.cost(label, *(answer["now_playing"] or {}).values())
+    tracks = []
+    for row in rows[offset:offset + limit]:
+        entry = {
             "index": row.get("index"),
             "track_id": _uuid_or_none(row.get("track_id")),
             "artist": mark(row.get("artist")),
@@ -259,8 +266,14 @@ def player_state(status: dict, playlist: dict, offset: int = 0, limit: int = 50)
             "album": mark(row.get("album")),
             "duration_seconds": row.get("duration_seconds"),
             "playing": row.get("index") == current,
-        } for row in page],
-    }
+        }
+        spent += _ROW_FRAME + mark.cost(entry["artist"], entry["title"], entry["album"])
+        if tracks and spent > ANSWER_BUDGET:
+            break
+        tracks.append(entry)
+    following = offset + len(tracks)
+    answer["queue"] = {"count": len(rows), "offset": offset, "tracks": tracks,
+                       "next_offset": following if following < len(rows) else None}
     return mark.dumps(answer)
 
 

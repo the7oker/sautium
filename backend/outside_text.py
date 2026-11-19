@@ -77,22 +77,37 @@ class _Slot:
         self.index = index
 
 
+# A block's delimiters around its body: two marks of the form ⟦outside-text #<16 hex>⟧
+_MARKUP = 2 * (len(OPEN) + len(OUTSIDE) + len(" #") + 16 + len(CLOSE)) + 1
+
+
 class Answer:
     """One tool answer's outside values: `answer(value)` stands for a value
     in the structure being built, and `dumps` writes the structure as JSON
     with each of them as one block under a tag drawn for this answer — what
     keeps a block shut is the escape (no delimiter's bracket survives it),
-    so one tag serves every block of the answer. None and "" stay as they
-    are: there is nothing to carry."""
+    so one tag serves every block of the answer. A value longer than `cut`
+    characters is cut there, and the node says so after the block, in its
+    own words: a stranger's text must not decide how long the answer is. None
+    and "" stay as they are: there is nothing to carry."""
 
-    def __init__(self):
+    def __init__(self, cut: int):
+        self._cut = cut
         self._bodies: list[str] = []
+        self._dropped: list[int] = []
 
     def __call__(self, value):
         if value is None or value == "":
             return value
-        self._bodies.append(escape(str(value)))
+        text = str(value)
+        self._bodies.append(escape(text[:self._cut]))
+        self._dropped.append(max(0, len(text) - self._cut))
         return _Slot(len(self._bodies) - 1)
+
+    def cost(self, *values) -> int:
+        """About how many characters `values` take in the answer once written."""
+        return sum(len(self._bodies[v.index]) + _MARKUP + (40 if self._dropped[v.index] else 0)
+                   for v in values if isinstance(v, _Slot))
 
     def dumps(self, structure) -> str:
         tag = draw_tag(*self._bodies)
@@ -100,7 +115,9 @@ class Answer:
         def block(slot):
             if not isinstance(slot, _Slot):
                 raise TypeError(f"{type(slot).__name__} is not JSON serializable")
+            dropped = self._dropped[slot.index]
             return (f"{OPEN}{OUTSIDE} #{tag}{CLOSE}{self._bodies[slot.index]}"
-                    f"{OPEN}/{OUTSIDE} #{tag}{CLOSE}")
+                    f"{OPEN}/{OUTSIDE} #{tag}{CLOSE}"
+                    + (f" (cut: {dropped} more characters)" if dropped else ""))
 
         return json.dumps(structure, ensure_ascii=False, default=block)

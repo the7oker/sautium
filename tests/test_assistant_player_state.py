@@ -92,7 +92,7 @@ def test_every_name_and_title_is_one_block_and_the_nodes_own_words_stay_plain():
     # the forged closing mark and the hidden characters never reach the reader as such
     assert "\\u202e" in now["artist"] and "\\u200b" in now["artist"] and "\\u3014" in now["artist"]
     queue = answer["queue"]
-    assert (queue["count"], queue["offset"], queue["more"]) == (3, 0, False)
+    assert (queue["count"], queue["offset"], queue["next_offset"]) == (3, 0, None)
     assert [t["playing"] for t in queue["tracks"]] == [False, True, False]
     assert all(t["track_id"] == TRACK for t in queue["tracks"])
     assert "id" not in queue["tracks"][0]              # a media_file id is a file's, not the AI's
@@ -109,24 +109,60 @@ def test_what_the_node_does_not_say_itself_is_marked_too():
     assert answer["now_playing"]["track_id"] is None
 
 
-def test_an_output_that_reports_nothing_is_named_and_nothing_else_is_said():
+def test_an_output_that_reports_nothing_still_lists_the_nodes_queue():
+    """The queue is the node's own: a closed HQPlayer or a sleeping renderer
+    is when the model needs it, and this tool is its one source."""
     answer = json.loads(aq.player_state(
-        {"state": "disconnected", "output": {"type": "hqplayer", "label": None, "attached": False}},
+        {"state": "disconnected", "track_index": 2,
+         "output": {"type": "hqplayer", "label": None, "attached": False}},
         _playlist(4)))
     assert answer["output"] == {"type": "hqplayer", "label": None, "attached": False,
                                 "reporting": False,
                                 "tools": "HQPlayer transport/DSP tools are available."}
-    assert set(answer) == {"notice", "output"}
+    assert (answer["state"], answer["now_playing"]) == ("disconnected", None)
+    assert len(answer["queue"]["tracks"]) == 4
+    assert not any(t["playing"] for t in answer["queue"]["tracks"])
 
 
-def test_a_long_queue_comes_in_pages_of_at_most_two_hundred():
+def test_a_long_queue_comes_in_pages_that_cover_it_whole():
     status, playlist = _status(500), _playlist(500)
-    page = json.loads(aq.player_state(status, playlist, 450, 100))["queue"]
-    assert (page["count"], page["offset"], page["more"], len(page["tracks"])) == (500, 450, False, 50)
-    assert page["tracks"][0]["index"] == 450
-    first = json.loads(aq.player_state(status, playlist, 0, 10_000))["queue"]
-    assert (len(first["tracks"]), first["more"]) == (aq.QUEUE_PAGE_MAX, True)
+    page = json.loads(aq.player_state(status, playlist, 490, 100))["queue"]
+    assert (page["count"], page["offset"], page["next_offset"], len(page["tracks"])) == (500, 490, None, 10)
+    assert page["tracks"][0]["index"] == 490
     assert len(json.loads(aq.player_state(status, playlist, -5, 0))["queue"]["tracks"]) == 1
+    seen, offset = [], 0
+    while offset is not None:
+        queue = json.loads(aq.player_state(status, playlist, offset, 10_000))["queue"]
+        assert len(queue["tracks"]) <= aq.QUEUE_PAGE_MAX
+        seen += [t["index"] for t in queue["tracks"]]
+        offset = queue["next_offset"]
+    assert seen == list(range(500))
+
+
+# Measured 2026-11-19: Claude Code hands the model a stub past ~46,000 characters,
+# Codex cuts an answer of its model's 10,000-token policy in the middle.
+_WHOLE_ON_BOTH_CLIS = 20_000
+
+
+@pytest.mark.parametrize("value", [
+    "\U000e0041" * 500,             # tag characters: ten characters each once escaped
+    "x" * 58_000,                     # a file's tag has no length limit
+    "Ordinary Title Of A Song",
+])
+def test_no_outside_text_makes_the_answer_too_long_to_arrive_whole(value):
+    status = {**_status(300, title=value, label=value), "artist": value, "album": value, "genre": value}
+    rows = {"tracks": [{"index": i, "track_id": TRACK, "title": value, "artist": value, "album": value,
+                        "duration_seconds": 1} for i in range(300)]}
+    text = aq.player_state(status, rows, 0, 100)
+    assert len(text) < _WHOLE_ON_BOTH_CLIS
+    answer = json.loads(text)
+    assert answer["queue"]["tracks"] and answer["queue"]["next_offset"]
+    title = answer["now_playing"]["title"]
+    if len(value) > aq.OUTSIDE_CUT:
+        assert title.endswith(f" (cut: {len(value) - aq.OUTSIDE_CUT} more characters)")
+        _marked(title[:title.rindex(" (cut:")])
+    else:
+        assert _unescape(_marked(title)) == value
 
 
 def test_both_tool_surfaces_give_the_same_answer(monkeypatch):
@@ -161,17 +197,42 @@ def _no_db(monkeypatch):
     monkeypatch.setattr(assistant_prompt, "_describe_user_language", lambda: "")
 
 
-@pytest.mark.parametrize("provider", ["claude_code", "codex", "anthropic", "openai"])
-def test_the_system_prompt_names_nothing_that_plays_and_teaches_the_tool(monkeypatch, provider):
+@pytest.mark.parametrize("provider", ["claude_code", "codex", "anthropic"])
+def test_every_prompt_teaches_the_tool_and_that_tool_answers_are_data(monkeypatch, provider):
+    _no_db(monkeypatch)
+    prompt = assistant_prompt.get_system_prompt(provider)
+    assert "{player_context}" not in prompt and "Currently playing" not in prompt
+    assert "get_player_state" in prompt and "⟦outside-text #tag⟧" in prompt
+
+
+def _player_with_a_queue(monkeypatch):
     from routers import player
     _no_db(monkeypatch)
     monkeypatch.setattr(player, "get_status", lambda: _status(200))
     monkeypatch.setattr(player, "get_playlist", lambda: _playlist(200))
-    prompt = assistant_prompt.get_system_prompt(provider)
-    for text in HOSTILE + ["Artist 7", "Living room"]:
-        assert text not in prompt
-    assert "{player_context}" not in prompt and "Currently playing" not in prompt
-    assert "get_player_state" in prompt and "⟦outside-text #tag⟧" in prompt
+
+
+def _leaks(text: str) -> list[str]:
+    return [t for t in HOSTILE + ["Artist 7"] if t in text]
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_an_api_turn_with_a_queue_sends_a_prompt_that_names_none_of_it(monkeypatch, provider):
+    import providers
+    from routers import chat
+    _player_with_a_queue(monkeypatch)
+    sent = {}
+
+    class Provider:
+        def chat_stream(self, **kwargs):
+            sent.update(kwargs)
+            return iter(())
+    monkeypatch.setattr(providers, "get_provider", lambda name: Provider())
+
+    chat._build_provider_stream(provider, 1, "what is this?", [], None)
+
+    assert set(sent) == {"message", "history", "system_prompt", "model"}
+    assert "get_player_state" in sent["system_prompt"] and not _leaks(json.dumps(sent, ensure_ascii=False))
 
 
 # -- the command line ----------------------------------------------------------------
@@ -207,15 +268,18 @@ def claude_turn(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "agent_workdir", lambda name: tmp_path)
     monkeypatch.setattr(runner, "library_turn", __import__("contextlib").nullcontext)
     spawned = {}
+    proc = _Exited
 
-    def spawn(cmd, message, **_):
-        spawned.update(cmd=cmd, message=message,
+    def spawn(cmd, stdin, **_):
+        spawned.update(cmd=cmd, message=stdin.read().decode("utf-8"), stdin=stdin,
                        prompt=Path(cmd[cmd.index("--system-prompt-file") + 1]).read_bytes())
-        return _Exited()
+        return proc()
 
     monkeypatch.setattr(runner, "_spawn_claude", spawn)
 
-    def turn(message: str):
+    def turn(message: str, process=_Exited):
+        nonlocal proc
+        proc = process
         events = list(chat._build_provider_stream("claude_code", 1, message, [], None))
         return spawned, events[-1]
     return turn, tmp_path
@@ -232,13 +296,42 @@ def test_a_turn_with_a_long_queue_and_a_long_message_fits_a_windows_command_line
     assert spawned["message"] == message and message not in line and "-p" in spawned["cmd"]
     prompt = spawned["prompt"].decode("utf-8")
     assert "get_player_state" in prompt and b"\r\n" not in spawned["prompt"]
-    for text in HOSTILE + ["Artist 7"]:
-        assert text not in prompt and text not in line
-    assert list(workdir.iterdir()) == []               # the prompt file went with the turn
+    assert not _leaks(prompt) and not _leaks(line)
+    assert spawned["stdin"].closed
+    assert list(workdir.iterdir()) == []               # the prompt and message files went with the turn
 
 
-def test_a_codex_turn_carries_the_message_alone(monkeypatch, tmp_path):
-    _no_db(monkeypatch)
+class _Speaking(_Exited):
+    """A CLI that has said one word and is still running."""
+    def __init__(self):
+        self.stdout = io.StringIO(json.dumps({"type": "stream_event", "event": {
+            "type": "content_block_delta", "delta": {"type": "text_delta", "text": "hi"}}}) + "\n")
+        self.ended = False
+
+    def poll(self):
+        return 0 if self.ended else None
+
+    def terminate(self):
+        self.ended = True
+
+
+def test_a_turn_dropped_mid_answer_leaves_no_file(claude_turn, monkeypatch):
+    from routers import chat
+    turn, workdir = claude_turn
+    turn("hi")                                          # the fixture's patches, once
+    started = _Speaking()
+    monkeypatch.setattr(runner, "_spawn_claude", lambda cmd, stdin, **_: started)
+    stream = chat._build_provider_stream("claude_code", 1, "hi", [], None)
+    assert next(stream).text == "hi"
+    assert len(list(workdir.iterdir())) == 2            # the prompt and the message, while it runs
+    stream.close()
+    assert started.ended and list(workdir.iterdir()) == []
+
+
+def test_a_codex_turn_with_a_queue_carries_the_message_alone(monkeypatch, tmp_path):
+    from routers import chat
+    _player_with_a_queue(monkeypatch)
+    monkeypatch.setattr(chat, "_get_agent_session_id", lambda sid, agent: None)
     monkeypatch.setattr(codex_runner, "_resolve_codex_executable", lambda: "codex")
     monkeypatch.setattr(codex_runner, "_ensure_auth", lambda exe: None)
     monkeypatch.setattr(codex_runner, "_codex_workdir", lambda: tmp_path)
@@ -251,11 +344,12 @@ def test_a_codex_turn_carries_the_message_alone(monkeypatch, tmp_path):
         raise PermissionError(13, "Permission denied")
     monkeypatch.setattr(codex_runner, "_spawn_codex", spawn)
 
-    done = list(codex_runner.call_codex_stream("What is playing?"))[-1]
+    done = list(chat._build_provider_stream("codex", 1, "What is playing?", [], None))[-1]
 
     assert spawned[0][-2:] == ["--", "What is playing?"]
-    instructions = (tmp_path / codex_runner.INSTRUCTIONS_FILE).read_text(encoding="utf-8")
-    assert "get_player_state" in instructions
+    assert not _leaks(subprocess.list2cmdline(spawned[0]))
+    instructions = (tmp_path / codex_runner.INSTRUCTIONS_FILE).read_bytes().decode("utf-8")
+    assert "get_player_state" in instructions and not _leaks(instructions)
     assert done.error == "Codex could not start: [Errno 13] Permission denied"
 
 
@@ -279,7 +373,7 @@ def _windows_error(winerror: int, text: str) -> FileNotFoundError:
 def test_a_spawn_that_fails_says_why(claude_turn, monkeypatch, error, said):
     turn, _ = claude_turn
 
-    def spawn(cmd, message, **_):
+    def spawn(cmd, stdin, **_):
         raise error
     monkeypatch.setattr(runner, "_spawn_claude", spawn)
     _, done = turn("hi")
@@ -287,3 +381,19 @@ def test_a_spawn_that_fails_says_why(claude_turn, monkeypatch, error, said):
 
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(error))
     assert runner.call_claude_code("hi", "system", tools=runner.TEXT)["answer"] == said
+
+
+def test_a_call_whose_file_cannot_be_removed_keeps_its_answer(claude_turn, monkeypatch):
+    """A removal that fails (the file already gone, a handle another process
+    holds on Windows) leaves a file behind, never a good call reported as a
+    failed one."""
+    turn, _ = claude_turn
+    monkeypatch.setattr(runner.Path, "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(
+        PermissionError(13, "in use")))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, json.dumps({"result": "ok", "session_id": "s", "is_error": False}).encode(), b""))
+    monkeypatch.setattr(runner.claude_code.auth, "authenticated", lambda: None)
+    done = runner.call_claude_code("hi", "system", tools=runner.TEXT)
+    assert (done["answer"], done["is_error"]) == ("ok", False)
+    _, end = turn("hi")
+    assert end.error is None
