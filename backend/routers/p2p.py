@@ -310,7 +310,7 @@ async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
     except HTTPException as e:
         logger.warning(f"check-email after email change: {e.detail}")
         result = None
-    verified = bool(result and result.get("verified"))
+    verified = _verified_for_this_key(result)
     if verified:
         data["email_verified"] = True
         info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -1233,6 +1233,16 @@ async def _worker_check_email(identity: dict) -> Optional[dict]:
     return result
 
 
+def _verified_for_this_key(result: Optional[dict]) -> bool:
+    """The Worker's /check-email says the address is verified AND bound to
+    this node's key — the one meaning of `user_profile.email_verified`. It
+    answers `verified` with no certificate where the address was verified
+    under another key of the same code (a key rotated since): for this key
+    that is an address not yet verified, and its row offers the verification
+    that binds it."""
+    return bool(result and result.get("verified") and result.get("birth_cert"))
+
+
 # -- The identity worker -------------------------------------------------------
 #
 # One per node, in the process that serves the node's peer surface
@@ -1445,9 +1455,10 @@ async def identity_proof_task(worker: _IdentityWorker) -> None:
     (_publish_identity_state). A node whose email is verified but whose
     certificate predates v2 gets the method:email certificate from
     /check-email here — no work needed. A node on the email road
-    (_email_road) asks the Worker for nothing and mines nothing: it says
-    `needs_email`, and the verification's own event starts the worker again
-    (_certificate_changed)."""
+    (_email_road) mines nothing, and asks the Worker only where its address
+    is already recorded as verified (_verified_email_certificate: one
+    /check-email read); otherwise it says `needs_email`, and the
+    verification's own event starts the worker again (_certificate_changed)."""
     from desktop.p2p import identity_proof
     import p2p_identity
 
@@ -1532,7 +1543,7 @@ async def email_status() -> Dict[str, Any]:
         return {"email": email, "verified": True}
 
     result = await _check_email_upgrade(identity)
-    verified = bool(result and result.get("verified"))
+    verified = _verified_for_this_key(result)
     if verified:
         _db_execute(
             "UPDATE user_profile SET email_verified = TRUE WHERE id = 1"

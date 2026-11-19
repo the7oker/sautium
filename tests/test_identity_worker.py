@@ -81,6 +81,7 @@ class _Worker:
         self.stall = threading.Event()       # set: reads hang until `unstall`
         self.unstall = threading.Event()
         self.verified_email: set = set()     # pubkeys whose address the Worker holds verified
+        self.verified_elsewhere: set = set()  # … verified for the same code under another key (a rotation)
         worker = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -115,6 +116,8 @@ class _Worker:
                     cert = worker.issued.get(pubkey)
                     return self._answer(200, cert) if cert else self._answer(404)
                 if url.path == "/check-email":
+                    if pubkey in worker.verified_elsewhere:
+                        return self._answer(200, {"verified": True})      # verify.js: no certificate
                     if pubkey not in worker.verified_email:
                         return self._answer(200, {"verified": False})
                     cert = worker.issued[pubkey] = _issue(pubkey, "email", 32)
@@ -872,6 +875,16 @@ def test_an_address_already_verified_brings_its_certificate_with_no_new_code(nod
     # … and a node with no such record asks the Worker nothing
     asked = len(node.worker.calls)
     assert run_worker()["status"] == "needs_email" and len(node.worker.calls) == asked
+    # Verified under another key of the same code (a key rotated since): the Worker says `verified`
+    # and gives no certificate. Not this key's: cleared by the worker, and the Profile's own read of
+    # the Worker does not set it back — the row offers the verification, which binds the address
+    node.worker.verified_elsewhere.add(info["public_key_hex"].lower())
+    cur.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    assert run_worker()["status"] == "needs_email"
+    assert asyncio.run(p2p_router.email_status()) == {"email": "owner@example.org", "verified": False}
+    cur.execute("SELECT email_verified FROM user_profile WHERE id = 1")
+    assert cur.fetchone()[0] is False
+    node.worker.verified_elsewhere.clear()
     # The Worker does hold it: the certificate comes, and the node is ready by it
     node.worker.verified_email.add(info["public_key_hex"].lower())
     cur.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")

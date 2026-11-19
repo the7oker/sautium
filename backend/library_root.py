@@ -48,11 +48,12 @@ class Refused(ValueError):
 
 
 def roots() -> List[str]:
-    """The roots as the kernel names them, in the order given."""
+    """The roots as the kernel names them, in the order given. Each as it
+    was written: a folder's name may begin or end with a space."""
     found = []
     for raw in (settings.sautium_library_roots or "").split(":"):
-        if raw.strip():
-            real = os.path.realpath(raw.strip())
+        if raw:
+            real = os.path.realpath(raw)
             if real not in found:
                 found.append(real)
     return found

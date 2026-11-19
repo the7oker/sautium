@@ -55,13 +55,17 @@ def birth_preset(ram_gib: float, data_root_removable: bool,
     return None, "enough memory and disk for the full node"
 
 
-_CONTAINER_BRIDGE = re.compile(r"(docker\d*|docker_gwbridge|br-[0-9a-f]{12}|veth\w*|virbr\d+|lxcbr\d+|cni\d*|podman\d*)$")
+_CONTAINER_BRIDGE = re.compile(
+    r"(docker\d*|docker_gwbridge|br-[0-9a-f]{12}|veth\w*|virbr\d+|lxcbr\d+|lxdbr\d+|incusbr\d+"
+    r"|cni[\w-]*|podman\d*|vethernet \((wsl.*|default switch)\))$", re.I)
 
 
 def container_bridge(interface: str) -> bool:
-    """Whether a network interface is a container runtime's own (Docker's
-    bridge, a compose network's, a pair's end): its address is this machine's
-    and no door from another device."""
+    """Whether a network interface is a container or VM runtime's own
+    (Docker's bridge, a compose network's, a pair's end, LXD's, WSL's and
+    Hyper-V's default switch on Windows — never a switch a person bridged to
+    their network): its address is this machine's and no
+    door from another device."""
     return _CONTAINER_BRIDGE.match(interface) is not None
 
 

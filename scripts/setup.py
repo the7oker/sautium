@@ -488,7 +488,7 @@ def root_refusal(path: str, checkout: Path = ROOT, docker_root: Optional[str] = 
     if docker_root and (holds_or_is(docker_root) or inside(docker_root)):
         return (f"it is, holds or lies inside Docker's own data ({docker_root}): every container's files "
                 "would be readable there. Name the folder the music is in")
-    if real in TOO_BROAD or (len(parts) == 3 and parts[1] == "home") or (
+    if real in TOO_BROAD or (len(parts) == 3 and parts[1] in ("home", "media") and real != AUTOMOUNT_BASE) or (
             len(parts) == 4 and parts[1:3] == ("run", "media")):
         return "it is a whole home or every mounted disk at once: name the folder the music is in"
     for system in ("/proc", "/sys", "/dev", "/run", "/etc", "/usr", "/boot", "/bin", "/sbin", "/lib"):
@@ -545,7 +545,7 @@ def chosen_roots(music: Optional[str], held: List[str], docker_root: Optional[st
         if why:
             raise Stop(f"--music {music}: {why}")
         real = os.path.realpath(music)
-        if real not in roots:
+        if real not in roots and real != AUTOMOUNT_BASE:
             roots.append(real)
     return roots + [AUTOMOUNT_BASE]
 
@@ -926,40 +926,59 @@ FSTAB_FILESYSTEMS = {
 
 def boot_mount(real: str, findmnt_json: str, uid: int, gid: int) -> Optional[dict]:
     """For a folder on a disk the desktop mounts: the /etc/fstab line that
-    mounts that disk at every start instead — by UUID, read-only, `nofail`
-    (a disk that is not plugged in delays no boot) — where it then lies, and
-    the folder's path there. None where the mount cannot be read whole or is
+    mounts that disk at every start instead — by UUID, read-only, `nofail`,
+    before Docker starts, waiting ten seconds at most for a disk that is not
+    plugged in — where it then lies, the folder's path there, and the device
+    the desktop holds now (where its name is one a command can carry). None
+    where the mount cannot be read whole, is the system's own disk, or is
     not a filesystem the automount knows. `findmnt_json`: `findmnt -J -o
     SOURCE,TARGET,FSTYPE,UUID -T <folder>`."""
     try:
         mount = json.loads(findmnt_json)["filesystems"][0]
         target, fstype, uuid = str(mount["target"]), str(mount["fstype"]), str(mount["uuid"] or "")
-    except (ValueError, KeyError, IndexError, TypeError):
+        source = str(mount.get("source") or "")
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         return None
-    if fstype not in FSTAB_FILESYSTEMS or not re.fullmatch(r"[0-9A-Za-z-]{4,40}", uuid):
+    if target == "/" or fstype not in FSTAB_FILESYSTEMS or not re.fullmatch(r"[0-9A-Za-z-]{4,40}", uuid):
         return None
     if not (real == target or real.startswith(target.rstrip("/") + "/")):
         return None
     driver, extra = FSTAB_FILESYSTEMS[fstype]
     point = f"/mnt/sautium-{uuid}"
-    line = f"UUID={uuid} {point} {driver} ro,nofail,nosuid,nodev,noexec{extra.format(uid=uid, gid=gid)} 0 0"
-    return {"point": point, "line": line, "folder": point + real[len(target.rstrip("/")):]}
+    line = (f"UUID={uuid} {point} {driver} ro,nofail,nosuid,nodev,noexec{extra.format(uid=uid, gid=gid)}"
+            ",x-systemd.before=docker.service,x-systemd.device-timeout=10s 0 0")
+    return {"point": point, "line": line, "folder": point + real[len(target.rstrip("/")):],
+            "device": source if re.fullmatch(r"/dev/[A-Za-z0-9/_-]{1,64}", source) else None}
+
+
+def boot_mount_undo(point: str) -> List[str]:
+    its_line = shlex.quote("\\|^UUID=[^ ]* " + point + " |d")              # sed's address for that one line
+    return [f"sudo umount {point}", f"sudo sed -i {its_line} /etc/fstab", f"sudo rmdir {point}",
+            "sudo systemctl daemon-reload"]
+
+
+def boot_mounts(fstab_targets: str) -> List[str]:
+    """The mount points of this setup's own fstab lines, of `findmnt --fstab
+    -n -o TARGET`'s answer: what `remove` prints the undo of."""
+    return [t for t in fstab_targets.split() if re.fullmatch(r"/mnt/sautium-[0-9A-Za-z-]{4,40}", t)]
 
 
 def boot_mount_block(music: str, found: dict) -> None:
-    its_line = shlex.quote("\\|^UUID=[^ ]* " + found["point"] + " |d")      # sed's address for that one line
+    # The desktop holds the disk now, mounted for writing: the same disk is
+    # not mounted read-only beside that, so its hold is let go first
+    release = [f"sudo umount {found['device']}"] if found["device"] else []
     block("The music disk, mounted when the machine starts",
           f"{music} is on a disk this machine's desktop mounts only while you are signed in to it.\n"
           "Sautium starts with the machine, before that. This mounts the same disk at every start,\n"
-          f"read-only, at {found['point']} (a disk that is not plugged in delays nothing).",
-          [f"sudo mkdir -p {found['point']}",
-           f"echo {shlex.quote(found['line'])} | sudo tee -a /etc/fstab",
-           "sudo systemctl daemon-reload",
-           f"sudo mount {found['point']}"],
-          [f"sudo umount {found['point']}",
-           f"sudo sed -i {its_line} /etc/fstab",
-           f"sudo rmdir {found['point']}",
-           "sudo systemctl daemon-reload"])
+          f"read-only, at {found['point']}, before Sautium starts (a disk that is not plugged in holds\n"
+          "the start back ten seconds at most)."
+          + ("" if found["device"] else "\nFirst eject the disk in the desktop (do not unplug it): it holds the disk now."),
+          release + [f"sudo mkdir -p {found['point']}",
+                     # its own line whatever the file's last one ends with
+                     f"printf '\\n%s\\n' {shlex.quote(found['line'])} | sudo tee -a /etc/fstab",
+                     "sudo systemctl daemon-reload",
+                     f"sudo mount {found['point']}"],
+          boot_mount_undo(found["point"]))
     say(f"To check it:  findmnt --fstab {found['point']}")
     say()
 
@@ -1048,9 +1067,13 @@ def cmd_setup(args) -> int:
     preset = birth_of(held, args.preset, machine_tier.birth_preset(
         m["ram_gib"], m["docker_root_removable"], m["docker_root_free_gb"])[0], volume)
     by_line = keeps_music_line(held)
-    if args.music and not by_line and os.path.isdir(args.music) and desktop_mounted(os.path.realpath(args.music)):
-        # Bound as it is, the node would not start whenever the disk is not
-        # mounted — every start of the machine before someone signs in
+    if (args.music and not by_line and os.path.isdir(args.music)
+            and desktop_mounted(os.path.realpath(args.music)) and desktop_automounter()
+            and mounted_outside_fstab(os.path.realpath(args.music))):
+        # A disk the desktop mounted (no line of fstab does, and it is not
+        # the system's own). Bound as it is, the node would not start
+        # whenever the disk is not mounted — every start of the machine
+        # before someone signs in
         real = os.path.realpath(args.music)
         found = boot_mount(real, out(run(["findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID", "-T", real])),
                            os.getuid(), os.getgid())
@@ -1287,6 +1310,9 @@ def cmd_remove(args) -> int:
         say("    sudo rm -f /etc/udev/rules.d/99-sautium-automount.rules /etc/systemd/system/sautium-automount@.service /usr/local/lib/sautium/automount")
         say("    sudo systemctl daemon-reload")
         say("    sudo udevadm control --reload")
+    for point in boot_mounts(out(run(["findmnt", "--fstab", "-n", "-o", "TARGET"]))):
+        for line in boot_mount_undo(point):
+            say("    " + line)
     say()
     if args.data and sys.stdin.isatty():
         # Last, and only after the data went by the nickname: the folder itself

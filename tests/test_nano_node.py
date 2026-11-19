@@ -421,16 +421,10 @@ def test_a_node_takes_without_passing_on(db, sync_router):
     assert (sync_router.sharing_enabled(), sync_router.serving_enabled()) == (False, False)
 
 
-def test_the_peer_surface_says_it_does_not_share_while_it_passes_nothing_on():
-    """/health's `sharing` is what a walker and a slice requester pick sources
-    by: a node that passes nothing on is walked by nobody."""
-    source = (BACKEND / "p2p_app.py").read_text(encoding="utf-8")
-    assert "sharing_enabled" not in source and '"sharing": serving,' in source
-
-
 def test_a_node_that_passes_nothing_on_says_nothing_of_what_it_holds(monkeypatch):
     """Both surfaces' /health: who the node is and that it does not serve —
-    no dump, no slice count, no holdings summary."""
+    no dump, no slice count, no holdings summary. `sharing` is what a walker
+    and a slice requester pick sources by: such a node is walked by nobody."""
     import asyncio
     from desktop.p2p import birth_cert, sync_queries
     from desktop.p2p.sync_server import SyncServer

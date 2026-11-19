@@ -14,6 +14,7 @@
 """
 
 import logging
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -23,6 +24,9 @@ import host_channel
 from db_pool import db_execute, db_query
 
 logger = logging.getLogger(__name__)
+
+# This run of the node, to a page that drew the node's state before it
+_RUN = secrets.token_hex(8)
 
 router = APIRouter(prefix="/api/host", tags=["host"])
 
@@ -40,6 +44,9 @@ async def host_state() -> dict:
     rows = db_query("SELECT verb::text, asked_at, outcome::text, detail, release, report IS NOT NULL AS has_report, "
                     "answered_at FROM host_requests ORDER BY verb")
     return {"available": host_channel.available(),
+            # Which run of the node answers: another after a restart or an
+            # update, and what a page drew of the node before is then old
+            "run": _RUN,
             "requests": {row.pop("verb"): row for row in rows},
             # The release a check offered while this node still runs an older one
             "offered": (offered_release() or {}).get("release")}

@@ -265,13 +265,20 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
     found = json.dumps({"filesystems": [{"source": "/dev/sda1", "target": "/media/pi/Elements",
                                          "fstype": "exfat", "uuid": "4A21-0000"}]})
     plan = setup.boot_mount("/media/pi/Elements/Music/Jazz", found, 1000, 1000)
+    systemd = ",x-systemd.before=docker.service,x-systemd.device-timeout=10s 0 0"
     assert plan == {
-        "point": "/mnt/sautium-4A21-0000", "folder": "/mnt/sautium-4A21-0000/Music/Jazz",
+        "point": "/mnt/sautium-4A21-0000", "folder": "/mnt/sautium-4A21-0000/Music/Jazz", "device": "/dev/sda1",
         "line": "UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat "
-                "ro,nofail,nosuid,nodev,noexec,uid=1000,gid=1000,fmask=0133,dmask=0022 0 0"}
+                "ro,nofail,nosuid,nodev,noexec,uid=1000,gid=1000,fmask=0133,dmask=0022" + systemd}
     ext4 = setup.boot_mount("/media/pi/disk", json.dumps({"filesystems": [{
-        "target": "/media/pi/disk", "fstype": "ext4", "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}), 1000, 1000)
-    assert ext4["line"].endswith(" ext4 ro,nofail,nosuid,nodev,noexec,noload 0 0") and ext4["folder"] == ext4["point"]
+        "source": "/dev/sda1; reboot", "target": "/media/pi/disk", "fstype": "ext4",
+        "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}), 1000, 1000)
+    assert ext4["line"].endswith(" ext4 ro,nofail,nosuid,nodev,noexec,noload" + systemd)
+    assert ext4["folder"] == ext4["point"] and ext4["device"] is None      # a name no command carries
+    # The system's own disk (a plain folder under /media): never an fstab line for the root filesystem
+    assert setup.boot_mount("/media/music/flac", json.dumps({"filesystems": [{
+        "source": "/dev/mmcblk0p2", "target": "/", "fstype": "ext4", "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}),
+        1000, 1000) is None
     # What cannot be read whole, a filesystem the automount does not know, a UUID that is not one: no line
     for bad in ("", "{}", json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "btrfs", "uuid": "ab-cd"}]}),
                 json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "vfat", "uuid": "4A21 0000; reboot"}]}),
@@ -283,14 +290,36 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
 
     monkeypatch.setattr(setup.os.path, "isdir", lambda p: True)
     monkeypatch.setattr(setup.os.path, "realpath", lambda p: str(p))
+    # Every disk a desktop mounted for one person, at once: as broad as a whole home
+    for broad in ("/media/pi", "/run/media/pi", "/home/pi"):
+        assert "whole home or every mounted disk" in setup.root_refusal(broad, machine_ready.root), broad
+    assert setup.root_refusal("/media/pi/Elements/Music", machine_ready.root) is None
+    assert setup.root_refusal("/run/media/pi/Elements/Music", machine_ready.root) is None
     monkeypatch.setattr(setup, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, found.encode(), b""))
+    monkeypatch.setattr(setup, "desktop_automounter", lambda: True)
+    monkeypatch.setattr(setup, "mounted_outside_fstab", lambda real: "/media/pi/Elements")
     assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 1
     said = capsys.readouterr().out
-    assert "    echo 'UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat ro,nofail," in said
-    assert "| sudo tee -a /etc/fstab" in said and "    sudo mount /mnt/sautium-4A21-0000" in said
-    assert "    sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab" in said       # its undo
+    commands = [line.strip() for line in said.splitlines() if line.startswith("    sudo ") or "| sudo tee" in line]
+    # The desktop's hold let go first: the same disk is not mounted read-only beside a mount for writing
+    assert commands[:5] == [
+        "sudo umount /dev/sda1", "sudo mkdir -p /mnt/sautium-4A21-0000",
+        "printf '\\n%s\\n' 'UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat ro,nofail,nosuid,nodev,noexec,uid=1000,"
+        "gid=1000,fmask=0133,dmask=0022" + systemd + "' | sudo tee -a /etc/fstab",
+        "sudo systemctl daemon-reload", "sudo mount /mnt/sautium-4A21-0000"]
+    assert "sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab" in commands       # its undo
+    assert "Elements" not in " ".join(commands)        # the volume's own name is in no root command
     assert "then run:  ./sautium --music /mnt/sautium-4A21-0000/Music" in said
     assert machine_ready.ran == [] and not (machine_ready.root / ".env").exists()
+    # The same path where nothing of a desktop mounted it — a Lite system, a disk fstab already mounts, a
+    # plain folder of the system's disk: an ordinary root, no fstab line
+    for desktop, loose in ((False, "/media/pi/Elements"), (True, None)):
+        monkeypatch.setattr(setup, "desktop_automounter", lambda d=desktop: d)
+        monkeypatch.setattr(setup, "mounted_outside_fstab", lambda real, l=loose: l)
+        monkeypatch.setattr(setup, "root_refusal", lambda path, **kw: None)
+        assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 0
+        assert "/etc/fstab" not in capsys.readouterr().out.replace("no line of /etc/fstab", "")
+        (machine_ready.root / ".env").unlink()
 
 
 def test_a_desktop_that_mounts_disks_itself_is_not_given_a_second_automount(checkout, monkeypatch, capsys):
@@ -325,8 +354,8 @@ def test_a_root_is_a_folder_of_music_never_a_part_of_the_system(checkout, tmp_pa
     assert setup.root_refusal(str(music), checkout) is None
     for refused in ("/", "/home", "/usr", "/var", "/etc", "/run", "/proc", "/sys", "/dev", "/mnt", "/media",
                     "/usr/share", "/etc/ssl", "relative/music", str(checkout), str(checkout / "data"),
-                    str(checkout.parent), str(tmp_path / "none"), str(music) + ":x", str(music) + " x",
-                    "/home/$USER/Music", "/run/media", "/run/user"):
+                    str(checkout.parent), str(tmp_path / "none"), str(music) + ":x",
+                    "/home/$USER/Music", "/run/media", "/run/user", "/media"):
         assert setup.root_refusal(refused, checkout) is not None, refused
     home = Path.home()
     if home.parts[:2] == ("/", "home") and len(home.parts) == 3:
@@ -505,8 +534,11 @@ def test_the_addresses_shown_are_doors_from_another_device():
     assert setup.lan_addresses("203.0.113.9", listing)[0] == "192.168.7.20"      # a public route's source is not shown
     assert setup.lan_addresses(None, "") == []
     bridge = setup.machine_tier.container_bridge
-    assert all(bridge(n) for n in ("docker0", "br-0a1b2c3d4e5f", "veth9f3a", "virbr0", "docker_gwbridge"))
-    assert not any(bridge(n) for n in ("eth0", "wlan0", "br0", "bridge0", "end0", "enp3s0", "tailscale0"))
+    assert all(bridge(n) for n in ("docker0", "br-0a1b2c3d4e5f", "veth9f3a", "virbr0", "docker_gwbridge", "lxdbr0",
+                                   "incusbr0", "cni-podman0", "vEthernet (WSL)", "vEthernet (Default Switch)",
+                                   "vEthernet (WSL (Hyper-V firewall))"))
+    assert not any(bridge(n) for n in ("eth0", "wlan0", "br0", "bridge0", "end0", "enp3s0", "tailscale0",
+                                       "Ethernet", "Wi-Fi", "vEthernet (External LAN)"))
 
 
 def test_a_tailnets_funnel_and_key_are_read_from_tailscales_own_answers():
@@ -772,12 +804,27 @@ def test_remove_takes_what_runs_and_keeps_the_data(installed, capsys):
     # The roots override stays with the .env that names it: the folder's compose commands still work
     assert (installed.root / "host" / "compose.roots.yml").exists()
     assert "sudo loginctl disable-linger" in said and "remove --data takes those" in said
+    assert "/etc/fstab" not in said                                    # no boot mount of the setup's here
     assert not any("sudo" in line for line in joined)
     # Run again: nothing left to take, and it says so
     installed.asked.clear()
     (installed.root / "host" / "agent.env").unlink(missing_ok=True)
     assert setup.main(["remove"]) == 0
     assert "agent uninstall" not in [" ".join(a) for a in installed.asked]
+
+
+def test_remove_prints_the_undo_of_a_boot_mount_the_setup_printed(installed, monkeypatch, capsys):
+    fstab = b"/\n/boot/firmware\n/mnt/sautium-4A21-0000\n/mnt/sautium-x; reboot\n/mnt/music\n"
+    monkeypatch.setattr(setup, "run", lambda args, **kw: installed.asked.append(args) or subprocess.CompletedProcess(
+        args, 0, fstab if args[:2] == ["findmnt", "--fstab"] else b"", b""))
+    assert setup.boot_mounts(fstab.decode()) == ["/mnt/sautium-4A21-0000"]
+    assert setup.main(["remove"]) == 0
+    said = capsys.readouterr().out
+    for line in ("    sudo umount /mnt/sautium-4A21-0000",
+                 "    sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab",
+                 "    sudo rmdir /mnt/sautium-4A21-0000"):
+        assert line in said, line
+    assert "reboot" not in said and "/mnt/music" not in said
 
 
 def test_the_data_goes_only_after_the_nodes_nickname(installed, monkeypatch, capsys):

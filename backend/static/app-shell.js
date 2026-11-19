@@ -17357,8 +17357,11 @@
     if (!holder) return;
     if (_hwBlockSub) _hwBlockSub.abort();
     // A wake of the Library stream is also a scan's or a backup's progress,
-    // several a second: it re-reads the host agent's answers alone, and the
-    // block is drawn again only where what it shows has changed.
+    // several a second: it re-reads the host's side alone — the agent's
+    // answers and which run of the node answers — and reads the node's own
+    // state again only when that moved (an update ended, the node
+    // restarted: the stream's first word after it reconnects is a wake).
+    // The block is drawn again only where what it shows has changed.
     _hwBlockSub = libraryWake.on(() => {
       if (!document.contains(holder)) { _hwBlockSub.abort(); _hwBlockSub = null; return; }
       paint(false);
@@ -17371,8 +17374,13 @@
           const rh = await fetch('/api/settings/hardware');
           if (rh.ok) hw = await rh.json();
         }
+        const before = JSON.stringify(host);
         const ro = await fetch('/api/host');
         if (ro.ok) host = await ro.json();
+        if (!whole && hw && JSON.stringify(host) !== before) {
+          const rh = await fetch('/api/settings/hardware');
+          if (rh.ok) hw = await rh.json();
+        }
       } catch (_) {}
       if (!hw) { holder.innerHTML = ''; shown = null; return; }
       const state = JSON.stringify([hw, host]);

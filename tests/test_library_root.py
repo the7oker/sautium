@@ -290,6 +290,22 @@ def test_a_scans_scope_is_a_folder_inside_the_library(tree, monkeypatch, caplog)
     monkeypatch.setattr(settings, "sautium_library_roots", "")
     assert scanner.scope_admitted(tree.music, "Jazz/way-out")
     assert not scanner.scope_admitted(tree.music, "Jazz/../../outside")
+    # A scope with a root of its own would replace the library's path when joined to it
+    assert not scanner.scope_admitted(tree.music, str(tree.outside))
+    # … and on a launcher under Windows, one with a drive (a name such as "B:Side" is a folder elsewhere)
+    assert all(scanner.scope_has_drive(s) for s in ("C:/Windows", "C:Windows", "\\\\server\\share\\x", "\\Windows"))
+    assert not any(scanner.scope_has_drive(s) for s in ("Jazz/Album", "Vol..2", "AC:DC/Back in Black", "Jazz"))
+    assert scanner.scope_admitted(tree.music, "Vol..2")           # two dots inside a name are a name
+
+
+def test_a_root_is_read_as_it_was_written(tmp_path, monkeypatch):
+    """A folder's name may end with a space; the setup carries it whole and
+    the node reads the list the same way."""
+    spaced = tmp_path / "Music "
+    (spaced / "Jazz").mkdir(parents=True)
+    monkeypatch.setattr(settings, "sautium_library_roots", f"{spaced}::{tmp_path / 'other'}")
+    assert library_root.roots() == [str(spaced), str(tmp_path / "other")]
+    assert library_root.within(str(spaced / "Jazz")) == str(spaced / "Jazz")
 
 
 def test_the_scan_route_refuses_a_scope_outside_the_library(tree, monkeypatch):

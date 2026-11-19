@@ -459,3 +459,68 @@ process.stdout.write(JSON.stringify(out));
     assert 'data-action="choose-folder" data-guide="music_folder"' in SOURCE
     assert '<div class="form-group" data-guide="this_node">' in SOURCE
     assert SOURCE.count('data-row="email" data-guide="verify_email"') == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_block_reads_the_node_again_when_the_hosts_side_moved_and_draws_only_a_change():
+    """A wake of the Library stream is also a scan's progress, several a
+    second: it costs one read of the host's side and no redraw. An update
+    that ended, or another run of the node answering (a restart the block's
+    own button asked for), has the node's own state read again — the version
+    and the models' state the block shows are that run's."""
+    driver = r"""
+'use strict';
+const calls = [];
+let hw = %(hw)s, host = %(host)s;
+const fetch = async url => { calls.push(url); return { ok: true, json: async () => JSON.parse(JSON.stringify(url === '/api/host' ? host : hw)) }; };
+let wake = null, draws = 0, html = '';
+const holder = { set innerHTML(v) { draws += 1; html = v; }, get innerHTML() { return html; },
+                 querySelector: () => null };
+const root = { querySelector: sel => sel === '[data-hw-block]' ? holder : null };
+const document = { contains: () => true };
+const libraryWake = { on(fn) { wake = fn; return { abort() {} }; } };
+const guide = { paint() {}, seen() {} };
+const escapeProfileHtml = s => String(s), fmtBytes = n => n + ' B', onceInFlight = (el, fn) => fn();
+const _hwMachineLine = () => 'a machine', hwProfileName = h => h.profile;
+const hwModelsRow = h => `models:${h.models}`, hwSoftwareRow = (h, o) => `sautium:${h.software.version}:${o.run}`;
+const paintEmailLine = () => {};
+let _hwBlockSub = null;
+%(fn)s
+const settle = () => new Promise(r => setTimeout(r, 0));
+(async () => {
+  const out = [];
+  const step = async (label, act) => {
+    calls.length = 0; const before = draws;
+    await act(); await settle(); await settle();
+    out.push([label, calls.slice(), draws - before, html.includes('sautium:' + hw.software.version + ':' + host.run),
+              html.includes('models:' + hw.models)]);
+  };
+  await step('first', () => _loadHwBlock(root));
+  await step('a scan ticks', () => wake());
+  await step('a scan ticks again', () => wake());
+  host = { ...host, requests: { update: { outcome: 'updated', release: 'v0.3.1' } } };
+  hw = { ...hw, software: { version: '0.3.1', commit: 'bbbb' } };
+  await step('an update ended', () => wake());
+  host = { ...host, run: 'second' };
+  hw = { ...hw, models: 'on' };
+  await step('the node restarted', () => wake());
+  await step('quiet again', () => wake());
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+    hw = {"profile": "lite", "models": "off", "software": {"version": "0.3.0", "commit": "aaaa"},
+          "restartable": True, "detected": {}}
+    host = {"available": True, "run": "first", "requests": {}, "offered": None}
+    proc = subprocess.run([NODE, "-e", driver % {
+        "hw": json.dumps(hw), "host": json.dumps(host),
+        "fn": _block("async function _loadHwBlock(root) {", "\n    await paint();\n  }\n")}],
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    both, host_only = ["/api/settings/hardware", "/api/host"], ["/api/host"]
+    assert json.loads(proc.stdout) == [
+        ["first", both, 1, True, True],
+        ["a scan ticks", host_only, 0, True, True],
+        ["a scan ticks again", host_only, 0, True, True],
+        ["an update ended", ["/api/host", "/api/settings/hardware"], 1, True, True],
+        ["the node restarted", ["/api/host", "/api/settings/hardware"], 1, True, True],
+        ["quiet again", host_only, 0, True, True]]
