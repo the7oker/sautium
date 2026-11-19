@@ -27,6 +27,9 @@ from pathlib import Path
 
 import pytest
 
+# These tests move the owner's models switch and read it back from their database
+pytestmark = pytest.mark.models_switch
+
 REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "backend"
 if str(BACKEND) not in sys.path:
@@ -471,8 +474,12 @@ def test_the_block_reads_the_node_again_when_the_hosts_side_moved_and_draws_only
     driver = r"""
 'use strict';
 const calls = [];
-let hw = %(hw)s, host = %(host)s;
-const fetch = async url => { calls.push(url); return { ok: true, json: async () => JSON.parse(JSON.stringify(url === '/api/host' ? host : hw)) }; };
+let hw = %(hw)s, host = %(host)s, failing = false;
+const fetch = async url => {
+  calls.push(url);
+  if (failing && url !== '/api/host') return { ok: false, json: async () => ({}) };
+  return { ok: true, json: async () => JSON.parse(JSON.stringify(url === '/api/host' ? host : hw)) };
+};
 let wake = null, draws = 0, html = '';
 const holder = { set innerHTML(v) { draws += 1; html = v; }, get innerHTML() { return html; },
                  querySelector: () => null };
@@ -503,6 +510,9 @@ const settle = () => new Promise(r => setTimeout(r, 0));
   await step('an update ended', () => wake());
   host = { ...host, run: 'second' };
   hw = { ...hw, models: 'on' };
+  failing = true;                       // the node answers the host's side before its own state
+  await step('restarted, its state not read yet', () => wake());
+  failing = false;
   await step('the node restarted', () => wake());
   await step('quiet again', () => wake());
   process.stdout.write(JSON.stringify(out));
@@ -522,5 +532,7 @@ const settle = () => new Promise(r => setTimeout(r, 0));
         ["a scan ticks", host_only, 0, True, True],
         ["a scan ticks again", host_only, 0, True, True],
         ["an update ended", ["/api/host", "/api/settings/hardware"], 1, True, True],
+        # not drawn, and not taken as seen: the next wake reads the node's state again
+        ["restarted, its state not read yet", ["/api/host", "/api/settings/hardware"], 0, False, False],
         ["the node restarted", ["/api/host", "/api/settings/hardware"], 1, True, True],
         ["quiet again", host_only, 0, True, True]]

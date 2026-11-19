@@ -30,6 +30,9 @@ from urllib.parse import urlparse
 
 import pytest
 
+# These tests move the owner's models switch and read it back from their database
+pytestmark = pytest.mark.models_switch
+
 REPO = Path(__file__).resolve().parent.parent
 BACKEND = REPO / "backend"
 if str(BACKEND) not in sys.path:

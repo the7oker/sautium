@@ -227,7 +227,9 @@ def test_a_folder_on_a_disk_no_fstab_line_mounts_is_said(machine_ready, monkeypa
     monkeypatch.setattr(setup, "run", run)
     assert setup.mounted_outside_fstab(str(music)) == "/mnt/usb"
     assert setup.main(["--music", str(music), "--yes"]) == 0
-    assert "is on a disk mounted at /mnt/usb, which no line of /etc/fstab mounts" in capsys.readouterr().out
+    said = capsys.readouterr().out
+    assert "is on a disk mounted at /mnt/usb, which no line of /etc/fstab mounts" in said
+    assert "Sautium does not start: mount the disk" in said and "docker compose up -d" in said
     # The system's own disk, or one fstab mounts: nothing to say
     answers[("findmnt", "--fstab", "-n")] = (0, b"/mnt/usb /dev/sda1 ext4\n")
     assert setup.mounted_outside_fstab(str(music)) is None
@@ -274,13 +276,24 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
         "source": "/dev/sda1; reboot", "target": "/media/pi/disk", "fstype": "ext4",
         "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}), 1000, 1000)
     assert ext4["line"].endswith(" ext4 ro,nofail,nosuid,nodev,noexec,noload" + systemd)
-    assert ext4["folder"] == ext4["point"] and ext4["device"] is None      # a name no command carries
+    # A device name no command carries: the disk is named by its UUID's own link
+    assert ext4["folder"] == ext4["point"]
+    assert ext4["device"] == "/dev/disk/by-uuid/0a1b2c3d-0000-4000-8000-000000000000"
+    # A mount through FUSE says `fuseblk` for NTFS and exFAT alike: the disk itself says which
+    fuse = json.dumps({"filesystems": [{"source": "/dev/sdb1", "target": "/media/pi/E", "fstype": "fuseblk",
+                                        "uuid": "4A21-0000"}]})
+    asked = []
+    for on_disk, driver in (("exfat", "exfat"), ("ntfs", "ntfs3")):
+        line = setup.boot_mount("/media/pi/E", fuse, 1000, 1000, disk_type=lambda d, t=on_disk: asked.append(d) or t)
+        assert f" /mnt/sautium-4A21-0000 {driver} ro,nofail," in line["line"], on_disk
+    assert asked == ["/dev/sdb1", "/dev/sdb1"]
+    assert setup.boot_mount("/media/pi/E", fuse, 1000, 1000, disk_type=lambda d: "") is None
     # The system's own disk (a plain folder under /media): never an fstab line for the root filesystem
     assert setup.boot_mount("/media/music/flac", json.dumps({"filesystems": [{
         "source": "/dev/mmcblk0p2", "target": "/", "fstype": "ext4", "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}),
         1000, 1000) is None
     # What cannot be read whole, a filesystem the automount does not know, a UUID that is not one: no line
-    for bad in ("", "{}", json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "btrfs", "uuid": "ab-cd"}]}),
+    for bad in ("", "{}", json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "btrfs", "uuid": "abcd-ef"}]}),
                 json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "vfat", "uuid": "4A21 0000; reboot"}]}),
                 json.dumps({"filesystems": [{"target": "/media/pi/other", "fstype": "vfat", "uuid": "4A21-0000"}]})):
         assert setup.boot_mount("/media/pi/x/Music", bad, 1000, 1000) is None, bad
@@ -293,11 +306,16 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
     # Every disk a desktop mounted for one person, at once: as broad as a whole home
     for broad in ("/media/pi", "/run/media/pi", "/home/pi"):
         assert "whole home or every mounted disk" in setup.root_refusal(broad, machine_ready.root), broad
+    # … but a disk mounted AT /media/<name> (its own fstab line, a Lite system's tool) is a disk
+    monkeypatch.setattr(setup.os.path, "ismount", lambda p: p == "/media/hdd")
+    assert setup.root_refusal("/media/hdd", machine_ready.root) is None
     assert setup.root_refusal("/media/pi/Elements/Music", machine_ready.root) is None
     assert setup.root_refusal("/run/media/pi/Elements/Music", machine_ready.root) is None
     monkeypatch.setattr(setup, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, found.encode(), b""))
     monkeypatch.setattr(setup, "desktop_automounter", lambda: True)
     monkeypatch.setattr(setup, "mounted_outside_fstab", lambda real: "/media/pi/Elements")
+    monkeypatch.setattr(setup.os, "getuid", lambda: 1000)       # the person, wherever the suite runs
+    monkeypatch.setattr(setup.os, "getgid", lambda: 1000)
     assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 1
     said = capsys.readouterr().out
     commands = [line.strip() for line in said.splitlines() if line.startswith("    sudo ") or "| sudo tee" in line]
@@ -309,7 +327,11 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
         "sudo systemctl daemon-reload", "sudo mount /mnt/sautium-4A21-0000"]
     assert "sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab" in commands       # its undo
     assert "Elements" not in " ".join(commands)        # the volume's own name is in no root command
-    assert "then run:  ./sautium --music /mnt/sautium-4A21-0000/Music" in said
+    # The root to name is the mount point — there with or without the disk — and the folder on it is
+    # chosen in the Web UI: a bind of a folder ON the disk would stop the node's start without the disk
+    assert "then run:  ./sautium --music /mnt/sautium-4A21-0000\n" in said
+    assert "and choose Music as the music folder in Sautium" in said
+    assert "--music /mnt/sautium-4A21-0000/Music" not in said
     assert machine_ready.ran == [] and not (machine_ready.root / ".env").exists()
     # The same path where nothing of a desktop mounted it — a Lite system, a disk fstab already mounts, a
     # plain folder of the system's disk: an ordinary root, no fstab line
@@ -318,7 +340,7 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
         monkeypatch.setattr(setup, "mounted_outside_fstab", lambda real, l=loose: l)
         monkeypatch.setattr(setup, "root_refusal", lambda path, **kw: None)
         assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 0
-        assert "/etc/fstab" not in capsys.readouterr().out.replace("no line of /etc/fstab", "")
+        assert "sudo tee -a /etc/fstab" not in capsys.readouterr().out          # no boot-mount block
         (machine_ready.root / ".env").unlink()
 
 
@@ -426,6 +448,21 @@ def test_the_override_binds_each_root_at_its_own_path_read_only(checkout, tmp_pa
     # With no folder named the node still picks: the automount's folder is its one root
     only = setup.roots_override(setup.chosen_roots(None, []))
     assert f'SAUTIUM_LIBRARY_ROOTS: "{setup.AUTOMOUNT_BASE}"' in only
+
+
+def test_a_folder_inside_a_root_already_read_is_not_bound_again(tmp_path, capsys):
+    """It is chosen in the Web UI. A bind of its own would tie the node's
+    start to one disk of the automount's folder."""
+    music = tmp_path / "Music"
+    (music / "Jazz").mkdir(parents=True)
+    held = [str(music)]
+    assert setup.chosen_roots(str(music / "Jazz"), held) == [str(music), setup.AUTOMOUNT_BASE]
+    assert f"is inside {music}, which this node already reads" in capsys.readouterr().out
+    assert setup.chosen_roots(str(music), held) == [str(music), setup.AUTOMOUNT_BASE]
+    assert capsys.readouterr().out == ""
+    other = tmp_path / "Music2"                      # a name that only begins like a root's is another folder
+    other.mkdir()
+    assert setup.chosen_roots(str(other), held) == [str(music), str(other), setup.AUTOMOUNT_BASE]
 
 
 def test_the_node_reads_the_roots_the_override_names():

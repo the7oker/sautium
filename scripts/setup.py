@@ -488,7 +488,10 @@ def root_refusal(path: str, checkout: Path = ROOT, docker_root: Optional[str] = 
     if docker_root and (holds_or_is(docker_root) or inside(docker_root)):
         return (f"it is, holds or lies inside Docker's own data ({docker_root}): every container's files "
                 "would be readable there. Name the folder the music is in")
-    if real in TOO_BROAD or (len(parts) == 3 and parts[1] in ("home", "media") and real != AUTOMOUNT_BASE) or (
+    # /home/<user>; /media/<user> and /run/media/<user>, where a desktop
+    # mounts a person's disks — but a disk mounted AT /media/<name> is a disk
+    if real in TOO_BROAD or (len(parts) == 3 and parts[1] == "home") or (
+            len(parts) == 3 and parts[1] == "media" and real != AUTOMOUNT_BASE and not os.path.ismount(real)) or (
             len(parts) == 4 and parts[1:3] == ("run", "media")):
         return "it is a whole home or every mounted disk at once: name the folder the music is in"
     for system in ("/proc", "/sys", "/dev", "/run", "/etc", "/usr", "/boot", "/bin", "/sbin", "/lib"):
@@ -545,8 +548,12 @@ def chosen_roots(music: Optional[str], held: List[str], docker_root: Optional[st
         if why:
             raise Stop(f"--music {music}: {why}")
         real = os.path.realpath(music)
-        if real not in roots and real != AUTOMOUNT_BASE:
+        inside = next((r for r in roots + [AUTOMOUNT_BASE] if real == r or real.startswith(r.rstrip("/") + "/")), None)
+        if inside is None:
             roots.append(real)
+        elif real != inside:
+            say(f"{music} is inside {inside}, which this node already reads: choose it as the music folder "
+                "in Sautium (More › Library).")
     return roots + [AUTOMOUNT_BASE]
 
 
@@ -919,36 +926,47 @@ FSTAB_FILESYSTEMS = {
     "exfat": ("exfat", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
     "ntfs": ("ntfs3", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
     "ntfs3": ("ntfs3", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
-    "fuseblk": ("ntfs3", ",uid={uid},gid={gid},fmask=0133,dmask=0022"),
     "ext4": ("ext4", ",noload"),
 }
 
 
-def boot_mount(real: str, findmnt_json: str, uid: int, gid: int) -> Optional[dict]:
+def disk_filesystem(device: str) -> str:
+    """The filesystem as the disk itself says it (lsblk reads the disk, not
+    the mount)."""
+    lines = out(run(["lsblk", "-no", "FSTYPE", device])).splitlines()
+    return lines[0].strip() if lines else ""
+
+
+def boot_mount(real: str, findmnt_json: str, uid: int, gid: int, disk_type=disk_filesystem) -> Optional[dict]:
     """For a folder on a disk the desktop mounts: the /etc/fstab line that
     mounts that disk at every start instead — by UUID, read-only, `nofail`,
     before Docker starts, waiting ten seconds at most for a disk that is not
     plugged in — where it then lies, the folder's path there, and the device
-    the desktop holds now (where its name is one a command can carry). None
-    where the mount cannot be read whole, is the system's own disk, or is
-    not a filesystem the automount knows. `findmnt_json`: `findmnt -J -o
-    SOURCE,TARGET,FSTYPE,UUID -T <folder>`."""
+    the desktop holds now, by a name a command can carry. None where the
+    mount cannot be read whole, is the system's own disk, or is not a
+    filesystem the automount knows. `findmnt_json`: `findmnt -J -o
+    SOURCE,TARGET,FSTYPE,UUID -T <folder>`. A mount through FUSE says
+    `fuseblk` for NTFS and exFAT alike: there `disk_type(device)` says which."""
     try:
         mount = json.loads(findmnt_json)["filesystems"][0]
         target, fstype, uuid = str(mount["target"]), str(mount["fstype"]), str(mount["uuid"] or "")
         source = str(mount.get("source") or "")
     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         return None
-    if target == "/" or fstype not in FSTAB_FILESYSTEMS or not re.fullmatch(r"[0-9A-Za-z-]{4,40}", uuid):
+    if target == "/" or not re.fullmatch(r"[0-9A-Za-z-]{4,40}", uuid):
         return None
     if not (real == target or real.startswith(target.rstrip("/") + "/")):
+        return None
+    device = source if re.fullmatch(r"/dev/[A-Za-z0-9/_-]{1,64}", source) else f"/dev/disk/by-uuid/{uuid}"
+    if fstype == "fuseblk":
+        fstype = disk_type(device)
+    if fstype not in FSTAB_FILESYSTEMS:
         return None
     driver, extra = FSTAB_FILESYSTEMS[fstype]
     point = f"/mnt/sautium-{uuid}"
     line = (f"UUID={uuid} {point} {driver} ro,nofail,nosuid,nodev,noexec{extra.format(uid=uid, gid=gid)}"
             ",x-systemd.before=docker.service,x-systemd.device-timeout=10s 0 0")
-    return {"point": point, "line": line, "folder": point + real[len(target.rstrip("/")):],
-            "device": source if re.fullmatch(r"/dev/[A-Za-z0-9/_-]{1,64}", source) else None}
+    return {"point": point, "line": line, "folder": point + real[len(target.rstrip("/")):], "device": device}
 
 
 def boot_mount_undo(point: str) -> List[str]:
@@ -966,18 +984,18 @@ def boot_mounts(fstab_targets: str) -> List[str]:
 def boot_mount_block(music: str, found: dict) -> None:
     # The desktop holds the disk now, mounted for writing: the same disk is
     # not mounted read-only beside that, so its hold is let go first
-    release = [f"sudo umount {found['device']}"] if found["device"] else []
     block("The music disk, mounted when the machine starts",
           f"{music} is on a disk this machine's desktop mounts only while you are signed in to it.\n"
           "Sautium starts with the machine, before that. This mounts the same disk at every start,\n"
           f"read-only, at {found['point']}, before Sautium starts (a disk that is not plugged in holds\n"
-          "the start back ten seconds at most)."
-          + ("" if found["device"] else "\nFirst eject the disk in the desktop (do not unplug it): it holds the disk now."),
-          release + [f"sudo mkdir -p {found['point']}",
-                     # its own line whatever the file's last one ends with
-                     f"printf '\\n%s\\n' {shlex.quote(found['line'])} | sudo tee -a /etc/fstab",
-                     "sudo systemctl daemon-reload",
-                     f"sudo mount {found['point']}"],
+          "the start back ten seconds at most; plugged in later, it appears in Sautium by itself).\n"
+          "Close anything that has a file of the disk open first: the desktop's hold is let go here.",
+          [f"sudo umount {found['device']}",
+           f"sudo mkdir -p {found['point']}",
+           # its own line whatever the file's last one ends with
+           f"printf '\\n%s\\n' {shlex.quote(found['line'])} | sudo tee -a /etc/fstab",
+           "sudo systemctl daemon-reload",
+           f"sudo mount {found['point']}"],
           boot_mount_undo(found["point"]))
     say(f"To check it:  findmnt --fstab {found['point']}")
     say()
@@ -1082,7 +1100,12 @@ def cmd_setup(args) -> int:
                        "signed in, and Sautium starts with the machine. Mount the disk at every start (a line of "
                        "/etc/fstab: read-only, nofail) and name the folder where it then lies")
         boot_mount_block(args.music, found)
-        raise Stop("then run:  ./sautium --music " + shlex.quote(found["folder"]))
+        # The root is the mount point, which is there with or without the
+        # disk: a folder ON the disk would be a bind Docker refuses whenever
+        # the disk is not plugged in, and the node would not start at all
+        under = found["folder"][len(found["point"]):].strip("/")
+        raise Stop(f"then run:  ./sautium --music {found['point']}"
+                   + (f"\nand choose {printable(under)} as the music folder in Sautium (More › Library)" if under else ""))
     if by_line and args.music:
         raise Stop("this install reads its music where MUSIC_LIBRARY_PATH in .env says, and --music is for an "
                    "install that picks its folder in Sautium. To change over, delete that line from .env and run "
@@ -1112,7 +1135,9 @@ def cmd_setup(args) -> int:
         loose = mounted_outside_fstab(os.path.realpath(args.music)) if args.music else None
         if loose:
             say(f"Note: {args.music} is on a disk mounted at {printable(loose)}, which no line of /etc/fstab mounts.")
-            say("After a restart of this machine Sautium starts only once that disk is mounted again.")
+            say("If that disk is not mounted when this machine starts, Sautium does not start: mount the disk")
+            say("and run  docker compose up -d  in this folder. (A disk mounted at every start by other means")
+            say("than /etc/fstab is fine.)")
         agent._write_private(ROOT / ROOTS_OVERRIDE, roots_override(roots).encode(), 0o644)
         (ROOT / "data" / "no-library").mkdir(parents=True, exist_ok=True)
     assistant = args.assistant or ("claude" if held.get("SAUTIUM_IMAGE_ASSISTANT_CLI") == "1" else "none")

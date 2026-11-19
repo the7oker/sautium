@@ -17374,14 +17374,17 @@
           const rh = await fetch('/api/settings/hardware');
           if (rh.ok) hw = await rh.json();
         }
-        const before = JSON.stringify(host);
         const ro = await fetch('/api/host');
-        if (ro.ok) host = await ro.json();
-        if (!whole && hw && JSON.stringify(host) !== before) {
+        const answered = ro.ok ? await ro.json() : host;
+        if (!whole && hw && JSON.stringify(answered) !== JSON.stringify(host)) {
+          // The host's side is taken as moved only with the node's state
+          // read for it: a read that failed is made again at the next wake
           const rh = await fetch('/api/settings/hardware');
-          if (rh.ok) hw = await rh.json();
+          if (!rh.ok) return;
+          hw = await rh.json();
         }
-      } catch (_) {}
+        host = answered;
+      } catch (_) { if (!whole) return; }
       if (!hw) { holder.innerHTML = ''; shown = null; return; }
       const state = JSON.stringify([hw, host]);
       if (state === shown) return;
