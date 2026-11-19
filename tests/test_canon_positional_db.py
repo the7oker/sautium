@@ -389,7 +389,8 @@ def test_a_later_copy_of_an_album_the_tier_bound_binds_to_its_group_or_not_at_al
         cur.execute("SELECT recording_mbid::text FROM media_files WHERE album_variant_id = %s "
                     "ORDER BY track_number", (v2,))
         assert [r[0] for r in cur.fetchall()] == recs
-        assert _run()["asked"] == 0                   # the abstention is kept
+        assert _run()["asked"] == 1                   # its album's unbound copies changed: asked once more
+        assert _run()["asked"] == 0                   # then the abstention is kept
 
 
 def test_on_a_slice_fed_node_a_data_track_is_no_position(node):
@@ -462,6 +463,137 @@ def test_a_file_of_another_album_on_a_shared_track_keeps_its_own_recording(node)
         cur.execute("SELECT recording_mbid::text FROM track_mbids WHERE track_id = "
                     "(SELECT track_id FROM media_files WHERE recording_mbid = %s)", (own,))
         assert sorted(r[0] for r in cur.fetchall()) == sorted([own, recs[0]])
+
+
+def test_the_track_layer_leaves_the_files_the_positional_pass_bound(node):
+    """Round 2 H1: an artist whose one album the positional pass bound has no
+    album the cascade resolves, so the track layer took it and stamped every
+    file of each title-matched track — the positional copy's included."""
+    conn, _fake = node
+    from canon import content
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        _polarity(cur)
+        s, leader, ens = _mb(cur)
+        _rel, recs = _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")])
+        # the leader's own recordings of the same names, lengths within the track layer's reach
+        _release(s, cur, str(uuid.uuid4()), "Live", [(leader, "Jan Gunnar Hoff")],
+                 lengths=tuple(ms + 3000 for ms in LENGTHS))
+        assert _run()["bound_albums"] == 1
+    from uuid_utils import artist_uuid
+    content.canonicalize_trackonly(str(artist_uuid("Jan Gunnar Hoff")), "Jan Gunnar Hoff")
+    with conn.cursor() as cur:
+        cur.execute("SELECT recording_mbid::text FROM media_files ORDER BY track_number")
+        assert [r[0] for r in cur.fetchall()] == recs
+
+
+def test_digital_media_s_window_holds_without_the_format_names(node):
+    """Round 2 M1: a slice carries a medium's format id, not the formats'
+    names; read by name, every medium on a slice-fed node fell to 2 s."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        _polarity(cur, files=(313.8, 245.4, 401.0, 198.6))   # 1.8 s past a whole-second length
+        cur.execute("DELETE FROM mb_medium_format")
+        s, leader, ens = _mb(cur)
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")])
+        assert _run()["bound_albums"] == 0
+
+
+def test_a_broadcast_group_is_no_candidate(node):
+    """Round 2 M2 (§3.4): 'Other' and 'Broadcast' stay out, as in _RG_SQL."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        _polarity(cur)
+        s, leader, ens = _mb(cur)
+        c = s.credit((ens, "Hoff Ensemble"))
+        g = s.release_group(str(uuid.uuid4()), "Polarity", c, primary="Broadcast")
+        s.release(str(uuid.uuid4()), "Polarity", g, c,
+                  [(f"Movement {i}", ms, str(uuid.uuid4())) for i, ms in enumerate(LENGTHS, 1)])
+        cur.execute("UPDATE mb_medium SET format = %s", (DM,))
+        st = _run()
+        assert (st["bound_albums"], st["abstained"]) == (0, 1)
+
+
+def test_an_abstention_is_asked_again_when_its_album_loses_a_copy(node):
+    """Round 2 M3: two copies fitting two groups bound neither and kept their
+    digests; with one of them gone, the other alone fits one group."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        v2 = _second_copy(cur, album, shift=30)
+        s, leader, ens = _mb(cur)
+        rg = str(uuid.uuid4())
+        _release(s, cur, rg, "Polarity", [(ens, "Hoff Ensemble")])
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")],
+                 lengths=tuple(ms + 30000 for ms in LENGTHS))
+        assert _run()["album_conflict"] == 1
+        cur.execute("DELETE FROM media_files WHERE album_variant_id = %s", (v2,))
+        cur.execute("DELETE FROM album_variants WHERE id = %s", (v2,))
+        assert _run()["bound_albums"] == 1
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (rg,)
+
+
+def test_any_slice_asks_an_abstained_copy_again(node):
+    """Round 2 M4: a slice of any name can bring a release credited to the
+    copy's artists (one whose group credits only the composer arrives with
+    the composer's); the digest followed only the copy's own artists' slices."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        s, leader, ens = _mb(cur)
+        assert _run()["abstained"] == 1                 # nothing fits yet
+        _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")])
+        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids) VALUES ('arvo pärt', 1)")
+        st = _run()
+        assert (st["asked"], st["bound_albums"]) == (1, 1)
+
+
+def test_a_binding_from_the_files_never_restates_this_node_s_own(node):
+    """Round 2 M5 (round 1 L2): bind_owned_recordings binds from what the
+    files carry, which says nothing of the matcher that stamped them: an own
+    row of an older matcher stays; a peer's is replaced."""
+    conn, _fake = node
+    from canon import content
+    from mb_fakes import Library
+    rec = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        lib = Library(cur, "Anne Akiko Meyers")
+        lib.album("The Four Seasons", [("Spring: I. Allegro", 210.0)])
+        cur.execute("UPDATE media_files SET recording_mbid = %s", (rec,))
+        cur.execute("INSERT INTO tracks (id, title) VALUES (gen_random_uuid(), 'elsewhere') RETURNING id::text")
+        elsewhere = cur.fetchone()[0]
+        cur.execute("INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version) "
+                    "VALUES (%s, %s, 'overlap_verified', 1)", (rec, elsewhere))
+    content.bind_owned_recordings(lib.id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text, matcher_version, imported FROM track_mbids WHERE recording_mbid = %s",
+                    (rec,))
+        assert cur.fetchone() == (elsewhere, 1, False)
+        cur.execute("UPDATE track_mbids SET imported = TRUE WHERE recording_mbid = %s", (rec,))
+    content.bind_owned_recordings(lib.id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT track_id::text <> %s, matcher_version, imported FROM track_mbids "
+                    "WHERE recording_mbid = %s", (elsewhere, rec))
+        assert cur.fetchone() == (True, 2, False)
+
+
+def test_the_collaboration_sweep_finds_a_list_joined_by_semicolons(node, monkeypatch):
+    """Round 2 M5 (round 1 L6): split_collaborations' candidates missed D3's
+    form, which only the inline path after a wake split."""
+    conn, _fake = node
+    import mb_backend
+    from canon import content
+    from mb_fakes import Library
+    monkeypatch.setattr(mb_backend, "LOCAL_DUMP", True)
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        Library(cur, "Trio Mediæval; Arve Henriksen; Anders Jormin").album("Rímur", [("Om Kvelden", 300.0)])
+    assert content.split_collaborations(dry_run=True)["candidates"] == 1
 
 
 def test_the_cascade_leaves_an_album_the_positional_tier_bound(node):

@@ -35,10 +35,10 @@ binding (§3.1.5). An album it bound is not the cascade's to re-decide
 
 Idempotent and resumable: a bound copy leaves the unbound set; a copy it
 abstained on keeps what it was asked with (`album_variants.positional_asked`,
-a digest of MusicBrainz's data for it — the dump's version, the newest slice
-of the copy's own artists —, its candidate artists, the positions' lengths,
-the witnesses and the album's group) and is asked again only when that
-changes; then the album's other unbound copies are asked with it, so the
+a digest of the rule's version, MusicBrainz's data here — the dump's version,
+the slices' last change —, its candidate artists, the positions' lengths,
+the witnesses, the album's group and its other unbound copies) and is asked
+again only when that changes; then the album's other unbound copies are asked with it, so the
 one-group rule sees every copy. An album still arriving by its own files'
 words waits for them unless the scan was explicit (canon.content.
 arriving_albums). A copy of an album this tier bound that is still unbound
@@ -77,15 +77,19 @@ SPECIAL_PURPOSE_ARTISTS = (
 
 # Q15's starting values for the artist-led tier (DESIGN §12.6); the replay
 # of the harness decides between them and 2 s (CANON-CLASSICAL-PROPOSAL).
+# MusicBrainz's medium_format id of Digital Media: a slice carries
+# mb_medium.format but not the formats' names, and the ids are MusicBrainz's
+# own, the same in every dump.
+DIGITAL_MEDIA = 12
 DIGITAL_MS_TOL = 0.5
 DIGITAL_WHOLE_LO, DIGITAL_WHOLE_HI = -0.5, 1.5
 OTHER_TOL = 2.0
 WITNESS_UNDER = 3        # _RG_MIN_CONTENT's three: fewer positions need a second witness
 NAME_MIN = 0.30          # _RG_NAME_MIN: the group's name like the album's title
 
-_FIT = f"""CASE WHEN f.name = 'Digital Media' AND p.len % 1000 <> 0
+_FIT = f"""CASE WHEN p.format = {DIGITAL_MEDIA} AND p.len % 1000 <> 0
                THEN abs(c.dur - p.len / 1000.0) <= {DIGITAL_MS_TOL}
-           WHEN f.name = 'Digital Media'
+           WHEN p.format = {DIGITAL_MEDIA}
                THEN c.dur - p.len / 1000.0 >= {DIGITAL_WHOLE_LO} AND c.dur - p.len / 1000.0 < {DIGITAL_WHOLE_HI}
            ELSE abs(c.dur - p.len / 1000.0) <= {OTHER_TOL} END"""
 
@@ -127,10 +131,8 @@ va AS (
 who AS (
     SELECT va.v,
            array_agg(DISTINCT am.mbid::text ORDER BY am.mbid::text)
-               FILTER (WHERE am.mbid IS NOT NULL AND am.mbid::text <> ALL(%(special)s)) AS cands,
-           array_agg(DISTINCT lower(trim(ar.name))) AS names
-      FROM va JOIN artists ar ON ar.id = va.artist_id
-      LEFT JOIN artist_mbids am ON am.artist_id = va.artist_id
+               FILTER (WHERE am.mbid IS NOT NULL AND am.mbid::text <> ALL(%(special)s)) AS cands
+      FROM va LEFT JOIN artist_mbids am ON am.artist_id = va.artist_id
      GROUP BY va.v),
 prim AS (
     SELECT f.v, min(ta.artist_id::text) AS artist FROM f JOIN ok ON ok.v = f.v
@@ -145,12 +147,12 @@ SELECT f.v, f.album_id::text AS album_id, a.title, a.catalog_number, av.position
        CASE WHEN count(DISTINCT f.barcode) = 1
              AND count(*) FILTER (WHERE f.barcode IS NULL AND f.tbl = 'media_files') = 0
             THEN min(f.barcode) END AS barcode,
-       who.cands, who.names, prim.artist
+       who.cands, prim.artist
   FROM f JOIN ok ON ok.v = f.v
   JOIN al ON al.id = f.album_id JOIN albums a ON a.id = f.album_id JOIN album_variants av ON av.id = f.v
   JOIN who ON who.v = f.v LEFT JOIN prim ON prim.v = f.v
  GROUP BY f.v, f.album_id, a.title, a.catalog_number, av.positional_asked, al.musicbrainz_id,
-          who.cands, who.names, prim.artist
+          who.cands, prim.artist
 """
 
 # The candidates of each copy in _pcopies: a release (`med` NULL), and each
@@ -166,7 +168,12 @@ WITH cr AS (
       JOIN mb_artist a ON a.gid = ANY(c.cands)
       JOIN mb_artist_credit_name acn ON acn.artist = a.id
       JOIN mb_release r ON r.artist_credit = acn.artist_credit
-       AND (r.status IS NULL OR r.status NOT IN (3, 4))),
+       AND (r.status IS NULL OR r.status NOT IN (3, 4))
+      -- the album types, as _RG_SQL admits them: no primary type is an album,
+      -- 'Other' and 'Broadcast' stay out (§3.4)
+      JOIN mb_release_group rg ON rg.id = r.release_group
+      LEFT JOIN mb_release_group_primary_type pt ON pt.id = rg.type
+     WHERE rg.type IS NULL OR pt.name IN ('Album', 'EP', 'Single')),
 mn AS (
     SELECT md.release AS rel, md.id AS med, count(*) AS n
       FROM (SELECT DISTINCT rel FROM cr) d JOIN mb_medium md ON md.release = d.rel
@@ -198,7 +205,6 @@ fit AS (
     SELECT p.v, p.rel, p.med, array_agg(p.recording ORDER BY p.pos) AS recs,
            round(sum(abs(c.dur::numeric - p.len / 1000.0)), 3) AS err
       FROM p JOIN c ON c.v = p.v AND c.pos = p.pos
-      LEFT JOIN mb_medium_format f ON f.id = p.format
      GROUP BY p.v, p.rel, p.med
     HAVING bool_and(p.has_rec AND p.len IS NOT NULL AND {_FIT}))
 SELECT fit.v, fit.rel, (SELECT md.position FROM mb_medium md WHERE md.id = fit.med) AS disc,
@@ -218,20 +224,25 @@ def _catno(value):
     return "".join(ch for ch in (value or "").lower() if ch.isalnum()) or None
 
 
-# What MusicBrainz's rows for a copy are: the dump's version, and the newest
-# slice of the copy's own artists — a reload or a slice can change a release's
-# lengths under its id, and the candidate releases are a function of the
-# candidate artists and these rows. Another artist's slice changes nothing here.
-_DUMP_SQL = "SELECT coalesce((SELECT value::text FROM user_settings WHERE key = 'musicbrainz.db_version'), '') AS v"
-_SLICES_SQL = ("SELECT name_key, max(fetched_at)::text AS at FROM mb_slice_fetches "
-               "WHERE name_key = ANY(%s) GROUP BY name_key")
+# The rule's own version, in every digest: a change to the tolerances or to
+# decide asks every copy it abstained on again. Bump it with any such change.
+RULE_VERSION = 1
+
+# What MusicBrainz's rows here are: the dump's version, and the slices' last
+# change — a reload or a slice can change a release's lengths under its id, and
+# a slice of any name can bring a release credited to the copy's artists (a
+# release whose group credits only the composer arrives with the composer's).
+# A dump node takes no slices; on a slice-fed node the rows are few, so the
+# candidate query a slice makes run again is cheap.
+_MB_DATA_SQL = """
+SELECT coalesce((SELECT value::text FROM user_settings WHERE key = 'musicbrainz.db_version'), '')
+       || '/' || coalesce((SELECT max(fetched_at)::text || ':' || count(*) FROM mb_slice_fetches), '') AS v"""
 
 
-def _digest(copy: dict, dump: str, slices: dict) -> str:
-    newest = max((slices.get(n) or "" for n in copy["names"] or ()), default="")
-    parts = [dump, newest, ",".join(copy["cands"]), ",".join(f"{d:.2f}" for d in copy["durs"]),
+def _digest(copy: dict, mb_data: str, siblings: list) -> str:
+    parts = [str(RULE_VERSION), mb_data, ",".join(copy["cands"]), ",".join(f"{d:.2f}" for d in copy["durs"]),
              copy["barcode"] or "", _catno(copy["catalog_number"]) or "", copy["title"] or "",
-             copy["album_rg"] or ""]
+             copy["album_rg"] or "", ",".join(map(str, siblings))]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
@@ -266,6 +277,7 @@ def run(waiting: set = None, take_arriving: bool = True) -> dict:
     from canon.content import arriving_albums
     st = {"copies": 0, "asked": 0, "bound_albums": 0, "bound_copies": 0, "abstained": 0,
           "album_conflict": 0, "waiting": 0}
+    bound: list = []
     with get_conn() as conn:
         conn.autocommit = False
         try:
@@ -279,11 +291,13 @@ def run(waiting: set = None, take_arriving: bool = True) -> dict:
                 if not copies:
                     conn.commit()
                     return st
-                cur.execute(_DUMP_SQL)
-                dump = cur.fetchone()["v"]
-                cur.execute(_SLICES_SQL, (sorted({n for c in copies.values() for n in c["names"] or ()}),))
-                slices = {r["name_key"]: r["at"] for r in cur.fetchall()}
-                digests = {v: _digest(c, dump, slices) for v, c in copies.items()}
+                cur.execute(_MB_DATA_SQL)
+                mb_data = cur.fetchone()["v"]
+                # the album's unbound copies are in each digest: one gone asks the rest again
+                siblings: dict = {}
+                for v, c in copies.items():
+                    siblings.setdefault(c["album_id"], []).append(v)
+                digests = {v: _digest(c, mb_data, sorted(siblings[c["album_id"]])) for v, c in copies.items()}
                 # a changed copy is asked with every unbound copy of its album:
                 # the one-group rule (§3.1.6) is the album's, not the copy's
                 changed = {c["album_id"] for v, c in copies.items() if c["positional_asked"] != digests[v]}
@@ -308,7 +322,11 @@ def run(waiting: set = None, take_arriving: bool = True) -> dict:
                 for r in cur.fetchall():
                     fits.setdefault(r["v"], []).append(r)
                 decisions = {v: decide(copies[v], fits.get(v, [])) for v in ask}
-                st.update(_apply(cur, copies, decisions, digests, waiting))
+                st.update(_apply(cur, copies, decisions, digests, waiting, bound))
+                if bound:
+                    cur.execute("SELECT DISTINCT artist_id::text AS a FROM album_artists "
+                                "WHERE album_id = ANY(%s::uuid[]) AND role = 'primary'", (bound,))
+                    album_artists = [r["a"] for r in cur.fetchall()]
             conn.commit()
         except Exception:
             conn.rollback()
@@ -316,6 +334,10 @@ def run(waiting: set = None, take_arriving: bool = True) -> dict:
         finally:
             conn.autocommit = True
     logger.info("positional tier: %s", st)
+    if bound:
+        # the album credit of what it bound: the editions name those albums
+        # (an ensemble's album whose tracks credit its leader is no pass's artist)
+        st["album_artists"] = album_artists
     return st
 
 
@@ -328,7 +350,8 @@ def _confirmed(copy: dict, pick: dict, asks) -> object:
     rel = confirm.release(pick["rel_mbid"], asks)
     if rel is confirm.WAIT:
         return confirm.WAIT
-    if not rel or not rel.known or not rel.data.get("group"):
+    if not rel or not rel.known or not rel.data.get("group") \
+            or rel.data["group"].get("primary_type") not in ("Album", "EP", "Single", None):
         return False
     same = confirm.same("release_group", pick["rg_mbid"], rel.data["group"]["mbid"], asks)
     if same is confirm.WAIT:
@@ -344,7 +367,7 @@ def _confirmed(copy: dict, pick: dict, asks) -> object:
     return [t["recording"] for t in tracks]
 
 
-def _apply(cur, copies: dict, decisions: dict, digests: dict, waiting) -> dict:
+def _apply(cur, copies: dict, decisions: dict, digests: dict, waiting, bound: list) -> dict:
     from canon.content import _LOCAL_BINDING_WINS, _PRUNE_STALE_BINDINGS
     st = {"bound_albums": 0, "bound_copies": 0, "abstained": 0, "album_conflict": 0, "waiting": 0}
     by_album: dict = {}
@@ -393,6 +416,7 @@ def _apply(cur, copies: dict, decisions: dict, digests: dict, waiting) -> dict:
             if not cur.rowcount:
                 continue
             st["bound_albums"] += 1
+            bound.append(album)
         bound_tracks = []
         for v, pick in picks.items():
             c = copies[v]

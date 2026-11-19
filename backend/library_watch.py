@@ -475,6 +475,14 @@ def start(request: Callable) -> None:
                 _state.update(state=NO_EVENTS, why=why)
             logger.info(f"Library watch: not armed — the music folder's mount is {why}, which "
                         "delivers no events for other programs' writes; 'Scan for new' finds new music")
+            # Files read under an older reader (scanner.TAGS_READ_REV) are read
+            # again by any scan that meets them; with no events nothing queues
+            # one, so the start (and the folder's return) queues the library
+            # until a whole walk has read it under this reader — a file that
+            # walk could not read or did not meet is read when a scan meets it.
+            from scanner import reread_due
+            if reread_due():
+                request({"": True}, explicit=True)
             return
         _arm(root)
     finally:

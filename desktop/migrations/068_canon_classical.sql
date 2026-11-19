@@ -13,6 +13,9 @@
 -- title_numbers / title_numbers_disagree: the numeral rule of the matcher.
 -- album_variants: the positional pass's last abstention on the copy, as the
 -- candidates it was asked with — asked again only when they change.
+-- mb_release: the positional pass's candidates by the release's credit (on a
+-- dump node an index over the whole table, built once here; the loader keeps
+-- it across reloads).
 -- mbws_tracks: a data track of an enhanced CD, which is no position of the
 -- audio a copy holds (a release answered before keeps false: its data
 -- tracks count until MusicBrainz's answer is stored again).
@@ -25,6 +28,8 @@ ALTER TYPE mb_match_confidence ADD VALUE IF NOT EXISTS 'positional' BEFORE 'ai';
 ALTER TABLE track_mbids ADD COLUMN IF NOT EXISTS matcher_version SMALLINT NOT NULL DEFAULT 1;
 
 ALTER TABLE mbws_tracks ADD COLUMN IF NOT EXISTS is_data BOOLEAN NOT NULL DEFAULT false;
+
+CREATE INDEX IF NOT EXISTS idx_mb_release_credit ON mb_release(artist_credit);
 
 CREATE OR REPLACE FUNCTION seal_guard_track_mbids() RETURNS trigger AS $$
 BEGIN

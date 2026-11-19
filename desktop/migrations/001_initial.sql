@@ -3378,6 +3378,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_mb_release_group_gid  ON mb_release_group(g
 CREATE INDEX IF NOT EXISTS idx_mb_rg_type               ON mb_release_group(type);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_name_trgm          ON mb_release_group USING gin (lower(name) gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_mb_release_rg            ON mb_release(release_group);
+-- the positional pass's candidates: the releases a candidate artist's credit names
+CREATE INDEX IF NOT EXISTS idx_mb_release_credit        ON mb_release(artist_credit);
 CREATE INDEX IF NOT EXISTS idx_mb_release_country_rel   ON mb_release_country(release);
 CREATE INDEX IF NOT EXISTS idx_mb_rgstj_secondary       ON mb_release_group_secondary_type_join(secondary_type);
 CREATE INDEX IF NOT EXISTS idx_mb_track_medium          ON mb_track(medium);

@@ -1455,8 +1455,12 @@ class SyncClient:
         the analysis records); this node's own is never replaced. A binding of
         a methodology this release does not compute is refused: its seal
         would replace every imported binding of the recording for good."""
-        items = [i for i in items if _is_int(i.get("matcher_version"))
-                 and 1 <= i["matcher_version"] <= rs.MATCHER_VERSION]
+        made = [i for i in items if _is_int(i.get("matcher_version"))
+                and 1 <= i["matcher_version"] <= rs.MATCHER_VERSION]
+        if len(made) < len(items):
+            logger.warning("track_mbids: %d binding(s) refused — no matcher version, or one this "
+                           "release does not compute (above %d)", len(items) - len(made), rs.MATCHER_VERSION)
+        items = made
         if not items:
             return 0
         uuids = list({item["track_uuid"] for item in items})

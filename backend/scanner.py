@@ -1165,6 +1165,14 @@ TAGS_READ_REV = 1
 TAGS_READ_KEY = "scanner.tags_read_rev"
 
 
+def reread_due() -> bool:
+    """No whole walk has read the library under this reader yet."""
+    with get_db_context() as db:
+        walked = db.execute(text("SELECT value FROM user_settings WHERE key = :k"),
+                            {"k": TAGS_READ_KEY}).scalar()
+    return (walked or 0) < TAGS_READ_REV
+
+
 def tag_values(audio, vorbis_key: str, id3_key: str = None, mp4_key: str = None) -> List[str]:
     """A tag's values as the container keeps them, in its order, empty ones
     dropped: a Vorbis field list, an ID3 frame's text list (a v2.4

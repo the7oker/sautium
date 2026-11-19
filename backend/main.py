@@ -1161,17 +1161,6 @@ async def lifespan(app: FastAPI):
     # while the node was down — and each folder that changes after.
     import library_watch
     await asyncio.to_thread(library_watch.start, request_scan)
-    # Files read under an older reader (scanner.TAGS_READ_REV) are read again
-    # by any scan that meets them. A watched library was just queued whole; one
-    # whose mount sends no events would wait for the owner's next scan, so the
-    # start queues it until a whole walk has read the library under this
-    # reader (scanner.TAGS_READ_KEY) — a file that walk could not read or did
-    # not meet (away, gone) is read when a scan meets it, never chased.
-    from scanner import TAGS_READ_KEY, TAGS_READ_REV
-    walked = db_query_one("SELECT value FROM user_settings WHERE key = %(k)s", {"k": TAGS_READ_KEY})
-    if library_watch.state()["state"] == library_watch.NO_EVENTS \
-            and (walked["value"] if walked else 0) < TAGS_READ_REV:
-        request_scan()
 
     yield
 

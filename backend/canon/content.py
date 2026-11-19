@@ -214,6 +214,12 @@ ORDER BY c.album_id, c.track_id, c.exact DESC, (grp.recording IS NULL), (c.dd IS
 """
 
 
+# A file of a copy the positional pass bound (canon.positional): its position
+# chose its recording, and the track layer's title match is no evidence over it.
+_NOT_POSITIONAL = """
+    AND NOT EXISTS (SELECT 1 FROM album_variants pv JOIN albums pa ON pa.id = pv.album_id
+                     WHERE pv.id = {f}.album_variant_id AND pa.mb_match_confidence = 'positional')"""
+
 # Track-centric match — the layer for artists owning TRACKS but no albums (a
 # single or two on a compilation owned by someone else). They are invisible to
 # the album-centric resolve, which walks album_artists. Same trust chain (name
@@ -232,6 +238,7 @@ WITH owned AS (
     JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         AND ta.artist_id = %(artist)s::uuid
     JOIN owned_files mf ON mf.track_id = t.id
+    WHERE TRUE{_NOT_POSITIONAL.format(f='mf')}
     GROUP BY t.id, t.title
 ),
 cand AS (
@@ -841,11 +848,13 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
                     # Stamp files FIRST (before any rename/merge): recording_mbid
                     # rides the file row (here or at the HQPlayer), which
                     # survives a track-UUID move.
+                    # never a file of a copy the positional pass bound: its
+                    # position chose that recording (canon.positional)
                     for h in dom_hits:
                         for table in ("media_files", "hqp_library_files"):
                             cur.execute(
-                                f"UPDATE {table} SET recording_mbid = %s WHERE track_id = %s::uuid",
-                                (h["rec_mbid"], h["track_id"]))
+                                f"UPDATE {table} f SET recording_mbid = %s WHERE f.track_id = %s::uuid"
+                                + _NOT_POSITIONAL.format(f="f"), (h["rec_mbid"], h["track_id"]))
                             st["files"] += cur.rowcount
                 # inside the txn on purpose: commit clears them; a rollback
                 # reverts the SET and the temp table along with the work
@@ -2486,9 +2495,12 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=(),
     except Exception as e:
         st["errors"] += 1
         logger.error("canon: the positional pass failed: %s", e)
-    if done:
-        apply_editions(dry_run=False, artist_ids=done, waiting=waiting,   # scoped edition split + RG rename
+    editions_for = list(dict.fromkeys(done + st.get("positional", {}).pop("album_artists", [])))
+    if editions_for:
+        # scoped edition split + RG rename, the positional pass's albums' credit too
+        apply_editions(dry_run=False, artist_ids=editions_for, waiting=waiting,
                        take_arriving=take_arriving)
+    if done:
         fold_credit_duplicates(dry_run=False, artist_ids=done)   # one track read from two copies
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)
