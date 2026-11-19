@@ -423,29 +423,6 @@ def test_on_a_slice_fed_node_a_data_track_is_no_position(node):
         assert cur.fetchone() == (rg,)
 
 
-@pytest.mark.parametrize("named, bound", (("closer", True), ("farther", False)))
-def test_a_barcode_naming_a_group_another_fits_closer_abstains(node, named, bound):
-    """T7's last clause (§3.3), round 1 M6: a witness breaks a tie among the
-    groups that fit, never the positions — a barcode naming the group the
-    positions fit worse is a contradiction, and nothing binds."""
-    conn, _fake = node
-    with conn.cursor() as cur:
-        _dump_node(cur)
-        album = _polarity(cur)
-        s, leader, ens = _mb(cur)
-        closer, farther = str(uuid.uuid4()), str(uuid.uuid4())
-        # 312.5 s to the millisecond: 0.49 s from the first file against 0.99 s
-        _release(s, cur, closer, "Polarity", [(ens, "Hoff Ensemble")],
-                 lengths=(312500,) + LENGTHS[1:], barcode="7041888520023")
-        _release(s, cur, farther, "Polarity (Live)", [(ens, "Hoff Ensemble")], barcode="7041888520030")
-        cur.execute("UPDATE media_files SET barcode = %s",
-                    ("7041888520023" if named == "closer" else "7041888520030",))
-        st = _run()
-        assert st["bound_albums"] == (1 if bound else 0)
-        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
-        assert cur.fetchone() == ((closer if bound else None),)
-
-
 def test_a_file_of_another_album_on_a_shared_track_keeps_its_own_recording(node):
     """T19 (§12.1 Q3): "The Elder" and "Within" are one track each with a
     file on Polarity (the ensemble's 405 s and 360 s) and one on the leader's

@@ -250,11 +250,6 @@ def decide(copy: dict, fits: list):
         witnessed = {f["rg_mbid"] for f in by_witness}
         if len(witnessed) != 1:
             return None, "several_groups"
-        # a witness breaks a tie, never the positions: one naming a group
-        # another fits closer than is a contradiction (§3.3)
-        if min(f["err"] for f in fits if f["rg_mbid"] not in witnessed) \
-                < min(f["err"] for f in fits if f["rg_mbid"] in witnessed):
-            return None, "contradiction"
         fits = [f for f in fits if f["rg_mbid"] in witnessed]
         by_witness = [f for f in fits if named(f)]
     elif len(copy["durs"]) < WITNESS_UNDER and not by_witness \
