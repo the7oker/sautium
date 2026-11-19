@@ -27,7 +27,7 @@ Postgres + OS don't fit a full/standard working set below that.
 
 `ml_available` is the separate axis: whether torch imports at all. It is
 False on nodes where the ML wheels do not exist for the platform (Intel
-macOS — PyTorch stopped at 2.2.2 there, see backend/requirements.txt), and
+macOS — PyTorch stopped at 2.2.2 there, see backend/requirements-ml.txt), and
 such a node is lite by tier anyway. Every ML-gated property folds it in, so
 one check keeps a torch-less install off the model paths even when
 SAUTIUM_PROFILE forces a tier the machine cannot honour.

@@ -1,10 +1,10 @@
-# Docker Compose for a Linux arm64 host — a Raspberry Pi 5 (8–16 GB) or any
-# native-Docker arm64 machine:
+# Docker Compose for a Linux host with no NVIDIA card — a Raspberry Pi 5, any
+# native-Docker arm64 machine, an x86-64 mini-PC or NAS:
 #   docker compose -f docker-compose.pi.yml up -d --build
 #
 # docker-compose.yml with only what such a host needs changed — keep them in step:
-#   - Dockerfile.mac, the arm64 CPU image (no CUDA): no CUDA variables, no GPU
-#     reservation. With no accelerator the node resolves to the lite profile
+#   - Dockerfile.mac, the CPU image (no CUDA; arm64 or x86-64 by the build's
+#     own architecture): no CUDA variables, no GPU reservation. With no accelerator the node resolves to the lite profile
 #     (backend/hardware_profile.py): it serves, syncs and plays, and analyses
 #     no library in bulk;
 #   - no Codex CLI in that image, so no CODEX_CLI_ENABLED and no ./data/codex;
@@ -112,6 +112,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.mac
+      # What the image carries (backend/Dockerfile.mac): the model stack, the
+      # assistant's CLI, the demo channel's runtime. The console setup records
+      # its choice in .env, and the host agent's update builds with the same.
+      args:
+        MODELS: ${SAUTIUM_IMAGE_MODELS:-1}
+        ASSISTANT_CLI: ${SAUTIUM_IMAGE_ASSISTANT_CLI:-1}
+        STREAMING: ${SAUTIUM_IMAGE_STREAMING:-1}
     # The image the host agent's update built from a verified release, named
     # in .env (scripts/host_agent.py); a build by hand tags this name too.
     image: ${SAUTIUM_BACKEND_IMAGE:-sautium-backend:local}

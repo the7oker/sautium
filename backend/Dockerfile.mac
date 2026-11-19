@@ -1,5 +1,18 @@
-# The CPU image for arm64 hosts — Docker on an Apple Silicon Mac
-# (docker-compose.mac.yml), a Raspberry Pi 5 (docker-compose.pi.yml); no CUDA.
+# The CPU image of a Linux host — Docker on an Apple Silicon Mac
+# (docker-compose.mac.yml), a Raspberry Pi 5 or an x86-64 machine with no
+# NVIDIA card (docker-compose.pi.yml); no CUDA. The architecture is the
+# build's own (TARGETARCH: arm64 or amd64).
+#
+# Three build arguments say what the image carries (PI-NODE-2B; the console
+# setup records them in .env, and the host agent's update builds with the same):
+#   MODELS=0         no model stack (requirements-ml.txt): the node analyses
+#                    nothing and embeds no query, whatever its switches say
+#   ASSISTANT_CLI=0  no Node.js and no Claude Code CLI
+#   STREAMING=0      no deno (yt-dlp's sandbox for the demo channel)
+# The node reads what its image has at its start and says "this install was
+# set up without it" where a screen would offer it. No variant carries the
+# compilers: the packages are installed in a build stage and copied.
+#
 # Ubuntu 22.04, the release image's own base: the fingerprint (fpcalc over
 # FFmpeg's decode) is the content address of every analysis record, and only
 # the same FFmpeg gives the same fingerprints — Debian trixie's FFmpeg 7.1
@@ -8,61 +21,131 @@
 # question first: the self-test (provenance.fingerprinter) refuses analysis
 # on an fpcalc that fingerprints its probe signal wrong or not at all, but
 # FFmpeg 7.1 moves a file's print one time in five, and its probe's not.
-FROM ubuntu:22.04
+FROM ubuntu:22.04 AS base
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
 ENV PYTHON_VERSION=3.11
 
-# Install system dependencies. deadsnakes for a 3.11 final, as the release image (jammy's own is 3.11.0rc1)
+# What the node runs on. deadsnakes for a 3.11 final, as the release image (jammy's own is 3.11.0rc1)
 RUN apt-get update && apt-get install -y software-properties-common \
     && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y \
+    && apt-get update && apt-get install -y --no-install-recommends \
     python${PYTHON_VERSION} \
-    python${PYTHON_VERSION}-dev \
     python${PYTHON_VERSION}-venv \
     python${PYTHON_VERSION}-distutils \
     # Audio processing libraries
     ffmpeg \
     libsndfile1 \
-    libsndfile1-dev \
+    # OpenMP's runtime, for the wheels that do not bundle their own
+    libgomp1 \
     # Chromaprint fpcalc — the content address of every analysis record
     # (provenance.require_fingerprinter refuses an analysis pass without it)
     libchromaprint-tools \
     # Parallel bzip2 for the MusicBrainz dump (mb_dump_load falls back to bzip2)
     lbzip2 \
-    # Build tools
-    build-essential \
     git \
     wget \
     curl \
-    # PostgreSQL client
-    postgresql-client \
+    ca-certificates \
     # Node's archive is .tar.xz
     xz-utils \
-    # Cleanup
+    && apt-get purge -y software-properties-common && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Every file fetched with curl below names its version and is checked against
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
+
+
+# -- the build stage: compilers and headers, left behind -----------------------
+FROM base AS build
+
+# Every file fetched with curl in the two stages below names its version and is checked against
 # its SHA-256 before it is unpacked or run; a version moves with its digest, in
-# a release. (The pip installs further down resolve from PyPI at build time.)
+# a release. (The pip installs of this stage resolve from PyPI at build time.)
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION}-dev \
+    libsndfile1-dev \
+    build-essential \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# pip from its wheel, checked by digest (the release image's way)
+ARG PIP_WHEEL=pip-26.2.2-py3-none-any.whl
+ARG PIP_URL=https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl
+ARG PIP_SHA256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
+RUN curl -fsSLo /tmp/${PIP_WHEEL} ${PIP_URL} \
+    && echo "${PIP_SHA256}  /tmp/${PIP_WHEEL}" | sha256sum -c - \
+    && python${PYTHON_VERSION} /tmp/${PIP_WHEEL}/pip install --no-index /tmp/${PIP_WHEEL} \
+    && rm /tmp/${PIP_WHEEL} \
+    && python${PYTHON_VERSION} -m pip install setuptools==78.1.1 wheel==0.48.0
+
+WORKDIR /build
+
+# Copy requirements first for better Docker layer caching
+COPY requirements.txt requirements-ml.txt ./
+
+ARG MODELS=1
+
+# PyTorch CPU-only (no CUDA in this image): this avoids downloading ~2GB of
+# CUDA libraries. Its own layer, so an edit of a requirements file downloads
+# no torch again.
+RUN if [ "${MODELS}" = 1 ]; then \
+        pip install --no-cache-dir torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 \
+            --index-url https://download.pytorch.org/whl/cpu; \
+    fi
+
+# The node's packages, and with MODELS=1 the model stack beside them in one
+# resolution (torch already installed above, pip will skip it)
+RUN if [ "${MODELS}" = 1 ]; then \
+        pip install --no-cache-dir -r requirements.txt -r requirements-ml.txt; \
+    else \
+        pip install --no-cache-dir -r requirements.txt; \
+    fi
+
+# cutlet's Japanese dictionary (transliterate.py degrades without it), as the release image has it
+RUN pip install --no-cache-dir unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc
+
+# Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
+RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+
+
+# -- the image -----------------------------------------------------------------
+FROM base
+
+# BuildKit names the architecture; the classic builder leaves it empty, and
+# the two downloads below then ask dpkg
+ARG TARGETARCH
+ARG ASSISTANT_CLI=1
+ARG STREAMING=1
 
 # Node.js 22, the official build (for the Claude Code CLI)
 ARG NODE_VERSION=22.23.2
-ARG NODE_SHA256=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8
-RUN curl -fsSLo /tmp/node.tar.xz \
-        https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.xz \
-    && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum -c - \
-    && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
-    && rm /tmp/node.tar.xz && node --version
+ARG NODE_SHA256_ARM64=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8
+ARG NODE_SHA256_AMD64=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
+RUN if [ "${ASSISTANT_CLI}" = 1 ]; then \
+        case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+            arm64) node_arch=arm64; node_sha256="${NODE_SHA256_ARM64}" ;; \
+            amd64) node_arch=x64; node_sha256="${NODE_SHA256_AMD64}" ;; \
+            *) echo "no Node.js digest for this architecture" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSLo /tmp/node.tar.xz \
+            https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz \
+        && echo "${node_sha256}  /tmp/node.tar.xz" | sha256sum -c - \
+        && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner \
+        && rm /tmp/node.tar.xz && node --version; \
+    fi
 
 # The Claude Code CLI at the exact version and integrity hashes its lockfile
 # names (agents/claude-code/package-lock.json): it moves with a release, never
 # at a container's start, and its own updater stays off.
 COPY agents/claude-code/ /opt/agents/claude-code/
-RUN npm ci --prefix /opt/agents/claude-code --no-audit --no-fund && npm cache clean --force
+RUN if [ "${ASSISTANT_CLI}" = 1 ]; then \
+        npm ci --prefix /opt/agents/claude-code --no-audit --no-fund && npm cache clean --force; \
+    fi
 ENV PATH=/opt/agents/claude-code/node_modules/.bin:$PATH
 ENV DISABLE_AUTOUPDATER=1
 
@@ -78,49 +161,33 @@ RUN useradd -m -s /bin/bash agent \
 COPY node_user.py /usr/local/lib/sautium/node_user.py
 ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
-
-# pip from its wheel, checked by digest (the release image's way)
-ARG PIP_WHEEL=pip-26.2.2-py3-none-any.whl
-ARG PIP_URL=https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl
-ARG PIP_SHA256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
-RUN curl -fsSLo /tmp/${PIP_WHEEL} ${PIP_URL} \
-    && echo "${PIP_SHA256}  /tmp/${PIP_WHEEL}" | sha256sum -c - \
-    && python${PYTHON_VERSION} /tmp/${PIP_WHEEL}/pip install --no-index /tmp/${PIP_WHEEL} \
-    && rm /tmp/${PIP_WHEEL} \
-    && python${PYTHON_VERSION} -m pip install setuptools==78.1.1 wheel==0.48.0
+# The packages the build stage installed (pip, the libraries, their scripts,
+# the dictionary's mecabrc): everything pip wrote lives under /usr/local
+COPY --from=build /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
+COPY --from=build /usr/local/bin/ /usr/local/bin/
+COPY --from=build /usr/local/etc/mecabrc /usr/local/etc/mecabrc
 
 # Set working directory
 WORKDIR /app
 
-# Copy requirements first for better Docker layer caching
-COPY requirements.txt .
-
-# Install PyTorch CPU-only for ARM64 (no CUDA available on Apple Silicon in Docker)
-# This avoids downloading ~2GB of CUDA libraries
-RUN pip install --no-cache-dir torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 \
-    --index-url https://download.pytorch.org/whl/cpu
-
-# Install remaining Python dependencies (torch already installed above, pip will skip it)
-RUN pip install --no-cache-dir -r requirements.txt
-
-# cutlet's Japanese dictionary (transliterate.py degrades without it), as the release image has it
-RUN pip install --no-cache-dir unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc
-
 # deno: the sandboxed JS runtime yt-dlp solves YouTube's player challenges in
 # (yt-dlp itself the node installs into its cache: streaming/ytdlp_release.py)
 ARG DENO_VERSION=2.9.8
-ARG DENO_SHA256=d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905
-RUN curl -fsSLo /tmp/deno.zip \
-         https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-aarch64-unknown-linux-gnu.zip \
-    && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
-    && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" \
-    && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
-    && deno --version
-
-# Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
-RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+ARG DENO_SHA256_ARM64=d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905
+ARG DENO_SHA256_AMD64=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+RUN if [ "${STREAMING}" = 1 ]; then \
+        case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+            arm64) deno_arch=aarch64; deno_sha256="${DENO_SHA256_ARM64}" ;; \
+            amd64) deno_arch=x86_64; deno_sha256="${DENO_SHA256_AMD64}" ;; \
+            *) echo "no deno digest for this architecture" >&2; exit 1 ;; \
+        esac \
+        && curl -fsSLo /tmp/deno.zip \
+            https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-${deno_arch}-unknown-linux-gnu.zip \
+        && echo "${deno_sha256}  /tmp/deno.zip" | sha256sum -c - \
+        && python -c "import zipfile; zipfile.ZipFile('/tmp/deno.zip').extractall('/usr/local/bin')" \
+        && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip \
+        && deno --version; \
+    fi
 
 # PostgreSQL 18 client — pg_dump / pg_restore for node backups (backup.py);
 # jammy's own client is the 14 series, which cannot dump an 18 server.

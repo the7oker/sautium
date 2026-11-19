@@ -142,7 +142,7 @@ devices that cannot sign a request: the media proxy (`8830`, launcher
 - **Python 3.11+**, **FastAPI** (async)
 - **PostgreSQL 18 + pgvector** — vector similarity + relational data
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL / batch operations
-- **Docker + Docker Compose** (WSL2 on Windows, native on macOS and on Linux arm64)
+- **Docker + Docker Compose** (WSL2 on Windows, native on macOS and on Linux)
 - **CUDA or Apple MPS** for GPU work (CLAP embeddings, BGE-M3 text
   encoding); a CPU-only node analyses its own files' sound too, and takes the
   instruments from peers unless its owner switches them on
@@ -177,7 +177,8 @@ tracks, plus the optional ~21 GB MusicBrainz catalogue.
 
 - Docker and Docker Compose
 - NVIDIA GPU with CUDA support + NVIDIA Container Toolkit (Linux/WSL2 path).
-  Apple Silicon and Linux arm64 use a CPU-only variant — see below.
+  Apple Silicon and a Linux machine without an NVIDIA card (arm64 or x86-64)
+  use a CPU-only variant — see below.
 - An LLM provider: an Anthropic API key, or Claude Code signed in from the
   Web UI (More › AI assistant; default provider is `claude_code`); an OpenAI
   Codex sign-in works as the second selectable agent. The node keeps its
@@ -240,9 +241,17 @@ docker compose -f docker-compose.wsl.yml up -d --build
 # macOS (Apple Silicon, CPU-only PyTorch)
 docker compose -f docker-compose.mac.yml up -d --build
 
-# Linux on arm64, e.g. a Raspberry Pi 5 (CPU-only; MUSIC_LIBRARY_PATH in .env)
+# Linux without an NVIDIA card — a Raspberry Pi 5, an x86-64 mini-PC
+# (CPU-only; MUSIC_LIBRARY_PATH in .env)
 docker compose -f docker-compose.pi.yml up -d --build
 ```
+
+The CPU image (`backend/Dockerfile.mac`) takes three build arguments, read
+from `.env` by `docker-compose.pi.yml` and by the host agent's update:
+`SAUTIUM_IMAGE_MODELS=0` leaves the model stack out (the node then analyses
+nothing itself and takes sound features from other nodes),
+`SAUTIUM_IMAGE_ASSISTANT_CLI=0` Node.js and the Claude Code CLI,
+`SAUTIUM_IMAGE_STREAMING=0` the demo channel's runtime. Each defaults to 1.
 
 This starts PostgreSQL and the FastAPI backend; on its first start the
 backend builds the schema (`desktop/migrations/001_initial.sql` plus the
@@ -441,7 +450,7 @@ sautium/
 ├── docker-compose.yml              # default (WSL2/Windows + NVIDIA GPU)
 ├── docker-compose.wsl.yml          # Windows, compose run from WSL
 ├── docker-compose.mac.yml          # Apple Silicon (CPU-only)
-├── docker-compose.pi.yml           # Linux arm64, e.g. Raspberry Pi 5 (CPU-only)
+├── docker-compose.pi.yml           # Linux without an NVIDIA card: a Raspberry Pi 5, x86-64 (CPU-only)
 ├── .env.example                    # environment template
 ├── CLAUDE.md                       # project spec, conventions, security posture
 ├── PROGRESS.md                     # design decisions and lessons learned

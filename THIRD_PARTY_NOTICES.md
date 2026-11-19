@@ -85,7 +85,7 @@ user's machine as separate, replaceable modules (not statically linked);
 their sources are at https://github.com/moses-palmer/pystray and
 https://github.com/psycopg/psycopg2.
 
-### Backend (`backend/requirements.txt`, installed by pip on the user's machine)
+### Backend (`backend/requirements.txt` and the model stack `backend/requirements-ml.txt`, installed by pip on the user's machine)
 
 fastapi (MIT) · starlette (BSD-3-Clause) · uvicorn (BSD-3-Clause) · h11 (MIT) ·
 anyio (MIT) · pydantic, pydantic-settings (MIT) ·
@@ -102,10 +102,10 @@ AND MIT) · numpy (BSD-3-Clause) · pandas (BSD-3-Clause) · scipy
 (BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) ·
 miniupnpc (BSD-3-Clause, the UPnP port mapping of a host-networked node) ·
 urllib3 (MIT) · certifi (MPL-2.0) · aiohttp
-(Apache-2.0 AND MIT) · Brotli (MIT) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
+(Apache-2.0 AND MIT) · Brotli (MIT) · qrcode (BSD-3-Clause) · python-json-logger (BSD-2-Clause) · pytest (MIT) ·
 pytest-asyncio (Apache-2.0) · anyascii (ISC) · pypinyin
 (MIT) · cutlet (MIT) · fugashi (MIT AND BSD-3-Clause, with MeCab) · koroman
-(MIT). Installed by the Docker image outside `requirements.txt`: libtorrent
+(MIT). Installed by the Docker image outside the requirements files: libtorrent
 (BSD; the launcher's too, above) and, in the image only, unidic-lite (MIT; it
 carries the UniDic dictionary, used under the BSD-3-Clause of its three
 licences).
