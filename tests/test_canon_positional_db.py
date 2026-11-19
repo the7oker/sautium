@@ -487,6 +487,35 @@ def test_a_track_timed_apart_from_its_recording_fits_by_the_track_s_length(node)
     assert set(a["recordings"].values()) == set(recs)
 
 
+@pytest.mark.parametrize("closer_first", (True, False))
+def test_two_groups_equal_on_the_four_keys_bind_the_closer_by_length(node, closer_first):
+    """§12.8 (the harness's case 2252: Kreisler's 1926 concerto bound to
+    another performance's group of the same name): two groups equal on name,
+    coverage, size and type were left to the plan's order. The closer by the
+    sum of |track − file| binds, whichever MusicBrainz holds first."""
+    conn, _fake = node
+    from canon import content
+    names = ("Violin Concerto: I. Allegro ma non troppo", "Violin Concerto: II. Larghetto",
+             "Violin Concerto: III. Rondo. Allegro")
+    title = "Violin Concerto in D major, op. 61"
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        lib, album, s, c = _meyers(cur, [(n, sec) for n, sec in zip(names, (1340.0, 560.0, 600.0))])
+        cur.execute("UPDATE albums SET title = %s WHERE id = %s", (title, album))
+        made = {}
+        for which in (("closer", "farther") if closer_first else ("farther", "closer")):
+            g = s.release_group(str(uuid.uuid4()), title, c)
+            recs = [str(uuid.uuid4()) for _ in names]
+            lengths = (1341200, 560400, 600900) if which == "closer" else (1254000, 563000, 596000)
+            s.release(str(uuid.uuid4()), title, g, c,
+                      [(n, ms, r) for n, ms, r in zip(names, lengths, recs)])
+            cur.execute("SELECT gid::text FROM mb_release_group WHERE id = %s", (g,))
+            made[which] = (cur.fetchone()[0], recs)
+    (a,) = content.resolve_artist(lib.id, "Anne Akiko Meyers")["albums"]
+    assert a["rg_mbid"] == made["closer"][0]
+    assert set(a["recordings"].values()) == set(made["closer"][1])
+
+
 def test_a_fuzzy_title_that_disagrees_on_its_movement_is_no_candidate(node):
     """T5 (DESIGN §2.2): Meyers' Spring I bound to "… No. 1: II. Largo"."""
     conn, _fake = node

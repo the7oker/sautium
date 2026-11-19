@@ -290,11 +290,23 @@ atitle AS (   -- atitle = normalized title; abase = the same with edition/disc s
 cand AS (   -- title candidates within a GENEROUS duration band (the band is a perf bound on
             -- mega-bootlegged artists, not a correctness lever — studio recordings sit within
             -- seconds of the owned file); exact (=) and fuzzy (%%) each use their _recs index
-    SELECT o.album_id, o.track_id, r.id AS rec_id FROM owned o JOIN _recs r ON r.rname = o.ntitle
+    SELECT o.album_id, o.track_id, o.dur, r.id AS rec_id, r.length AS rlen
+      FROM owned o JOIN _recs r ON r.rname = o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= {_RG_DURTOL})
     UNION
-    SELECT o.album_id, o.track_id, r.id FROM owned o JOIN _recs r ON r.rname %% o.ntitle
+    SELECT o.album_id, o.track_id, o.dur, r.id, r.length FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= {_RG_DURTOL})
+),
+fit AS (   -- per (owned album, owned track, release): how close the release's closest track to
+           -- it is, by the MB track's length (the recording's where the track has none); one
+           -- with neither counts as the band's edge, so a lengthless release never wins the
+           -- length tie-break over a timed one that fits
+    SELECT c.album_id, c.track_id, md.release AS rel_id,
+           min(coalesce(abs(coalesce(mt.length, c.rlen)/1000.0 - c.dur), {_RG_DURTOL})) AS d
+    FROM cand c
+    JOIN mb_track mt ON mt.recording = c.rec_id
+    JOIN mb_medium md ON md.id = mt.medium
+    GROUP BY c.album_id, c.track_id, md.release
 ),
 rel_cov AS (   -- per (owned album, OFFICIAL release of ANY studio-primary type incl comp/live):
                -- owned tracks covered. Comps are NOT pruned — an owned compilation must be free to
@@ -302,18 +314,16 @@ rel_cov AS (   -- per (owned album, OFFICIAL release of ANY studio-primary type 
                -- of being forced onto a studio/live album it merely shares songs with. Early-cut to
                -- releases covering >= half the owned album: that is half the bidirectional gate, and
                -- it bounds the "a hit song rides hundreds of comps" join blow-up.
-    SELECT album_id, rg_mbid, rel_id, owned_cov, total, is_comp, rgn FROM (
+    SELECT album_id, rg_mbid, rel_id, owned_cov, lendiff, total, is_comp, rgn FROM (
         SELECT c.album_id, rg.gid::text AS rg_mbid, r.id AS rel_id, nt.total,
                {_norm('rg.name')} AS rgn,
-               count(DISTINCT c.track_id) AS owned_cov,
+               count(*) AS owned_cov, sum(c.d) AS lendiff,
                EXISTS (SELECT 1 FROM mb_release_group_secondary_type_join j
                        JOIN mb_release_group_secondary_type st ON st.id = j.secondary_type
                        WHERE j.release_group = rg.id
                          AND st.name IN ('Compilation', 'DJ-mix', 'Mixtape/Street')) AS is_comp
-        FROM cand c
-        JOIN mb_track mt ON mt.recording = c.rec_id
-        JOIN mb_medium md ON md.id = mt.medium
-        JOIN mb_release r ON r.id = md.release
+        FROM fit c
+        JOIN mb_release r ON r.id = c.rel_id
             AND (r.status IS NULL OR r.status NOT IN (3, 4))  -- drop Bootleg + Pseudo-Release
         JOIN mb_release_group rg ON rg.id = r.release_group
         LEFT JOIN mb_release_group_primary_type pt ON pt.id = rg.type
@@ -335,7 +345,7 @@ rel_total AS (   -- true track count of just the candidate releases (the other h
 valid AS (   -- candidates passing the FULL bidirectional gate BEFORE ranking, so the name tie-break
              -- picks the best-named VALID release and a high-name-sim near-miss that fails the gate
              -- can't shadow a real lower-named match (which would wrongly NULL the album).
-    SELECT rc.album_id, rc.rg_mbid, rc.rel_id, rc.owned_cov, rc.total, rt.n AS rel_total,
+    SELECT rc.album_id, rc.rg_mbid, rc.rel_id, rc.owned_cov, rc.lendiff, rc.total, rt.n AS rel_total,
            GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) AS namesim, rc.is_comp
     FROM rel_cov rc
     JOIN rel_total rt ON rt.rel_id = rc.rel_id
@@ -351,13 +361,18 @@ SELECT album_id, rg_mbid,          -- among content-valid releases, the one whos
        (SELECT r.gid::text FROM mb_release r WHERE r.id = x.rel_id) AS rel_mbid
 FROM (                            -- owned title (tie-break, never a gate: a regional retitle with a lone
                                   -- match still wins on content; two sibling comps split by name). Then
-                                  -- most covered, closest in size (rejects supersets / medleys), studio.
+                                  -- most covered, closest in size (rejects supersets / medleys), studio;
+                                  -- then the closest by length, the MBIDs last: equal-named groups of
+                                  -- different performances tie on the four, and the plan's order is no
+                                  -- rule — two nodes with the same data, or a re-run, must reach the
+                                  -- same group (DESIGN §12.8).
                                   -- rel_mbid: the release that covered the album, the evidence a node
                                   -- without the dump re-checks on MusicBrainz's answer (canon.confirm).
-    SELECT album_id, rg_mbid, rel_id,
-           row_number() OVER (PARTITION BY album_id
-               ORDER BY namesim DESC, owned_cov DESC, abs(rel_total - total), is_comp) AS rn
-    FROM valid
+    SELECT v.album_id, v.rg_mbid, v.rel_id,
+           row_number() OVER (PARTITION BY v.album_id
+               ORDER BY v.namesim DESC, v.owned_cov DESC, abs(v.rel_total - v.total), v.is_comp,
+                        v.lendiff, v.rg_mbid, rl.gid) AS rn
+    FROM valid v JOIN mb_release rl ON rl.id = v.rel_id
 ) x WHERE x.rn = 1
 """
 
