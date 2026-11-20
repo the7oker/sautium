@@ -301,14 +301,17 @@ def _digest(copy: dict, mb_data: str, siblings: list) -> str:
 def decide(copy: dict, fits: list, named=()):
     """(release row, why) for one copy's fitting releases, or (None, why).
     `named`: the candidate releases its witnesses name (named_releases), as
-    (release id, group MBID) — one that does not fit while a release of
-    another group does is a contradiction (§3.3, §12.9 Q18). A smaller error
-    among fitting releases is no preference: every fit is inside the
-    tolerance."""
+    (release id, group MBID) — when they name one that does not fit and none
+    that does, while a release of another group fits, that is a
+    contradiction (§3.3, §12.9 Q18). A smaller error among fitting releases
+    is no preference: every fit is inside the tolerance."""
     if not fits:
         return None, "none_fit"
+    # a witness that also names a fitting release points at it, not away
+    # (one barcode on two releases of the artist's, one of them a fit)
     fitting = {f["rel"] for f in fits}
-    if any(rel not in fitting and any(f["rg_mbid"] != rg for f in fits) for rel, rg in named):
+    if not any(rel in fitting for rel, _rg in named) \
+            and any(rel not in fitting and any(f["rg_mbid"] != rg for f in fits) for rel, rg in named):
         return None, "contradiction"
     groups = {f["rg_mbid"] for f in fits}
     barcode, catno = copy["barcode"], _catno(copy["catalog_number"])

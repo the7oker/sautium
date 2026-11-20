@@ -197,12 +197,14 @@ def test_a_barcode_naming_its_own_release_binds_it_beside_a_box_that_fits_closer
         assert cur.fetchone() == (own,)
 
 
-@pytest.mark.parametrize("same_group", (False, True))
-def test_a_witness_naming_a_release_that_does_not_fit_contradicts_another_group_s(node, same_group):
+@pytest.mark.parametrize("same_group, also_the_fit", ((False, False), (True, False), (False, True)))
+def test_a_witness_naming_a_release_that_does_not_fit_contradicts_another_group_s(node, same_group, also_the_fit):
     """§3.3 as §12.9 Q18 reads it: the copy's barcode names a candidate
     release that does not fit (five positions against four files) while a
     release of another group does — no bind. Editions in one group (the
-    barcode a deluxe's, the positions the standard's) are no contradiction."""
+    barcode a deluxe's, the positions the standard's) are no contradiction,
+    and nor is a barcode that names the fitting release as well (the
+    harness's case 1129: one barcode on two releases of the artist's)."""
     conn, _fake = node
     with conn.cursor() as cur:
         _dump_node(cur)
@@ -218,12 +220,16 @@ def test_a_witness_naming_a_release_that_does_not_fit_contradicts_another_group_
         deluxe = s.release(str(uuid.uuid4()), "Polarity (Deluxe)", g, c,
                            [(f"Movement {i}", ms, str(uuid.uuid4())) for i, ms in enumerate(LENGTHS + (300000,), 1)])
         cur.execute("UPDATE mb_release SET barcode = '7041888520047' WHERE id = %s", (deluxe,))
+        if also_the_fit:
+            cur.execute("UPDATE mb_release r SET barcode = '7041888520047' FROM mb_release_group g "
+                        "WHERE g.id = r.release_group AND g.gid = %s", (fits_rg,))
         cur.execute("UPDATE mb_medium SET format = %s", (DM,))
         cur.execute("UPDATE media_files SET barcode = '7041888520047'")
+        bound = same_group or also_the_fit
         st = _run()
-        assert st["bound_albums"] == (1 if same_group else 0)
+        assert st["bound_albums"] == (1 if bound else 0)
         cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
-        assert cur.fetchone() == ((fits_rg if same_group else None),)
+        assert cur.fetchone() == ((fits_rg if bound else None),)
 
 
 def test_under_three_positions_a_second_witness_is_needed(node):
