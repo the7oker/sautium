@@ -535,9 +535,15 @@ def verify_relayed(conn, cert: dict, proof: Optional[dict], relay: str) -> str:
     return "failed"
 
 
+# A node too small to check a proof-of-work identity says so; one verified
+# by email it knows at once, by the certificate's signature. The guest's
+# client parks on this answer until its own identity changes (chat_client).
+UNVERIFIABLE = "identity proof cannot be checked on this node"
+
+
 @dataclass(frozen=True)
 class Admission:
-    status: str                    # verified | invalid | proof_required | failed | banned | busy | rate_limited
+    status: str                    # verified | invalid | proof_required | unverifiable | failed | banned | busy | rate_limited
     detail: str = ""
     retry_after: Optional[int] = None
 
@@ -551,6 +557,7 @@ class IdentityGate:
 
     def __init__(self, conn_factory: Callable, verify_certificate: Callable[[dict], bool], *,
                  mem_available_kib: Callable[[], Optional[int]] = identity_pow.mem_available_kib,
+                 mem_limit_kib: Callable[[], Optional[int]] = identity_pow.mem_limit_kib,
                  mem_guard_kib: int = identity_proof.MEM_GUARD_KIB):
         """`conn_factory()` returns a context manager yielding a psycopg2
         connection; `verify_certificate` is the surface's authority mirror."""
@@ -558,6 +565,13 @@ class IdentityGate:
         self._verify_certificate = verify_certificate
         self._mem_available_kib = mem_available_kib
         self._mem_guard_kib = mem_guard_kib
+        # A machine whose whole memory is under the guard can never run an
+        # evaluation: decided once, from the machine. Its answer to a
+        # proof-of-work identity is a stated refusal (UNVERIFIABLE) — "busy,
+        # come back in 30 s" for ever was a retry loop on the guest and a
+        # silence for its person (PI-NODE-2B §3.2).
+        limit = mem_limit_kib()
+        self.can_evaluate = limit is None or limit >= mem_guard_kib
         # Requests waiting for the evaluator wait on the event loop, holding
         # no thread; one that is cancelled holds nothing.
         self._queue = asyncio.Semaphore(1)
@@ -610,7 +624,11 @@ class IdentityGate:
         if row["status"] == "verified":
             return Admission("verified")
 
-        # method: pow, not yet verified — the one-time evaluation
+        # method: pow, not yet verified — the one-time evaluation, where
+        # this machine can ever run one (said before the proof is asked for:
+        # a proof presented here would change nothing)
+        if not self.can_evaluate:
+            return Admission("unverifiable", UNVERIFIABLE)
         if not identity_proof.proof_binds(proof, cert):
             return Admission("proof_required", "identity proof required")
         if self._addr_rate_limited(addr):

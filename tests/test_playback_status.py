@@ -201,6 +201,7 @@ def test_the_status_a_connection_opens_with_carries_the_floor_of_its_events(monk
     from routers import player as player_router
     from routers import settings as settings_router
     monkeypatch.setattr(settings_router, "_notices_state", lambda: {})
+    monkeypatch.setattr(settings_router, "identity_event", lambda: {"status": None})
     from playback.base import new_id
     mgr = player_router.manager
     before = new_id()
@@ -214,6 +215,7 @@ def test_the_status_a_connection_opens_with_carries_the_floor_of_its_events(monk
         floor = first["d"]["event_floor"]
         assert before < floor < new_id()
         assert json.loads((await stream.__anext__())[6:])["t"] == "notice"
+        assert json.loads((await stream.__anext__())[6:])["t"] == "identity"
         mgr._push_status({"state": "stopped", "output": {}, "output_event": {"id": new_id(), "kind": "refused"}})
         live = json.loads((await asyncio.wait_for(stream.__anext__(), 3))[6:])
         assert live["t"] == "status" and "event_floor" not in live["d"]

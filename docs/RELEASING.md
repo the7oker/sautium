@@ -76,7 +76,11 @@ own, no release descends from it, so it is never moved. A tracked file edited
 by hand stops the update as well. A Docker node has no updater of its own:
 on Linux (`docker-compose.pi.yml`) the host agent (`scripts/host_agent.py`,
 since 2026-11-15) moves it to a signed release through the same chain walk
-(`updater.survey_fetched`).
+(`updater.survey_fetched`). Since 2026-11-19 it is asked from the Web UI
+(More › Profile › Hardware profile: "Check for updates", "Update to …") or by
+`./sautium update`, and the node asks it for a check itself at its start and
+once a day; it builds the image with what `.env` says the install carries
+(`SAUTIUM_IMAGE_*`).
 
 ## The keys
 

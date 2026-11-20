@@ -83,6 +83,12 @@ ORDER = ("check", "diagnostics", "update")
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILE = "docker-compose.pi.yml"
 DOCKERFILE = "Dockerfile.mac"           # docker-compose.pi.yml's (a test holds them together)
+# What the image carries, by the Dockerfile's argument and the key of .env the
+# console setup recorded the choice under (docker-compose.pi.yml reads the
+# same keys; a test holds the three together). .env is the person's, mounted
+# into no container: an update builds what the install built.
+IMAGE_ARGS = (("MODELS", "SAUTIUM_IMAGE_MODELS"), ("ASSISTANT_CLI", "SAUTIUM_IMAGE_ASSISTANT_CLI"),
+              ("STREAMING", "SAUTIUM_IMAGE_STREAMING"))
 BACKEND, POSTGRES = "sautium-backend", "sautium-postgres"
 DEFAULT_IMAGE = "sautium-backend:local"
 NODE_API = "http://127.0.0.1:8800"
@@ -112,7 +118,7 @@ STATE_MAX = 64 * 1024
 VERIFY_MAX = 1024 * 1024
 # The setup code a node logs at each start until its account exists
 # (backend/device_auth._SETUP_CODE_FORM): never in a diagnostics report
-SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){2}")
+SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){1}")
 
 UNIT = "sautium-host-agent"
 STARTER_NAME = "sautium-host-agent"
@@ -747,6 +753,11 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
         return "refused", ("files git does not know of lie among the code, and would run in every release: "
                            + ", ".join(left[:5]) + (" …" if len(left) > 5 else "")), name, None
     env = read_env(root / ".env")
+    try:
+        carried = build_args(env)
+    except ValueError as e:
+        state["update_held_at"] = now
+        return "refused", f"{e}: an update builds what .env says the image carries", name, None
     tag = f"sautium-backend:{name}-{commit[:12]}"
     log(f"building {tag} from {name} ({commit})")
     # A build is the heaviest thing a forged request asks for: once a day,
@@ -756,7 +767,7 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     archive = subprocess.Popen(["git", "archive", "--format=tar", f"{commit}:backend"], cwd=str(root),
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
-        _run(["docker", "build", "-f", DOCKERFILE, "-t", tag, "-"], cwd=root,
+        _run(["docker", "build", "-f", DOCKERFILE, *carried, "-t", tag, "-"], cwd=root,
              stdin=archive.stdout, timeout=3 * 3600)
     except Exception as e:
         raise Refusal("failed", f"the image of {name} did not build "
@@ -793,6 +804,19 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     return _go_back(state, root, env, moving, now, why)
 
 
+def build_args(env: Dict[str, str]) -> List[str]:
+    """`--build-arg` for each choice .env records of what the image carries; a
+    key it does not hold is the Dockerfile's own default."""
+    args = []
+    for arg, key in IMAGE_ARGS:
+        value = env.get(key, "")
+        if value not in ("", "0", "1"):
+            raise ValueError(f"{key} in .env is neither 0 nor 1")
+        if value:
+            args += ["--build-arg", f"{arg}={value}"]
+    return args
+
+
 class NotReady(Exception):
     """Docker or the database is not up yet: the agent's boot unit starts the
     body again shortly."""
@@ -823,7 +847,7 @@ def resume(state: dict, now: float, root: Path = None) -> Optional[Tuple[str, st
 
 
 def _scrub(text: str) -> str:
-    return SETUP_CODE.sub("XXXX-XXXX-XXXX", text)
+    return SETUP_CODE.sub("XXXX-XXXX", text)
 
 
 def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:

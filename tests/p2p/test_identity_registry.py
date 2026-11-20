@@ -73,7 +73,9 @@ def _gate(monkeypatch, permit):
     monkeypatch.setattr(reg.identity_proof, "verify_proof", lambda proof, cert: True)
     monkeypatch.setattr(load_meter, "current", lambda: None)
     cert = {"pubkey": "ab" * 32, "difficulty": 32}
-    return reg.IdentityGate(_no_db, lambda c: True, mem_available_kib=lambda: None), cert
+    # the machine's size unknown: a capped test container is not a node too small to evaluate
+    return reg.IdentityGate(_no_db, lambda c: True, mem_available_kib=lambda: None,
+                            mem_limit_kib=lambda: None), cert
 
 
 def test_a_request_waiting_for_the_evaluator_parks_no_thread(monkeypatch):

@@ -216,3 +216,63 @@ def shutdown():
     """
     with _lock:
         _cache.clear()
+
+
+# -- the downloaded models, as files ----------------------------------------------------
+
+def store_is_own() -> bool:
+    """Whether the model cache is this node's alone: on a node its image
+    holds, where the cache root is the node's own folder (./data/cache). A
+    launcher reads the machine's Hugging Face and torch caches, every
+    program's on that machine — never this node's to count or to remove."""
+    import claude_code_runner
+    return claude_code_runner.IN_DOCKER
+
+
+def store_dirs() -> list:
+    """Where this node's downloaded models lie: the Hugging Face hub cache,
+    the converted translator beside it (translation._ct2_model_dir) and
+    torch hub's checkpoints (the instrument pair's) — each under the cache
+    root of the node's user (Docker: ./data/cache); none where the cache is
+    not the node's own (store_is_own). Never the node's own rows: a profile
+    decides what is computed, and these are what computing downloaded."""
+    import os
+    from pathlib import Path
+    if not store_is_own():
+        return []
+    hub = os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")
+    root = Path(hub).parent if hub else Path.home() / ".cache"
+    return [root / "huggingface", root / "sautium-ct2", root / "torch"]
+
+
+def store_bytes() -> int:
+    """What the downloaded models take on the disk: each file once (the hub
+    cache names a blob by links, which are not followed)."""
+    import os
+    total = 0
+    stack = [str(d) for d in store_dirs()]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for entry in it:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            continue
+    return total
+
+
+def remove_store() -> int:
+    """The owner's "Remove" of the downloaded models on a node that runs
+    none: the bytes freed. A model wanted again downloads again."""
+    import shutil
+    freed = store_bytes()
+    for folder in store_dirs():
+        if folder.is_symlink():
+            folder.unlink()
+        elif folder.is_dir():
+            shutil.rmtree(folder)
+    logger.info("downloaded models removed (%.1f GiB)", freed / 1024 ** 3)
+    return freed

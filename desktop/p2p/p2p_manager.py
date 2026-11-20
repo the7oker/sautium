@@ -185,7 +185,7 @@ class P2PManager:
             mb_dump_version=self._mb_dump_version,
         )
         self._dht_service = DHTService(
-            sharing_enabled=self._sharing_on,
+            sharing_enabled=self._passing_on,
             state_store=DhtStateStore(self.db_dsn),
             listen_port=dht_port,
             http_port=http_port,
@@ -212,6 +212,7 @@ class P2PManager:
             self.db_dsn,
             identity=self._peer_identity,
             sharing_enabled=self._sharing_on,
+            passing_on=self._passing_on,
             dht=self._dht_service,
             lan=self._lan_discovery,
             manual_peers=p2p_cfg.get("manual_peers", []),
@@ -1188,6 +1189,12 @@ class P2PManager:
         (the walk, both slice cycles, the DHT tail) follow the one value."""
         return self._sync_server._sharing_enabled()
 
+    def _passing_on(self) -> bool:
+        """Whether this node passes on what it holds (sharing, and its second
+        switch sync.pass_on): what the DHT's tail and the walk's carry follow,
+        as serving does."""
+        return self._sync_server._serving_enabled()
+
     async def _sharing_changed(self) -> None:
         """P2P sharing as it is now — at start, whenever the owner moves it,
         and whenever the notifications are listened for again: the LAN
@@ -1199,9 +1206,9 @@ class P2PManager:
         sautium_sync_request) may have read this process's cached "off"
         before this read refreshed it."""
         async with self._sharing_lock:
-            on = await asyncio.get_running_loop().run_in_executor(
+            on, passing_on = await asyncio.get_running_loop().run_in_executor(
                 None, self._sync_server.sharing_changed)
-            self._lan_discovery.set_beaconing(on)
+            self._lan_discovery.set_beaconing(passing_on)
             if on and self._sharing_read is False:
                 self._walk.request("sharing")
             self._sharing_read = on

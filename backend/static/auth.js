@@ -316,9 +316,10 @@
   const setupCodePlace = () => hostShowsCodes
     ? "On the computer that runs Sautium it is in setup_code.txt, in the identity folder that " +
       "Sautium's window names (a new one at each start)."
-    : "It is in the node's log (docker logs sautium-backend; the node " +
-      "writes a new one at each start) or in setup_code.txt in its identity folder — data/node_identity, " +
-      "or backend/data/node_identity under the WSL and Mac compose files.";
+    : "It is on the last screen of the node's setup, and in the node's log (docker logs " +
+      "sautium-backend; the node writes a new one at each start) or in setup_code.txt in its " +
+      "identity folder — data/node_identity, or backend/data/node_identity under the WSL and Mac " +
+      "compose files.";
   // What createAccount answers when the nickname and password make another
   // identity than the one the node's records were signed with: the gate
   // says what a new one costs, and sends it again only on the person's word.
@@ -410,6 +411,9 @@
       }
       if (r.status === 409) return "This node already has an account — reload.";
       if (r.status === 403) return `That is not this node's setup code. ${setupCodePlace()}`;
+      if (r.status === 429 && r.resp.headers.get("X-Sautium-Auth-Error") === "shut") {
+        return `Too many wrong setup codes — the next try is taken in ${r.resp.headers.get("Retry-After")} s.`;
+      }
       if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: 8+ characters.";
       return errorDetail(r, "Could not create the account.");
     },
@@ -549,6 +553,10 @@
     let mode = "pin";
     let unnamedKey = false;
     let username = "";
+    let emailRoad = false;
+    // The setup code the address carried (#setup=, the QR on the setup's
+    // last screen): the field is filled, nobody types it
+    const setupFromUrl = takeFragmentSetup();
 
     function showForm() {
       title.textContent = mode === "create" ? "Set up Sautium"
@@ -573,9 +581,21 @@
           "lose it you get a new identity, and your invite code and friends " +
           "with it.<br><br>" +
           "The setup code proves you run this node. " + setupCodePlace();
+        // The email is optional everywhere. On a node that never earns its
+        // identity by computing it is the way to one (draft words for the
+        // owner's words review); on any other it skips the wait.
         fields.innerHTML = input("auth-user", "text", "nickname") +
                            input("auth-pass", "password", "password (8+ characters)") +
-                           input("auth-setup", "text", "setup code");
+                           input("auth-setup", "text", "setup code", setupFromUrl) +
+                           input("auth-email", "email", "email (optional)") +
+                           `<p class="confirm-message" style="margin-top:0;">${emailRoad
+                             ? "This machine is too small to earn its network identity by computing. " +
+                               "A verified email gives it one. Without it Sautium still plays and " +
+                               "organises your music, but cannot reach Support or be reached from " +
+                               "outside your network."
+                             : "Optional. A verified email gives this node its network identity at " +
+                               "once; without one it earns it by a calculation that takes a while."}</p>`;
+        groupSetupCode(fields.querySelector("#auth-setup"));
         submit.textContent = "Create account";
       } else if (mode === "restore") {
         // No key, while the database says the node had one: the same
@@ -595,7 +615,8 @@
         fields.innerHTML = input("auth-user", "text", "nickname",
                                  /^[A-Za-z0-9_-]{3,32}$/.test(username) ? username : "") +
                            input("auth-pass", "password", "password") +
-                           input("auth-setup", "text", "setup code");
+                           input("auth-setup", "text", "setup code", setupFromUrl);
+        groupSetupCode(fields.querySelector("#auth-setup"));
         submit.textContent = "Bring it back";
       } else if (mode === "password") {
         // The username is shown, not asked for — a node has one account.
@@ -673,6 +694,7 @@
       mode = st.onboarding ? (st.identity_missing ? "restore" : "create") : st.password_login ? "password"
         : (unnamedKey || st.pin_door === false) ? "none" : "pin";
       username = st.username || "";
+      emailRoad = !!st.email_road;
       buildForm();
       // The create form says itself what a node not set up yet needs, and
       // no notice stands over what a node no browser can sign in to says
@@ -711,6 +733,15 @@
           const given = [overlay.querySelector("#auth-user").value.trim(),
                          overlay.querySelector("#auth-pass").value,
                          overlay.querySelector("#auth-setup").value.trim()];
+          const emailField = overlay.querySelector("#auth-email");
+          const email = emailField ? emailField.value.trim() : "";
+          if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+            // Said before anything is made: the account cannot be un-made
+            submit.disabled = false;
+            submit.textContent = prev;
+            msg.textContent = "That email does not look right. Correct it, or leave the field empty.";
+            return;
+          }
           let res = await window.Sautium.auth.createAccount(...given);
           if (res === ANOTHER_IDENTITY) {
             const yes = await window.confirmDestructive({
@@ -728,6 +759,7 @@
           }
           ok = res === true;
           why = typeof res === "string" ? res : "Could not create the account.";
+          if (ok && email) await rememberEmail(email, given[1]);
         } else if (mode === "password") {
           const res = await window.Sautium.auth.login(
             overlay.querySelector("#auth-pass").value);
@@ -780,6 +812,56 @@
   // code aloud. The fragment never reaches the server (so the one-time code
   // stays out of access logs and Referer), and it is stripped from the address
   // bar the moment it is redeemed.
+  // The setup code rides the fragment the same way (the QR on the console
+  // setup's last screen): read once, and gone from the address bar at once.
+  function takeFragmentSetup() {
+    const m = /(?:^|[#&])setup=([A-Za-z0-9-]+)/.exec(location.hash || "");
+    if (!m) return "";
+    const clean = (location.hash || "").replace(/(?:^|[#&])setup=[A-Za-z0-9-]+/, "");
+    history.replaceState(null, "", location.pathname + location.search +
+                         (clean && clean !== "#" ? clean : ""));
+    return m[1];
+  }
+
+  // The setup code is typed by hand: its characters are grouped as they are
+  // typed (XXXX-XXXX). Anything longer than a code is a pasted line, left as
+  // it is — the node reads the code out of it.
+  function groupSetupCode(field) {
+    if (!field) return;
+    const group = () => {
+      const plain = field.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (plain.length <= 8 && /^[A-Z0-9\s-]*$/i.test(field.value)) {
+        field.value = plain.length > 4 ? `${plain.slice(0, 4)}-${plain.slice(4)}` : plain;
+      }
+    };
+    field.addEventListener("input", group);
+    group();
+  }
+
+  // The email typed on the first-run form: set on the account just made (the
+  // password is still in hand, and the route asks for it), and the code's
+  // grant kept for the page that loads next, which opens the code's dialog
+  // (app-shell.js). A failure here loses nothing: the account exists, and
+  // the trail leads to Profile's Email row.
+  const EMAIL_GRANT_KEY = "sautium.first_run_email_grant";
+  async function rememberEmail(email, password) {
+    try {
+      const r = await window.Sautium.auth.boxed("/api/p2p/account/email", { email },
+                                                { method: "PUT", password });
+      if (r.ok && !r.data.email_verified && r.data.grant) {
+        sessionStorage.setItem(EMAIL_GRANT_KEY, r.data.grant);
+      }
+    } catch (_) { /* the Email row is the way from here */ }
+  }
+  window.Sautium.auth.takeFirstRunEmailGrant = () => {
+    let grant = "";
+    try {
+      grant = sessionStorage.getItem(EMAIL_GRANT_KEY) || "";
+      sessionStorage.removeItem(EMAIL_GRANT_KEY);
+    } catch (_) { /* no storage: the Email row is the way */ }
+    return grant;
+  };
+
   function fragmentCode() {
     const m = /(?:^|[#&])pair=([A-Za-z0-9-]+)/.exec(location.hash || "");
     return m ? m[1] : "";

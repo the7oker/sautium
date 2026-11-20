@@ -185,3 +185,42 @@ def test_a_password_the_node_could_not_check_ends_the_backup_as_an_error(backup_
     monkeypatch.setattr(device_auth, "verify_password", failing)
     with pytest.raises(backup_mod.nb.BackupError, match="could not be checked"):
         backup_mod.create("the right one")
+
+
+def test_one_backup_of_a_node_is_made_at_a_time_whoever_makes_it(backup_mod, scratch_dsn, tmp_path, monkeypatch):
+    """The Web UI's job, the weekly task and a hand-run CLI are separate
+    processes: the second is refused while the first holds the making's lock,
+    and the first's part file — which a starting maker clears as a dead job's
+    — is left alone."""
+    import device_auth
+    monkeypatch.setattr(backup_mod, "node", lambda: {"username": "owner", "pubkey": "ab" * 32})
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+
+    async def right(_password, **_kw):
+        return True
+    monkeypatch.setattr(device_auth, "verify_password", right)
+    monkeypatch.setattr(backup_mod.nb, "derive_kek", lambda password, username: b"k" * 32)
+    monkeypatch.setattr(type(backup_mod.settings), "database_url", property(lambda self: scratch_dsn))
+    monkeypatch.setattr(backup_mod, "build_identity", lambda: {"commit": "c" * 40, "build": "test"})
+    monkeypatch.setattr(backup_mod, "pg_target", lambda: None)
+    monkeypatch.setattr(backup_mod, "identity_dir", lambda: tmp_path)
+    made = []
+    monkeypatch.setattr(backup_mod.nb, "create_backup", lambda out, **kw: made.append(out) or {"name": "x.sbk"})
+    part = tmp_path / ("running" + backup_mod.nb.PART_SUFFIX)
+    part.write_bytes(b"the first maker's")
+
+    first = backup_mod.PlaybackHold(scratch_dsn)
+    first.sole_maker()
+    try:
+        with pytest.raises(backup_mod.nb.Refused, match="another backup of this node is being made"):
+            backup_mod.create("pw", out_dir=tmp_path)
+        assert part.read_bytes() == b"the first maker's" and made == []
+    finally:
+        first.close()
+    # The first ended (its session closed, however it ended): the next is made, a dead job's part cleared
+    assert backup_mod.create("pw", out_dir=tmp_path) == {"name": "x.sbk"}
+    assert made == [tmp_path] and not part.exists()
+    # … and its own lock went with its session
+    again = backup_mod.PlaybackHold(scratch_dsn)
+    again.sole_maker()
+    again.close()

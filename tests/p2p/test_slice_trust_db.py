@@ -930,3 +930,32 @@ def test_the_delta_brings_a_node_at_051_to_the_slice_record_and_one_row_per_mbid
         assert db_init.apply_migrations(c) == 0
     finally:
         c.close()
+
+
+def test_a_slice_whose_authors_proof_this_node_never_evaluated_is_not_served(conn, scratch_dsn, monkeypatch):
+    """PI-NODE-2B Q5's condition, at the serving body both surfaces share: a
+    slice this node took from an author it could not verify (a board too
+    small to evaluate the proof records the author `unverified`) stays its
+    own copy. Asked for, it is `missing` — whatever "pass on what this node
+    holds" says — and served the moment the author is verified."""
+    from desktop.p2p import mb_slice_queries
+    author = _key()
+    kept = _honest("Kept Name")
+    assert "error" not in _offer(scratch_dsn, author, kept)
+    monkeypatch.setattr(slice_checks, "servable", lambda conn, family, key, own: True)   # checked against MB
+    with conn.cursor() as cur:               # a slice the cycle fetched, not one for the owner's own lookup
+        cur.execute("UPDATE mb_slice_blobs SET local_only = FALSE")
+    served = mb_slice_queries.serve_slices(conn, ["Kept Name"], own_pubkey=OWN)
+    assert list(served["slices"]) == ["Kept Name"]                # an author this node verified: passed on
+    with conn.cursor() as cur:
+        cur.execute("UPDATE p2p_identities SET status = 'unverified', verified_at = NULL, proof_nonce = NULL "
+                    "WHERE pubkey = %s", (pub(author),))
+        assert cur.rowcount == 1
+    for pass_on in ("true", "false"):
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO user_settings (key, value) VALUES ('sync.pass_on', %s::jsonb) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (pass_on,))
+        answer = mb_slice_queries.serve_slices(conn, ["Kept Name"], own_pubkey=OWN)
+        assert answer["slices"] == {} and answer["missing"] == ["Kept Name"], pass_on
+    # The node's own copy is untouched
+    assert _rows(conn, "SELECT name_key FROM mb_slice_blobs") == [("kept name",)]

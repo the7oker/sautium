@@ -142,7 +142,7 @@ devices that cannot sign a request: the media proxy (`8830`, launcher
 - **Python 3.11+**, **FastAPI** (async)
 - **PostgreSQL 18 + pgvector** — vector similarity + relational data
 - **SQLAlchemy** ORM + `psycopg2` for raw SQL / batch operations
-- **Docker + Docker Compose** (WSL2 on Windows, native on macOS and on Linux arm64)
+- **Docker + Docker Compose** (WSL2 on Windows, native on macOS and on Linux)
 - **CUDA or Apple MPS** for GPU work (CLAP embeddings, BGE-M3 text
   encoding); a CPU-only node analyses its own files' sound too, and takes the
   instruments from peers unless its owner switches them on
@@ -177,7 +177,8 @@ tracks, plus the optional ~21 GB MusicBrainz catalogue.
 
 - Docker and Docker Compose
 - NVIDIA GPU with CUDA support + NVIDIA Container Toolkit (Linux/WSL2 path).
-  Apple Silicon and Linux arm64 use a CPU-only variant — see below.
+  Apple Silicon and a Linux machine without an NVIDIA card (arm64 or x86-64)
+  use a CPU-only variant — see below.
 - An LLM provider: an Anthropic API key, or Claude Code signed in from the
   Web UI (More › AI assistant; default provider is `claude_code`); an OpenAI
   Codex sign-in works as the second selectable agent. The node keeps its
@@ -240,9 +241,28 @@ docker compose -f docker-compose.wsl.yml up -d --build
 # macOS (Apple Silicon, CPU-only PyTorch)
 docker compose -f docker-compose.mac.yml up -d --build
 
-# Linux on arm64, e.g. a Raspberry Pi 5 (CPU-only; MUSIC_LIBRARY_PATH in .env)
+# Linux without an NVIDIA card — a Raspberry Pi 5, an x86-64 mini-PC
+# (CPU-only; MUSIC_LIBRARY_PATH in .env)
 docker compose -f docker-compose.pi.yml up -d --build
 ```
+
+On such a Linux machine `./sautium` does all of it from the clone (since
+2026-11-19; `scripts/setup.py`, standard-library Python, run as yourself):
+it checks the machine, writes `.env`, builds the image, installs the host
+agent, starts the node and prints its address with the setup code and a QR.
+It reads how much the machine can carry and makes a small board a **Nano**
+node — nothing analysed there, sound features taken from other nodes. It
+never calls `sudo`: a step that needs root (lingering, mounting plugged
+disks read-only) is printed whole for you to paste. The music folder, the
+assistant and the output are then chosen in the Web UI. `./sautium status`,
+`pair`, `update` and `remove` are its other commands.
+
+The CPU image (`backend/Dockerfile.mac`) takes three build arguments, read
+from `.env` by `docker-compose.pi.yml` and by the host agent's update:
+`SAUTIUM_IMAGE_MODELS=0` leaves the model stack out (the node then analyses
+nothing itself and takes sound features from other nodes),
+`SAUTIUM_IMAGE_ASSISTANT_CLI=0` Node.js and the Claude Code CLI,
+`SAUTIUM_IMAGE_STREAMING=0` the demo channel's runtime. Each defaults to 1.
 
 This starts PostgreSQL and the FastAPI backend; on its first start the
 backend builds the schema (`desktop/migrations/001_initial.sql` plus the
@@ -282,7 +302,11 @@ The first visit sets the node up: a nickname, a password, and the setup code
 the backend writes at each start to its log (`docker compose logs backend |
 grep "setup code"` — the last one is the live one) and to `setup_code.txt` in
 the node's identity folder: `data/node_identity` (under
-`docker-compose.wsl.yml`, `backend/data/node_identity`). The code dies with the account's creation. To
+`docker-compose.wsl.yml`, `backend/data/node_identity`). It is eight characters, taken in any case
+and with or without its hyphen (the last screen of `./sautium` shows it, with a QR that carries it);
+past five wrong tries the form waits out a growing delay, and the code stays the same. The form's
+optional email, once verified, gives the node its network identity at once — the only way to one
+on a Nano node, which never earns it by computing. The code dies with the account's creation. To
 start over, stop the stack, empty that folder and start it again: the node
 writes a new code. A node whose database names the key it signed with —
 every node that started with one — then asks for that identity's nickname and
@@ -441,7 +465,7 @@ sautium/
 ├── docker-compose.yml              # default (WSL2/Windows + NVIDIA GPU)
 ├── docker-compose.wsl.yml          # Windows, compose run from WSL
 ├── docker-compose.mac.yml          # Apple Silicon (CPU-only)
-├── docker-compose.pi.yml           # Linux arm64, e.g. Raspberry Pi 5 (CPU-only)
+├── docker-compose.pi.yml           # Linux without an NVIDIA card: a Raspberry Pi 5, x86-64 (CPU-only)
 ├── .env.example                    # environment template
 ├── CLAUDE.md                       # project spec, conventions, security posture
 ├── PROGRESS.md                     # design decisions and lessons learned

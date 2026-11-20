@@ -503,6 +503,9 @@ def run_search(
     # profile that never ships the translator, "warming" would otherwise
     # promise an improvement that never comes; those queries get the
     # distinct `limited` flag instead (HARDWARE-TIERS sound-scope policy).
+    # And on a node where no model ever loads (its models off or absent),
+    # the three model-backed scopes are `unavailable`, never warming.
+    from hardware_profile import resolve as _hw
     needed: set = set()
     limited = False
     if "bio" in active:
@@ -513,22 +516,24 @@ def run_search(
         # only when it needs it: ASCII goes to CLAP directly.
         needed |= {"clap", "enrichment"}
         if not str(active["sound"]).isascii():
-            from hardware_profile import resolve as _hw
             if _hw().translation_available:
                 needed.add("translate")
             else:
                 limited = True
     if "lyrics" in active:
         needed.add("lyrics")
-    warming = bool(needed) and not all(model_cache.is_loaded(k) for k in needed)
+    unavailable = bool(needed) and not _hw().ml_available
+    if unavailable:
+        limited = False
+    warming = (bool(needed) and not unavailable
+               and not all(model_cache.is_loaded(k) for k in needed))
+    state = {"warming": warming, "limited": limited, "unavailable": unavailable}
     if not active:
-        return {"status": "ok", "results": [], "warming": warming,
-                "limited": limited, "next_cursor": None}
+        return {"status": "ok", "results": [], **state, "next_cursor": None}
 
     built = build(active, {}, corpus=corpus, limit=limit, offset=offset)
     if target not in built:                    # target below the atom — structurally absent
-        return {"status": "ok", "results": [], "warming": warming,
-                "limited": limited, "next_cursor": None}
+        return {"status": "ok", "results": [], **state, "next_cursor": None}
     sql, params = built[target]
     with get_db_context() as db:
         # The segment-KNN retrieve branch overscans to 1000 rows (see Source.knn):
@@ -547,6 +552,5 @@ def run_search(
     # holds the query + chips (and rebuilds list params like instruments correctly,
     # which a flattened server-side echo could not).
     nxt = offset + limit
-    return {"status": "ok", "results": _SHAPERS[target](rows), "warming": warming,
-            "limited": limited,
+    return {"status": "ok", "results": _SHAPERS[target](rows), **state,
             "next_cursor": {"offset": nxt} if len(rows) == limit and nxt <= RETRIEVE_K else None}

@@ -104,13 +104,37 @@ _create_lock = asyncio.Lock()
 # a code the node writes where its owner alone reads: its log, and
 # SETUP_CODE_FILE in the identity folder (a Docker node's bind-mounted
 # ./data/node_identity). One per start of a node with no account; it dies
-# with the account's creation. 60 bits: nothing counts the attempts.
+# with the account's creation, and a wrong try never changes it.
+#
+# It is typed by hand, so it is short and forgiving (since 2026-11-19,
+# PI-NODE-2B Q20): 8 characters, 40 bits, read out of whatever was typed or
+# pasted around it — any case, with or without its hyphen, a space in its
+# place, a whole log line (setup_candidates). 40 bits stand behind the
+# setup's own door, the login door's rule: past LOGIN_FREE_FAILURES wrong
+# tries a delay that doubles to LOGIN_DELAY_MAX. What that costs is a LAN
+# neighbour delaying the first run by a quarter of an hour.
 SETUP_CODE_FILE = "setup_code.txt"
-SETUP_CODE_GROUPS = 3
+SETUP_CODE_GROUPS = 2
 _setup_code: Optional[str] = None
-# The code within whatever was pasted around it (a log line, a space)
+# The code as the node writes it (its log, its file): what a diagnostics
+# report scrubs (scripts/host_agent.SETUP_CODE, held to this by a test)
 _SETUP_CODE_FORM = re.compile("[%s]{4}(?:-[%s]{4}){%d}" % (
     "A-HJ-NP-Z2-9", "A-HJ-NP-Z2-9", SETUP_CODE_GROUPS - 1))
+# The code as a person gives it back: its two groups with anything that is
+# not a letter or a digit between them, standing as a word of their own —
+# so a pasted line offers the few words of that shape it holds, never every
+# eight-character window of a long string
+_SETUP_CODE_TYPED = re.compile("(?<![A-Z0-9])([%s]{4})[^A-Z0-9]{0,3}([%s]{4})(?![A-Z0-9])" % (
+    "A-HJ-NP-Z2-9", "A-HJ-NP-Z2-9"))
+# One request tries at most this many words of the code's shape — the last
+# ones: a pasted log ends on its newest line, and each start wrote a code
+SETUP_CANDIDATES_MAX = 4
+
+
+def setup_candidates(typed: str) -> list:
+    """The setup codes `typed` could mean, in the node's own spelling."""
+    found = _SETUP_CODE_TYPED.findall((typed or "").upper())
+    return ["-".join(groups) for groups in found[-SETUP_CANDIDATES_MAX:]]
 
 # The password doors' wrong guesses. Two doors, one rule: the login's, which
 # anyone on the LAN reaches — one count for the node, as behind Docker every
@@ -124,7 +148,8 @@ _SETUP_CODE_FORM = re.compile("[%s]{4}(?:-[%s]{4}){%d}" % (
 LOGIN_FREE_FAILURES = 5
 LOGIN_DELAY_MAX = 15 * 60
 LOGIN_FAILURES_KEY = "auth.login_failures"
-_doors = {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0} for name in ("login", "signed")}
+_doors = {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
+          for name in ("login", "signed", "setup")}
 _failures_lock = threading.Lock()
 
 _pin: Optional[dict] = None          # {"code", "expires_at", "attempts"}
@@ -407,12 +432,26 @@ async def create_account(username: str, password: str, setup_code: str,
     async with _create_lock:
         if account_configured() or identity_key_on_disk():
             raise AccountExists()
-        found = _SETUP_CODE_FORM.search((setup_code or "").upper())
-        if _setup_code is None or found is None or not hmac.compare_digest(
-                _setup_code.encode(), found.group().encode()):
+        # The setup's door: shut by wrong codes, it answers before a code is
+        # compared; one try at a time is the lock's. The code is never
+        # burned — a wrong try leaves it as it is.
+        door = _doors["setup"]
+        left = door["shut_until"] - time.time()
+        if left > 0:
+            raise Shut(math.ceil(left))
+        wanted = (_setup_code or "").encode()
+        if _setup_code is None or not any([hmac.compare_digest(wanted, candidate.encode())
+                                           for candidate in setup_candidates(setup_code)]):
+            door["failures"] += 1
+            delay = _delay(door["failures"])
+            if delay:
+                door["shut_until"] = time.time() + delay
+                logger.warning("%d wrong setup codes in a row: the next is taken in %d s",
+                               door["failures"], delay)
             raise WrongSetupCode()
         info = await asyncio.to_thread(_write_identity, d, username, password,
                                        new_identity=new_identity)
+        door["failures"], door["shut_until"] = 0, 0.0
         _setup_code = None
         (d / SETUP_CODE_FILE).unlink(missing_ok=True)
         return info
@@ -679,7 +718,8 @@ async def derive_guarded(fn, *args, signed: bool = False):
 
 
 class Shut(Exception):
-    """The password door waits out its delay: `seconds` left."""
+    """A door (a password's, the setup code's) waits out its delay:
+    `seconds` left."""
 
     def __init__(self, seconds: int):
         super().__init__(f"the login door opens in {seconds} s")

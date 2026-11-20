@@ -100,6 +100,28 @@ def _recreate(name: str, *, create: bool) -> bool:
 ASSISTANT_ROLE = "sautium_assistant_" + SESSION_DATABASE.removeprefix("sautium_")
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "models_switch: the test reads the owner's switch "
+                                       '"AI models on this machine" from its own database')
+
+
+@pytest.fixture(autouse=True)
+def _models_switch_never_touched(request, monkeypatch):
+    """The owner's switch "AI models on this machine" is a row of
+    user_settings the hardware profile reads when it is first resolved — on
+    a node, after its migrations. A test that resolves the profile with no
+    node's database behind it runs as a node whose owner never touched the
+    switch; the tests of the switch itself (`pytest.mark.models_switch`)
+    read the real row."""
+    if request.node.get_closest_marker("models_switch") is not None:
+        return
+    try:
+        import hardware_profile
+    except ImportError:
+        return                      # a test with no backend on its path resolves no profile
+    monkeypatch.setattr(hardware_profile, "models_switch", lambda: True)
+
+
 def pytest_sessionstart(session):
     if not _recreate(SESSION_DATABASE, create=True):
         return

@@ -1,0 +1,35 @@
+# The model stack: what analyses audio and embeds text on this machine. A
+# file of its own (PI-NODE-2B) so that an image built with MODELS=0 leaves it
+# out whole; every other install — the launcher's backend runtime, the CUDA
+# image, the CPU image with MODELS=1 — reads it together with
+# requirements.txt, in one pip resolution. Without it hardware_profile says
+# `models: absent`: the node analyses nothing and embeds no query, and sound
+# features arrive from other nodes.
+
+# Pinned: torch._dynamo (imported by transformers at model load) is sensitive
+# to the torch×Python stdlib pair. Unpinned `>=` previously drifted to a torch
+# whose _dynamo polyfills require stdlib symbols absent from the image's Python,
+# breaking every embedding model load. This is the verified GPU-working set.
+#
+# The marker excludes Intel macOS, where the local-analysis stack cannot be
+# installed at all: PyTorch stopped publishing wheels after 2.2.2, and
+# librosa's numba/llvmlite chain has no wheel either and fails to build from
+# source. An unsatisfiable requirement fails the WHOLE `pip install -r`, so
+# leaving these unmarked failed that node's install of this file.
+#
+# Nothing is lost by dropping them there. Those machines have neither CUDA
+# nor MPS, and without the ML stack hardware_profile resolves `lite` with no
+# local analysis (`ml_available` False), no pre-warm, no translation;
+# analysis arrives over P2P. Every module that
+# imports torch or librosa sits on an analysis path gated by that profile.
+# Anything that imports either needs the same marker, or it drags the
+# unsatisfiable pin back in as a transitive dependency.
+torch==2.12.0; sys_platform != "darwin" or platform_machine != "x86_64"
+torchvision==0.27.0; sys_platform != "darwin" or platform_machine != "x86_64"
+torchaudio==2.11.0; sys_platform != "darwin" or platform_machine != "x86_64"
+transformers==4.57.6
+sentence-transformers==5.5.1; sys_platform != "darwin" or platform_machine != "x86_64"
+hear21passt>=0.0.26; sys_platform != "darwin" or platform_machine != "x86_64"
+librosa>=0.10.1; sys_platform != "darwin" or platform_machine != "x86_64"
+# MADLAD-400 int8 CPU runtime (query translation; future chat/voice synergy)
+ctranslate2>=4.5.0

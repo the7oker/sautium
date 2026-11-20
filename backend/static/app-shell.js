@@ -851,7 +851,8 @@
      element carrying `data-guide="<id>"` — the More tab, the drawer row,
      the control itself — so the user follows one mark down to the button
      instead of hunting for it. `data-guide="*"` stands for any open task,
-     which is what the tab bar can honestly say from outside the drawer.
+     which is what the tab bar can honestly say from outside the drawer; a
+     row several tasks pass through names them all, space-separated.
 
      A guided control that also carries `data-guide-scroll` gets the puck
      below: the mark is useless on a control that sits past the fold. */
@@ -862,7 +863,7 @@
 
     paint() {
       document.querySelectorAll('[data-guide]').forEach(el => {
-        const on = this.has(el.dataset.guide);
+        const on = el.dataset.guide.split(' ').some(id => this.has(id));
         el.classList.toggle('is-guided', on);
         if (el.hasAttribute('data-guide-scroll')) {
           if (on) attachGuidePuck(el); else detachGuidePuck(el);
@@ -3980,6 +3981,19 @@
     // = disabled with a download hint on tap. Kept current via the
     // /api/events stream ('sautium:mb-changed') — the old one-shot fetch
     // left a fresh node's chip dead until a page reload.
+    // The three AI scopes exist only where a model runs: a node whose models
+    // are off or absent never loads one, so it offers none of them (the
+    // chips sit in the closed filters panel, so nothing is seen to go).
+    const scopes = fetch('/api/settings/hardware')
+      .then(r => r.ok ? r.json() : null)
+      .then(hw => {
+        if (!hw || hw.detected.ml_available) return;
+        for (const value of ['bio', 'sound', 'lyrics']) {
+          const chip = screen.querySelector(`#discoveryScopeRow .f-chip[data-value="${value}"]`);
+          if (chip) chip.hidden = true;
+        }
+      })
+      .catch(err => console.warn('hardware profile failed:', err));
     const mbStatus = fetch('/api/discovery/mb-status')
       .then(r => r.ok ? r.json() : { available: false, state: 'none' })
       .then(s => {
@@ -3989,8 +4003,14 @@
       .catch(err => console.warn('mb-status failed:', err));
     // The screen is painted once the shuffle shelf and the chip have
     // landed — render() publishes this as window.sautiumRendered.
-    return Promise.all([shuffle, mbStatus]);
+    return Promise.all([shuffle, mbStatus, scopes]);
   }
+
+  // A query that reached an AI scope on a node where no model runs (a link
+  // carried it; the chips are hidden there). Draft words for the owner's
+  // words review.
+  const DISCOVERY_NO_MODELS = 'This search needs AI models, and none runs on this node.'
+    + ' Search by names and titles instead.';
 
   function applyMbChipState(chip, s) {
     chip.dataset.mbState = s.state || (s.available ? 'local' : 'none');
@@ -4530,6 +4550,7 @@
           if ((data.results || []).length > 0) completion.hadAnyResults = true;
           if (data.warming) completion.warming = true;
           if (data.limited) completion.limited = true;
+          if (data.unavailable) completion.unavailable = true;
         })
         .catch(err => {
           if (queryId !== getActiveId()) return;
@@ -4544,7 +4565,9 @@
               // A bio-scope search has no tracks block to carry the per-block
               // warming note — say it here instead of a false "No matches."
               const emptyP = empty.querySelector('p');
-              if (emptyP) emptyP.textContent = completion.limited
+              if (emptyP) emptyP.textContent = completion.unavailable
+                ? DISCOVERY_NO_MODELS
+                : completion.limited
                 ? 'Limited on this device: non-English Sound queries match genre descriptions only.'
                 : completion.warming
                   ? 'AI model is warming up — search again in a minute.'
@@ -4725,7 +4748,9 @@
     // `limited` is DISTINCT from warming: this hardware profile never loads
     // the translator, so a non-English Sound query permanently matches
     // genre descriptions only — promising a warm-up would be a lie.
-    const stateNote = (descriptor.id === 'tracks' && data.limited)
+    const stateNote = (descriptor.id === 'tracks' && data.unavailable)
+      ? `<p class="d-loading-notice">${DISCOVERY_NO_MODELS}</p>`
+      : (descriptor.id === 'tracks' && data.limited)
       ? '<p class="d-loading-notice">Limited on this device: non-English'
         + ' Sound queries match genre descriptions only.</p>'
       : (descriptor.id === 'tracks' && data.warming)
@@ -7643,16 +7668,83 @@
   // re-derives it, so the Friends list and the Sync screen agree.
 
   // The line of a contact that is not online — the friend row's and the
-  // chat header's. Support's tells what becomes of what is written to it
-  // (row.mailbox, the server's word: B-92).
+  // chat header's.
   function offlineLabel(friend) {
-    const base = friend.last_seen ? `last seen ${lastSeenLabel(friend.last_seen)}` : 'offline';
-    return friend.mailbox ? `${base} · messages are kept` : base;
+    return friend.last_seen ? `last seen ${lastSeenLabel(friend.last_seen)}` : 'offline';
   }
+
+  // Support's line, in its row and its chat header: what becomes of a
+  // message, never a presence — "offline" reads as "nobody will get this",
+  // and Support answers when a person does (row.reach, the server's word:
+  // this node can deliver or deposit). Draft words for the owner's review.
+  function supportLine(friend) {
+    return friend.reach
+      ? 'Write any time — your message is kept until Support reads it'
+      : 'Your message waits on this node and is sent once it can reach Support';
+  }
+
+  // This node's own identity as its worker last said it (the page's event
+  // stream, 'sautium:identity'): while the node has none it can use, friends
+  // and Support cannot connect — Friends and every chat header say why, and
+  // what the person can do. A state is shown where it is; its two events are
+  // toasts: the identity ready, and the first message written while it is
+  // not. Draft words for the owner's words review.
+  const nodeIdentity = {
+    state: null,
+    _saidWaiting: false,
+    waiting() {
+      const s = this.state;
+      return !!(s && ['mining', 'paused', 'needs_email'].includes(s.status));
+    },
+    apply(d) {
+      const was = this.state;
+      this.state = d;
+      if (d.status === 'ready') {
+        this._saidWaiting = false;
+        if (!d.initial && was && was.status && was.status !== 'ready') {
+          notices.toast({ kind: 'success', title: 'Your node is ready',
+                          text: 'Friends and Support can connect now.', key: 'identity.ready' });
+        }
+      }
+    },
+    // Once per waiting period, not per message
+    wroteWhileWaiting() {
+      if (!this.waiting() || this._saidWaiting) return;
+      this._saidWaiting = true;
+      notices.toast({ kind: 'info', title: 'Saved',
+                      text: 'It will be sent once your node\'s identity is ready.',
+                      key: 'identity.waiting' });
+    },
+    offersEmail() {
+      const s = this.state;
+      return this.waiting() && (s.status === 'needs_email' || !s.email_verified);
+    },
+    line() {
+      const s = this.state;
+      if (!this.waiting()) return '';
+      if (s.status === 'needs_email') {
+        return 'This node has no network identity yet. Verify your email to connect with friends and Support.';
+      }
+      const email = s.email_verified ? '' : ' Or verify your email — either is enough.';
+      const until = 'Until it ends, friends and Support cannot connect; what you write waits here and goes by itself.';
+      if (s.status === 'paused') {
+        const why = { memory: 'not enough free memory', playback: 'music is playing',
+                      battery: 'on battery' }[s.detail] || 'waiting';
+        return `Your node is proving it is a real new node, and the calculation is paused: ${why}. `
+          + `It goes on by itself. ${until}${email}`;
+      }
+      const odds = Math.round((s.p_done || 0) * 100);
+      return 'Your node is proving it is a real new node: a one-time calculation that keeps '
+        + `fake identities out of the network. ${until} So far: ${odds}% of the usual odds.${email}`;
+    },
+  };
 
   // The chat header's status line: the friend row's words.
   function paintChatStatus(statusEl, friend) {
-    if (friend.is_online) {
+    if (friend.source === 'master') {
+      statusEl.textContent = supportLine(friend);
+      statusEl.style.color = 'var(--color-text-muted)';
+    } else if (friend.is_online) {
       statusEl.innerHTML = `<span class="status-dot"></span>online`;
       statusEl.style.color = 'var(--color-positive)';
     } else {
@@ -7698,9 +7790,11 @@
 
   function friendRowInner(friend) {
     const name = friend.display_name || friend.username || friend.invite_code || '?';
-    const status = friend.is_online
-      ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
-      : `<div class="friend-status">${escapeHtml(offlineLabel(friend))}</div>`;
+    const status = friend.source === 'master'
+      ? `<div class="friend-status">${escapeHtml(supportLine(friend))}</div>`
+      : friend.is_online
+        ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
+        : `<div class="friend-status">${escapeHtml(offlineLabel(friend))}</div>`;
     const ph = avatarPlaceholder(name);
     const unread = Number(friend.unread_count) || 0;
     const badge = unread > 0
@@ -7844,6 +7938,13 @@
         Add by invite code or by email.
       </div>
 
+      <div id="friendsIdentity" hidden>
+        <div class="hint" id="friendsIdentityText"></div>
+        <button class="manage-tokens-row" type="button" data-action="verify-email" hidden>
+          <span>Verify email</span><span class="chev">›</span>
+        </button>
+      </div>
+
       <div id="friendRequests" hidden>
         <div class="group-label">Added you</div>
         <div class="friends-list" id="friendRequestsList"></div>
@@ -7906,6 +8007,7 @@
     // manual reload and without a second connection to the origin.
     const detach = () => {
       window.removeEventListener('sautium:chat-changed', onChat);
+      window.removeEventListener('sautium:identity', paintIdentity);
       window.removeEventListener('sautium:route', onRoute);
     };
     const onChat = () => {
@@ -7916,7 +8018,20 @@
     const onRoute = () => {
       if (!document.contains(listEl)) detach();
     };
+    // Why nothing connects while the node has no identity it can use, at
+    // the list's head; gone at `ready`
+    const identityEl = screen.querySelector('#friendsIdentity');
+    const verifyBtn = identityEl.querySelector('[data-action="verify-email"]');
+    verifyBtn.addEventListener('click', () => navigate('more/profile'));
+    function paintIdentity() {
+      const text = nodeIdentity.line();
+      identityEl.hidden = !text;
+      identityEl.querySelector('#friendsIdentityText').textContent = text;
+      verifyBtn.hidden = !nodeIdentity.offersEmail();
+    }
+    paintIdentity();
     window.addEventListener('sautium:chat-changed', onChat);
+    window.addEventListener('sautium:identity', paintIdentity);
     window.addEventListener('sautium:route', onRoute);
 
     // Friends list: favorites first, then the first page, further pages
@@ -8636,6 +8751,7 @@
         </button>
       </div>
       <div class="chat-body-wrap">
+        <div class="hint" id="chatIdentity" hidden></div>
         <div class="thread" id="chatThread">
           <div class="e2ee-banner">
             ${SVG_LOCK}
@@ -8735,6 +8851,7 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({content: text}),
         });
+        nodeIdentity.wroteWhileWaiting();
         // SSE will refresh; refetch immediately for snappy feel.
         loadMessages();
       } catch (err) { console.warn('Send failed', err); }
@@ -8749,6 +8866,7 @@
     // stream per tab.
     const detach = () => {
       window.removeEventListener('sautium:chat-changed', onChat);
+      window.removeEventListener('sautium:identity', paintIdentity);
       window.removeEventListener('sautium:route', onRoute);
     };
     const onChat = () => {
@@ -8760,7 +8878,17 @@
     const onRoute = () => {
       if (!document.contains(threadEl)) detach();
     };
+    // The same line as Friends' head: why this message may wait
+    const identityEl = screen.querySelector('#chatIdentity');
+    function paintIdentity() {
+      const text = nodeIdentity.line();
+      identityEl.hidden = !text;
+      identityEl.textContent = text
+        + (text && nodeIdentity.offersEmail() ? ' Verify it in More › Profile.' : '');
+    }
+    paintIdentity();
     window.addEventListener('sautium:chat-changed', onChat);
+    window.addEventListener('sautium:identity', paintIdentity);
     window.addEventListener('sautium:route', onRoute);
   }
 
@@ -8981,13 +9109,13 @@
               <span class="more-hint" id="outputHint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/profile">
+            <button class="more-row" type="button" data-go="more/profile" data-guide="verify_email this_node">
               <span class="more-icon">${ICON_PROFILE}</span>
               <span class="more-label">Profile</span>
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/library" data-guide="analyse_library">
+            <button class="more-row" type="button" data-go="more/library" data-guide="analyse_library music_folder">
               <span class="more-icon">${ICON_LIBRARY}</span>
               <span class="more-label">Library</span>
               <span class="more-hint"></span>
@@ -11940,7 +12068,7 @@
     const email = (emailStatus && emailStatus.email) || (account && account.email) || '';
     if (!email) {
       return `
-        <div class="form-row is-clickable" data-action="set-email" data-row="email">
+        <div class="form-row is-clickable" data-action="set-email" data-row="email" data-guide="verify_email">
           <span class="form-label">Email</span>
           <span class="form-actions">
             <span class="form-value action">Add</span>
@@ -11970,7 +12098,7 @@
         </div>`;
     }
     return `
-      <div class="form-row is-clickable" data-action="verify-email" data-row="email">
+      <div class="form-row is-clickable" data-action="verify-email" data-row="email" data-guide="verify_email">
         <span class="form-label">Email</span>
         <span class="form-actions">
           <span class="form-value">${escapeProfileHtml(email)}</span>
@@ -12001,6 +12129,26 @@
     if (verifyRow) verifyRow.addEventListener('click', () => openEmailVerifyFlow());
     const setRow = root.querySelector('[data-action="set-email"]');
     if (setRow) setRow.addEventListener('click', () => openSetEmailFlow((data && data.email) || ''));
+    paintEmailLine(root, data);
+    guide.paint();
+  }
+
+  // What a node without a verified email cannot do, beside the row (B-96):
+  // one line, and on a node that runs no model — it never earns its identity
+  // by computing — the heavier one. Gone once the address is verified.
+  // Draft words for the owner's words review.
+  function paintEmailLine(root, emailStatus) {
+    const line = root.querySelector('[data-email-line]');
+    if (!line) return;
+    const verified = !!(emailStatus && emailStatus.verified);
+    line.hidden = verified || emailStatus === null;
+    if (line.hidden) return;
+    line.querySelector('.row-stack-sub').textContent = line.dataset.nano === '1'
+      ? 'Not verified. This node has no network identity yet: no Support, no connections from '
+        + 'outside your network, no invites by email.'
+      // (a second sentence, of small nodes that cannot check an identity
+      // earned by computing, waits for the measurement that names their size)
+      : 'Not verified. Needed to invite friends by email.';
   }
 
   /* ------------------------------------------------------------------
@@ -12558,10 +12706,26 @@
         <div class="profile-group-label">Account</div>
         <div class="form-group">
           ${emailRowHTML(account, emailStatus)}
+          <div class="form-row stacked" data-email-line data-nano="0" hidden><div class="row-stack-sub"></div></div>
           <div class="form-row is-clickable" data-action="change-identity">
             <span class="form-label">Nickname &amp; password</span>
             <span class="form-actions">
               <span class="form-value action">Change</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
+          <div class="form-row is-clickable" data-action="backup">
+            <span class="form-label">Backup</span>
+            <span class="form-actions">
+              <span class="form-value" data-backup-line>…</span>
+              <span class="form-value action">Back up now</span>
+              <span class="link-chev">${PROFILE_ICONS.chev}</span>
+            </span>
+          </div>
+          <div class="form-row is-clickable" data-action="add-device">
+            <span class="form-label">Add a device</span>
+            <span class="form-actions">
+              <span class="form-value action">Show</span>
               <span class="link-chev">${PROFILE_ICONS.chev}</span>
             </span>
           </div>
@@ -12668,6 +12832,14 @@
 
     const identityRow = root.querySelector('[data-action="change-identity"]');
     if (identityRow) identityRow.addEventListener('click', () => openChangeIdentityFlow(account, authStatus));
+
+    const backupRow = root.querySelector('[data-action="backup"]');
+    if (backupRow) {
+      backupRow.addEventListener('click', () => openBackupSheet());
+      paintBackupLine(root);
+    }
+    const deviceRow = root.querySelector('[data-action="add-device"]');
+    if (deviceRow) deviceRow.addEventListener('click', () => openAddDeviceSheet());
 
     const signOutRow = root.querySelector('[data-action="logout-all"]');
     if (signOutRow) signOutRow.addEventListener('click', () => onceInFlight(signOutRow, async () => {
@@ -13168,6 +13340,31 @@
             `since ${at(d.first)}, the last on ${at(d.last)}. If they were not yours, someone on your ` +
             'network is trying to guess the password.',
     };
+  };
+  // A Raspberry Pi whose supply dropped under its voltage since the node's
+  // start (backend/power_watch.py): a report, gone once seen. Draft words
+  // for the owner's words review.
+  NOTICE_COPY['power.undervoltage'] = () => ({
+    title: 'The power supply is too weak',
+    text: 'This machine\'s supply dropped under its voltage: under load it can switch off, ' +
+          'and a disk can lose what it was writing. Use the board\'s official power supply.',
+  });
+  // A signed release newer than the one this node runs, found by the host
+  // agent's check (backend/routers/host.py), and how the last update ended
+  // (a report, gone once seen). Draft words for the owner's words review.
+  NOTICE_COPY['update.available'] = n => {
+    const release = escapeHtml(String((n.data && n.data.release) || '').replace(/^v/, ''));
+    return { title: `Sautium ${release} is available`,
+             text: 'Update from More › Profile › Hardware profile.',
+             action: { label: 'Update', run: () => navigate('more/profile') } };
+  };
+  NOTICE_COPY['update.result'] = n => {
+    const d = n.data || {};
+    const release = escapeHtml(String(d.release || '').replace(/^v/, ''));
+    return d.outcome === 'updated'
+      ? { title: `Updated to ${release}`, text: '' }
+      : { title: `The update to ${release} did not start`,
+          text: `Sautium is back on ${escapeHtml(d.running || 'the release before')}, with its data as before.` };
   };
   // Raised only while the assistant runs on Codex (backend/codex_cli.py).
   NOTICE_COPY['codex.signed_out'] = () => ({
@@ -13939,11 +14136,23 @@
       if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
       close();
       if (result.restart_required) {
-        await notifyDialog({
-          title: 'Restart the backend',
-          kind: 'info',
-          message: 'The identity is changed. Peers see the new key once the backend restarts.',
-        });
+        // Where the node's image holds it, the restart is one tap here
+        let restartable = false;
+        try { restartable = !!(await (await fetch('/api/settings/hardware')).json()).restartable; } catch (_) {}
+        if (restartable) {
+          const now = await confirmDestructive({
+            title: 'Restart Sautium?',
+            message: 'The identity is changed. Peers see the new key once Sautium restarts. Music stops for about a minute.',
+            confirmText: 'Restart', cancelText: 'Later', confirmKind: 'primary',
+          });
+          if (now) await restartNode();
+        } else {
+          await notifyDialog({
+            title: 'Restart the backend',
+            kind: 'info',
+            message: 'The identity is changed. Peers see the new key once the backend restarts.',
+          });
+        }
       }
       // The Worker knew the old invite code — the mailbox is verified again
       // from the new key, which is what records the succession.
@@ -15369,7 +15578,7 @@
             <span></span>
           </div>
           <div class="row-stack-value" style="${_cliSigninProse}">
-            Claude Code is not installed in this container. Rebuild the Sautium image (it bakes the CLI in), or use the <b>Sautium Desktop Launcher</b>.
+            This install was set up without Claude Code. On the machine, run <b>./sautium setup --assistant claude</b> (or rebuild the Sautium image, which bakes the CLI in), or use the <b>Sautium Desktop Launcher</b>.
           </div>
         </div>`;
     }
@@ -15681,7 +15890,23 @@
           ${waiting
             ? `<button class="btn-link" type="button" data-action="review-support">${escapeProfileHtml(supportLabel(sync.support))}</button>`
             : `<span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>`}
-        </div>`;
+        </div>
+        ${sync.host_agent ? `<div class="form-row">
+          <span class="form-label"></span>
+          <button class="btn-link" type="button" data-action="host-diagnostics">Diagnostics from this machine</button>
+        </div>` : ''}`;
+
+    // "Pass on what this node holds": the serving side of sharing, a switch
+    // of its own on a node born small — shown only where it is off or the
+    // node is Nano, so no other node's screen grows a row. Draft words.
+    const passOnRow = (sync.pass_on && !sync.nano) ? '' : `
+        <div class="form-row">
+          <span class="form-label">Pass on what this node holds</span>
+          <button class="toggle ${sync.pass_on ? 'on' : ''}" data-action="toggle-pass-on"><span class="knob"></span></button>
+        </div>
+        <div class="form-row stacked"><div class="row-stack-sub">${sync.pass_on
+          ? 'This node answers other Sautium nodes that ask for what it holds.'
+          : 'Off: this node asks other nodes and takes what they hold, and answers none of them.'}</div></div>`;
 
     if (!on) {
       // Sharing OFF — consolidated explainer in place of the three
@@ -15719,6 +15944,7 @@
           <button class="toggle on" data-action="toggle-p2p"><span class="knob"></span></button>
         </div>
         <div class="form-row stacked"><div class="row-stack-sub">${escapeProfileHtml(SHARING_ON_LINE)}</div></div>
+        ${passOnRow}
         <div class="form-row">
           <span class="form-label">Auto-sync interval</span>
           <button class="select-trigger" data-action="pick-interval">
@@ -15808,7 +16034,9 @@
   }
   function supportDetail(s) {
     if (!s) return '';
-    const parts = [s.enabled
+    const parts = [s.enabled && !s.sends_reports
+      ? 'This node keeps its event reports; they are sent when Support asks'
+      : s.enabled
       ? 'Event reports are sent on their own, and so is a request from Sautium support for facts about this node; a request that also asks for your conversations, logs or playback traces waits — all of it — until you review it, and those go only if you tick them'
       : 'Nothing is sent to Sautium support'];
     if (s.pending_events) parts.push(`${fmtNum(s.pending_events)} event${s.pending_events === 1 ? '' : 's'} waiting`);
@@ -15891,6 +16119,261 @@
     }));
   }
 
+  /* "Back up now" (backend/backup_job.py): the making only. The account's
+     password rides the credential box; the file stays on the node — said
+     where it is, with what that means — and nothing here downloads it. The
+     job's progress follows the Library stream. Old backups are counted, and
+     "Keep the newest" is the owner's confirmed act, never the node's rule.
+     Draft words for the owner's words review. */
+  function backupLine(b) {
+    if (!b) return '—';
+    if (b.job.running) return 'running…';
+    if (!b.newest) return 'none yet';
+    return `${fmtRelative(b.newest.at)} · ${fmtBytes(b.newest.size)}`;
+  }
+  async function paintBackupLine(root) {
+    const line = root.querySelector('[data-backup-line]');
+    if (!line) return;
+    try {
+      const r = await fetch('/api/backup');
+      if (r.ok) line.textContent = backupLine(await r.json());
+    } catch (_) { /* the row keeps its last line */ }
+  }
+  const BACKUP_PHASES = { starting: 'Checking the password…', counting: 'Counting what there is…',
+                          dumping: 'Writing the database…', identity: 'Adding the identity…',
+                          paused: 'Paused while music plays…' };
+  function backupJobLine(job) {
+    const phase = BACKUP_PHASES[job.phase] || 'Working…';
+    return job.bytes ? `${phase} ${fmtBytes(job.bytes)}${job.total ? ` of ${fmtBytes(job.total)}` : ''}` : phase;
+  }
+  function openBackupSheet() {
+    if (document.querySelector('[data-backup-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.backupSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Backup</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            A backup holds your library's records, your listening history and this node's identity, encrypted with your account password.
+          </p>
+          <div data-state style="font-size:calc(13*var(--px));color:var(--color-text);line-height:1.5;"></div>
+          <button class="profile-btn primary" data-start>Back up now</button>
+          <button class="profile-btn secondary" data-stop hidden>Cancel</button>
+          <button class="profile-btn secondary" data-keep hidden></button>
+          <div data-msg style="font-size:calc(12*var(--px));color:var(--color-negative);min-height:calc(16*var(--px));"></div>
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">
+            A backup on the same disk does not survive that disk. Copy the file to another machine or a USB disk: Sautium does not send it anywhere, and this page cannot download it.
+          </p>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const stateEl = overlay.querySelector('[data-state]');
+    const start = overlay.querySelector('[data-start]');
+    const stop = overlay.querySelector('[data-stop]');
+    const keep = overlay.querySelector('[data-keep]');
+    const msg = overlay.querySelector('[data-msg]');
+    function paint(b) {
+      const job = b.job;
+      start.hidden = job.running;
+      stop.hidden = !job.running;
+      stop.disabled = !!job.cancel_requested;
+      keep.hidden = job.running || b.count <= b.keep_newest;
+      keep.textContent = `Keep the newest ${b.keep_newest}`;
+      if (job.running) {
+        stateEl.textContent = job.cancel_requested ? 'Cancelling…' : backupJobLine(job);
+      } else if (b.newest) {
+        stateEl.textContent = `Saved on this node · ${b.folder}/${b.newest.name} · ${fmtBytes(b.newest.size)}`
+          + (b.count > 1 ? ` — ${fmtNum(b.count)} backups · ${fmtBytes(b.bytes)}` : '');
+      } else {
+        stateEl.textContent = 'No backup yet.';
+      }
+      if (!job.running && job.error) msg.textContent = job.error;
+    }
+    async function refresh() {
+      try {
+        const r = await fetch('/api/backup');
+        if (r.ok) paint(await r.json());
+      } catch (_) { /* the sheet keeps what it shows */ }
+    }
+    const sub = libraryWake.on(refresh);
+    const close = () => { sub.abort(); overlay.remove(); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    start.addEventListener('click', () => onceInFlight(start, async () => {
+      msg.textContent = '';
+      const res = await askStepUp({
+        title: 'Back up now', confirm: 'Back up',
+        text: 'Your account password encrypts the backup. Without it the file cannot be opened.',
+      }, password => window.Sautium.auth.boxed('/api/backup', {}, { password }));
+      if (res && res.ok) paint(res.data);
+    }));
+    stop.addEventListener('click', () => onceInFlight(stop, async () => {
+      const r = await fetch('/api/backup/cancel', { method: 'POST' });
+      if (r.ok) paint(await r.json());
+    }));
+    keep.addEventListener('click', () => onceInFlight(keep, async () => {
+      const b = await (await fetch('/api/backup')).json();
+      const ok = await confirmDestructive({
+        title: `Keep the newest ${b.keep_newest} backups?`,
+        message: `${fmtNum(b.count - b.keep_newest)} older backup${b.count - b.keep_newest === 1 ? ' is' : 's are'} `
+               + 'deleted from this node for good. Copies you made elsewhere are not touched.',
+        confirmText: 'Delete the older ones',
+      });
+      if (!ok) return;
+      const r = await fetch('/api/backup/keep-newest', { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) paint(data); else msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not removed.';
+    }));
+    refresh();
+  }
+
+  /* "Add a device" (backend/device_links.py): this node's own addresses as
+     QR codes — the other device opens one and signs in with the account's
+     nickname and password. Nothing is minted here. The codes are drawn as
+     inline SVG from the matrix the node sends: no image is fetched. Draft
+     words for the owner's words review. */
+  function qrSvg(rows) {
+    const n = rows.length, quiet = 4, size = n + 2 * quiet;
+    let d = '';
+    rows.forEach((row, y) => {
+      for (let x = 0; x < row.length; x++) {
+        if (row[x] === '1') d += `M${x + quiet} ${y + quiet}h1v1h-1z`;
+      }
+    });
+    // Dark on white whatever the theme: a camera reads contrast, not tokens
+    return `<svg viewBox="0 0 ${size} ${size}" width="100%" role="img" aria-label="QR code" `
+      + `shape-rendering="crispEdges" style="max-width:calc(220*var(--px));display:block;margin:0 auto;">`
+      + `<rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+  }
+  function openAddDeviceSheet() {
+    if (document.querySelector('[data-device-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.deviceSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Add a device</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row" data-links>
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));">…</p>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const p = text => `<p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">${text}</p>`;
+    fetch('/api/auth/device-links').then(r => r.ok ? r.json() : { links: [] }).then(data => {
+      const links = data.links || [];
+      const block = (link, label) => `
+        <div style="font-size:calc(13*var(--px));color:var(--color-text);">${label}</div>
+        ${qrSvg(link.qr)}
+        <div class="mono" style="text-align:center;font-size:calc(12.5*var(--px));color:var(--color-text);">${escapeProfileHtml(link.url)}</div>`;
+      const lan = links.filter(l => l.kind === 'lan');
+      const tailnet = links.filter(l => l.kind === 'tailnet');
+      overlay.querySelector('[data-links]').innerHTML = !links.length
+        ? p('This node does not know an address another device could open. Use the address this page was opened at.')
+        : lan.map(l => block(l, 'In this network')).join('')
+          + (lan.length ? p('Open the address on the other device and sign in with your nickname and password. '
+              + 'If the page does not open: the device must be on the same Wi-Fi, and a VPN on it must allow local network access or be off.') : '')
+          + tailnet.map(l => block(l, 'From anywhere (Tailscale)')).join('')
+          + (tailnet.length ? p('Tailscale must be on on that device; a phone runs one VPN at a time. '
+              + 'It is a separate address: sign in there once more.') : '');
+    }).catch(() => {
+      overlay.querySelector('[data-links]').innerHTML = p('Could not read this node\'s addresses.');
+    });
+  }
+
+  /* The host's diagnostics (a node with a host agent): what the machine
+     knows that the node cannot read for itself — versions, the power flag,
+     the disk, the containers' last lines, the agent's own log (setup codes
+     scrubbed by the agent). "Collect" asks the agent; its report comes back
+     as text, shown as text and never parsed — part of it is what a
+     container logged — with Copy, to paste into a message to Support.
+     Draft words for the owner's words review. */
+  function openHostDiagnosticsSheet() {
+    if (document.querySelector('[data-host-diag-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.hostDiagSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Diagnostics from this machine</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
+            Versions, the power supply's flag, the disk, the last lines of Sautium's logs. Nothing is sent anywhere: the report is shown here.
+          </p>
+          <button class="profile-btn primary" data-collect>Collect</button>
+          <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+          <div data-report hidden>
+            <div data-report-box>
+              <pre data-report-text style="margin:0;max-height:40vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:calc(11*var(--px));color:var(--color-text);"></pre>
+              <div class="copy-line" data-copy-skip>${copyButtonHtml('data-copy-from="[data-report-box]"', 'Copy')}</div>
+            </div>
+            <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">Paste it into your message to Support.</p>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const msg = overlay.querySelector('[data-msg]');
+    const collect = overlay.querySelector('[data-collect]');
+    const box = overlay.querySelector('[data-report]');
+    let asked = false;
+    async function paint() {
+      let host;
+      try { host = await (await fetch('/api/host')).json(); } catch (_) { return; }
+      const d = (host.requests && host.requests.diagnostics) || {};
+      const waits = d.asked_at && (!d.answered_at || d.answered_at < d.asked_at);
+      collect.disabled = !!waits;
+      collect.textContent = waits ? 'Collecting…' : 'Collect';
+      if (!waits && asked && d.outcome && d.outcome !== 'done') {
+        msg.textContent = d.outcome === 'floor'
+          ? 'Collected less than ten minutes ago: this is that report.'
+          : `Not collected: ${d.detail || d.outcome}`;
+      }
+      if (d.has_report && !waits) {
+        try {
+          const r = await fetch('/api/host/diagnostics/report');
+          if (r.ok) {
+            const report = await r.json();
+            overlay.querySelector('[data-report-text]').textContent = report.report;
+            box.hidden = false;
+            if (!msg.textContent) msg.textContent = `Collected ${fmtRelative(report.answered_at)}.`;
+          }
+        } catch (_) { /* the last report stays */ }
+      }
+    }
+    const sub = libraryWake.on(paint);
+    const close = () => { sub.abort(); overlay.remove(); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    collect.addEventListener('click', () => onceInFlight(collect, async () => {
+      msg.textContent = '';
+      asked = true;
+      const r = await fetch('/api/host/diagnostics', { method: 'POST' });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        msg.textContent = typeof data.detail === 'string' ? data.detail : 'The host agent could not be asked.';
+        return;
+      }
+      await paint();
+    }));
+    paint();
+  }
+
   // Identity certificate + proof state published by the node's proof worker
   // (user_settings 'p2p.identity', desktop/p2p/identity_proof.py). The proof
   // is a background lottery, so progress is the odds so far, not a percent
@@ -15903,7 +16386,13 @@
       const odds = Math.round((st.p_done || 0) * 100);
       return `securing… ${fmtNum(st.attempts || 0)} tries · ${odds}% odds`;
     }
-    if (st.status === 'paused') return `paused · ${st.detail === 'battery' ? 'on battery' : 'low memory'}`;
+    if (st.status === 'needs_email') return 'needs a verified email';
+    if (st.status === 'paused') {
+      // The memory pause may never end on a small board: the other way is said with it
+      if (st.detail === 'memory') return 'paused · not enough free memory — or verify your email';
+      return `paused · ${st.detail === 'playback' ? 'while music plays'
+        : st.detail === 'battery' ? 'on battery' : st.detail || 'waiting'}`;
+    }
     return st.status;
   }
   function identityDetail(st) {
@@ -15911,6 +16400,7 @@
     const parts = [];
     if (st.method) parts.push(`method: ${st.method}`);
     if (st.difficulty) parts.push(`E = ${st.difficulty} attempts expected`);
+    if (st.status === 'needs_email') parts.push('Verify your email in More › Profile: this node does not earn its identity by computing');
     if (st.proof_mined_at) parts.push(`proof mined ${st.proof_mined_at}`);
     if (st.started_at && st.status !== 'ready') parts.push(`since ${st.started_at}`);
     return parts.join(' · ');
@@ -16684,6 +17174,11 @@
     return null;
   }
 
+  const DUMPS_NOT_ON_NANO = 'Not offered on this node. The MusicBrainz catalogue alone is a 7.5 GB download '
+    + 'that takes about 21 GB in the database and hours to load — more than a Nano node is set up for. This node '
+    + 'settles artist and album names, and listening statistics, from other Sautium nodes\' answers instead. '
+    + 'Turning the AI models on (More › Profile) makes this a full node, and the databases are offered again.';
+
   async function renderDatabases(root) {
     const data = await _fetchDumps();
     if (!data) {
@@ -16692,6 +17187,24 @@
       return;
     }
     const families = Object.keys(DUMP_FAMILIES);
+    // A Nano node is not offered the dumps: a download of tens of GB and
+    // hours of loading on a machine set up to do neither. One it already
+    // holds (a restore, an owner who loaded it before) is shown as anywhere.
+    const held = families.some(f => {
+      const d = data[DUMP_FAMILIES[f].key] || {};
+      return d.loaded || (d.update && d.update.running);
+    });
+    if (data.nano && !held) {
+      root.innerHTML = `
+        <section class="screen screen-settings">
+          ${_settingsHeader('Offline databases')}
+          <div class="form-group">
+            <div class="form-row stacked"><div class="row-stack-sub">${escapeProfileHtml(DUMPS_NOT_ON_NANO)}</div></div>
+          </div>
+        </section>`;
+      _wireBack(root);
+      return;
+    }
     root.innerHTML = `
       <section class="screen screen-settings">
         ${_settingsHeader('Offline databases')}
@@ -16763,22 +17276,238 @@
     return parts.join(' · ');
   }
 
+  // The profile's name as a person meets it: the tier, or "Nano" where the
+  // tier is lite and no model runs (the owner, 2026-11-18).
+  function hwProfileName(hw) {
+    return hw.nano ? 'Nano' : (PROFILE_DISPLAY_NAMES[hw.profile] || hw.profile || '?');
+  }
+
+  // The "AI models" row: the owner's switch, or why there is none to move.
+  // Draft words for the owner's words review.
+  function hwModelsRow(hw) {
+    if (hw.models === 'absent') {
+      const why = hw.restartable
+        ? 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full'
+        : 'Not available: no AI models exist for this machine.';
+      return `<div class="form-row stacked"><div class="row-stack"><span class="row-stack-label">AI models</span></div>
+        <div class="row-stack-sub">${escapeProfileHtml(why)}</div></div>`;
+    }
+    const on = !!hw.models_switch;
+    const pending = hw.restart_required
+      ? `<div class="row-stack-sub">${on ? 'On' : 'Off'} from the next start of Sautium.</div>` : '';
+    return `<div class="form-row stacked">
+        <div class="row-stack">
+          <span class="row-stack-label">AI models</span>
+          <span class="form-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
+          <button class="profile-btn secondary" type="button" data-action="models-switch" data-on="${on ? '0' : '1'}">${on ? 'Turn off' : 'Turn on'}</button>
+        </div>${pending}</div>`;
+  }
+
+  // The "Sautium" row: what runs here, and the one control the host agent's
+  // last answers leave (backend/routers/host.py). Its sentences for a
+  // refusal are the agent's own, shown as text. Draft words for the review.
+  function hwSoftwareRow(hw, host) {
+    const sw = hw.software || {};
+    const what = [sw.version, sw.commit || sw.build].filter(Boolean).join(' · ') || '—';
+    let control = '', sub = '';
+    if (hw.restartable && !host.available) {
+      sub = 'Updates: on the machine, run ./sautium update';
+    } else if (host.available) {
+      const check = host.requests.check || {};
+      const update = host.requests.update || {};
+      const waits = r => r.asked_at && (!r.answered_at || r.answered_at < r.asked_at);
+      const offered = host.offered ? host.offered.replace(/^v/, '') : null;
+      if (waits(update)) {
+        sub = 'Updating… Sautium will stop and come back.';
+      } else {
+        control = offered
+          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
+          : `<button class="profile-btn secondary" type="button" data-action="host-check"${waits(check) ? ' disabled' : ''}>${waits(check) ? 'Checking…' : 'Check for updates'}</button>`;
+        const newest = [check, update].filter(r => r.answered_at)
+          .sort((a, b) => (a.answered_at < b.answered_at ? 1 : -1))[0];
+        if (newest === update && ['refused', 'failed', 'floor'].includes(update.outcome)) {
+          sub = `The update did not run: ${update.detail || update.outcome}`;
+        } else if (!offered && check.answered_at) {
+          sub = {
+            current: `Up to date · checked ${fmtRelative(check.answered_at)}`,
+            floor: 'Checked less than an hour ago.',
+            rewrite: 'A newer release cannot be reached from this install. A fresh install moves to it.',
+            refused: 'A release offered to this node is not signed by a Sautium release key. Nothing was changed.',
+            failed: `The check did not run: ${check.detail || ''}`,
+          }[check.outcome] || '';
+        }
+      }
+    }
+    return `<div class="form-row stacked">
+        <div class="row-stack">
+          <span class="row-stack-label">Sautium</span>
+          <span class="form-value mono">${escapeProfileHtml(what)}</span>
+          ${control}
+        </div>${sub ? `<div class="row-stack-sub">${escapeProfileHtml(sub)}</div>` : ''}</div>`;
+  }
+
+  /* Hardware profile block (Profile screen): this node's tier — automatic,
+     SAUTIUM_PROFILE env its only override, for diagnostics — the owner's
+     model switch, what it runs, and on a node its image holds the update
+     (through the host agent) and the restart. Loads itself after render and
+     follows the host agent's answers over the Library stream. */
+  let _hwBlockSub = null;
   async function _loadHwBlock(root) {
     const holder = root.querySelector('[data-hw-block]');
     if (!holder) return;
-    let hw = null;
-    try {
-      const r = await fetch('/api/settings/hardware');
-      if (r.ok) hw = await r.json();
-    } catch (_) {}
-    if (!hw) { holder.innerHTML = ''; return; }
-    const d = hw.detected || {};
-    holder.innerHTML = `
-      <div class="profile-group-label">Hardware profile</div>
-      <div class="form-group">
-        <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(PROFILE_DISPLAY_NAMES[hw.profile] || hw.profile || '?')}${hw.source === 'env' ? ' · env override' : ''}</span></div>
-        <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(_hwMachineLine(d))}. Scales analysis, model pre-warm and background load.</div></div>
-      </div>`;
+    if (_hwBlockSub) _hwBlockSub.abort();
+    // A wake of the Library stream is also a scan's or a backup's progress,
+    // several a second: it re-reads the host's side alone — the agent's
+    // answers and which run of the node answers — and reads the node's own
+    // state again only when that moved (an update ended, the node
+    // restarted: the stream's first word after it reconnects is a wake).
+    // The block is drawn again only where what it shows has changed.
+    _hwBlockSub = libraryWake.on(() => {
+      if (!document.contains(holder)) { _hwBlockSub.abort(); _hwBlockSub = null; return; }
+      paint(false);
+    });
+    let hw = null, host = { available: false, requests: {}, offered: null }, shown = null;
+
+    async function paint(whole = true) {
+      try {
+        if (whole || !hw) {
+          const rh = await fetch('/api/settings/hardware');
+          if (rh.ok) hw = await rh.json();
+        }
+        const ro = await fetch('/api/host');
+        const answered = ro.ok ? await ro.json() : host;
+        if (!whole && hw && JSON.stringify(answered) !== JSON.stringify(host)) {
+          // The host's side is taken as moved only with the node's state
+          // read for it: a read that failed is made again at the next wake
+          const rh = await fetch('/api/settings/hardware');
+          if (!rh.ok) return;
+          hw = await rh.json();
+        }
+        host = answered;
+      } catch (_) { if (!whole) return; }
+      if (!hw) { holder.innerHTML = ''; shown = null; return; }
+      const state = JSON.stringify([hw, host]);
+      if (state === shown) return;
+      shown = state;
+      const d = hw.detected || {};
+      const cache = hw.models_cache_bytes || 0;
+      holder.innerHTML = `
+        <div class="profile-group-label">Hardware profile</div>
+        <div class="form-group" data-guide="this_node">
+          <div class="form-row"><span class="form-label">Active</span><span class="form-value">${escapeProfileHtml(hwProfileName(hw))}${hw.source === 'env' ? ' · env override' : ''}</span></div>
+          <div class="form-row stacked"><div class="row-stack-sub">Auto-selected from this machine: ${escapeProfileHtml(_hwMachineLine(d))}. ${hw.nano
+            ? 'Nothing is analysed here: sound features arrive from other Sautium nodes.'
+            : 'Scales analysis, model pre-warm and background load.'}</div></div>
+          ${hwModelsRow(hw)}
+          ${cache ? `<div class="form-row">
+            <span class="form-label">Downloaded models</span>
+            <span class="form-value mono">${escapeProfileHtml(fmtBytes(cache))}</span>
+            <button class="profile-btn secondary" type="button" data-action="models-cache-remove">Remove</button>
+          </div>` : ''}
+          ${hwSoftwareRow(hw, host)}
+          ${hw.restartable ? `<div class="form-row">
+            <span class="form-label">This machine</span>
+            <span class="form-value">${escapeProfileHtml(hw.machine || '—')}</span>
+            <button class="profile-btn secondary" type="button" data-action="restart-node">Restart Sautium</button>
+          </div>` : ''}
+        </div>`;
+      wire(hw);
+      // Shown: the one-time mark of a node born with a preset is retired,
+      // and the Email row's line knows which node this is
+      guide.paint();
+      guide.seen('this_node');
+      const emailLine = root.querySelector('[data-email-line]');
+      if (emailLine && emailLine.dataset.nano !== (hw.nano ? '1' : '0')) {
+        emailLine.dataset.nano = hw.nano ? '1' : '0';
+        if (!emailLine.hidden) paintEmailLine(root, { verified: false });
+      }
+    }
+
+    const act = (sel, fn) => {
+      const el = holder.querySelector(sel);
+      if (el) el.addEventListener('click', () => onceInFlight(el, () => fn(el)));
+    };
+    function wire(hw) {
+      act('[data-action="models-switch"]', async el => {
+        const on = el.dataset.on === '1';
+        const ok = await confirmDestructive(on ? {
+          title: 'Turn the AI models on?',
+          message: 'Your library is then analysed here: about a day for 5 000 tracks on a small machine. '
+                 + 'Models download on first use, about 4 GB. Sautium restarts.',
+          confirmText: 'Turn on', confirmKind: 'primary',
+        } : {
+          title: 'Turn the AI models off?',
+          message: 'Nothing stored is removed: what this node analysed stays. It stops analysing music '
+                 + 'and searching by sound; sound features then arrive from other Sautium nodes. Sautium restarts.',
+          confirmText: 'Turn off',
+        });
+        if (!ok) return;
+        const r = await fetch('/api/settings/hardware/models', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ on }),
+        });
+        if (!r.ok) {
+          const data = await r.json().catch(() => ({}));
+          notices.toast({ kind: 'error', title: 'Not changed', text: escapeHtml(data.detail || `HTTP ${r.status}`) });
+          return;
+        }
+        if (hw.restartable) return restartNode();
+        await notifyDialog({ title: 'Restart Sautium', kind: 'info',
+                             message: 'The change applies when Sautium starts again: quit it from its launcher and start it.' });
+        paint();
+      });
+      act('[data-action="models-cache-remove"]', async () => {
+        const ok = await confirmDestructive({
+          title: 'Remove the downloaded models?',
+          message: 'The model files this node downloaded are deleted from its disk. Nothing of your library '
+                 + 'or its analysis goes. Turning the models on again downloads them again.',
+        });
+        if (!ok) return;
+        const r = await fetch('/api/settings/hardware/models/cache', { method: 'DELETE' });
+        const data = await r.json().catch(() => ({}));
+        notices.toast(r.ok
+          ? { kind: 'success', title: 'Models removed', text: `${escapeHtml(fmtBytes(data.freed_bytes || 0))} freed.` }
+          : { kind: 'error', title: 'Not removed', text: escapeHtml(data.detail || `HTTP ${r.status}`) });
+        paint();
+      });
+      act('[data-action="host-check"]', async () => {
+        await fetch('/api/host/check', { method: 'POST' });
+        paint();
+      });
+      act('[data-action="host-update"]', async el => {
+        const release = el.dataset.release;
+        const ok = await confirmDestructive({
+          title: `Update to ${release}?`,
+          message: `Sautium stops for a few minutes and restarts on ${escapeProfileHtml(release)}. Music stops.`,
+          confirmText: 'Update', confirmKind: 'primary',
+        });
+        if (!ok) return;
+        await fetch('/api/host/update', { method: 'POST' });
+        paint();
+      });
+      act('[data-action="restart-node"]', async () => {
+        const ok = await confirmDestructive({
+          title: 'Restart Sautium?',
+          message: 'Sautium stops and starts again in about a minute. Music stops.',
+          confirmText: 'Restart', confirmKind: 'primary',
+        });
+        if (ok) await restartNode();
+      });
+    }
+    await paint();
+  }
+
+  // "Restart Sautium" on a node its image holds: the backend ends its own
+  // process and the container's policy starts it; this page's stream
+  // reconnects by itself.
+  async function restartNode() {
+    const r = await fetch('/api/settings/restart', { method: 'POST' });
+    if (r.ok) {
+      notices.toast({ kind: 'info', title: 'Restarting Sautium',
+                      text: 'This page reconnects by itself when it is back.' });
+    } else {
+      const data = await r.json().catch(() => ({}));
+      notices.toast({ kind: 'error', title: 'Not restarted', text: escapeHtml(data.detail || `HTTP ${r.status}`) });
+    }
   }
 
   /* Last.fm listening history (Profile screen, when Last.fm is connected).
@@ -16975,7 +17704,8 @@
         <div class="form-row stacked"><div class="row-stack-sub">Albums and tracks you don't have — MusicBrainz discographies and Last.fm neighbours — browsable and streamable next to your library. Grows with what you listen to; never removed on its own.</div></div>
         <div class="form-row"><span class="form-label">Storage</span><span class="form-value mono">${empty ? 'Empty' : escapeProfileHtml(fmtBytes(ph.size_bytes))}</span></div>
         <div class="form-row"><span class="form-label">Discover new</span><button class="toggle ${ph.enabled ? 'on' : ''}" data-action="phantom-toggle" aria-pressed="${ph.enabled ? 'true' : 'false'}"><span class="knob"></span></button></div>
-        <div class="form-row stacked"><div class="row-stack-sub">Off: nothing new is added; what is here stays until you remove it.</div></div>
+        <div class="form-row stacked"><div class="row-stack-sub">Off: nothing new is added and nothing streams; what is here stays until you remove it.</div></div>
+        ${ph.demo_runtime === false ? `<div class="form-row stacked"><div class="row-stack-sub">This install was set up without the full-length channel's runtime: tracks stream as 30-second excerpts. On the machine, run ./sautium setup --preset full</div></div>` : ''}
       </div>
       <div data-phantom-actions>${actions}</div>`;
   }
@@ -17187,12 +17917,132 @@
   // would walk an empty folder, so the server refuses one. The notice set is
   // the one source, on render and on every snapshot (the library read wakes
   // the channel when it sees the folder gone first).
+  // Who names the folder decides the line under it (lib.music_folder, kept
+  // on the row): the owner here, under the roots the node's setup mounted
+  // ('pick'); the launcher's window; the node's .env ('setup').
+  const MUSIC_FOLDER_LINES = {
+    pick: '',
+    launcher: 'Configured in the launcher.',
+    setup: 'Named where this node was set up (MUSIC_LIBRARY_PATH in its .env).',
+  };
   function paintMusicPathRow(row, missing) {
     row.classList.toggle('notice-row', missing);
     row.classList.toggle('kind-error', missing);
-    row.querySelector('.row-stack-sub').textContent = missing
+    const sub = row.querySelector('.row-stack-sub');
+    sub.textContent = missing
       ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
-      : 'Configured in the launcher.';
+      : MUSIC_FOLDER_LINES[row.dataset.musicFolder] || '';
+    sub.hidden = !sub.textContent;
+  }
+
+  /* The folder sheet of a node that reads its music under roots (backend
+     library_root.py): the places a choice can start at — each disk plugged
+     in, each folder named at setup — then down through folders, and "Use
+     this folder". Every name is a stranger's text (a disk's label, a
+     folder's name): escaped, never part of a path the page builds — the
+     server hands each row's path, and resolves it again when it is sent.
+     The list of places follows the mount table live: a disk plugged in
+     while the sheet is open appears in it (the Library stream wakes it).
+     Draft words for the owner's words review. */
+  function openMusicFolderSheet(onChosen) {
+    if (document.querySelector('[data-folder-sheet]')) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.dataset.folderSheet = '';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">Music folder</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <div data-crumb style="font-size:calc(12.5*var(--px));color:var(--color-text-muted);line-height:1.5;"></div>
+          <div data-list></div>
+          <button class="profile-btn primary" data-use hidden>Use this folder</button>
+          <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">
+            Sautium can read every disk plugged into this machine. It writes to none of them.
+          </p>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const crumb = overlay.querySelector('[data-crumb]');
+    const list = overlay.querySelector('[data-list]');
+    const use = overlay.querySelector('[data-use]');
+    const msg = overlay.querySelector('[data-msg]');
+    let at = null;                       // the folder shown, null = the places
+    let seq = 0;
+    const row = (label, path, sub) => `
+      <button class="manage-tokens-row" type="button" data-path="${escapeProfileHtml(path)}">
+        <span>${escapeProfileHtml(label)}${sub ? ` <span style="color:var(--color-text-dim);">${escapeProfileHtml(sub)}</span>` : ''}</span><span class="chev">›</span>
+      </button>`;
+    async function show(under) {
+      const mine = ++seq;
+      let data;
+      try {
+        const r = await fetch('/api/settings/library/folders'
+          + (under ? `?under=${encodeURIComponent(under)}` : ''));
+        data = await r.json().catch(() => ({}));
+        if (mine !== seq) return;
+        if (!r.ok) {
+          // A folder that left with its disk: back to the places
+          if (under) return show(null);
+          msg.textContent = typeof data.detail === 'string' ? data.detail : 'Could not read the folders.';
+          return;
+        }
+      } catch (err) {
+        if (mine === seq) msg.textContent = String(err);
+        return;
+      }
+      at = data.under;
+      msg.textContent = '';
+      if (!at) {
+        crumb.textContent = data.places.length
+          ? 'Where is your music?'
+          : 'No disk is plugged in, and no folder was named when this node was set up. Plug a disk with music into this machine: it appears here.';
+        list.innerHTML = data.places.map(p => row(
+          p.kind === 'disk' ? (p.label || 'Disk') : p.name, p.path,
+          p.kind === 'disk' && p.size_bytes ? `— ${fmtBytes(p.size_bytes)}` : '')).join('');
+        use.hidden = true;
+        return;
+      }
+      const count = `${fmtNum(data.folders.length)} folder${data.folders.length === 1 ? '' : 's'} · `
+        + `${fmtNum(data.audio_files)}${data.capped ? '+' : ''} audio file${data.audio_files === 1 ? '' : 's'}`;
+      crumb.textContent = `${fmtPathForDisplay(at)} — ${count}`;
+      list.innerHTML = `
+        <button class="manage-tokens-row" type="button" data-up><span>‹ Back</span><span></span></button>`
+        + data.folders.map(f => row(f.name, f.path, '')).join('');
+      list.querySelector('[data-up]').dataset.path = data.parent || '';
+      use.hidden = false;
+    }
+    list.addEventListener('click', e => {
+      const btn = e.target.closest('[data-path]');
+      if (btn) show(btn.dataset.path || null);
+    });
+    // The Library stream wakes on the mount table's changes among much else
+    // (a scan's progress): only the list of places follows it — a folder's
+    // own listing counts its files, and is asked for by a tap alone.
+    const sub = libraryWake.on(() => { if (at === null) show(null); });
+    const close = () => { sub.abort(); overlay.remove(); };
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    use.addEventListener('click', () => onceInFlight(overlay, async () => {
+      try {
+        const r = await fetch('/api/settings/library/root', {
+          method: 'PUT', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ path: at }),
+        });
+        if (r.ok) { close(); onChosen(); return; }
+        const data = await r.json().catch(() => ({}));
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not chosen.';
+      } catch (err) {
+        msg.style.color = 'var(--color-negative)';
+        msg.textContent = String(err);
+      }
+    }));
+    show(null);
   }
 
   async function renderLibrary(root) {
@@ -17221,9 +18071,15 @@
     // Treat that — and the Docker default '/music' when nothing was
     // bind-mounted — as "not configured" so we don't pretend a path
     // exists.
-    const isPathSet     = !!(lib.music_path && lib.music_path !== '/music');
-    const pathFull      = isPathSet ? fmtPathForDisplay(lib.music_path) : '';
-    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull) : 'Not set';
+    // A node whose owner picks the folder here has none until they do. One
+    // whose .env names it holds a folder even where only the container's
+    // own mount point is known (no MUSIC_HOST_PATH): said as that.
+    const picksFolder   = lib.music_folder === 'pick';
+    const isPathSet     = !!(lib.music_path && (lib.music_path !== '/music' || lib.music_folder === 'setup'));
+    const pathFull      = !isPathSet ? ''
+      : lib.music_path === '/music' ? 'The folder named at setup' : fmtPathForDisplay(lib.music_path);
+    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull)
+      : picksFolder ? 'Not chosen' : 'Not set';
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
     const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
@@ -17322,7 +18178,11 @@
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
-          No music folder yet — Home, streaming and friends work without one. To add your own files, open the <b>Desktop Launcher</b> and tap <b>Choose Music Folder</b>; files are only ever read.
+          ${picksFolder
+            ? 'No music folder yet — Home and friends work without one. To add your own files, tap <b>Choose</b> above and pick the folder your music is in; files are only ever read.'
+            : lib.music_folder === 'setup'
+              ? 'No music folder yet — Home, streaming and friends work without one. To add your own files, name the folder in this node\'s <b>.env</b> (MUSIC_LIBRARY_PATH) and start the node again; files are only ever read.'
+              : 'No music folder yet — Home, streaming and friends work without one. To add your own files, open the <b>Desktop Launcher</b> and tap <b>Choose Music Folder</b>; files are only ever read.'}
         </p>
       </div>` : `
       <div class="empty-library">
@@ -17350,10 +18210,11 @@
         ${_settingsHeader('Library')}
 
         <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked" data-music-path-row>
+          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}">
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
               <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
+              ${picksFolder ? `<button class="profile-btn secondary" type="button" data-action="choose-folder" data-guide="music_folder">${isPathSet ? 'Change' : 'Choose'}</button>` : ''}
             </div>
             <div class="row-stack-sub"></div>
           </div>
@@ -17382,6 +18243,8 @@
     `;
     paintMusicPathRow(root.querySelector('[data-music-path-row]'), !!notices.get('library.mount_missing'));
     _wireBack(root);
+    const chooseFolder = root.querySelector('[data-action="choose-folder"]');
+    if (chooseFolder) chooseFolder.addEventListener('click', () => openMusicFolderSheet(() => renderLibrary(root)));
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
     // A refused start says why: the folder unreachable, a scan already
@@ -17911,6 +18774,8 @@
     toggle('[data-action="toggle-reanalyze"]', 'reanalyze_imported');
     toggle('[data-action="toggle-relay"]',     'relay_enabled');
     toggle('[data-action="toggle-support"]',   'diagnostics_enabled');
+    toggle('[data-action="toggle-pass-on"]',   'pass_on');
+    onAction('[data-action="host-diagnostics"]', () => openHostDiagnosticsSheet());
     onAction('[data-action="review-support"]', () => {
       openSupportRequestSheet(sync.support.requests[0]);
     });
@@ -18013,6 +18878,14 @@
     // Notices ride /api/events (player.js re-dispatches the snapshot); the
     // link state comes from the same stream's transport.
     window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));
+    // The email typed on the first-run form: its code was asked for as the
+    // account was made, and this is the page that loads next — the code's
+    // dialog opens here, with no second tap (auth.js rememberEmail)
+    const firstRunGrant = window.Sautium.auth.takeFirstRunEmailGrant();
+    if (firstRunGrant) openEmailVerifyFlow(firstRunGrant);
+    // Registered before any screen's own listener: Friends and a chat
+    // header repaint from the state this one has already taken
+    window.addEventListener('sautium:identity', e => nodeIdentity.apply(e.detail || {}));
     window.addEventListener('sautium:link', e => {
       notices.strip('link', e.detail && e.detail.up ? null
         : 'Connection to the node lost — reconnecting…');
