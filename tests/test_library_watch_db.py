@@ -41,11 +41,22 @@ def test_the_mount_says_whether_events_come():
 
 
 def test_a_bind_of_docker_desktop_is_not_watched(library, monkeypatch, cur):
+    """Nothing is watched there, and nothing is queued — but the library's
+    re-read under a newer reader (scanner.TAGS_READ_REV), until a whole walk
+    has done it, which no event would ever start (CANON-CLASSICAL)."""
     asked = []
     monkeypatch.setattr(library_watch, "mount_kind", lambda root: "9p")
     library_watch.start(lambda scopes, **kw: asked.append(scopes))
     try:
         assert library_watch.state() == {"state": library_watch.NO_EVENTS, "why": "9p"}
+        assert asked == [{"": True}]                 # no whole walk under this reader yet
+    finally:
+        library_watch.stop()
+    cur.execute("INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)",
+                (scanner.TAGS_READ_KEY, str(scanner.TAGS_READ_REV)))
+    asked.clear()
+    library_watch.start(lambda scopes, **kw: asked.append(scopes))
+    try:
         assert asked == []
     finally:
         library_watch.stop()

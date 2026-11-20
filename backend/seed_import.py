@@ -250,7 +250,14 @@ def _check_completeness(conn, bundle: dict, envelopes: dict) -> dict:
     }
     for category, envelope in envelopes.items():
         sql, key = _PRESENCE_SQL[category]
-        entities = sorted({item[key] for item in envelope["items"]})
+        items = envelope["items"]
+        if category == "track_mbids":
+            # a binding of the record format before the matcher's methodology
+            # (record_sig track_mbid v3) is refused by the gate, not missing:
+            # a bundle made before it completes without them, and the next
+            # bundle brings them
+            items = [i for i in items if "matcher_version" in i]
+        entities = sorted({item[key] for item in items})
         out[category] = {
             "expected": len(entities),
             "present": _count_present(conn, sql, entities),

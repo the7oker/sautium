@@ -41,11 +41,12 @@ def seal_track(cur, author_key, track: str, model: str, *, recording: str,
                first_hand: bool = False, chromaprint: str = "AQAAsealed",
                duration: int = 95, segments: int = 3, analysis_version: int = 2,
                stretch: float = 1.0, instruments: dict = None,
-               instruments_version: int = 2) -> str:
+               instruments_version: int = 2, matcher_version: int = rs.MATCHER_VERSION) -> str:
     """An author's whole analysis of `track` on this node: its source (the
     author's own file when `first_hand`, else imported), the mean and
     `segments` sealed segments, sealed features, sealed `instruments` (at
-    `instruments_version`) when given, and a sealed binding to `recording`.
+    `instruments_version`) when given, and a sealed binding to `recording`
+    (made by `matcher_version`).
     `stretch` (a power of two, so float32 keeps the values) scales the
     segment vectors off the unit sphere, validly sealed all the same.
     Returns the batch root."""
@@ -77,7 +78,7 @@ def seal_track(cur, author_key, track: str, model: str, *, recording: str,
         signed.append(("instruments", None, rs.sign(rs.instruments_payload(
             author, track, chromaprint, duration, instruments_version,
             rs.blake2b_hex(rs.canonical_instruments_blob(instruments))), author_key)))
-    binding = {"recording_mbid": recording, "confidence": "name_exact"}
+    binding = {"recording_mbid": recording, "confidence": "name_exact", "matcher_version": matcher_version}
     signed.append(("binding", None, rs.sign(rs.enrichment_payload(
         author, "track_mbid", track, "",
         rs.blake2b_hex(rs.canonical_enrichment_blob("track_mbid", binding)), BOUND_AT), author_key)))
@@ -112,9 +113,9 @@ def seal_track(cur, author_key, track: str, model: str, *, recording: str,
                         (track, psycopg2.extras.Json(instruments), source, instruments_version,
                          *seal))
         else:
-            cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, created_at,
-                                                    author_pubkey, signature, batch_root,
+            cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version,
+                                                    created_at, author_pubkey, signature, batch_root,
                                                     merkle_proof, imported)
-                           VALUES (%s, %s, 'name_exact', %s, %s, %s, %s, %s, %s)""",
-                        (recording, track, BOUND_AT, *seal, not first_hand))
+                           VALUES (%s, %s, 'name_exact', %s, %s, %s, %s, %s, %s, %s)""",
+                        (recording, track, matcher_version, BOUND_AT, *seal, not first_hand))
     return root

@@ -1449,8 +1449,20 @@ class SyncClient:
                                                             template=template))
 
     def _import_track_mbids(self, conn, items: list[dict]) -> int:
-        """Sealed track↔recording bindings — same shape as artist_mbids:
-        the track must exist, an existing binding outranks a restatement."""
+        """Sealed track↔recording bindings: the track must exist, and an
+        existing binding outranks a restatement — but for an imported one of
+        an older matcher, which a newer one replaces (KEPT_RECORD's rule for
+        the analysis records); this node's own is never replaced. A binding of
+        a methodology this release does not compute is refused: its seal
+        would replace every imported binding of the recording for good."""
+        made = [i for i in items if _is_int(i.get("matcher_version"))
+                and 1 <= i["matcher_version"] <= rs.MATCHER_VERSION]
+        if len(made) < len(items):
+            logger.warning("track_mbids: %d binding(s) refused — no matcher version, or one this "
+                           "release does not compute (above %d)", len(items) - len(made), rs.MATCHER_VERSION)
+        # one row per recording: a page that names it twice would have the
+        # upsert reach its row twice, which PostgreSQL refuses for the page
+        items = list({i["recording_mbid"]: i for i in sorted(made, key=lambda i: i["matcher_version"])}.values())
         if not items:
             return 0
         uuids = list({item["track_uuid"] for item in items})
@@ -1460,7 +1472,7 @@ class SyncClient:
             known = {r[0] for r in cur.fetchall()}
             values = [
                 (item["recording_mbid"], item["track_uuid"],
-                 item.get("confidence"), item.get("fetched_at"),
+                 item.get("confidence"), item["matcher_version"], item.get("fetched_at"),
                  *self._seal_values(item)[1:])
                 for item in items if item["track_uuid"] in known
             ]
@@ -1469,13 +1481,19 @@ class SyncClient:
             psycopg2.extras.execute_values(
                 cur,
                 """INSERT INTO track_mbids
-                       (recording_mbid, track_id, confidence, created_at,
+                       (recording_mbid, track_id, confidence, matcher_version, created_at,
                         author_pubkey, signature, batch_root, merkle_proof,
                         imported)
                    VALUES %s
-                   ON CONFLICT (recording_mbid) DO NOTHING""",
+                   ON CONFLICT (recording_mbid) DO UPDATE SET
+                       track_id = EXCLUDED.track_id, confidence = EXCLUDED.confidence,
+                       matcher_version = EXCLUDED.matcher_version, created_at = EXCLUDED.created_at,
+                       author_pubkey = EXCLUDED.author_pubkey, signature = EXCLUDED.signature,
+                       batch_root = EXCLUDED.batch_root, merkle_proof = EXCLUDED.merkle_proof
+                   WHERE track_mbids.imported
+                     AND track_mbids.matcher_version < EXCLUDED.matcher_version""",
                 values,
-                template="(%s::uuid, %s::uuid, %s::mb_match_confidence,"
+                template="(%s::uuid, %s::uuid, %s::mb_match_confidence, %s::smallint,"
                          " %s::timestamptz, %s, %s, %s, %s, TRUE)")
         return len(values)
 

@@ -36,6 +36,7 @@ from canon import confirm
 from canon.match import _candidates, _exact_mbids, match_whole_gids, _name_exact_gids
 from canon.identity import _update_album_uuid, _update_track_uuid, recanonicalize_album_variants, recanonicalize_artist
 from canon.split import normalize_compound_artist
+from record_sig import MATCHER_VERSION
 from release_groups import release_group_cluster, simplify_edition_name
 from uuid_utils import album_uuid, artist_uuid, normalize
 
@@ -47,13 +48,40 @@ _NO_DUR = 9999     # duration tolerance that effectively ignores duration (title
 # a peer's seal brought (track_mbids.imported): first-writer-wins let any
 # sealed claim hold a recording for good. The seal guard clears the peer's
 # seal as the row changes hands; this node signs its own binding later. An
-# imported row that says the same is left as it came.
+# imported row that says the same is left as it came. This node's own row of
+# an older matcher is the current matcher's to restate (record_sig.
+# MATCHER_VERSION): the canon's re-derive moves it, and the guard sheds its seal.
 _LOCAL_BINDING_WINS = """
     ON CONFLICT (recording_mbid) DO UPDATE SET
-        track_id = EXCLUDED.track_id, confidence = EXCLUDED.confidence, imported = FALSE
+        track_id = EXCLUDED.track_id, confidence = EXCLUDED.confidence,
+        matcher_version = EXCLUDED.matcher_version, imported = FALSE
+    WHERE (track_mbids.imported OR track_mbids.matcher_version < EXCLUDED.matcher_version)
+      AND (track_mbids.track_id, track_mbids.confidence, track_mbids.matcher_version)
+          IS DISTINCT FROM (EXCLUDED.track_id, EXCLUDED.confidence, EXCLUDED.matcher_version)"""
+
+# What bind_owned_recordings, which binds from what the files already carry,
+# may replace: a peer's binding, never this node's own — the files' recording
+# says nothing of which matcher stamped it, so restating an own row would
+# relabel an older matcher's binding as the current one's.
+_FILES_BINDING_WINS = """
+    ON CONFLICT (recording_mbid) DO UPDATE SET
+        track_id = EXCLUDED.track_id, confidence = EXCLUDED.confidence,
+        matcher_version = EXCLUDED.matcher_version, imported = FALSE
     WHERE track_mbids.imported
-      AND (track_mbids.track_id, track_mbids.confidence)
-          IS DISTINCT FROM (EXCLUDED.track_id, EXCLUDED.confidence)"""
+      AND (track_mbids.track_id, track_mbids.confidence, track_mbids.matcher_version)
+          IS DISTINCT FROM (EXCLUDED.track_id, EXCLUDED.confidence, EXCLUDED.matcher_version)"""
+
+# This node's own bindings of the tracks an apply just bound that no file of
+# the track carries any more (CANON-CLASSICAL-DESIGN §5.2): an earlier pass's
+# binding a later one moved. A track two files bind to two recordings keeps
+# both; an away copy's file still counts.
+_PRUNE_STALE_BINDINGS = """
+    DELETE FROM track_mbids tm
+     WHERE tm.track_id = ANY(%(tracks)s::uuid[]) AND NOT tm.imported
+       AND NOT EXISTS (SELECT 1 FROM media_files f
+                        WHERE f.track_id = tm.track_id AND f.recording_mbid = tm.recording_mbid)
+       AND NOT EXISTS (SELECT 1 FROM hqp_library_files f
+                        WHERE f.track_id = tm.track_id AND f.recording_mbid = tm.recording_mbid)"""
 
 # Cascade passes (cheap→specialised), each re-tried only on the prior residue:
 #   (label, exact_dur_tol, fuzzy_dur_tol, fuzzy_sim, min_matched, coverage_frac, cap_min_to_ntracks)
@@ -93,26 +121,41 @@ cand_credit AS (
     FROM cand c JOIN mb_artist_credit_name acn ON acn.artist = c.id
 )
 SELECT rec.id, rec.gid::text AS rec_mbid, cc.artist_mbid,
-       {_norm('rec.name')} AS rname, rec.length
+       {_norm('rec.name')} AS rname, rec.length, title_numbers(rec.name) AS nums
 FROM mb_recording rec JOIN cand_credit cc ON cc.artist_credit = rec.artist_credit
 UNION
--- per-release TRACK name variants (regional/romanized retitles): identity stays
--- the recording, only the matchable NAME comes from the track; the differs-filter
--- keeps just the rows that add information (most track names equal the recording's)
+-- per-release TRACK variants: identity stays the recording, only the matchable
+-- NAME or LENGTH comes from the track — a regional/romanized retitle, or a
+-- track MusicBrainz times apart from its recording (CANON-CLASSICAL-DESIGN
+-- §12.7: Polarity's "The Elder", 405 s as a track and 396.5 s as a recording),
+-- so a file fits by either. The differs-filter keeps just the rows that add
+-- information: most tracks carry the recording's name, and a length within a
+-- second of it changes no pass's verdict
 SELECT rec.id, rec.gid::text, cc.artist_mbid,
-       {_norm('mt.name')}, coalesce(mt.length, rec.length)
+       {_norm('mt.name')}, coalesce(mt.length, rec.length), title_numbers(mt.name)
 FROM mb_track mt
 JOIN cand_credit cc ON cc.artist_credit = mt.artist_credit
 JOIN mb_recording rec ON rec.id = mt.recording
 WHERE {_norm('mt.name')} <> {_norm('rec.name')}
+   OR (mt.length IS NOT NULL AND (rec.length IS NULL OR abs(mt.length - rec.length) >= 1000))
 """
 
 # Match owned tracks (scoped to %(albums)s) against the temp _recs.
 # ta2: only the artist's own tracks — a mixed directory must not dilute coverage.
+# A recording with no length is never duration evidence (CANON-CLASSICAL-DESIGN
+# §2.1): its `dd` is NULL, it ranks after every timed candidate, and `timed`
+# tells the cascade's duration-anchored passes not to count it. The album's
+# own group ranks before that (§12.7): a recording on a release of the group in
+# _agroup — the one the resolve bound the album to, when it picks again — is
+# never replaced by a timed one off it. A candidate
+# whose title disagrees with the file's on a catalogue number, a No. or a
+# movement numeral is no candidate in any arm (§2.2: a fuzzy "Spring: I." is
+# not "… No. 1: II. Largo"); among fuzzy hits the closer title wins first.
+_AGROUP_SQL = "CREATE TEMP TABLE _agroup (album_id text PRIMARY KEY, rg uuid NOT NULL)"
 _MATCH_SQL = f"""
 WITH owned AS (
     SELECT a.id::text AS album_id, t.id::text AS track_id,
-           {_norm('t.title')} AS ntitle, mf.duration_seconds::float AS dur
+           {_norm('t.title')} AS ntitle, title_numbers(t.title) AS nums, mf.duration_seconds::float AS dur
     FROM albums a
     JOIN album_artists aa ON aa.album_id=a.id AND aa.role='primary'
         AND aa.artist_id=%(artist)s::uuid
@@ -128,15 +171,16 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
             -- exact (=) and fuzzy (%%) are separate scans so each uses its _recs(rname)
             -- index. `matched` collapses to the single best pick per track (recording-norm
             -- + coverage gate); RG resolution is a SEPARATE concern (see _RG_SQL).
-    SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, TRUE AS exact,
-           abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur) AS dd
+    SELECT o.album_id, o.track_id, r.id AS rid, r.rec_mbid, r.artist_mbid, TRUE AS exact,
+           abs(r.length/1000.0 - o.dur) AS dd, 1.0::real AS sim
     FROM owned o JOIN _recs r ON r.rname = o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
     UNION ALL
-    SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
-           abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur)
+    SELECT o.album_id, o.track_id, r.id, r.rec_mbid, r.artist_mbid, FALSE,
+           abs(r.length/1000.0 - o.dur), similarity(r.rname, o.ntitle)
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(fdurtol)s)
+        AND NOT title_numbers_disagree(r.nums, o.nums)
     UNION ALL
     -- timing arm, BIDIRECTIONAL containment: dirty owned title CONTAINS the
     -- recording's full name ("artist - fever" ⊃ "fever"), or the recording
@@ -144,19 +188,38 @@ cand AS (   -- recording candidates per owned track within the pass's duration t
     -- ("The Terminator: Tunnel Chase" ⊃ owned "Tunnel Chase"). The weakest
     -- name evidence, so duration corroboration is REQUIRED and tight (never
     -- loosened by the pass durtol — on drifted vinyl rips the arm stays silent)
-    SELECT o.album_id, o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
-           abs(r.length/1000.0 - o.dur)
+    SELECT o.album_id, o.track_id, r.id, r.rec_mbid, r.artist_mbid, FALSE,
+           abs(r.length/1000.0 - o.dur), 0.0::real
     FROM owned o JOIN _recs r ON r.rname <> o.ntitle
         AND ((length(r.rname) >= 10 AND position(r.rname in o.ntitle) > 0)
              OR (length(o.ntitle) >= 10 AND position(o.ntitle in r.rname) > 0))
         AND r.length IS NOT NULL AND o.dur IS NOT NULL
         AND abs(r.length/1000.0 - o.dur) <= 5
+        AND NOT title_numbers_disagree(r.nums, o.nums)
+),
+grp AS (    -- the recordings of each album's group in _agroup
+    SELECT DISTINCT ag.album_id, mt.recording
+    FROM _agroup ag
+    JOIN mb_release_group g ON g.gid = ag.rg
+    JOIN mb_release rl ON rl.release_group = g.id
+    JOIN mb_medium md ON md.release = rl.id
+    JOIN mb_track mt ON mt.medium = md.id
+    WHERE ag.album_id = ANY(%(albums)s::text[])
 )
-SELECT DISTINCT ON (album_id, track_id) album_id, track_id, rec_mbid, artist_mbid
-FROM cand
-ORDER BY album_id, track_id, exact DESC, dd
+SELECT DISTINCT ON (c.album_id, c.track_id) c.album_id, c.track_id, c.rec_mbid, c.artist_mbid,
+       c.dd IS NOT NULL AS timed
+FROM cand c LEFT JOIN grp ON grp.album_id = c.album_id AND grp.recording = c.rid
+ORDER BY c.album_id, c.track_id, c.exact DESC, (grp.recording IS NULL), (c.dd IS NULL), c.sim DESC, c.dd,
+         c.rec_mbid   -- equal on every key (MusicBrainz's duplicates, lengthless twins): the MBID, not the plan
 """
 
+
+# A file of a copy the positional pass bound here (canon.positional): its
+# position chose its recording, and the track layer's title match is no
+# evidence over it. Another copy of the album is the track layer's as before.
+_NOT_POSITIONAL = """
+    AND NOT EXISTS (SELECT 1 FROM album_variants pv
+                     WHERE pv.id = {f}.album_variant_id AND pv.positional_bound)"""
 
 # Track-centric match — the layer for artists owning TRACKS but no albums (a
 # single or two on a compilation owned by someone else). They are invisible to
@@ -171,35 +234,38 @@ _TRACK_MATCH_SQL = f"""
 WITH owned AS (
     SELECT t.id::text AS track_id,
            {_norm("regexp_replace(t.title, %(strip)s, '', 'i')")} AS ntitle,
-           min(mf.duration_seconds::float) AS dur
+           title_numbers(t.title) AS nums, min(mf.duration_seconds::float) AS dur
     FROM tracks t
     JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         AND ta.artist_id = %(artist)s::uuid
     JOIN owned_files mf ON mf.track_id = t.id
+    WHERE TRUE{_NOT_POSITIONAL.format(f='mf')}
     GROUP BY t.id, t.title
 ),
 cand AS (
     SELECT o.track_id, r.rec_mbid, r.artist_mbid, TRUE AS exact,
-           abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur) AS dd
+           abs(r.length/1000.0 - o.dur) AS dd, 1.0::real AS sim
     FROM owned o JOIN _recs r ON r.rname = o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
     UNION ALL
     SELECT o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
-           abs(coalesce(r.length, o.dur*1000)/1000.0 - o.dur)
+           abs(r.length/1000.0 - o.dur), similarity(r.rname, o.ntitle)
     FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= %(durtol)s)
+        AND NOT title_numbers_disagree(r.nums, o.nums)
     UNION ALL
     -- timing arm (see _MATCH_SQL): bidirectional containment + REQUIRED tight duration
     SELECT o.track_id, r.rec_mbid, r.artist_mbid, FALSE,
-           abs(r.length/1000.0 - o.dur)
+           abs(r.length/1000.0 - o.dur), 0.0::real
     FROM owned o JOIN _recs r ON r.rname <> o.ntitle
         AND ((length(r.rname) >= 10 AND position(r.rname in o.ntitle) > 0)
              OR (length(o.ntitle) >= 10 AND position(o.ntitle in r.rname) > 0))
         AND r.length IS NOT NULL AND o.dur IS NOT NULL
         AND abs(r.length/1000.0 - o.dur) <= 5
+        AND NOT title_numbers_disagree(r.nums, o.nums)
 )
-SELECT DISTINCT ON (track_id) track_id, rec_mbid, artist_mbid, exact
-FROM cand ORDER BY track_id, exact DESC, dd
+SELECT DISTINCT ON (track_id) track_id, rec_mbid, artist_mbid, exact, dd IS NOT NULL AS timed
+FROM cand ORDER BY track_id, exact DESC, (dd IS NULL), sim DESC, dd, rec_mbid
 """
 
 
@@ -245,11 +311,25 @@ atitle AS (   -- atitle = normalized title; abase = the same with edition/disc s
 cand AS (   -- title candidates within a GENEROUS duration band (the band is a perf bound on
             -- mega-bootlegged artists, not a correctness lever — studio recordings sit within
             -- seconds of the owned file); exact (=) and fuzzy (%%) each use their _recs index
-    SELECT o.album_id, o.track_id, r.id AS rec_id FROM owned o JOIN _recs r ON r.rname = o.ntitle
+    SELECT o.album_id, o.track_id, o.dur, r.id AS rec_id, r.length AS rlen
+      FROM owned o JOIN _recs r ON r.rname = o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= {_RG_DURTOL})
     UNION
-    SELECT o.album_id, o.track_id, r.id FROM owned o JOIN _recs r ON r.rname %% o.ntitle
+    SELECT o.album_id, o.track_id, o.dur, r.id, r.length FROM owned o JOIN _recs r ON r.rname %% o.ntitle
         AND (r.length IS NULL OR abs(r.length/1000.0 - o.dur) <= {_RG_DURTOL})
+),
+fit AS (   -- per (owned album, owned track, release): how close the release's closest track to
+           -- it is, in whole milliseconds (an exact sum: equal tracks tie, and the MBID decides),
+           -- by the MB track's length (the recording's where the track has none); one with
+           -- neither counts as the band's edge, so a lengthless release never wins the length
+           -- tie-break over a timed one that fits
+    SELECT c.album_id, c.track_id, md.release AS rel_id,
+           min(coalesce(abs(coalesce(mt.length, c.rlen) - round(c.dur * 1000)::int),
+                        {_RG_DURTOL} * 1000)) AS d
+    FROM cand c
+    JOIN mb_track mt ON mt.recording = c.rec_id
+    JOIN mb_medium md ON md.id = mt.medium
+    GROUP BY c.album_id, c.track_id, md.release
 ),
 rel_cov AS (   -- per (owned album, OFFICIAL release of ANY studio-primary type incl comp/live):
                -- owned tracks covered. Comps are NOT pruned — an owned compilation must be free to
@@ -257,23 +337,23 @@ rel_cov AS (   -- per (owned album, OFFICIAL release of ANY studio-primary type 
                -- of being forced onto a studio/live album it merely shares songs with. Early-cut to
                -- releases covering >= half the owned album: that is half the bidirectional gate, and
                -- it bounds the "a hit song rides hundreds of comps" join blow-up.
-    SELECT album_id, rg_mbid, rel_id, owned_cov, total, is_comp, rgn FROM (
+    SELECT album_id, rg_mbid, rel_id, owned_cov, lendiff, total, is_comp, rgn FROM (
         SELECT c.album_id, rg.gid::text AS rg_mbid, r.id AS rel_id, nt.total,
                {_norm('rg.name')} AS rgn,
-               count(DISTINCT c.track_id) AS owned_cov,
+               count(*) AS owned_cov, sum(c.d) AS lendiff,
                EXISTS (SELECT 1 FROM mb_release_group_secondary_type_join j
                        JOIN mb_release_group_secondary_type st ON st.id = j.secondary_type
                        WHERE j.release_group = rg.id
                          AND st.name IN ('Compilation', 'DJ-mix', 'Mixtape/Street')) AS is_comp
-        FROM cand c
-        JOIN mb_track mt ON mt.recording = c.rec_id
-        JOIN mb_medium md ON md.id = mt.medium
-        JOIN mb_release r ON r.id = md.release
+        FROM fit c
+        JOIN mb_release r ON r.id = c.rel_id
             AND (r.status IS NULL OR r.status NOT IN (3, 4))  -- drop Bootleg + Pseudo-Release
         JOIN mb_release_group rg ON rg.id = r.release_group
-        JOIN mb_release_group_primary_type pt ON pt.id = rg.type
-            AND pt.name IN ('Album', 'EP', 'Single')
+        LEFT JOIN mb_release_group_primary_type pt ON pt.id = rg.type
+        -- a group with no primary type (one of MB's in 45; Appassionata's) is an
+        -- album as much as one typed Album; 'Other' and 'Broadcast' stay out
         JOIN nt ON nt.album_id = c.album_id
+        WHERE rg.type IS NULL OR pt.name IN ('Album', 'EP', 'Single')
         GROUP BY c.album_id, rg.gid, rg.id, r.id, nt.total
     ) q WHERE owned_cov::float >= {_RG_OWNED_MIN} * total
 ),
@@ -288,7 +368,7 @@ rel_total AS (   -- true track count of just the candidate releases (the other h
 valid AS (   -- candidates passing the FULL bidirectional gate BEFORE ranking, so the name tie-break
              -- picks the best-named VALID release and a high-name-sim near-miss that fails the gate
              -- can't shadow a real lower-named match (which would wrongly NULL the album).
-    SELECT rc.album_id, rc.rg_mbid, rc.rel_id, rc.owned_cov, rc.total, rt.n AS rel_total,
+    SELECT rc.album_id, rc.rg_mbid, rc.rel_id, rc.owned_cov, rc.lendiff, rc.total, rt.n AS rel_total,
            GREATEST(similarity(rc.rgn, at.atitle), similarity(rc.rgn, at.abase)) AS namesim, rc.is_comp
     FROM rel_cov rc
     JOIN rel_total rt ON rt.rel_id = rc.rel_id
@@ -304,13 +384,18 @@ SELECT album_id, rg_mbid,          -- among content-valid releases, the one whos
        (SELECT r.gid::text FROM mb_release r WHERE r.id = x.rel_id) AS rel_mbid
 FROM (                            -- owned title (tie-break, never a gate: a regional retitle with a lone
                                   -- match still wins on content; two sibling comps split by name). Then
-                                  -- most covered, closest in size (rejects supersets / medleys), studio.
+                                  -- most covered, closest in size (rejects supersets / medleys), studio;
+                                  -- then the closest by length, the MBIDs last: equal-named groups of
+                                  -- different performances tie on the four, and the plan's order is no
+                                  -- rule — two nodes with the same data, or a re-run, must reach the
+                                  -- same group (DESIGN §12.8).
                                   -- rel_mbid: the release that covered the album, the evidence a node
                                   -- without the dump re-checks on MusicBrainz's answer (canon.confirm).
-    SELECT album_id, rg_mbid, rel_id,
-           row_number() OVER (PARTITION BY album_id
-               ORDER BY namesim DESC, owned_cov DESC, abs(rel_total - total), is_comp) AS rn
-    FROM valid
+    SELECT v.album_id, v.rg_mbid, v.rel_id,
+           row_number() OVER (PARTITION BY v.album_id
+               ORDER BY v.namesim DESC, v.owned_cov DESC, abs(v.rel_total - v.total), v.is_comp,
+                        v.lendiff, v.rg_mbid, rl.gid) AS rn
+    FROM valid v JOIN mb_release rl ON rl.id = v.rel_id
 ) x WHERE x.rn = 1
 """
 
@@ -364,9 +449,11 @@ rel_cov AS (
         JOIN mb_release r ON r.id = md.release
             AND (r.status IS NULL OR r.status NOT IN (3, 4))
         JOIN mb_release_group rg ON rg.id = r.release_group
-        JOIN mb_release_group_primary_type pt ON pt.id = rg.type
-            AND pt.name IN ('Album', 'EP', 'Single')
+        LEFT JOIN mb_release_group_primary_type pt ON pt.id = rg.type
+        -- a group with no primary type (one of MB's in 45; Appassionata's) is an
+        -- album as much as one typed Album; 'Other' and 'Broadcast' stay out
         JOIN nt ON nt.album_id = c.album_id
+        WHERE rg.type IS NULL OR pt.name IN ('Album', 'EP', 'Single')
         GROUP BY c.album_id, rg.gid, rg.id, r.id, nt.total
     ) q WHERE owned_cov::float >= {_RG_OWNED_MIN} * total
 ),
@@ -512,8 +599,9 @@ def _owned_counts(artist_id):
 def _group(rows):
     by_album: dict = {}
     for r in rows:
-        m = by_album.setdefault(r["album_id"], {"recs": {}, "amb": {}})
+        m = by_album.setdefault(r["album_id"], {"recs": {}, "amb": {}, "timed": 0})
         m["recs"][r["track_id"]] = r["rec_mbid"]
+        m["timed"] += r["timed"]
         if r["artist_mbid"]:
             m["amb"][r["artist_mbid"]] = m["amb"].get(r["artist_mbid"], 0) + 1
     return by_album
@@ -539,6 +627,12 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
     (arriving_albums) is left out of the plan."""
     cands = _unrefuted(artist_id, _candidates(name))
     owned = _owned_counts(artist_id)
+    # an album the positional tier bound here is not the cascade's to
+    # re-decide: a copy's positions chose the group (canon.positional). An
+    # album only labelled so (a seed's, a share's) is this node's to decide.
+    for row in db_query("SELECT DISTINCT album_id::text AS id FROM album_variants "
+                        "WHERE album_id = ANY(%(a)s::uuid[]) AND positional_bound", {"a": list(owned)}):
+        owned.pop(row["id"])
     if not take_arriving:
         for album in arriving_albums(owned):
             owned.pop(album)
@@ -553,6 +647,8 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
             cur.execute("CREATE INDEX ON _recs (rname)")                       # exact (=)
             cur.execute("CREATE INDEX ON _recs USING gin (rname gin_trgm_ops)")  # fuzzy (%)
             cur.execute("ANALYZE _recs")
+            cur.execute("DROP TABLE IF EXISTS _agroup")
+            cur.execute(_AGROUP_SQL)
             try:
                 cache: dict = {}
                 for label, dur, fdur, sim, minm, frac, cap in _CASCADE:
@@ -568,10 +664,12 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
                     for aid in list(pending):
                         m = cache[key].get(aid)
                         ntr = owned[aid][1]
-                        nm = len(m["recs"]) if m else 0
+                        # only the title pass is title-only by design: in every
+                        # other pass a lengthless match anchors nothing (§2.1)
+                        nm = (len(m["recs"]) if label == "title" else m["timed"]) if m else 0
                         floor = min(minm, ntr) if cap else minm
                         if m and nm >= floor and nm / ntr >= frac:
-                            resolved[aid] = {**m, "matched": nm, "pass": label}
+                            resolved[aid] = {**m, "matched": nm, "pass": label, "key": key}
                             pending.discard(aid)
                 # RG once over the verified albums — decoupled from the verifying pass
                 if resolved:
@@ -587,10 +685,26 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
                     rg = {r["album_id"]: (r["rg_mbid"], r["rel_mbid"]) for r in cur.fetchall()}
                     for aid, r in resolved.items():
                         r["rg"], r["rel"] = rg.get(aid, (None, None))
+                    # The recordings again, the album's group first (§12.7), under
+                    # the tolerances of the pass that verified it: the same tracks
+                    # match, only which of a track's candidates is picked moves.
+                    grouped = {aid: r for aid, r in resolved.items() if r["rg"]}
+                    if grouped:
+                        psycopg2.extras.execute_values(cur, "INSERT INTO _agroup VALUES %s",
+                                                       [(aid, r["rg"]) for aid, r in grouped.items()])
+                        for key in {r["key"] for r in grouped.values()}:
+                            dur, fdur, sim = key
+                            albums = [aid for aid, r in grouped.items() if r["key"] == key]
+                            cur.execute("SET pg_trgm.similarity_threshold = %s", (sim,))
+                            cur.execute(_MATCH_SQL, {"artist": str(artist_id), "albums": albums,
+                                                     "durtol": dur, "fdurtol": fdur})
+                            for aid, m in _group(cur.fetchall()).items():
+                                grouped[aid].update(recs=m["recs"], amb=m["amb"])
             finally:
                 cur.execute("RESET pg_trgm.similarity_threshold")  # don't leak to the pool
                 cur.execute("DROP TABLE IF EXISTS _recs")
                 cur.execute("DROP TABLE IF EXISTS _abase")
+                cur.execute("DROP TABLE IF EXISTS _agroup")
 
     albums = []
     for aid, (title, ntr) in owned.items():
@@ -664,9 +778,13 @@ def apply_artist(artist_id, name: str, plan: dict = None) -> dict:
                                         (rec, a["album_id"], tid))
                             st["files"] += cur.rowcount
                         cur.execute("INSERT INTO track_mbids (recording_mbid, track_id, "
-                                    "confidence) VALUES (%s,%s,'overlap_verified') "
-                                    + _LOCAL_BINDING_WINS, (rec, tid))
+                                    "confidence, matcher_version) VALUES (%s,%s,'overlap_verified',%s) "
+                                    + _LOCAL_BINDING_WINS, (rec, tid, MATCHER_VERSION))
                         st["track_mbids"] += cur.rowcount
+                bound = [t for a in plan["albums"] if a["verified"] for t in a["recordings"]]
+                if bound:
+                    cur.execute(_PRUNE_STALE_BINDINGS, {"tracks": bound})
+                    st["track_mbids_pruned"] = cur.rowcount
                 for mbid in plan["artist_mbids"]:
                     cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) "
                                 "VALUES (%s,%s,'overlap_verified') "
@@ -732,11 +850,13 @@ def canonicalize_trackonly(artist_id, name: str) -> dict:
                     # Stamp files FIRST (before any rename/merge): recording_mbid
                     # rides the file row (here or at the HQPlayer), which
                     # survives a track-UUID move.
+                    # never a file of a copy the positional pass bound: its
+                    # position chose that recording (canon.positional)
                     for h in dom_hits:
                         for table in ("media_files", "hqp_library_files"):
                             cur.execute(
-                                f"UPDATE {table} SET recording_mbid = %s WHERE track_id = %s::uuid",
-                                (h["rec_mbid"], h["track_id"]))
+                                f"UPDATE {table} f SET recording_mbid = %s WHERE f.track_id = %s::uuid"
+                                + _NOT_POSITIONAL.format(f="f"), (h["rec_mbid"], h["track_id"]))
                             st["files"] += cur.rowcount
                 # inside the txn on purpose: commit clears them; a rollback
                 # reverts the SET and the temp table along with the work
@@ -822,14 +942,14 @@ def bind_owned_recordings(artist_id: str) -> None:
     one recording ("Song", "Song (Remastered)") would have the update reach
     its row twice in one statement, which PostgreSQL refuses."""
     db_execute("""
-        INSERT INTO track_mbids (recording_mbid, track_id, confidence)
+        INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version)
         SELECT DISTINCT ON (mf.recording_mbid)
-               mf.recording_mbid, mf.track_id, 'overlap_verified'::mb_match_confidence
+               mf.recording_mbid, mf.track_id, 'overlap_verified'::mb_match_confidence, %(mv)s
         FROM owned_files mf
         JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
         WHERE ta.artist_id = %(a)s::uuid AND mf.recording_mbid IS NOT NULL
         ORDER BY mf.recording_mbid, mf.track_id
-    """ + _LOCAL_BINDING_WINS, {"a": artist_id})
+    """ + _FILES_BINDING_WINS, {"a": artist_id, "mv": MATCHER_VERSION})
 
 
 def merge_collisions(dry_run: bool = True, waiting: set = None, artist_ids: list = None) -> list:
@@ -1975,14 +2095,16 @@ def _collab_members(artist_id, name: str, plan: dict) -> list:
     # order = credit order (position 0 = primary). A part whose exact name is
     # ambiguous (several MB namesakes) still splits but gets NO mbid — identity
     # by name stays deterministic, the MBID waits for content evidence.
-    parts = [p.strip() for p in re.split(r' & | and | with | / |,', name) if p.strip()]
+    # `; ` is MusicBrainz's own separator of a classical release's performer
+    # list, and no band name carries one (CANON-CLASSICAL-DESIGN §4.1, D3)
+    parts = [p.strip() for p in re.split(r' & | and | with | / |,|;', name) if p.strip()]
     if len(parts) < 2:
         return []
     # "Kaji, Meiko" is a REORDERED person ("Meiko Kaji"), not a collaboration —
     # a comma-only 2-part name whose swap is an MB artist OR ALIAS must not be
     # split (梶芽衣子 carries "Meiko Kaji" only as an alias, not the name).
     if (len(parts) == 2 and "," in name
-            and not re.search(r" & | and | with | / ", name)
+            and not re.search(r" & | and | with | / |;", name)
             and db_query("""
                 SELECT 1 FROM mb_artist WHERE lower(name) = lower(%(s)s)
                 UNION ALL
@@ -2128,7 +2250,7 @@ def split_collaborations(dry_run: bool = False) -> dict:
     owned = db_query("""
         SELECT DISTINCT a.id::text AS id, a.name FROM artists a
         WHERE (a.name ~ ' & ' OR a.name ~ ', ' OR a.name ~ ' and '
-               OR a.name ~ ' with ' OR a.name ~ ' / ')
+               OR a.name ~ ' with ' OR a.name ~ ' / ' OR a.name ~ '; ')
           AND EXISTS (SELECT 1 FROM track_artists ta
                 JOIN owned_files mf ON mf.track_id = ta.track_id
                 WHERE ta.artist_id = a.id AND ta.role = 'primary')
@@ -2365,9 +2487,22 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=(),
         except Exception as e:
             st["errors"] += 1
             logger.error("canon failed for %r: %s", aname, e)
-    if done:
-        apply_editions(dry_run=False, artist_ids=done, waiting=waiting,   # scoped edition split + RG rename
+    # After the cascade, over every copy it left unbound (CANON-CLASSICAL-
+    # DESIGN §12.6 Q13); before the editions, which then name what it bound.
+    # One transaction over every copy: a failure there is the pass's, logged
+    # and counted as an artist's is, and never stops the bookkeeping below.
+    from canon import positional
+    try:
+        st["positional"] = positional.run(waiting=waiting, take_arriving=take_arriving)
+    except Exception as e:
+        st["errors"] += 1
+        logger.error("canon: the positional pass failed: %s", e)
+    editions_for = list(dict.fromkeys(done + st.get("positional", {}).pop("album_artists", [])))
+    if editions_for:
+        # scoped edition split + RG rename, the positional pass's albums' credit too
+        apply_editions(dry_run=False, artist_ids=editions_for, waiting=waiting,
                        take_arriving=take_arriving)
+    if done:
         fold_credit_duplicates(dry_run=False, artist_ids=done)   # one track read from two copies
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)

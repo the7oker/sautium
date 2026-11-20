@@ -2302,7 +2302,9 @@ def _canon_run(full: bool, owned: list, phantom: list) -> None:
             if _ok and full:
                 # The artists a wake named ride along whatever their watermark:
                 # a CLI's or a crashed pass's waiters left them stamped.
-                canon = canonicalize_pending(woken=owned)
+                # An album still arriving waits for its files or an explicit
+                # scan (canon.content.arriving_albums): a trigger is neither.
+                canon = canonicalize_pending(woken=owned, take_arriving=False)
                 canon["album_residue_bound"] = (
                     distill_album_residue().get("bound", 0)
                     + distill_album_coverage().get("bound", 0))
@@ -2312,7 +2314,7 @@ def _canon_run(full: bool, owned: list, phantom: list) -> None:
                 canon["phantom"] = canonize_phantom_similars(dry_run=False)
             elif _ok:
                 if owned:
-                    canon = canonicalize_pending(artist_ids=owned)
+                    canon = canonicalize_pending(artist_ids=owned, take_arriving=False)
                 if phantom:
                     canon["phantom"] = canonize_phantom_similars(dry_run=False, artist_ids=phantom)
         logger.info(f"Triggered canon: {canon}")

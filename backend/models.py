@@ -65,7 +65,7 @@ VerificationStatusEnum = ENUM(
     create_type=False,
 )
 MbMatchConfidenceEnum = ENUM(
-    "name_fuzzy", "alias_exact", "name_exact", "overlap_verified",
+    "name_fuzzy", "alias_exact", "name_exact", "overlap_verified", "positional",
     name="mb_match_confidence",
     create_type=False,
 )
@@ -419,6 +419,7 @@ class TrackMbid(Base):
     recording_mbid = Column(UUID(as_uuid=False), primary_key=True)
     track_id = Column(UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE", onupdate="CASCADE"), nullable=False)
     confidence = Column(MbMatchConfidenceEnum)
+    matcher_version = Column(SmallInteger, nullable=False, default=1, server_default="1")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     track = relationship("Track", foreign_keys=[track_id])
@@ -483,6 +484,8 @@ class AlbumVariant(Base):
     absent_since = Column(DateTime(timezone=True))   # a local copy away (001_initial.sql)
     arrived_at = Column(DateTime(timezone=True))     # its files' earliest arrival (triggers)
     raw_artist = Column(Text)  # the album credit the scan minted it under, beside raw_title (the folder rule)
+    positional_asked = Column(Text)  # the positional pass's last abstention, as its candidates (canon.positional)
+    positional_bound = Column(Boolean, nullable=False, server_default="false")  # the positional pass bound this copy
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -573,6 +576,8 @@ class MediaFile(Base):
 
     # External IDs
     isrc = Column(String(20))
+    barcode = Column(Text)
+    tags_read_rev = Column(SmallInteger, nullable=False, default=0, server_default="0")
 
     # Original tags as read from the file — ground truth for re-normalization / correction
     raw_track_name = Column(Text)

@@ -168,7 +168,7 @@ def release(target: str) -> Optional[dict]:
     row["urls"] = [r["url"] for r in db_query(
         "SELECT url FROM mbws_release_urls WHERE release = %(m)s::uuid ORDER BY url", {"m": target})]
     tracks = db_query("""SELECT disc, position, mbid::text AS mbid, title, length_ms,
-                                recording::text AS recording, media_format
+                                recording::text AS recording, media_format, is_data
                            FROM mbws_tracks WHERE release = %(m)s::uuid
                           ORDER BY disc, position""", {"m": target})
     credits = _credits("track", [t["mbid"] for t in tracks if t["mbid"]])
@@ -407,9 +407,10 @@ def _put_release(cur, d: dict) -> List[Item]:
     for medium in d.get("media") or []:
         disc = int(medium.get("position") or 1)
         fmt = medium.get("format")
-        listed = ([medium["pregap"]] if medium.get("pregap") else []) \
-            + list(medium.get("tracks") or []) + list(medium.get("data-tracks") or [])
-        for t in listed:
+        listed = [(t, False) for t in ([medium["pregap"]] if medium.get("pregap") else [])
+                  + list(medium.get("tracks") or [])] \
+            + [(t, True) for t in medium.get("data-tracks") or []]
+        for t, is_data in listed:
             rec = t.get("recording") or {}
             if rec.get("id"):
                 _put_recording(cur, rec)
@@ -418,15 +419,15 @@ def _put_release(cur, d: dict) -> List[Item]:
             position = int(t.get("position") if t.get("position") is not None else 0)
             tracks.append((mbid, disc, position, t.get("id"), t.get("title") or rec.get("title") or "",
                            t.get("length") if t.get("length") is not None else rec.get("length"),
-                           rec.get("id"), fmt))
+                           rec.get("id"), fmt, is_data))
             if t.get("id"):
                 credits.extend(_credit_rows("track", t["id"],
                                             t.get("artist-credit") or rec.get("artist-credit")))
     if tracks:
         execute_values(cur, """INSERT INTO mbws_tracks (release, disc, position, mbid, title,
-                                                        length_ms, recording, media_format)
+                                                        length_ms, recording, media_format, is_data)
                                VALUES %s ON CONFLICT DO NOTHING""", tracks,
-                       template="(%s::uuid, %s, %s, %s::uuid, %s, %s, %s::uuid, %s)")
+                       template="(%s::uuid, %s, %s, %s::uuid, %s, %s, %s::uuid, %s, %s)")
     _put_credits(cur, credits)
     return also
 

@@ -563,7 +563,7 @@ def pull_track_mbids(conn, track_uuids: list[str], own=None) -> dict:
         conn, "track_mbids",
         f"""SELECT tm.track_id::text AS track_uuid,
                    tm.recording_mbid::text AS recording_mbid,
-                   tm.confidence::text AS confidence,
+                   tm.confidence::text AS confidence, tm.matcher_version,
                    tm.created_at AS fetched_at, tm.author_pubkey,
                    tm.signature, tm.batch_root, tm.merkle_proof
             FROM track_mbids tm
@@ -778,6 +778,10 @@ _LACKS = {
     "segments": "NOT " + HOLDS_SEGMENTS,
     "audio_features": "NOT " + HOLDS_FEATURES,
     "instruments": "NOT " + HOLDS_INSTRUMENTS,
+    # any binding is held, of whatever matcher: as for the analysis records
+    # (HELD_RECORD), the planner asks for nothing the importer would drop —
+    # a peer's older binding pushed again would be — and a newer one replaces
+    # an older imported one when a pull brings it (_import_track_mbids)
     "track_mbids": "NOT EXISTS (SELECT 1 FROM track_mbids tm WHERE tm.track_id = {t})",
 }
 
