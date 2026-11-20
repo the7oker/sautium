@@ -315,10 +315,10 @@ class Attempt:
         stopped at 0 s, nothing having played yet: how a rate HQPlayer
         refuses looks — it takes the Play and stops at once. True once: the
         close's questions are asked then, and an attempt the rate check
-        names a cause for without a hedge closes at that tick (end
-        "refused") instead of at the window (names_cause). Never while
-        HQPlayer has yet to take the start (_yet_to_take): it decides after
-        its build."""
+        names a stop for, without a hedge and not as one that may come,
+        closes at that tick (end "refused") instead of at the window
+        (names_cause). Never while HQPlayer has yet to take the start
+        (_yet_to_take): it decides after its build."""
         with _lock:
             # An advance stops by its first tick: HQPlayer decides after its tail
             if (self.stop_asked or self.t0 is None or self.advance is not None or not self.ticks
@@ -498,11 +498,14 @@ class Attempt:
             self.follower = _follower = LogFollower(self, info, wake_poller)
         self.follower.start()
 
-    def heard(self, line: str) -> None:
+    def heard(self, line: str, rate_in: Optional[int]) -> None:
         """HQPlayer's log refused this advance's rate combination
-        (LogFollower): it closes at the poller's next pass, as refused."""
+        (LogFollower), with the rate its engine took in as that refusal names
+        it or its own "Rate:" line before it, read since the stop: it closes
+        at the poller's next pass, as refused."""
         with _lock:
             self.advance["line"] = line
+            self.advance["rate_in"] = rate_in
             if self.end is None:
                 self.end = "refused"
 
@@ -522,7 +525,7 @@ def tick_of(status, state: str, read_at: float) -> dict:
             "out_fill": status.output_fill, "tracks_total": status.tracks_total,
             "mode": status.active_mode, "filter": status.active_filter,
             "shaper": status.active_shaper, "rate": status.active_rate,
-            "src_rate": status.src_rate, "serial": status.track_serial}
+            "src_rate": status.src_rate, "sdm": status.src_sdm, "serial": status.track_serial}
 
 
 def started(ticks: list, serial: Optional[int] = None, meter: Optional[dict] = None,
@@ -620,7 +623,7 @@ def advance(entry: int, serial: int, output_delay: Optional[float], now: float) 
                    advance={"from": entry, "serial": serial, "output_delay": delay,
                             "delay_assumed": not output_delay,
                             "deadline": now + ADVANCE_DELAYS * delay + ADVANCE_BUILD_S,
-                            "log": None, "line": None})
+                            "log": None, "line": None, "rate_in": None})
 
 
 class LogFollower:
@@ -667,7 +670,7 @@ class LogFollower:
             with open(path, "rb") as f:
                 self.offset = f.seek(0, os.SEEK_END)
                 self._attempt.following("followed")
-                rest = b""
+                rest, taken = b"", None
                 while True:
                     self._tick.wait()
                     self._tick.clear()
@@ -684,8 +687,12 @@ class LogFollower:
                     *lines, rest = (rest + chunk).split(b"\n")
                     for raw in lines:
                         line = raw.decode("utf-8", "replace").rstrip("\r")
-                        if _RATE_LINE.search(line):
-                            self._attempt.heard(line)
+                        took = _RATE_IN.search(line)
+                        if took:
+                            taken = int(took.group(1))
+                        refused = _REFUSAL.search(line)
+                        if refused:
+                            self._attempt.heard(line, _rate_taken(refused, taken))
                             self._wake_poller()
                             return
         except (OSError, ET.ParseError) as e:
@@ -705,8 +712,13 @@ def close(attempt: Attempt, facts: dict) -> bool:
     if attempt.follower is not None:
         attempt.follower.stop()
     with _lock:
-        line = (attempt.advance or {}).get("line")
-    v = verdict(facts, {"cause": classify([line])} if line else None)
+        advance = dict(attempt.advance) if attempt.advance is not None else None
+    if advance is not None:
+        # what the follower heard after the facts were read is the trace's too:
+        # the log read after this judges by the trace (attach_log)
+        facts = {**facts, "advance": advance}
+    heard = _refusal_heard(advance)
+    v = verdict(facts, {"cause": heard} if heard else None)
     with _lock:
         attempt.facts = facts
         attempt.verdict = v
@@ -742,8 +754,9 @@ def other_reason(log: Optional[dict]) -> Optional[str]:
         m = _NO_RATE_LINE.search(line)
         return f"no output rate for {rate_name(int(m.group(1)))} in its output family" if m else None
     if cause.get("code") == "rate_filter":
-        m = _RATE_LINE.search(line)
-        return (f"its filter is not possible at {rate_name(int(m.group(1)))}" if m
+        m = _REFUSAL.search(line)
+        src = m.group("src") if m else None
+        return (f"its filter is not possible at {rate_name(int(src))}" if src
                 else "its filter is not possible at that rate")
     return None
 
@@ -782,13 +795,21 @@ def record_other_refused(uri: Optional[str], log: dict, reason: str) -> Attempt:
 def attach_log(attempt: Attempt, log: dict) -> bool:
     """HQPlayer's log, read after the attempt closed. A verdict the protocol
     left without a cause, or a refused rate, is judged again with it: the
-    log's line can name the refusal, and is quoted. The new verdict replaces
-    the old in place — the Diagnostics list, the sheet, Now Playing's offer;
-    no new toast. Returns whether the failing run changed."""
+    log's line can name the refusal, and is quoted. An advance that closed
+    on the refusal its log named since its stop keeps that line as the log's
+    cause, on the sheet as in the verdict: the tail read now finds its cause
+    by the file's add, which a queue handed over at once logged before every
+    play. The new verdict replaces the old in place — the Diagnostics list,
+    the sheet, Now Playing's offer; no new toast. Returns whether the failing
+    run changed."""
     with _lock:
-        attempt.hqp_log = log
         code = (attempt.verdict or {}).get("code")
         facts = attempt.facts
+    heard = _refusal_heard((facts or {}).get("advance"))
+    if heard:
+        log = {**log, "cause": heard}
+    with _lock:
+        attempt.hqp_log = log
     if facts is None or code not in ("not_played", "unknown", "rate_refused", "other_stopped"):
         return False
     v = verdict(facts, log)
@@ -1148,7 +1169,10 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
         return _v("external", f)
     if owner:
         return _v("interrupted", f)
-    if ticks and not began and ticks[-1]["state"] == "stopped":
+    # Stopped at the end — or an advance closed on the refusal its log named,
+    # which a filter HQPlayer builds first follows with a playing status at
+    # 0 s that the close can meet before the stop
+    if ticks and not began and (ticks[-1]["state"] == "stopped" or (adv and f["end"] == "refused")):
         refused = _rate_refused(f, log)
         if refused is not None:
             return _v("rate_refused", f, **refused)
@@ -1157,54 +1181,88 @@ def verdict(f: dict, log: Optional[dict] = None) -> dict:
     return _v("unknown", f)
 
 
-# HQPlayer's line for a refused rate combination, the source's rate first
-# (_CAUSES rate_filter finds it in the log)
-_RATE_LINE = re.compile(r"Requested filter not possible with this rate combination (\d+)/(\d+)[^\n]*")
+# HQPlayer's lines for a refused rate combination (_CAUSES rate_filter finds
+# them in the log): before the engine starts, the source's rate over the
+# output rate; from a filter it built first (sinc-medium, 6.2.4), no rates
+_REFUSAL = re.compile(r"Requested filter not possible with this rate combination(?: (?P<src>\d+)/(?P<out>\d+))?"
+                      r"[^\n]*|(?P<built>clHQPlayerEngine::Execute\(\): lInRate > lOutRate)")
+# The rate the engine takes in, as it starts: a PCM source's own, or the PCM
+# rate HQPlayer converts a DSD track to ("Rate: 176400, block size: …")
+_RATE_IN = re.compile(r"\bRate: (\d+), block size")
 
 
-def rate_facts(inputs: "rc.Inputs", source: Optional[int], queue: Optional[Mapping[int, int]]) -> dict:
+def _rate_taken(refusal: "re.Match", taken: Optional[int]) -> Optional[int]:
+    """The rate the engine took in for a refusal: the one its line names
+    before the engine starts, or — only from a filter it built, the engine
+    having started — `taken`, its own "Rate:" line of that play."""
+    if refusal.group("src"):
+        return int(refusal.group("src"))
+    return taken if refusal.group("built") else None
+
+
+def _refusal_heard(advance: Optional[dict]) -> Optional[dict]:
+    """The cause an advance closed on, as its log follower heard it since the
+    stop: the refusal and the rate its engine took in (Attempt.heard)."""
+    line = (advance or {}).get("line")
+    if not line:
+        return None
+    cause = classify([line])
+    return {**cause, "rate_in": advance.get("rate_in") or cause["rate_in"]}
+
+
+def rate_facts(inputs: "rc.Inputs", source: Optional[int], queue: Optional[Mapping[int, int]],
+               dsd: bool = False) -> dict:
     """The rate check's inputs as an attempt's facts keep them (JSON: the
     traces record them, a warrant's playback scope carries them whole), with
     the PCM rates of the queue from the attempt's slot to its end — tracks
-    by rate, None when they were not read."""
+    by rate, None when they were not read. `dsd`: the source is a DSD
+    track's own rate."""
     f = inputs.nx
     return {"inputs": {"mode": inputs.mode, "rate": inputs.rate, "adaptive": inputs.adaptive,
                        "filter": {"name": f.name, "ratio": f.ratio, "up": f.up} if f else None,
                        "rates": list(inputs.rates), "modulator": inputs.modulator,
                        "refused": {str(r): fs for r, fs in inputs.refused.items()},
-                       "engine": inputs.engine},
-            "source": source,
+                       "engine": inputs.engine, "measured": inputs.measured},
+            "source": source, "dsd": dsd,
             "queue": {str(r): n for r, n in queue.items()} if queue is not None else None}
 
 
-def _rate_check(rate: Optional[dict], source: Optional[int]) -> Optional["rc.Check"]:
+def _rate_check(rate: Optional[dict], source: Optional[int],
+                of_dsd: Optional[int] = None) -> Optional["rc.Check"]:
     """The rate check over an attempt's one source, by the filter HQPlayer
     ran it with (both slots, its own choice); None without its inputs. The
     rate its fix names is the queue's to say: one only when every PCM track
     from the attempt's slot to the queue's end is refused, all of one
-    family (hqp_rate_check._fix_rate) — none when the facts hold no queue."""
+    family (hqp_rate_check._fix_rate) — none when the facts hold no queue.
+    `of_dsd`: a DSD track's own rate, `source` the PCM rate HQPlayer's log
+    named it converted the track to — judged in PCM mode alone, where that
+    was measured, and with no rate to pick."""
     d = (rate or {}).get("inputs")
-    if not d or not source:
+    if not d or not source or (of_dsd and d["mode"] != "pcm"):
         return None
     f = d["filter"]
     filt = rc.Filter(f["name"], f["ratio"], f["up"]) if f else None
     inputs = rc.Inputs(d["mode"], d["rate"], d["adaptive"], filt, filt, tuple(d["rates"]), d["modulator"],
-                       {int(r): fs for r, fs in d["refused"].items()}, d["engine"])
+                       {int(r): fs for r, fs in d["refused"].items()}, d["engine"], d["measured"])
     fix = None
-    if rate.get("queue"):
+    if rate.get("queue") and not of_dsd:
         ahead = {int(r): n for r, n in rate["queue"].items()}
         ahead.setdefault(source, 1)
         fix = rc.check(inputs, rc.Sources(ahead, first=source)).fix_rate
-    return rc.check(inputs, rc.Sources({source: 1}, first=source))._replace(fix_rate=fix)
+    return rc.check(inputs, rc.Sources({source: 1}, first=source, of_dsd=of_dsd))._replace(fix_rate=fix)
 
 
 def names_cause(rate: Optional[dict]) -> bool:
     """Whether the rate check names, without a hedge, why an attempt's track
     stopped at its start — the attempt then closes at once
     (Attempt.stopped_at_start). A hedged claim, the adaptive output rate not
-    known, waits for the window: HQPlayer may yet pick a rate it reaches."""
-    check = _rate_check(rate, (rate or {}).get("source"))
-    return bool(check and check.groups and not check.hedged)
+    known, waits for the window: HQPlayer may yet pick a rate it reaches. So
+    does an "up" filter not tried under the source's rate, which only may
+    stop; so does a DSD track: the rate it reaches the filter at is
+    HQPlayer's log's to name."""
+    rate = rate or {}
+    check = None if rate.get("dsd") else _rate_check(rate, rate.get("source"))
+    return bool(check and not check.hedged and any(g.why != "may" for g in check.groups))
 
 
 def _rate_refused(f: dict, log: Optional[dict]) -> Optional[dict]:
@@ -1212,16 +1270,21 @@ def _rate_refused(f: dict, log: Optional[dict]) -> Optional[dict]:
     rate check's cause, the filter's or the modulator's, and HQPlayer's line
     when its log was read — or that line alone; None with neither. The
     source is the slot's rate as HQPlayer reported it or its file row gave
-    it (_facts), else the line's."""
+    it (_facts), else the rate the log names its engine took in (classify's
+    `rate_in`); a DSD track's, that rate alone — the PCM rate HQPlayer
+    converted it to, never its DSD rate: none named, and only the line
+    speaks."""
     cause = (log or {}).get("cause") or {}
-    line = _RATE_LINE.search(cause.get("line") or "") if cause.get("code") == "rate_filter" else None
+    line = _REFUSAL.search(cause.get("line") or "") if cause.get("code") == "rate_filter" else None
     rate = f.get("rate") or {}
-    source = rate.get("source") or (int(line.group(1)) if line else None)
-    check = _rate_check(rate, source)
+    of_dsd = rate.get("source") if rate.get("dsd") else None
+    rate_in = cause.get("rate_in") if line else None
+    source = rate_in if of_dsd else rate.get("source") or rate_in
+    check = _rate_check(rate, source, of_dsd)
     if check is None:
         mode = rc.mode_kind(next((t["mode"] for t in reversed(f.get("ticks") or []) if t.get("mode")), None))
         check = rc.check(rc.Inputs(mode, 0, None, None, None), rc.Sources({}))
-    words = rc.verdict(check, source, line.group(0) if line else None)
+    words = rc.verdict(check, source, line.group(0) if line else None, dsd=of_dsd)
     if words is None:
         return None
     return {**words, "cause": check.groups[0].cause if check.groups else "line"}
@@ -1424,7 +1487,7 @@ _CAUSES = [
                             r"|Audio Adapter keepalive", re.I),
      "HQPlayer lost its Network Audio Adapter."),
     # The filter or the modulator: the line names neither (rate_refused tells them apart)
-    ("rate_filter", re.compile(r"Requested filter not possible with this rate combination"), rc.LOG_CAUSE),
+    ("rate_filter", _REFUSAL, rc.LOG_CAUSE),
     # Desktop 6.1.1: a source rate the output family holds no rate for (ROON-COEX, day 1's A8)
     ("no_output_rate", re.compile(r"No suitable output rate for \d+"),
      "HQPlayer's output family has no rate for the source's rate."),
@@ -1452,15 +1515,31 @@ def classify(lines: list, uri: Optional[str] = None) -> Optional[dict]:
     line that mentions its file onward (HQPlayer logs the URI it was handed,
     and why it refused it, on the add); when no line names the file, the
     NEWEST cause — the log is read right after the attempt, and an older one
-    belongs to some earlier play."""
+    belongs to some earlier play. A refused rate is a play's, never an add's:
+    a queue handed over at once logged every add before any play, so from
+    the add on it is the newest one. It carries the rate the engine took in
+    (`rate_in`, _rate_taken): its line's, or — from a filter HQPlayer built —
+    the engine's own "Rate:" line of that play, after any refusal before it
+    — the PCM rate HQPlayer converted a DSD track to."""
     needles = _needles(uri)
     start = next((i for i in range(len(lines) - 1, -1, -1)
                   if any(n in lines[i] for n in needles)), None) if needles else None
-    scan = lines[start:] if start is not None else reversed(lines)
-    for line in scan:
+    at = range(start, len(lines)) if start is not None else range(len(lines) - 1, -1, -1)
+    for i in at:
         for code, rx, sentence in _CAUSES:
-            if rx.search(line):
-                return {"code": code, "sentence": sentence, "line": line}
+            m = rx.search(lines[i])
+            if not m:
+                continue
+            if code == "rate_filter" and start is not None:
+                i, m = next((j, r) for j in range(len(lines) - 1, i - 1, -1)
+                            for r in (_REFUSAL.search(lines[j]),) if r)
+            cause = {"code": code, "sentence": sentence, "line": lines[i]}
+            if code == "rate_filter":
+                play = next((j + 1 for j in range(i - 1, (start or 0) - 1, -1) if _REFUSAL.search(lines[j])),
+                            start or 0)
+                taken = next((int(r.group(1)) for r in map(_RATE_IN.search, reversed(lines[play:i])) if r), None)
+                cause["rate_in"] = _rate_taken(m, taken)
+            return cause
     return None
 
 

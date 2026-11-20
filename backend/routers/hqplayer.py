@@ -161,7 +161,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     from routers.settings import _hqp_library_state
     lib = _hqp_library_state()
     response["library"] = {k: lib.get(k) for k in ("own_library", "synced", "files", "albums",
-                                                   "measured", "running", "cancel_requested",
+                                                   "measured", "compared", "running", "cancel_requested",
                                                    "progress", "last_synced_at")}
     if dsp:
         # The job and the last run whether or not HQPlayer answers now: a
@@ -225,6 +225,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         hqp_library.note_info(ep["id"], info, here=not _stream_mode())
         ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
     response["headroom"] = _headroom(ep, state, status, lists)
+    response["ab"] = _ab_block(ep, state, response["headroom"], lists)
     response["benchmark"] = _benchmark_block(ep, state, lists, volume_range)
     response["volume_range"] = volume_range
     # Said by the server, in the words the volume route and the assistant use.
@@ -297,10 +298,11 @@ def _rate_queue(state: Optional[dict], lists: dict) -> Optional[Tuple[Optional[s
 
 
 def _rate_lines(info: Optional[dict], state: Optional[dict], lists: dict) -> Dict[str, list]:
-    """What the screen says when the queue meets a rate HQPlayer cannot reach
-    (hqp_rate_check): each phrase under the row it names, for the queue
-    _rate_queue reads. The node's own atlas copy speaks here, on the node's
-    own screen."""
+    """What the screen says when the queue meets a rate HQPlayer cannot reach,
+    or may not (hqp_rate_check): each phrase under the row it names, for the
+    queue _rate_queue reads. The node's own atlas copy speaks here, on the
+    node's own screen; a "may" HQPlayer disproved at this setting is said no
+    more, as in the notice."""
     import hqp_rate_check
     queue = _rate_queue(state, lists)
     if queue is None:
@@ -308,7 +310,10 @@ def _rate_lines(info: Optional[dict], state: Optional[dict], lists: dict) -> Dic
     adaptive, sources = queue
     inputs = hqp_rate_check.inputs(state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
                                    adaptive=adaptive, atlas=_atlas(), engine=(info or {}).get("engine"))
-    return hqp_rate_check.lines(hqp_rate_check.check(inputs, sources))
+    check = hqp_rate_check.check(inputs, sources)
+    active = manager.active
+    heard = active.rate_heard(check.key) if active is not None and active.id == "hqplayer" else frozenset()
+    return hqp_rate_check.lines(check, heard)
 
 
 @router.get("/facts")
@@ -390,6 +395,23 @@ def _headroom(ep: Optional[dict], state: Optional[dict], status, lists: dict) ->
                                 src_rate=src[0], src_channels=src[1], asked_rate=asked),
             "setting": {"rate_out": rate_out, "filter": filt, "shaper": shaper},
             "measurable": measurable(*src)}
+
+
+def _ab_block(ep: Optional[dict], state: Optional[dict], headroom: Dict[str, Any],
+              lists: dict) -> Optional[Dict[str, Any]]:
+    """Comparing by ear on this screen (AB-1): the context the track gives —
+    the mode, the slot its source runs, a conversion across rate families —
+    and the person's picks there ("your pick · N", §14.5), from the source
+    and the output rate the headroom marks are read at. None without them."""
+    from playback import hqp_ab
+    src = (headroom.get("source") or {}).get("rate")
+    rate_out = (headroom.get("setting") or {}).get("rate_out")
+    kind = mode_kind(_mode_of(state, lists["modes"])) if state and lists.get("modes") else None
+    if not ep or not src or not rate_out or kind is None:
+        return None
+    ctx = hqp_ab.context_of(kind, state["filterNx"], state["filter1x"], src, rate_out)
+    return {"context": {**ctx, "words": hqp_ab.context_words(ctx)},
+            "picks": hqp_ab.picks(ep["id"], ep.get("hqp_engine") or "", ctx)}
 
 
 def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
@@ -521,7 +543,9 @@ def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
     if tool in ("filter_facts", "compare"):
         queue = _rate_queue(state, lists)
         if queue is not None:
-            read = read._replace(adaptive=queue[0], sources=queue[1])
+            active = manager.active
+            heard = active.rate_heard if active is not None and active.id == "hqplayer" else None
+            read = read._replace(adaptive=queue[0], sources=queue[1], heard=heard)
     if tool == "compare":
         import hqp_library
         ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
@@ -767,3 +791,87 @@ def update_favorite_filter(req: FavoriteRequest) -> Dict[str, Any]:
         favs.remove(name)
     _save_favorites(favs)
     return {"ok": True, "favorite_filters": favs}
+
+
+# -- comparing filters by ear (AB-1) -------------------------------------------------------
+
+class AbOpen(BaseModel):
+    form: Literal["chain", "pair"] = "chain"
+    second: Optional[str] = None          # the pair's other filter: the card's or the block's
+    fixed_volume_ok: bool = False         # W5 read: the warm-up's bursts at their volume
+
+
+class AbAsk(BaseModel):
+    name: Literal["learn", "passage", "form", "begin", "answer", "decide", "stop"]
+    from_s: Optional[float] = None
+    length_s: Optional[float] = Field(default=None, gt=0, le=60.0)   # the sitting clamps it to the view's `lengths`
+    form: Optional[Literal["chain", "pair"]] = None
+    second: Optional[str] = None
+    answer: Optional[Literal["better", "worse", "same", "1", "2"]] = None
+    make: Optional[bool] = None
+    sitting: Optional[str] = Field(default=None, max_length=64)    # the view's `key`: the sheet's own
+
+
+class AbClose(BaseModel):
+    sitting: Optional[str] = Field(default=None, max_length=64)
+
+
+def _ab_refused(e: Exception) -> HTTPException:
+    return HTTPException(status_code=409, detail={"message": str(e), "code": getattr(e, "code", None)})
+
+
+@router.get("/ab")
+def get_ab() -> Dict[str, Any]:
+    """The comparison's sheet: its phase and all it shows — read whole at
+    each change the player status announces (`hold.progress.seq`)."""
+    from playback import hqp_ab
+    return hqp_ab.view()
+
+
+@router.post("/ab")
+def open_ab(req: AbOpen) -> Dict[str, Any]:
+    """A door's tap: the sitting starts with its warm-up; 409 with the
+    reason (and a `code` where the sheet offers a way on) when it cannot."""
+    from playback import hqp_ab
+    try:
+        return hqp_ab.open_sitting(req.form, req.second, fixed_volume_ok=req.fixed_volume_ok)
+    except hqp_ab.Refused as e:
+        raise _ab_refused(e)
+
+
+@router.post("/ab/ask")
+def ask_ab(req: AbAsk) -> Dict[str, Any]:
+    """A tap on the sheet: the sitting's thread takes it when it waits for
+    one of its kind (an answer once the fragment's tail is out)."""
+    from playback import hqp_ab
+    args = req.model_dump(exclude_none=True)
+    name = args.pop("name")
+    need = {"passage": ("from_s", "length_s"), "form": ("form",), "answer": ("answer",),
+            "decide": ("make",)}.get(name, ())
+    if any(k not in args for k in need):
+        raise HTTPException(status_code=400, detail=f"{name} needs {', '.join(need)}")
+    try:
+        return hqp_ab.command(name, **args)
+    except hqp_ab.Refused as e:
+        raise _ab_refused(e)
+
+
+@router.post("/ab/close")
+def close_ab(req: AbClose) -> Dict[str, Any]:
+    """The sheet closed: the sitting it showed, still going, stops and is
+    put back — a later one (another device's) is left alone."""
+    from playback import hqp_ab
+    return hqp_ab.close(req.sitting)
+
+
+@router.post("/ab/adopt")
+def adopt_ab() -> Dict[str, Any]:
+    """The pair's "Make it my filter": the other one into the context's slot."""
+    from playback import hqp_ab
+    try:
+        out = hqp_ab.adopt()
+    except hqp_ab.Refused as e:
+        raise _ab_refused(e)
+    except (OutputHeld, Building, Dropped, NotAnswering) as e:
+        raise _busy(e)
+    return {"change": out, "ab": hqp_ab.view()}

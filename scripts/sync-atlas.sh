@@ -21,8 +21,8 @@
 # replaced whole, the data first — a version file is the data's when its
 # app_sha256 is. --into writes the two files into DIR instead of backend/.
 #
-# It publishes nothing: both files stay out of git (.gitignore) until the
-# release that ships them.
+# It publishes nothing by itself: the release's commit carries both files
+# (in the tree since the atlas's first release, 2026-11-19).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 into="$root/backend"

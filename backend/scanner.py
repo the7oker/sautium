@@ -2419,10 +2419,12 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
             WHERE id = ANY(CAST(:ids AS int[])) AND album_id IS NOT NULL
         """), {"ids": variant_ids})]
 
-        # Artist links cascade with the track/album rows, so the candidates
-        # have to be read before the deletes, not after.
+        # Artist links and credits cascade with the track/album rows, so the
+        # candidates have to be read before the deletes, not after.
         artist_ids = [r[0] for r in db.execute(text("""
             SELECT artist_id FROM track_artists WHERE track_id = ANY(CAST(:t AS uuid[]))
+            UNION
+            SELECT artist_id FROM track_credits WHERE track_id = ANY(CAST(:t AS uuid[]))
             UNION
             SELECT artist_id FROM album_artists WHERE album_id = ANY(CAST(:a AS uuid[]))
         """), {"t": [str(t) for t in track_ids], "a": [str(a) for a in album_ids]})]
@@ -2465,6 +2467,7 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
             DELETE FROM artists ar WHERE ar.id = ANY(CAST(:ids AS uuid[]))
               AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = ar.id)
               AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = ar.id)
+              AND NOT EXISTS (SELECT 1 FROM track_credits tc WHERE tc.artist_id = ar.id)
         """), {"ids": [str(a) for a in artist_ids]})
         stats["orphan_artists"] = r.rowcount
 

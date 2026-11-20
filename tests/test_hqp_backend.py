@@ -41,6 +41,11 @@ from playback.hqp_backend import HqpBackend  # noqa: E402
 from streaming.base import StreamProvider  # noqa: E402
 from playback.manager import PlaybackManager  # noqa: E402
 from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
+# The HQPlayer router binds the manager singleton as it is first imported:
+# here, before a fixture (output) can put a test's manager in its place for
+# good — the tests reach it with `from routers import hqplayer` and set its
+# `manager` themselves
+from routers import hqplayer as _hqp_router  # noqa: E402,F401
 from streaming import service as streaming_service  # noqa: E402
 from streaming.proxy import MediaProxy  # noqa: E402
 
@@ -182,6 +187,19 @@ class FakeHqp:
         # connection ends there instead, once: no answer, nothing carried out.
         self.probe_holds: dict = {}
         self.probe_drops: set = set()
+        # The source an entry holds, by a part of its URI: (rate, DSD or not)
+        # — its <metadata samplerate … sdm> while something plays, as Desktop
+        # sends it, and what `cells` judges it by
+        self.sources: dict[str, tuple] = {}
+        # What it does at a Play onto such an entry, by its active filter and
+        # output rate — cells(filter, rate, dsd, out): "stops" (refused before
+        # the engine starts), "builds" (the filter built, one PLAYING read at
+        # 0 s, then refused), anything else plays (Desktop 6.2.4's two
+        # refusals); None: no entry is judged
+        self.cells = None
+        # Its log, appended as it acts (a path), in Desktop's line form
+        self.log_path = None
+        self._refusing = None
         # (time.time(), command) as each command ARRIVES — `commands` logs
         # them as they are carried out, after any silence, in the order they
         # arrived on whichever connection: HQPlayer's one control thread
@@ -412,14 +430,47 @@ class FakeHqp:
 
     def _stops_if_refused(self) -> None:
         """The entry a Play went to is one it refuses at Play (refuse_play):
-        stopped on at once — resting on no entry where `rests_nowhere`.
-        Under the lock."""
-        if (1 <= self.track <= len(self.playlist)
-                and any(part in self.playlist[self.track - 1] for part in self.refuse_play)):
+        stopped on at once — resting on no entry where `rests_nowhere` — or
+        one its `cells` refuse: stopped on at once, or after one PLAYING read
+        of the filter it built. Under the lock."""
+        self._refusing = None
+        if not 1 <= self.track <= len(self.playlist):
+            return
+        if any(part in self.playlist[self.track - 1] for part in self.refuse_play):
             self.state = int(PlaybackState.STOPPED)
             self.position = 0.0
             if self.rests_nowhere:
                 self.track = 0
+            return
+        src = self._source()
+        if self.cells is None or src is None:
+            return
+        rate, dsd = src
+        # the rate its engine takes in: a DSD64 track's 176.4 kHz (Desktop 6.2.4's log)
+        took, out = rate // 16 if dsd else rate, self.active["rate"]
+        did = self.cells(self.active["filter"], rate, dsd, out)
+        if did == "stops":
+            self.state, self.position = int(PlaybackState.STOPPED), 0.0
+            self._log(f"Requested filter not possible with this rate combination {took}/{out}, stop",
+                      "Stop request (tail)")
+        elif did == "builds":
+            self._refusing = 1
+            self._log(f"Rate: {took}, block size: 8192, frame size: 32768",
+                      f"Playback engine ratio: {out / took:g}", f"Filter: {self.active['filter']}",
+                      "clHQPlayerEngine::Execute(): lInRate > lOutRate", "Stop request (reset)")
+        else:
+            self._log(f"Rate: {took}, block size: 8192, frame size: 32768",
+                      f"Playback engine ratio: {out / took:g}", f"Filter: {self.active['filter']}")
+
+    def _source(self):
+        """The source of the entry it reads (sources), or None. Under the lock."""
+        uri = self.playlist[self.track - 1] if 1 <= self.track <= len(self.playlist) else ""
+        return next((src for part, src in self.sources.items() if part in uri), None)
+
+    def _log(self, *lines: str) -> None:
+        if self.log_path is not None:
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.writelines(f"I 2001/05/06 10:00:01 {line}\n" for line in lines)
 
     def _dispatch(self, cmd: str, attrs: dict) -> str:
         with self._lock:
@@ -454,7 +505,14 @@ class FakeHqp:
                 elif opening:
                     self.opening -= 1
                 elif self.state == int(PlaybackState.PLAYING):
-                    if self._starting:
+                    if self._refusing is not None:
+                        # the one PLAYING read of a filter it built, then its refusal
+                        if self._refusing:
+                            self._refusing -= 1
+                        else:
+                            self._refusing = None
+                            self.state, self.position = int(PlaybackState.STOPPED), 0.0
+                    elif self._starting:
                         self._starting -= 1
                     else:
                         self.position += 1.0
@@ -474,6 +532,10 @@ class FakeHqp:
                 uri = (f' uri="{self._uri_out(self.playlist[self.track - 1])}"'
                        if 1 <= self.track <= len(self.playlist)
                        and not (raw and self.raw_streams == "bare") else "")
+                src = self._source()
+                if src is not None and self.state != int(PlaybackState.STOPPED):
+                    uri += (f' samplerate="{src[0]}" bits="{1 if src[1] else 24}" channels="2" '
+                            f'sdm="{int(src[1])}"')
                 track, length = (0, 0) if opening else (self.track, 0 if raw else self.length)
                 if self._transit is not None:
                     track, shown, length = self._transit[:3]
@@ -659,6 +721,10 @@ def fake(monkeypatch):
     monkeypatch.setattr(hqp_library, "note_info", lambda *a, **k: None)
     monkeypatch.setattr(hqp_benchmark, "recover", lambda endpoint_id, link, **kw: None)
     monkeypatch.setattr(hqp_benchmark, "left_pending", lambda endpoint_id: False)
+    # ...and so is a comparison's (playback.hqp_ab; tests/test_hqp_ab drives both).
+    from playback import hqp_ab
+    monkeypatch.setattr(hqp_ab, "recover", lambda endpoint_id, link, **kw: None)
+    monkeypatch.setattr(hqp_ab, "left_by_person", lambda host, port: None)
     # ...and its endpoint row: this HQPlayer's library is endpoint 7 here.
     monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 7, "name": "fake"})
     # The output switch re-reads every slot's copies from the database
@@ -2345,6 +2411,274 @@ def test_hqplayers_own_advance_into_a_refused_rate_leaves_the_spot_and_play_star
     assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
 
 
+@pytest.mark.parametrize("close_meets", ["its playing answer", "the stop", "another entry's start"])
+def test_an_advance_closed_on_a_filter_hqplayer_built_and_refused_leaves_the_spot(traced, fake, monkeypatch,
+                                                                                  tmp_path, close_meets):
+    """HQPlayer's own advance onto our next entry, whose filter it builds —
+    one playing status at 0 s — and then refuses: "lInRate > lOutRate" in
+    its log, followed since the stop, closes the advance at the poller's
+    next pass, which can meet that playing status before HQPlayer's own stop
+    on no entry. Either way the spot stays at that slot at 0, and Play
+    starts it — not HQPlayer's first entry, where Desktop's own stop rests.
+    One that meets HQPlayer starting another entry (the person's word in its
+    own window) finds it resting on nothing of the advance's: no spot."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    building = (int(PlaybackState.PLAYING), 2, 10 ** 6)
+    meanwhile = {"its playing answer": [], "the stop": [(int(PlaybackState.STOPPED), 0, 0)],
+                 "another entry's start": [(int(PlaybackState.PLAYING), 1, 10 ** 6)]}[close_meets]
+    for state, track, starting in [building, *meanwhile]:
+        with fake._lock:
+            fake._advancing = None
+            fake.state, fake.track, fake.position, fake._starting = state, track, 0.0, starting
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+    with open(tmp_path / "HQPlayer9Desktop.log", "a", encoding="utf-8") as f:
+        f.write("I 2001/05/06 10:00:09 Rate: 48000, block size: 8192, frame size: 32768\n"
+                "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate\n")
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    assert att.facts["ticks"][-1]["state"] == ("stopped" if close_meets == "the stop" else "playing")
+    if close_meets == "another entry's start":
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)     # the close's pass, the rest's, is over
+        assert traced._spot is None
+        return
+    with fake._lock:
+        fake.state, fake.track, fake._starting = int(PlaybackState.STOPPED), 0, 0
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 10.0)
+    st = traced._last_tick
+    assert (st.state, st.queue_index, st.item.track_id) == ("stopped", 2, "track-2")
+    with fake._lock:
+        fake.length = 300
+    n = len(fake.commands)
+    assert traced.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2, 8.0)
+    assert ("SelectTrack", {"index": "2"}) in fake.commands[n:]
+
+
+
+def test_an_advance_closed_on_its_refusal_while_hqplayer_opens_another_entry_leaves_no_spot(traced, fake,
+                                                                                            monkeypatch, tmp_path):
+    """HQPlayer's own advance onto our next entry, whose filter it builds and
+    refuses; before the refusal its log names closes the advance, HQPlayer
+    stops on no entry and then opens another one — its opening answers
+    (playing at track 0, length 0) give no verdict, so the status still
+    shows the stop. The rest is judged at the reading the advance closed on:
+    HQPlayer opens an entry, resting on nothing of the advance's — no spot.
+    Judged on the stop the status showed, the spot stood under what plays,
+    and Pause then Play restarted the refused track (atlas-release's review,
+    N1)."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    for state, track, starting, opening in [(int(PlaybackState.PLAYING), 2, 10 ** 6, 0),
+                                            (int(PlaybackState.STOPPED), 0, 0, 0),
+                                            (int(PlaybackState.PLAYING), 1, 10 ** 6, 10 ** 6)]:
+        with fake._lock:
+            fake._advancing = None
+            fake.state, fake.track, fake.position, fake._starting, fake.opening = state, track, 0.0, starting, opening
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+    assert traced._last_tick.state == "stopped"         # the opening answers give no verdict
+    with open(tmp_path / "HQPlayer9Desktop.log", "a", encoding="utf-8") as f:
+        f.write("I 2001/05/06 10:00:09 Rate: 48000, block size: 8192, frame size: 32768\n"
+                "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate\n")
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    last = att.facts["ticks"][-1]
+    assert (last["state"], last["track"], last["length"]) == ("playing", 0, 0)
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)        # the close's pass, the rest's, is over
+    assert traced._spot is None and traced._rest_due is None        # its URI said: another entry, at once
+
+
+def _refused_in_log(tmp_path):
+    with open(tmp_path / "HQPlayer9Desktop.log", "a", encoding="utf-8") as f:
+        f.write("I 2001/05/06 10:00:09 Rate: 48000, block size: 8192, frame size: 32768\n"
+                "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate\n")
+
+
+def _hqplayer_is(fake, state, track, starting, opening=0, reads=2):
+    with fake._lock:
+        fake._advancing = None
+        fake.state, fake.track, fake.position, fake._starting, fake.opening = state, track, 0.0, starting, opening
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, reads), 10.0)
+
+
+def test_an_advance_closed_on_the_build_answer_of_its_own_entry_in_the_opening_shape_leaves_the_spot(
+        traced, fake, monkeypatch, tmp_path):
+    """The one playing answer of the filter HQPlayer builds for the advance's
+    entry, given in the shape HQPlayer opens an entry in (playing at track 0,
+    length 0, no verdict) with its URI naming that entry: the close meets it
+    — what the URI names is the start's own entry, a rest, and the spot
+    stays at slot 2 once HQPlayer stops (the rest's reading, not the opening
+    shape, decides)."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6, opening=10 ** 6)
+    _refused_in_log(tmp_path)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    last = att.facts["ticks"][-1]
+    assert (last["state"], last["track"], last["length"]) == ("playing", 0, 0)
+    assert _wait(lambda: traced._spot is not None, 5.0)             # its URI said: the start's own, at once
+    assert (traced._spot[0].track_id, traced._spot[1]) == ("track-2", 0) and traced._rest_due is None
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0)
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 10.0)
+
+
+@pytest.mark.parametrize("hqplayer", ["plays its entry", "rests on it"])
+def test_a_close_on_a_reading_with_no_verdict_and_no_uri_leaves_the_rest_to_the_next_reading(
+        traced, fake, monkeypatch, tmp_path, hqplayer):
+    """An HQPlayer whose Status names no URI, a queue edit in flight: its
+    readings give no verdict (D4). The advance's close meets one — playing
+    its entry, nothing naming it: the next reading that names an entry
+    decides, HQPlayer's own stop a rest (the spot at slot 2); or stopped on
+    it: a stop is a rest whatever names its entry, the spot at once."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    monkeypatch.setattr(traced, "_readings", lambda uri: [])        # no URI from this build
+    edit = traced._queue.mutation()
+    edit.__enter__()                                                 # a queue edit in flight
+    try:
+        state = int(PlaybackState.PLAYING) if hqplayer == "plays its entry" else int(PlaybackState.STOPPED)
+        _hqplayer_is(fake, state, 2, 10 ** 6)
+        assert traced._before[1] is None                             # no verdict
+        _refused_in_log(tmp_path)
+        assert _wait(lambda: att.verdict is not None, 10.0)
+        assert att.verdict["code"] == "rate_refused" and att.facts["ticks"][-1]["track"] == 2
+        n = len(fake.commands)
+        assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)     # the close's pass is over
+        spot = traced._spot and (traced._spot[0].track_id, traced._spot[1])
+        assert spot == (None if hqplayer == "plays its entry" else ("track-2", 0))
+    finally:
+        edit.__exit__(None, None, None)
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0)
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 10.0)
+
+
+def test_a_close_on_a_state_the_sdk_does_not_name_leaves_the_rest_to_the_next_reading(traced, fake, monkeypatch,
+                                                                                      tmp_path):
+    """The reading the advance's close meets is a state the SDK does not name
+    (Embedded said 5 while it started a play): the poller keeps no reading of
+    it, so the stop before it is not the close's reading — the rest waits for
+    the next reading that names an entry, and HQPlayer playing another entry
+    then is none: no spot."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    for state, track, starting in [(int(PlaybackState.PLAYING), 2, 10 ** 6), (int(PlaybackState.STOPPED), 0, 0),
+                                   (5, 1, 10 ** 6)]:
+        _hqplayer_is(fake, state, track, starting)
+    _refused_in_log(tmp_path)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert (att.verdict["code"], att.end) == ("rate_refused", "refused")
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)
+    assert traced._spot is None and traced._rest_due is not None
+    _hqplayer_is(fake, int(PlaybackState.PLAYING), 1, 10 ** 6)
+    assert traced._spot is None and traced._rest_due is None
+
+
+def _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path):
+    """The advance's close at the build's playing answer of entry 2 on an
+    HQPlayer whose Status names no URI, a queue edit in flight: nothing names
+    the entry, the rest left to a later reading. Returns (the attempt, the
+    edit still open)."""
+    att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    monkeypatch.setattr(traced, "_readings", lambda uri: [])        # no URI from this build
+    edit = traced._queue.mutation()
+    edit.__enter__()                                                 # a queue edit in flight
+    _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6)
+    _refused_in_log(tmp_path)
+    assert _wait(lambda: att.verdict is not None, 10.0)
+    assert att.verdict["code"] == "rate_refused" and att.facts["ticks"][-1]["track"] == 2
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 1), 10.0)
+    assert traced._spot is None and traced._rest_due is not None
+    return att, edit
+
+
+def test_a_start_of_the_nodes_while_the_rest_is_due_drops_it(traced, fake, monkeypatch, tmp_path):
+    """The rest left to a later reading; the person taps slot 1 meanwhile — a
+    start watched, newer than the close — and HQPlayer still reads entry 2's
+    build once after the edit, then plays entry 1: the rest is dropped, no
+    spot at slot 2 under what plays, and Pause then Play resumes entry 1
+    (Play alone) — never the refused track again."""
+    att, edit = _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path)
+    try:
+        monkeypatch.setattr(diag, "OBSERVE_S", 60.0)                # the tap stays watched through the test
+        with fake._lock:
+            fake.length = 300
+        assert traced.select(1)
+        assert traced._attempt is not None and traced._attempt.intent == "select"
+        _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6, reads=1)
+    finally:
+        edit.__exit__(None, None, None)
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 2), 10.0)
+    with fake._lock:
+        fake.track_serial += 1
+        fake.state, fake.track, fake.position, fake._starting = int(PlaybackState.PLAYING), 1, 0.0, 0
+    n = len(fake.commands)
+    assert _wait(lambda: _statuses_after(fake, n, 4), 10.0)
+    assert traced._rest_due is None and (traced._spot is None or traced._spot[0].track_id != "track-2")
+    fake.takes_seek = True
+    assert traced.pause()
+    assert _wait(lambda: fake.state == int(PlaybackState.PAUSED), 5.0)
+    n = len(fake.commands)
+    assert traced.play()
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING), 10.0)
+    assert [c for c, _ in fake.commands[n:] if c in ("SelectTrack", "Seek", "Play")] == ["Play"]
+
+
+@pytest.mark.parametrize("met", ["after the close", "at the close"])
+def test_a_stop_under_way_says_nothing_of_the_rest_and_the_stop_after_it_is_one(traced, fake, monkeypatch,
+                                                                                tmp_path, met):
+    """HQPlayer's own stop after it refused: a stop under way (STOPREQ), then
+    stopped on no entry. Under way it says nothing yet — met by a rest left
+    to a later reading, or by the close itself — and the stop that follows
+    is the rest: the spot at slot 2, as D6 leaves it."""
+    if met == "after the close":
+        att, edit = _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path)
+        try:
+            _hqplayer_is(fake, int(PlaybackState.STOPREQ), 2, 0)
+            assert traced._rest_due is not None and traced._spot is None
+        finally:
+            edit.__exit__(None, None, None)
+    else:
+        att = _advancing(traced, fake, monkeypatch, tmp_path, refused=None, polls=10 ** 6)
+        assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+        _hqplayer_is(fake, int(PlaybackState.PLAYING), 2, 10 ** 6)
+        _hqplayer_is(fake, int(PlaybackState.STOPREQ), 2, 0)
+        _refused_in_log(tmp_path)
+        assert _wait(lambda: att.verdict is not None, 10.0)
+        assert att.verdict["code"] == "rate_refused" and att.facts["ticks"][-1]["state"] == "stopping"
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0)
+    assert _wait(lambda: traced._last_tick.extra.get("resume") == {"index": 2, "position": 0}, 5.0)
+
+
+def test_the_reading_a_rest_left_to_it_sets_the_spot_on_is_said_with_the_spot(traced, fake, monkeypatch,
+                                                                              tmp_path):
+    """The rest left to a later reading is set at HQPlayer's stop on no entry:
+    that very reading is said at the spot — its slot and track beside the
+    resume — never slot 0 with a resume a tick ahead of it."""
+    said = []
+    say = traced._say
+
+    def saying(st):
+        said.append((st.state, st.queue_index, st.item.track_id if st.item is not None else None,
+                     st.extra.get("resume")))
+        return say(st)
+    monkeypatch.setattr(traced, "_say", saying)
+    att, edit = _rest_left_to_a_later_reading(traced, fake, monkeypatch, tmp_path)
+    edit.__exit__(None, None, None)
+    n = len(said)
+    _hqplayer_is(fake, int(PlaybackState.STOPPED), 0, 0, reads=3)
+    resumed = [t for t in said[n:] if t[3] == {"index": 2, "position": 0}]
+    assert resumed and resumed[0][:3] == ("stopped", 2, "track-2")
+
 
 @pytest.mark.parametrize("why", ["rule", "slow"])
 def test_a_spot_hqplayer_plays_after_all_is_spent(traced, fake, monkeypatch, tmp_path, why):
@@ -2431,7 +2765,10 @@ class HqpMeterPort:
             return None
         f = self.fake
         with f._lock:
-            if f.state == int(PlaybackState.PLAYING) and f.track >= 1 and f._advancing is None:
+            # a filter HQPlayer builds and then refuses (`cells`' "builds") says
+            # PLAYING once while it builds: nothing leaves then
+            if (f.state == int(PlaybackState.PLAYING) and f.track >= 1 and f._advancing is None
+                    and f._refusing is None):
                 return self.SILENCE if self.digital_silence else self.SOUND
             if f.ended_at is not None and time.monotonic() - f.ended_at < self.tail_s:
                 return self.SILENCE
@@ -3108,6 +3445,188 @@ def test_no_advance_at_the_playlists_end_nor_for_a_stop_hqplayer_did_not_move_on
         fake.state, fake.track = int(PlaybackState.STOPPED), 0
     _polls(fake, 2)
     assert traced._attempt is None and [a.intent for a in diag.attempts()] == ["select"] * 3
+
+
+# -- What was measured on engine 6.2.4 (hqp_rate_check): "up", and FFT and FIR at 1:1 -------
+# The fake plays HQPlayer 6.2.4 as it was measured (test_hqp_rate_check.UP_MATRIX):
+# its own PCM lists, a filter in both slots at a fixed output rate, the queue's
+# first file the cell's source — a DSD64 one taken in at 176.4 kHz — and its log
+# written as it acts, read here after the close.
+
+def _measured_hqp(backend, fake, monkeypatch, tmp_path, name, cell):
+    import hqp_atlas
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    from test_hqp_rate_check import DSD64, UP_CELLS, UP_MATRIX
+    lists = json.loads(_LISTS_624.read_text(encoding="utf-8"))
+    pcm = lists["pcm"]
+    src, out = UP_CELLS[cell]
+    _settings_xml(tmp_path, ("0", "0"), 1)
+    fake.log_path = tmp_path / "HQPlayer6Desktop.log"
+    fake.log_path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(diag, "local_log_dir", lambda: tmp_path)
+    monkeypatch.setattr(hqp_atlas, "SHIPPED", tmp_path / "shipped.json")
+    monkeypatch.setattr(settings, "hqp_atlas_overlay", "")
+    dsd = src == DSD64
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: (Sources({}, dsd=1, first_dsd=DSD64) if dsd
+                                                              else Sources({src: 1}, first=src)))
+    fake.sources["A [TR24]/01.flac"] = (src, dsd)
+    fake.cells = lambda f, rate, d, o: next((UP_MATRIX[f][c] for c, (s, r) in UP_CELLS.items()
+                                             if (s, r) == (DSD64 if d else rate, o)), "plays")
+    fake.replies["GetInfo"] = ('<GetInfo name="fake" product="Signalyst HQPlayer Desktop" version="6" '
+                               'platform="Linux" engine="6.2.4"/>')
+    fake.replies["GetModes"] = ("<GetModes>" + "".join(f'<ModesItem index="{m["index"]}" name="{m["name"]}" '
+                                                       f'value="{m["value"]}"/>' for m in lists["modes"])
+                                + "</GetModes>")
+    fake.replies["GetRates"] = ("<GetRates>" + "".join(f'<RatesItem index="{r["index"]}" rate="{r["rate"]}"/>'
+                                                       for r in pcm["rates"]) + "</GetRates>")
+    fake.replies["GetFilters"] = ("<GetFilters>" + "".join(
+        f'<FiltersItem index="{f["index"]}" name="{f["name"]}" value="{f["value"]}" arg="{f["arg"]}" '
+        f'description="{f["description"]}"/>' for f in pcm["filters"]) + "</GetFilters>")
+    fake.replies["GetShapers"] = ("<GetShapers>" + "".join(
+        f'<ShapersItem index="{s["index"]}" name="{s["name"]}" value="{s["value"]}" description=""/>'
+        for s in pcm["shapers"]) + "</GetShapers>")
+    index = next(f["index"] for f in pcm["filters"] if f["name"] == name)
+    rate = next(r["index"] for r in pcm["rates"] if r["rate"] == out)
+    fake.replies["State"] = (f'<State mode="1" rate="{rate}" filter="{index}" filter1x="{index}" '
+                             f'filterNx="{index}" shaper="7" volume="-3"/>')
+    fake.active.update(mode="PCM", filter=name, shaper="TPDF", rate=out)
+    backend._info_due = True
+    backend.poke()
+    assert _wait(lambda: backend.info.get("engine") == "6.2.4", 5.0)
+
+
+# (filter, cell) → the verdict's code and cause, closed at HQPlayer's first stop or
+# watched to the window, and its sentence once the log is read
+_CELLS_624 = {
+    ("closed-form", "88.2k->44.1k"): (
+        "rate_refused", "filter", "refused",
+        "HQPlayer describes closed-form as 2^x up: 44.1 kHz is under 88.2 kHz, and HQPlayer stopped on this track. "
+        "HQPlayer's log: “Requested filter not possible with this rate combination 88200/44100, stop”."),
+    ("sinc-medium", "352.8k->176.4k"): (
+        "rate_refused", "filter", "refused",
+        "HQPlayer describes sinc-medium as Any up: 176.4 kHz is under 352.8 kHz, and HQPlayer stopped on this "
+        "track. HQPlayer's log: “clHQPlayerEngine::Execute(): lInRate > lOutRate”."),
+    ("FFT", "44.1k->44.1k"): (
+        "rate_refused", "filter", "refused",
+        "HQPlayer refused FFT at the source's own rate (1:1) on engine 6.2.4, and it stopped on this 44.1 kHz "
+        "track. HQPlayer's log: “Requested filter not possible with this rate combination 44100/44100, stop”."),
+    ("poly-sinc-ext2-short", "DSD64->88.2k"): (
+        "rate_refused", "filter", "window",
+        "HQPlayer describes poly-sinc-ext2-short as Int up: 88.2 kHz is under the 176.4 kHz HQPlayer converted "
+        "this DSD64 track to, and HQPlayer stopped on this track. HQPlayer's log: “Requested filter not possible "
+        "with this rate combination 176400/88200, stop”."),
+    ("sinc-medium", "DSD64->88.2k"): (
+        "rate_refused", "filter", "window",
+        "HQPlayer describes sinc-medium as Any up: 88.2 kHz is under the 176.4 kHz HQPlayer converted this DSD64 "
+        "track to, and HQPlayer stopped on this track. HQPlayer's log: “clHQPlayerEngine::Execute(): lInRate > "
+        "lOutRate”."),
+    # 1:1 is never judged: with a DSD track HQPlayer's line speaks alone
+    ("none", "DSD64->352.8k"): (
+        "rate_refused", "line", "window",
+        "HQPlayer stopped on it: “Requested filter not possible with this rate combination 176400/352800, stop”."),
+}
+
+
+@pytest.mark.parametrize("name,cell", list(_CELLS_624), ids=lambda v: str(v))
+def test_engine_6_2_4s_stops_are_judged_as_measured(traced, fake, monkeypatch, tmp_path, name, cell):
+    code, cause, end, sentence = _CELLS_624[name, cell]
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, name, cell)
+    monkeypatch.setattr(diag, "OBSERVE_S", 3.0)
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    # a PCM track's stop the rule names closes at once; a DSD track's waits: only the log names its rate
+    assert a.end == end, a.verdict
+    assert _wait(lambda: a.hqp_log is not None and "HQPlayer" in a.verdict["sentence"]
+                 and (a.verdict["code"], a.verdict.get("cause")) == (code, cause), 5.0), a.verdict
+    assert _wait(lambda: a.verdict["sentence"] == sentence, 5.0), a.verdict["sentence"]
+    # a DSD track is known as one — from Status where it played a moment (sinc-medium's build), else from its
+    # file row: stopped, HQPlayer sends no source
+    if cell.startswith("DSD64"):
+        assert (a.facts["rate"]["source"], a.facts["rate"]["dsd"]) == (2822400, True)
+    else:
+        assert not a.facts["rate"]["dsd"]
+
+
+def test_an_up_filter_not_tried_that_stops_is_judged_at_the_window_and_said_as_a_stop(traced, fake, monkeypatch,
+                                                                                       tmp_path):
+    # sinc-short, described "up", was never tried under the source's rate: HQPlayer may stop there. Here it does,
+    # as the three tried did, and nothing in its log says so: the attempt waits for the window, then says the stop
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, "sinc-short", "88.2k->44.1k")
+    fake.cells = lambda f, rate, dsd, out: "stops" if (f, rate, out) == ("sinc-short", 88200, 44100) else "plays"
+    fake.log_path = None
+    monkeypatch.setattr(diag, "OBSERVE_S", 3.0)
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    assert a.end == "window" and a.facts["closed"] - a.facts["t0"] >= 3.0, a.verdict
+    assert (a.verdict["code"], a.verdict["cause"]) == ("rate_refused", "filter")
+    assert a.verdict["sentence"] == ("HQPlayer describes sinc-short as Any up: 44.1 kHz is under 88.2 kHz, and "
+                                     "HQPlayer stopped on this track.")
+
+
+@pytest.mark.parametrize("name,cell", [("poly-sinc-ext2", "88.2k->44.1k"), ("FFT", "352.8k->176.4k"),
+                                       ("FIR", "44.1k->88.2k"), ("closed-form", "DSD64->352.8k"),
+                                       ("none", "44.1k->88.2k"), ("sinc-M", "352.8k->176.4k")], ids=str)
+def test_engine_6_2_4s_plays_are_played_and_nothing_names_a_stop(traced, fake, monkeypatch, tmp_path, name, cell):
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, name, cell)
+    if name == "sinc-M":
+        fake.start_polls = 3            # its Status still at 0 for a while after the Play
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    assert a.verdict["code"] == "played", a.verdict
+    # the rule over the slot's facts names no stop either
+    assert not diag.names_cause(a.facts["rate"])
+
+
+def test_a_filter_hqplayer_builds_and_then_refuses_is_no_start_with_its_meter_open(traced, fake, monkeypatch,
+                                                                                    tmp_path, metered):
+    # sinc-medium at 176.4 kHz from 352.8 kHz: one PLAYING status at 0 s while it builds, nothing on the meter,
+    # then its refusal — judged at HQPlayer's first stop, as without the meter
+    code, cause, end, _ = _CELLS_624["sinc-medium", "352.8k->176.4k"]
+    _measured_hqp(traced, fake, monkeypatch, tmp_path, "sinc-medium", "352.8k->176.4k")
+    assert traced.select(1)
+    a = _closed(timeout=10.0)
+    assert (a.end, a.verdict["code"], a.verdict.get("cause")) == (end, code, cause), a.verdict
+    assert a.facts["meter"]["runs"] == []
+
+
+def test_the_screen_says_what_engine_6_2_4_did_before_play(fake, output, monkeypatch, tmp_path):
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    mgr, b = output
+    hqp_router = _screen(monkeypatch)
+    monkeypatch.setattr(hqp_router, "manager", mgr)
+    _measured_hqp(b, fake, monkeypatch, tmp_path, "closed-form", "88.2k->44.1k")
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({44100: 1, 88200: 2, 96000: 1}, dsd=1,
+                                                                    first=44100))
+    assert _rate_said(hqp_router.get_state(dsp=True)) == {"filter": [
+        "HQPlayer describes closed-form as 2^x up. On engine 6.2.4 HQPlayer stopped with closed-form under the "
+        "source's rate, so it will stop on the 88.2 kHz and 96 kHz tracks in the queue at 44.1 kHz.",
+        "Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer describes "
+        "without “up”, or as the output rate the tracks' own or a power-of-two multiple of it.",
+        "The DSD tracks in the queue are not checked."]}
+    # sinc-M there: its words for the tracks of its family, no stop, nothing to pick; of the 96 kHz ones,
+    # downward across the families, nothing was measured
+    fake.replies["State"] = fake.replies["State"].replace('filter="50" filter1x="50" filterNx="50"',
+                                                          'filter="54" filter1x="54" filterNx="54"')
+    assert _rate_said(hqp_router.get_state(dsp=True)) == {"filter": [
+        "HQPlayer describes sinc-M as 2^x up, and the 88.2 kHz tracks in the queue are above 44.1 kHz. Filters "
+        "described with “up” are made for upsampling, not for decimation; on engine 6.2.4 HQPlayer converted "
+        "352.8 kHz to 176.4 kHz with sinc-M and did not stop.",
+        "The DSD tracks in the queue are not checked."]}
+    # FFT at 44.1 kHz: the 44.1 kHz tracks at 1:1; nothing is said of those above it
+    fake.replies["State"] = fake.replies["State"].replace('filter="54" filter1x="54" filterNx="54"',
+                                                          'filter="6" filter1x="6" filterNx="6"')
+    assert _rate_said(hqp_router.get_state(dsp=True))["filter"][:2] == [
+        "HQPlayer refused FFT at the source's own rate (1:1) on engine 6.2.4, so it will stop on the 44.1 kHz "
+        "tracks in the queue.",
+        "Pick another filter, or another output rate."]
+    # another major: nothing of what was measured on 6.2.4
+    fake.replies["GetInfo"] = fake.replies["GetInfo"].replace('engine="6.2.4"', 'engine="7.0.1"')
+    b._info_due = True
+    b.poke()
+    assert _wait(lambda: b.info.get("engine") == "7.0.1", 5.0)
+    assert "rate_check" not in hqp_router.get_state(dsp=True)
 
 
 def test_hqplayers_error_text_reaches_the_caller(fake):
@@ -5160,7 +5679,8 @@ def test_with_the_nodes_atlas_the_rows_carry_its_facts_by_name_in_hqplayers_orde
     assert _facts_text(rows["demo-new"]) == (["1:1", "not measured on engine 9.4.1"], None)
     assert rows["demo-new"]["facts"]["chips"][-1]["muted"] is True
     assert _facts_text(rows["demo-sinc-a"]) == (["linear phase", "±12.346 ms", "2^x up"],
-                                                "Same output as demo-sinc-b (within one step)")
+                                                "Same output as demo-sinc-b (within one step, compared into 705.6k and "
+                                                "768k)")
     assert _facts_text(rows["demo-gauss-x"])[0] == ["intermediate phase", "1.5 ms before · 2.5 ms after",
                                                     "position-dependent", "Any"]
     # Every key HQPlayer gave stays as it gave it; only `facts` is added.
@@ -5416,6 +5936,202 @@ def test_a_started_track_hqplayer_cannot_reach_speaks_through_its_verdict_alone(
     assert _wait(lambda: b._rate_check is not None and b._rate_check.started_refused, 5.0)
     _polls(fake, 2)
     assert b._rate_check.groups and b.rate_notice() is None
+
+
+def test_a_track_an_up_filter_not_tried_may_stop_on_plays_and_the_notice_warns_of_the_others(
+        fake, output, monkeypatch, tmp_path):
+    # demo-sinc-a (2^x up, never tried) at 44.1 kHz on an HQPlayer of engine 6, an 88.2 kHz track playing as
+    # HQPlayer reports it: no verdict comes while it plays on, so the notice warns of the 96 kHz tracks it may stop
+    # on and says nothing of the rate playing, nor do the screen and the assistant; a "may not play" turned
+    # "cannot play" is a notice anew
+    from hqp_rate_check import Sources
+    from playback import hqp_load
+    hqp_router = _screen(monkeypatch)
+    monkeypatch.setattr(hqp_router, "manager", output[0])
+    fake.sources["A/01.flac"] = (88200, False)
+    fake.active.update(rate=44100, filter="demo-sinc-a")
+    mgr, b = _rate_queue(fake, output, monkeypatch, tmp_path, Sources({88200: 1, 96000: 1}, first=88200))
+    fake.replies["State"] = _RATE_PCM[0].replace('rate="3"', 'rate="1"')
+    b._rate_event("state", "lists")
+    b.poke()
+    said = lambda: _rate_notice_said(b) or ("", [])                                     # noqa: E731
+    assert _wait(lambda: said()[0] == "Some tracks in the queue may not play at 44.1 kHz", 5.0), said()
+    assert not b._rate_check.started_refused and len(said()[1]) == 1
+    assert said()[1][0].endswith("so HQPlayer may stop on the 96 kHz tracks in the queue at 44.1 kHz.")
+    assert _rate_said(hqp_router.get_state(dsp=True))["filter"][0].endswith(
+        "so HQPlayer may stop on the 96 kHz tracks in the queue at 44.1 kHz.")
+    # nor does the assistant, through its route: both slots hold demo-sinc-a, the setting it asks of
+    _picker(monkeypatch, fake)
+    told = hqp_router.assistant("filter_facts", name="demo-sinc-a")["text"].split("\n")
+    at = told.index("With demo-sinc-a in both filter slots, at this output rate and queue:")
+    assert told[at + 1].endswith("so HQPlayer may stop on the 96 kHz tracks in the queue at 44.1 kHz.")
+    assert sum("may stop" in line for line in told) == 1
+    since = b.rate_notice()["since"]
+    # a 32 kHz track appended: 44.1 kHz is no power-of-two multiple of it, a stop that will come
+    monkeypatch.setattr(hqp_load, "sources", lambda openers: Sources({88200: 1, 96000: 1, 32000: 1}, first=88200))
+    b.queue_changed("append")
+    assert _wait(lambda: said()[0] == "Some tracks in the queue cannot play at 44.1 kHz", 5.0), said()
+    assert b.rate_notice()["since"] != since and len(said()[1]) == 2
+
+
+def test_a_tick_with_no_verdict_keeps_the_rate_checks_notice(monkeypatch):
+    """A tick that gives no verdict — HQPlayer opening an entry, or a queue
+    edit in flight on an HQPlayer whose Status names no URI — says nothing
+    new of the queue: the notice the tick before served stands, playing or
+    paused. Withdrawn there, it came back at the next tick: two notice wakes,
+    no toast (atlas-release's review, L2). Stopped, none is served."""
+    import hqp_rate_check as rc
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{n}.flac", n) for n in range(1, 5)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    inp = rc.Inputs("pcm", 44100, "not checked", rc.Filter("sinc-short", "Any", True),
+                    rc.Filter("closed-form", "2^x", True), measured="6.2.4")
+    queue = [88200, 96000, 88200, 48000]
+    b._rate_check = rc.check(inp, rc.Sources({r: queue.count(r) for r in queue}, first=queue[0]))
+    b._rate_gen, b._rate_slot = q.generation, 1
+
+    def status(position, state=PlaybackState.PLAYING):
+        return TrackStatus(state=state, track_index=1, track_id="", position=position, length=300.0,
+                           volume=-3.0, src_rate=88200, active_rate=44100, active_filter="sinc-short",
+                           track_serial=1)
+    for position, asked in ((0.0, 1000.0), (5.0, 1005.0)):
+        b._rate_served = b._rate_notice_now(status(position), (1, q.item_at(1), False), asked)
+    served = b._rate_served
+    assert served is not None
+    assert b._rate_notice_now(status(6.0), None, 1006.0) is served
+    assert b._rate_notice_now(status(6.0, PlaybackState.PAUSED), None, 1007.0) is served
+    assert b._rate_notice_now(status(0.0, PlaybackState.STOPPED), None, 1008.0) is None
+    # another setting, the same queue: what was served is that setting's, never kept for this one
+    other = rc.Inputs("pcm", 44100, "not checked", rc.Filter("sinc-short", "Any", True),
+                      rc.Filter("poly-sinc-gauss-xla", "Any", False), measured="6.2.4")
+    b._rate_check = rc.check(other, rc.Sources({r: queue.count(r) for r in queue}, first=queue[0]))
+    check = b._rate_check
+    assert check.groups and not check.started_refused and check.key != b._rate_onset[0][1]
+    assert b._rate_notice_now(status(7.0), None, 1009.0) is None
+
+
+def test_a_may_hqplayer_disproves_by_playing_is_said_no_more_at_that_setting(monkeypatch):
+    # sinc-short (not tried) in the Nx slot, closed-form in the 1x one, at 44.1 kHz on engine 6: a queue of 88.2,
+    # 96, 88.2 and 48 kHz tracks. While the take of the slot a "may" names starts — under a second past where its
+    # first status read it (a filter HQPlayer builds before it refuses shows one playing status) — the notice
+    # stands as it was, as on a tick whose slot is not the one judged; past it the take plays and the notice
+    # leaves its rate out. Heard — its own Status naming that source rate, the output rate checked and the filter
+    # the "may" names, with the DSP keeping up — the rate is said no more at that setting. A Seek sent after the
+    # take's first status was asked (a resume's own, one while HQPlayer builds) moves the position with nothing
+    # heard: the take starts anew at the status after it
+    import hqp_rate_check as rc
+    from datetime import datetime, timedelta, timezone
+    from hqp_atlas import plain
+    q = CanonicalQueue()
+    q.replace([_item(f"E:/Music/A/0{n}.flac", n) for n in range(1, 5)])
+    b = HqpBackend(emit=lambda *_: None, queue=q)
+    clock = (datetime(2026, 10, 22, tzinfo=timezone.utc) + timedelta(seconds=n) for n in itertools.count())
+    monkeypatch.setattr(hb, "datetime", types.SimpleNamespace(now=lambda tz: next(clock)))   # each onset its own
+    inp = rc.Inputs("pcm", 44100, "not checked", rc.Filter("sinc-short", "Any", True),
+                    rc.Filter("closed-form", "2^x", True), measured="6.2.4")
+
+    def tick(queue, slot, position, speed=None, src=None, out=44100, active="sinc-short", judged=None,
+             state=PlaybackState.PLAYING, sdm=False, serial=1):
+        judged = judged or slot                                 # the slot the check was judged for
+        ahead = queue[judged - 1:]
+        b._rate_check = rc.check(inp, rc.Sources({r: ahead.count(r) for r in ahead}, first=ahead[0]))
+        b._rate_gen, b._rate_slot = q.generation, judged
+        status = TrackStatus(state=state, track_index=slot, track_id="", position=position, length=300.0,
+                             volume=-3.0, process_speed=speed, src_rate=src or queue[slot - 1], src_sdm=sdm,
+                             active_rate=out, active_filter=active, track_serial=serial)
+        b._rate_served = b._rate_notice_now(status, (slot, q.item_at(slot), False), next(asked))  # as the poller does
+        n = b._rate_served
+        return n and (n["since"], plain(n["data"]["title"]), [plain(t) for t in n["data"]["text"]])
+
+    def reset():
+        b._rate_heard, b._rate_onset, b._rate_served = {}, None, None
+
+    asked = itertools.count(1000.0)                             # when each tick's Status was asked
+
+    queue = [88200, 96000, 88200, 48000]
+    will = "will stop on the 48 kHz tracks in the queue at 44.1 kHz."
+    may96 = ("HQPlayer describes sinc-short as Any up. Of the “up” filters tried on engine 6.2.4, HQPlayer stopped "
+             "with all but sinc-M under the source's rate; sinc-short was not tried there, so HQPlayer may stop on "
+             "the 96 kHz tracks in the queue at 44.1 kHz.")
+    assert tick(queue, 1, 0.0) is None                                  # starting: nothing served before
+    b._seek_mark = (120.0, b._rate_take[2] + 0.5, None)                 # a resume's Seek, after that status
+    assert tick(queue, 1, 120.0, speed=1.6) is None                     # moved, nothing heard: it starts anew
+    assert tick(queue, 1, 120.5, speed=1.6) is None and b.rate_heard(b._rate_check.key) == frozenset()
+    b._rate_take = b._seek_mark = None
+    assert tick(queue, 1, 0.0) is None
+    # past the second, not heard as HQPlayer reports it — the DSP behind, another source rate, output rate or
+    # filter, paused, a DSD source: the take plays all the same, and its rate is not said
+    for kw in ({"speed": 0.4}, {"src": 96000}, {"out": 88200}, {"active": "poly-sinc-ext2"},
+               {"state": PlaybackState.PAUSED}, {"sdm": True}):
+        since, title, said = tick(queue, 1, 5.0, **kw)
+        assert title == "Some tracks in the queue cannot play at 44.1 kHz" and said[1] == may96, kw
+        assert said[0].endswith(will) and len(said) == 2, kw
+        assert b.rate_heard(b._rate_check.key) == frozenset(), kw
+    assert tick(queue, 1, 5.0, speed=1.6) == (since, title, said)       # heard: the same words
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # the slot moved, the check not judged for it yet: nothing of the slot playing is taken as heard
+    assert tick(queue, 2, 5.0, judged=1) == (since, title, said)
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    assert tick(queue, 2, 0.0, serial=2) == (since, title, said)        # the 96 kHz track starting: as it was
+    assert tick(queue, 2, 3.0, serial=2) == (since, title, [said[0]])   # heard: neither "may" is said
+    assert tick(queue, 3, 0.0, serial=3) == (since, title, [said[0]])   # 88.2 kHz again: heard already
+    assert tick(queue, 4, 0.0, serial=4) is None                        # the 48 kHz one: its verdict speaks
+    assert b.rate_heard(b._rate_check.key) == {88200, 96000}
+    assert b.rate_heard(rc.check(inp._replace(rate=48000), rc.Sources({88200: 1})).key) == frozenset()
+    # another engine: what was heard on this one is not taken for it
+    b._info = {"engine": "6.2.5"}
+    assert b.rate_heard(b._rate_check.key) == frozenset()
+    # "may not play" turned "cannot play" is a notice anew; back to "may" and to "cannot" again, it is not
+    reset()
+    assert tick([88200, 96000], 1, 0.0, serial=5) is None
+    may_since = tick([88200, 96000], 1, 5.0, serial=5)[0]
+    cannot_since = tick([88200, 96000, 48000], 1, 6.0, serial=5)[0]
+    assert cannot_since != may_since
+    assert tick([88200, 96000], 1, 7.0, serial=5)[0] == cannot_since
+    assert tick([88200, 96000, 48000], 1, 8.0, serial=5)[0] == cannot_since
+    # a take started at a spot (a resume after a rebuild) reads the spot at once: one playing status there, the
+    # DSP keeping up, proves nothing — a second past it does
+    reset()
+    assert tick([88200, 96000], 1, 120.0, speed=1.6, serial=6) is None
+    assert tick([88200, 96000], 1, 120.6, speed=1.6, serial=6) is None
+    assert b.rate_heard(b._rate_check.key) == frozenset()
+    assert tick([88200, 96000], 1, 121.2, speed=1.6, serial=6)[2] == [may96]
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # a position read earlier than the take's first starts the take anew (a seek back, a restart)
+    reset()
+    assert tick([88200, 96000], 1, 30.0, speed=0.4, serial=7) is None
+    played = tick([88200, 96000], 1, 31.5, speed=0.4, serial=7)         # the DSP behind: plays, not heard
+    assert played[2] == [may96] and b.rate_heard(b._rate_check.key) == frozenset()
+    assert tick([88200, 96000], 1, 0.2, speed=1.6, serial=7) == played   # back to the start: starting again
+    assert tick([88200, 96000], 1, 1.3, speed=1.6, serial=7) == played
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # a tick whose slot is not the one the check was judged for serves what was served: after a take that played
+    # unheard, within a take's first second (a skip), and for a row tapped after a check judged at rest
+    reset()
+    assert tick([88200, 96000], 1, 0.0, speed=0.4, serial=8) is None
+    played = tick([88200, 96000], 1, 2.0, speed=0.4, serial=8)
+    assert tick([88200, 96000], 2, 0.0, judged=1, serial=9) == played and played[2] == [may96]
+    reset()
+    assert tick([88200, 88200], 1, 0.0, serial=10) is None
+    assert tick([88200, 88200], 1, 0.8, serial=10) is None
+    assert tick([88200, 88200], 2, 0.0, judged=1, serial=11) is None
+    assert tick([88200, 48000], 1, 0.0, serial=15) is None
+    assert tick([88200, 48000], 2, 0.0, judged=1, serial=16) is None      # onto one that will stop: its verdict's
+    reset()
+    assert tick([44100, 96000, 96000], 2, 0.0, judged=1, serial=12) is None
+    # a queue of that rate alone: a slow tick past the second, or a pause there, says nothing, nor does a heard one
+    reset()
+    assert tick([88200, 88200], 1, 0.0, serial=13) is None
+    assert tick([88200, 88200], 1, 1.3, state=PlaybackState.PAUSED, serial=13) is None
+    assert tick([88200, 88200], 1, 2.5, speed=0.93, serial=13) is None
+    assert tick([88200, 88200], 1, 3.5, speed=1.6, serial=13) is None
+    assert b.rate_heard(b._rate_check.key) == {88200}
+    # a slot starting at another setting holds no notice served for the one before
+    b._rate_check = rc.check(inp._replace(rate=88200), rc.Sources({176400: 1, 48000: 1}, first=176400))
+    status = TrackStatus(state=PlaybackState.PLAYING, track_index=1, track_id="", position=0.0, length=300.0,
+                         volume=-3.0, src_rate=176400, src_sdm=False, active_rate=88200, active_filter="sinc-short",
+                         track_serial=14)
+    assert b._rate_check.started_may == "sinc-short" and b._rate_notice_now(status, (1, q.item_at(1), False), 0.0) is None
 
 
 def test_the_held_rate_check_asks_nothing_on_a_plays_path(fake, output, monkeypatch, tmp_path):

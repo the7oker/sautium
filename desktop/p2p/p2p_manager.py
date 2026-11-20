@@ -40,6 +40,12 @@ from desktop.p2p.upnp_service import UPnPService
 logger = logging.getLogger(__name__)
 
 
+def _said_if_failed(future) -> None:
+    """The end of a job the LISTEN loop handed its executor, said if it failed."""
+    if not future.cancelled() and future.exception() is not None:
+        logger.error("identity worker restart failed", exc_info=future.exception())
+
+
 class P2PManager:
     """Orchestrates P2P sync server + DHT + LAN discovery + UPnP."""
 
@@ -50,6 +56,10 @@ class P2PManager:
         self._thread: Optional[threading.Thread] = None
         self._proof_thread: Optional[threading.Thread] = None
         self._proof_stop: Optional[threading.Event] = None
+        # Held by a restart of the worker and by stop(): a restart racing a
+        # stop starts nothing once the stop has begun
+        self._proof_lock = threading.Lock()
+        self._proof_stopping = False
         self._load_meter = None
         self._sync_server: Optional[SyncServer] = None
         self._dht_service: Optional[DHTService] = None
@@ -144,6 +154,7 @@ class P2PManager:
         self._load_meter.subscribe(_publish_load)
         self._load_meter.start()
 
+        self._proof_stopping = False
         if account_info:
             from desktop.p2p.birth_cert import ensure_certificate
             cert = ensure_certificate()
@@ -657,6 +668,24 @@ class P2PManager:
             daemon=True, name="identity-proof")
         self._proof_thread.start()
 
+    def _restart_identity_proof_worker(self) -> None:
+        """The certificate changed under the worker (the Web UI's email
+        verification, served by the backend — NOTIFY sautium_identity_cert):
+        the old worker ends between two attempts, and the new one reads the
+        stored certificate — an `email` one is `ready` at once, and its
+        publish wakes the parked handshakes."""
+        from desktop.p2p.birth_cert import load_certificate
+        with self._proof_lock:
+            if self._proof_stopping:
+                return
+            if self._proof_thread is not None:
+                self._proof_stop.set()
+                self._proof_thread.join()
+                self._proof_thread = None
+            cert = load_certificate()
+            if cert is not None:
+                self._start_identity_proof_worker(cert)
+
     def stop(self):
         """Stop all P2P services.
 
@@ -672,8 +701,10 @@ class P2PManager:
         logger.info("Stopping P2P manager...")
 
         # The proof worker exits between attempts (one ~2 GiB call at most).
-        if self._proof_stop is not None:
-            self._proof_stop.set()
+        with self._proof_lock:
+            self._proof_stopping = True
+            if self._proof_stop is not None:
+                self._proof_stop.set()
         if self._load_meter is not None:
             self._load_meter.stop()
 
@@ -707,7 +738,9 @@ class P2PManager:
                 )
 
         if self._proof_thread is not None:
-            self._proof_thread.join(timeout=10)
+            # Whole: it holds the identity folder's lock until it returns, and
+            # a manager started after this one would find its worker held off
+            self._proof_thread.join()
             self._proof_thread = None
 
         self._running = False
@@ -1039,6 +1072,7 @@ class P2PManager:
                     cur.execute("LISTEN sautium_diag")
                     cur.execute("LISTEN sautium_diag_consent")
                     cur.execute("LISTEN sautium_identity_rotated")
+                    cur.execute("LISTEN sautium_identity_cert")
                     cur.execute("LISTEN sautium_relay_off")
                 # A decision made while this connection was not listening
                 # woke nobody: the worker looks once on every (re)connect
@@ -1074,6 +1108,12 @@ class P2PManager:
                     if ("sautium_identity_rotated" in channels
                             and self._on_identity_rotated_cb):
                         self._on_identity_rotated_cb()
+                    if "sautium_identity_cert" in channels:
+                        # Not awaited: the join of an Argon2 attempt holds no
+                        # other notice of this loop back
+                        asyncio.get_event_loop().run_in_executor(
+                            None, self._restart_identity_proof_worker
+                        ).add_done_callback(_said_if_failed)
             except Exception as e:
                 logger.debug(f"DB LISTEN error: {e}")
                 await asyncio.sleep(5)

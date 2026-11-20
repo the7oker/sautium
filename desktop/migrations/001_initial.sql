@@ -60,6 +60,16 @@ DO $$ BEGIN
     CREATE TYPE credit_role AS ENUM ('primary', 'featured', 'member');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- A track's credits beyond its performers (track_credits): its own enum, so
+-- no reader of track_artists — the engagement gate among them — sees one.
+DO $$ BEGIN
+    CREATE TYPE track_credit_role AS ENUM ('composer');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE track_credit_source AS ENUM ('tag', 'mb');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE musical_key AS ENUM ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -245,6 +255,22 @@ CREATE TABLE IF NOT EXISTS artist_members (
     member_artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE CASCADE ON UPDATE CASCADE,
     role credit_role NOT NULL DEFAULT 'member',
     PRIMARY KEY (compound_artist_id, member_artist_id)
+);
+
+-- Who wrote the music, apart from who performs it (CREDITS-1, 2026-11-18): a
+-- composer is a credit, never a track_artists role, so he engages nothing —
+-- no similars, no slice, no announce fans out from him. A tag's credit is
+-- what the file says (the floor); MusicBrainz's, from its work relations, is
+-- the authority where it exists, and the tag's row stays beside it.
+-- artist_id RESTRICTs: every DELETE FROM artists is a sweep or a merge, and
+-- one that forgets this table fails instead of taking a credit silently.
+CREATE TABLE IF NOT EXISTS track_credits (
+    track_id UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    role track_credit_role NOT NULL,
+    artist_id UUID NOT NULL REFERENCES artists(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+    source track_credit_source NOT NULL,
+    position SMALLINT NOT NULL,   -- the order the source names them in
+    PRIMARY KEY (track_id, role, artist_id, source)
 );
 
 -- MB entities a name-derived Sautium artist maps to (1:N — the name-UUID
@@ -590,6 +616,93 @@ CREATE TABLE IF NOT EXISTS hqp_dsp_speed (
     CONSTRAINT uq_hqp_dsp_speed_key UNIQUE NULLS NOT DISTINCT
         (hqp_endpoint_id, hqp_engine, cuda, mode, rate_out, filter, shaper,
          matrix_profile, convolution, src_rate, src_channels)
+);
+
+-- Comparing filters by ear (AB-1, 2026-11-17): the person's own record of
+-- what they picked — on this node, in the node backup (life data), never in
+-- the sync, carry, the share export, the seed or a support bundle. A sitting
+-- is kept under the three facts of the track it played (the mode, the slot
+-- the source runs, a conversion across rate families) and the engine its
+-- names belong to; a duel is one answer, in either form.
+DO $$ BEGIN
+    CREATE TYPE hqp_ab_form AS ENUM ('chain', 'pair');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_ab_mode AS ENUM ('pcm', 'sdm');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_ab_slot AS ENUM ('1x', 'nx');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_ab_axis AS ENUM ('phase', 'cutoff', 'ringing');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_ab_answer AS ENUM ('first', 'second', 'same');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE hqp_ab_end AS ENUM ('done', 'stopped', 'break', 'left', 'failed');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS hqp_ab_sittings (
+    id BIGSERIAL PRIMARY KEY,
+    -- "Forget this library" removes its sittings with it (AB-1 Q15)
+    hqp_endpoint_id INTEGER NOT NULL REFERENCES hqp_endpoints(id) ON DELETE CASCADE,
+    engine TEXT NOT NULL,                   -- the build its filter names belong to
+    mode hqp_ab_mode NOT NULL,
+    slot hqp_ab_slot NOT NULL,              -- the slot the track's source runs, the one a swap writes
+    fractional BOOLEAN NOT NULL,            -- the source and the output in different rate families
+    form hqp_ab_form NOT NULL,
+    track_id UUID REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE SET NULL,
+    from_s NUMERIC(9,3) NOT NULL,           -- the passage, in the track
+    length_s NUMERIC(5,2) NOT NULL,
+    lead_s NUMERIC(4,2),                    -- the cut's digital silence before it; NULL: ended before its warm-up
+    silence_s NUMERIC(5,2),                 -- P, as finally played; NULL: ended before its warm-up
+    tolerance_s NUMERIC(3,2) NOT NULL,      -- how far a silence may miss P (0.15 s PCM, 0.3 s SDM)
+    slipped SMALLINT NOT NULL DEFAULT 0,    -- steps played again for a silence that missed
+    learn_plays SMALLINT NOT NULL DEFAULT 0,  -- "Play" of the passage before the test: no duels, no listens
+    -- What is put back: the slots HQPlayer held before, by name, and the
+    -- volume (the warm-up's level, `muted_to`; NULL: a fixed volume)
+    before_filter_nx TEXT,
+    before_filter_1x TEXT,
+    before_volume NUMERIC(6,2),
+    muted_to NUMERIC(6,2),
+    last_set TEXT,                          -- the filter it set last: its mark, which a put-back after a crash stands on
+    champion TEXT,                          -- the chain's champion now; the pair's: their own filter
+    picked TEXT,                            -- the chain's champion at its end, the pair's winner; NULL: none
+    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMPTZ,
+    ended hqp_ab_end,                       -- NULL with no sitting going: the process died in it
+    owed BOOLEAN NOT NULL DEFAULT FALSE,    -- ended, its put-back not taken by HQPlayer yet
+    -- A put-back HQPlayer refused twice alike: closed as left, said once
+    -- (the notice hqplayer.ab_refused) — the filter, or the volume, it would
+    -- not take back
+    refused_filter TEXT,
+    refused_volume NUMERIC(6,2),
+    refused_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_hqp_ab_sittings_context
+    ON hqp_ab_sittings(hqp_endpoint_id, engine, mode, slot, fractional);
+-- A sitting's natural key: the node backup's merge unions by it (life_merge)
+CREATE UNIQUE INDEX IF NOT EXISTS uq_hqp_ab_sittings_start
+    ON hqp_ab_sittings(hqp_endpoint_id, started_at);
+
+CREATE TABLE IF NOT EXISTS hqp_ab_duels (
+    sitting_id BIGINT NOT NULL REFERENCES hqp_ab_sittings(id) ON DELETE CASCADE,
+    n SMALLINT NOT NULL,
+    first_name TEXT NOT NULL,               -- heard first
+    second_name TEXT NOT NULL,
+    answer hqp_ab_answer NOT NULL,          -- the chain: better = second, worse = first
+    axis hqp_ab_axis,                       -- the chain: the axis probed; NULL in the pair and the replay
+    check_step BOOLEAN NOT NULL DEFAULT FALSE,   -- the champion's replay after "worse"
+    counted BOOLEAN NOT NULL DEFAULT TRUE,       -- FALSE: set aside by a failed focus check
+    swapped BOOLEAN,                        -- the chain: the answer made it champion (FALSE: kept theirs)
+    answered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (sitting_id, n)
 );
 
 CREATE TABLE IF NOT EXISTS album_variants (
@@ -1956,6 +2069,7 @@ CREATE INDEX IF NOT EXISTS idx_tags_name_lower ON tags(name text_pattern_ops);
 -- Association indexes
 CREATE INDEX IF NOT EXISTS idx_track_artists_artist_id ON track_artists(artist_id);
 CREATE INDEX IF NOT EXISTS idx_album_artists_artist_id ON album_artists(artist_id);
+CREATE INDEX IF NOT EXISTS idx_track_credits_artist ON track_credits(artist_id, role);
 CREATE INDEX IF NOT EXISTS idx_album_artists_mbid ON album_artists(mbid) WHERE mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_media_files_recording_mbid ON media_files(recording_mbid) WHERE recording_mbid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_album_genres_genre_id ON album_genres(genre_id);

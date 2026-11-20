@@ -225,6 +225,11 @@ def _h_get_track_info(track_id: str) -> str:
         return f"Error getting track info: {e}"
 
 
+def _h_get_player_state(queue_offset: int = 0, queue_limit: int = 50) -> str:
+    from routers.player import get_playlist, get_status
+    return aq.player_state(get_status(), get_playlist(), queue_offset, queue_limit)
+
+
 # -- Playback handlers -------------------------------------------------------
 #
 # Thin wrappers over the player router: it owns the canonical queue, the output
@@ -736,6 +741,16 @@ def register_all():
             ToolParam("track_id", "string", "Track UUID", required=True),
         ],
         handler=_h_get_track_info,
+    ))
+
+    REGISTRY.register(ToolDef(
+        name="get_player_state",
+        description=aq.PLAYER_STATE_DOC,
+        parameters=[
+            ToolParam("queue_offset", "integer", "The first queue slot to list (0-based, default 0)", required=False, default=0),
+            ToolParam("queue_limit", "integer", "How many queue slots to list (1..100, default 50); a page may end sooner", required=False, default=50),
+        ],
+        handler=_h_get_player_state,
     ))
 
     REGISTRY.register(ToolDef(

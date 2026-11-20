@@ -127,7 +127,10 @@ AB_STEPS = (
     "happened, not which.",
     "4. Name the one you heard, or say you could not tell. Could not tell is an answer: then the CPU each takes on "
     "this HQPlayer decides (hqplayer_host_fit).",
-    "5. Repeat it a few times: one answer can be chance.")
+    "5. Repeat it a few times: one answer can be chance.",
+    "In Sautium, Compare by ear on the HQPlayer screen does all of this for the track playing: the user's "
+    "filter against one other, blind, the same silence before each — an hqp_ab block naming the other filter "
+    "opens it.")
 # The kind of name each axis of the file's pairs holds
 AXIS_KIND = {"phase": "filter", "apodizing": "filter", "length": "filter", "order": "modulator",
              "ec": "modulator", "adaptive": "modulator", "generation": "modulator", "tuning": "modulator",
@@ -156,14 +159,14 @@ TOOLS = (
     Tool("hqplayer_filter_facts",
          "What HQPlayer says of one of its filters or modulators — Signalyst's technical rating, the author's "
          "focus, the ratio class, a modulator's generation — and what Sautium has published of its measurements on "
-         "the HQPlayer engine they were made on: properties per context or per rate, the names with the same "
-         "output, the approved pairs it belongs to, history and the author's stated purpose with their sources, "
-         "and the page's address. Refuses while HQPlayer is not the selected output.",
+         "the HQPlayer engine they were made on: properties per context or per rate, the names that gave the same "
+         "output where the atlas compared them, the approved pairs it belongs to, history and the author's stated "
+         "purpose with their sources, and the page's address. Refuses while HQPlayer is not the selected output.",
          (Param("name", "A filter or modulator name as HQPlayer lists it (hqplayer_get_settings).", True),)),
     Tool("hqplayer_compare",
          "Two filters, or two modulators, side by side: what HQPlayer says of each, what Sautium has published of "
-         "their measurements, whether they give the same output, and how each runs on this HQPlayer. States "
-         "differences; never ranks.",
+         "their measurements, whether they gave the same output where the atlas compared them, and how each runs "
+         "on this HQPlayer. States differences; never ranks.",
          (Param("name_a", "The first filter or modulator, as HQPlayer lists it.", True),
           Param("name_b", "The second, of the same kind.", True))),
     Tool("hqplayer_differs_only_in",
@@ -219,9 +222,11 @@ class Read(NamedTuple):
     # The file at the shipped path (hqp_atlas.read(SHIPPED, None))
     atlas: Any = None
     # The rate check's own inputs (hqp_rate_check): the adaptive output rate,
-    # and the queue's sources — None when the queue is not checked
+    # and the queue's sources — None when the queue is not checked; and the
+    # "may" rates HQPlayer was heard playing, by setting (HqpBackend.rate_heard)
     adaptive: Optional[str] = None
     sources: Any = None
+    heard: Optional[Callable[[tuple], frozenset]] = None
     # compare: this HQPlayer's endpoint row, and the picker's marks with the
     # setting and source they are for (routers.hqplayer._headroom)
     endpoint: Optional[dict] = None
@@ -381,7 +386,8 @@ def _table(t: Dict[str, Any], pad: str) -> List[str]:
 def _check(read: Read, n: Named) -> List[str]:
     """The rate check's own lines for the name as if set — a filter in both
     filter slots, a modulator as the modulator — at the current rate, mode
-    and queue; its modulator half from the published atlas alone."""
+    and queue; its modulator half from the published atlas alone, and a
+    "may" HQPlayer disproved at that setting not said (read.heard)."""
     lists = read.lists
     if (read.sources is None or n.kind not in CHECK or not read.state
             or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers"))):
@@ -391,7 +397,8 @@ def _check(read: Read, n: Named) -> List[str]:
     inputs = hqp_rate_check.inputs({**read.state, **slots}, lists["modes"], lists["rates"], lists["filters"],
                                    lists["shapers"], adaptive=read.adaptive, atlas=read.atlas,
                                    engine=_engine(read), published=True)
-    said = hqp_rate_check.lines(hqp_rate_check.check(inputs, read.sources))
+    check = hqp_rate_check.check(inputs, read.sources)
+    said = hqp_rate_check.lines(check, read.heard(check.key) if read.heard else frozenset())
     lines = [plain(p) for cause in ("modulator", "filter") for p in said.get(cause, ())]
     return [CHECK[n.kind].format(name=n.name)] + [INDENT + line for line in lines] if lines else []
 

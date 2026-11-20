@@ -363,6 +363,18 @@ def _break(doc, how):
         p["contexts"]["1x-44.1k-705.6k"] = next(iter(p["contexts"].values()))
     elif how == "a group of two releases":
         _filter(doc, "demo-sinc-b")["release"] = "9.4.1/sdm"
+    elif how == "a comparison into no rate":
+        doc["groups"][0]["comparisons"][1]["fs_out"] = 768000.5
+    elif how == "a word across the families for a name that is no member":
+        doc["groups"][0]["cross_family"]["demo-sinc-z"] = "plays"
+    elif how == "a licence without its address":
+        doc["sources"][1]["license"] = "CC BY-NC-SA 3.0"
+    elif how == "a licence's address of another scheme":
+        doc["sources"][1].update({"license": "CC BY-NC-SA 3.0", "license_url": "javascript:alert(1)"})
+    elif how == "a source's address of another scheme":
+        doc["sources"][1]["url"] = "javascript:alert(1)"
+    elif how == "a source's address with a user":
+        doc["sources"][1]["url"] = "https://someone@forum.example.org/t/1"
     return doc
 
 
@@ -378,7 +390,10 @@ BREAKS = ("another schema", "a missing key", "a wrong type deep inside", "an unr
           "a source it cites that the file does not hold", "no engine", "a group figure's bound set by a list",
           "an idle bound set by no excitation the words name", "a range without its min",
           "a rate longer than int() reads", "an engine longer than int() reads", "a release of another engine",
-          "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases")
+          "a filter pair keyed by a rate", "a modulator pair keyed by a context", "a group of two releases",
+          "a comparison into no rate", "a word across the families for a name that is no member",
+          "a licence without its address", "a licence's address of another scheme",
+          "a source's address of another scheme", "a source's address with a user")
 
 
 @pytest.mark.parametrize("how", BREAKS)
@@ -413,6 +428,9 @@ def test_a_refusal_names_the_place_by_keys_that_passed_their_shape(tmp_path, cap
     caplog.clear()
     assert _read(tmp_path, _break(_doc(), "a rate no DSD rate of its source")) is None
     assert "not a DSD rate of its source, at engines.9.4.1.modulators.dmx5.rates.8467200" in caplog.text
+    caplog.clear()
+    assert _read(tmp_path, _break(_doc(), "a source's address of another scheme")) is None
+    assert "not text of its shape, at sources[1].url" in caplog.text
     caplog.clear()
     assert _read(tmp_path, _break(_doc(), "a source of no family's base")) is None
     assert "a source no rate family is based on, at engines.9.4.1.modulators.dmx5.rates.5644800.fs_in" in caplog.text
@@ -623,7 +641,7 @@ def test_a_measured_filter_row(atlas):
     assert a["chips"][1]["parts"] == [{"t": "±"}, {"n": "12.346"}, {"t": " ms"}]
     assert a["tag"]["text"] == "Signalyst 4/5" and a["words"] is None and a["card"] is True
     assert plain(a["caption"]) == "Apod Y per the manual"
-    assert plain(a["line3"]) == "Same output as demo-sinc-b (within one step)"
+    assert plain(a["line3"]) == "Same output as demo-sinc-b (within one step, compared into 705.6k and 768k)"
     assert f["demo-sinc-b"]["caption"] is None  # the manual's N says nothing on the row
     assert _chips(f["demo-poly-mp"]) == ["minimum phase", "0.0 ms before · 0.300 ms after", "Any"]
     assert _chips(f["demo-gauss-x"]) == ["intermediate phase", "1.5 ms before · 2.5 ms after", "position-dependent",
@@ -818,15 +836,94 @@ def test_an_identical_group_of_three_draws_one_bracket_in_hqplayers_order(atlas)
 
 
 @pytest.mark.parametrize("relation, line", [
-    ("bit_identical", "Same output as demo-sinc-b (bit for bit)"),
-    ("within_1_lsb", "Same output as demo-sinc-b (within one step)"),
+    ("bit_identical", "Same output as demo-sinc-b (bit for bit, compared into 705.6k and 768k)"),
+    ("within_1_lsb", "Same output as demo-sinc-b (within one step, compared into 705.6k and 768k)"),
     ("same_figures_within_precision", "Same figures as demo-sinc-b (within the measurement's precision)")])
-def test_a_twins_line_in_its_relations_words(tmp_path, relation, line):
+def test_a_twins_line_names_its_relation_and_where_its_comparisons_went(tmp_path, relation, line):
+    # One short line: the output rates the comparisons went into, each once and
+    # ascending, as the site's index says them; the group's say on the card
+    # alone (the row carried it 2026-10-23, three or four lines at 360 px).
+    # In SDM mode, where a row shows its PCM facts, the same line.
     doc = _doc()
     doc["groups"][0]["relation"] = relation
     doc["engines"]["9.4.1"]["identity_groups"][0]["relation"] = relation
     atlas = _read(tmp_path, doc)
-    assert plain(_facts_of(atlas, "filter", PCM, "9.4.1", "pcm")["demo-sinc-a"]["line3"]) == line
+    say = doc["groups"][0]["say"]
+    for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
+        f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
+        assert plain(f["demo-sinc-a"]["line3"]) == line, mode
+        assert plain(f["demo-sinc-b"]["line3"]) == line.replace("demo-sinc-b", "demo-sinc-a"), mode
+        text = _card_text(_card(atlas, "filter", "demo-sinc-a", spec, mode=mode))
+        assert f"{line.split(' (')[0]} — {say}." in text, mode
+
+
+def test_a_twin_compared_sample_by_sample_with_no_comparison_has_no_line(tmp_path):
+    doc = _doc()
+    rows = doc["groups"][0]["comparisons"]
+    rows.append({**rows[0], "fs_out": 352800})
+    assert plain(_facts_of(_read(tmp_path, doc), "filter", PCM, "9.4.1", "pcm")["demo-sinc-a"]["line3"]) == \
+        "Same output as demo-sinc-b (within one step, compared into 352.8k, 705.6k and 768k)"
+    for relation in ("within_1_lsb", "bit_identical", "same_figures_within_precision"):
+        doc = _doc()
+        doc["groups"][0].update(relation=relation, comparisons=[])
+        doc["engines"]["9.4.1"]["identity_groups"][0]["relation"] = relation
+        for at in ("empty", "absent"):
+            if at == "absent":
+                del doc["groups"][0]["comparisons"]
+            (tmp_path / relation / at).mkdir(parents=True)
+            atlas = _read(tmp_path / relation / at, doc)
+            for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
+                f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
+                lines = [f[n]["line3"] and plain(f[n]["line3"]) for n in ("demo-sinc-a", "demo-sinc-b")]
+                # the same figures were never a sample-by-sample claim: their line needs no comparison
+                assert lines == ([None, None] if relation != "same_figures_within_precision" else
+                                 ["Same figures as demo-sinc-b (within the measurement's precision)",
+                                  "Same figures as demo-sinc-a (within the measurement's precision)"]), \
+                    (relation, at, mode)
+
+
+@pytest.mark.parametrize("unsaid", [None, ""])
+def test_a_group_without_a_say_claims_nothing_on_its_card_its_members_are_named(tmp_path, unsaid):
+    # The card of a group without a say, a magnitude group's as a twin's, names
+    # the members alone: "Same output as demo-sinc-b." said more than any
+    # comparison made (until 2026-10-23). The row's line comes from the
+    # comparisons, so a twin keeps it
+    doc = _doc()
+    for g in doc["groups"][:2]:
+        if unsaid is None:
+            del g["say"]
+        else:
+            g["say"] = unsaid
+    atlas = _read(tmp_path, doc)
+    for spec, mode in ((PCM, "pcm"), (SDM, "sdm")):
+        f = _facts_of(atlas, "filter", spec, "9.4.1", mode)
+        assert plain(f["demo-sinc-a"]["line3"]) == \
+            "Same output as demo-sinc-b (within one step, compared into 705.6k and 768k)", mode
+        for name, names in (("demo-sinc-a", "demo-sinc-a and demo-sinc-b."),
+                            ("demo-poly-mp", "demo-poly-lp and demo-poly-mp.")):
+            text = _card_text(_card(atlas, "filter", name, spec, mode=mode))
+            assert names in text and not any(re.search(r"\bSame (output|magnitude)\b", t) for t in text), (mode, name)
+
+
+@pytest.mark.parametrize("across, line", [
+    ({"demo-sinc-a": "plays", "demo-sinc-b": "refused"},
+     "Across rate families, in the one conversion the atlas tried: demo-sinc-a: played; demo-sinc-b: refused."),
+    ({"demo-sinc-b": "refused"},
+     "Across rate families, in the one conversion the atlas tried: demo-sinc-a: not tried; demo-sinc-b: refused."),
+    ({}, None), ({"demo-sinc-a": "void", "demo-sinc-b": "refused"}, None)])
+def test_what_hqplayer_did_across_the_families_is_said_in_the_past_of_the_one_conversion_tried(tmp_path, caplog,
+                                                                                                across, line):
+    # As the export writes it: a word for each member the try named, none for
+    # the others; "plays" was a rule from one conversion (until 2026-10-23).
+    # A word with no past tense here shows no line, logged by its name once
+    caplog.set_level(logging.INFO, logger="hqp_atlas")
+    doc = _doc()
+    doc["groups"][0]["cross_family"] = across
+    text = _card_text(_card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM))
+    assert "Same output as demo-sinc-b — the same output within one step, in this fictional file." in text  # read
+    said = [t for t in text if t.startswith("Across rate families")]
+    assert said == ([line] if line else [])
+    assert caplog.text.count("no words for the cross_family word void") == (1 if "void" in across.values() else 0)
 
 
 def test_a_relation_without_words_shows_nothing_and_is_logged_by_its_name(tmp_path, caplog):
@@ -865,7 +962,7 @@ def test_a_filters_card(atlas):
         "A variant of, per the manual (§9.9): demo-gauss-x",
         "## None",
         "Same output as demo-sinc-b — the same output within one step, in this fictional file.",
-        "Across rate families: demo-sinc-a: plays; demo-sinc-b: refused.",
+        "Across rate families, in the one conversion the atlas tried: demo-sinc-a: played; demo-sinc-b: refused.",
         "Choose by the fictional listener's own ears.",
         "A fictional note on how the two were compared.",
         "## Properties",
@@ -907,8 +1004,8 @@ def test_a_filters_card(atlas):
         "Only what the sources state; a missing event means not stated in the sources read.",
         "## Sources",
         "Measured by Sautium on HQPlayer engine 9.4.1.",
-        "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03. “A fictional sentence, quoted only "
-        "by Sautium's tests.”",
+        "Fictional Author, Fictional Forum › Fictional thread #1 (https://forum.example.org/t/1), 2001-02-03. “A "
+        "fictional sentence, quoted only by Sautium's tests.”",
         "Fictional Vendor, Fictional User Manual 0.0.0, §9.9 Fictional filter table, 2001-01-01."]
 
 
@@ -1000,8 +1097,8 @@ def test_a_modulators_card(atlas):
         "## Sources",
         "Measured by Sautium on HQPlayer engine 9.4.1.",
         "Measured with demo-sinc-a in both filter slots.",
-        "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03. “A fictional sentence, quoted only "
-        "by Sautium's tests.”"]
+        "Fictional Author, Fictional Forum › Fictional thread #1 (https://forum.example.org/t/1), 2001-02-03. “A "
+        "fictional sentence, quoted only by Sautium's tests.”"]
     # The highest stable tone and pair stay out: near full scale stands alone.
     assert "-11" not in json.dumps(_card(atlas, "modulator", "DMX7EC-a", MODULATORS, mode="sdm"))
 
@@ -1062,6 +1159,58 @@ def test_a_source_not_reread_in_full_is_never_quoted_or_cited(tmp_path, atlas):
     text = _card_text(_card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM))
     assert "## The author's stated purpose" not in text and "## History" not in text
     assert not any("Fictional Author" in line for line in text)
+
+
+def test_a_licensed_sources_line_names_its_licence_linked_and_in_words_its_address(tmp_path, atlas):
+    # As Roon's rows carry CC BY-NC-SA 3.0: the licence after the date, as
+    # the site prints it, a link on the screen and its address in words
+    doc = _doc()
+    doc["sources"][1].update({"license": "Fictional Licence 9.9", "license_url": "https://licence.example.org/9.9/"})
+    card = _card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM)
+    line = next(it["line"] for it in card["sections"][-1]["items"] if "Fictional Author" in plain(it["line"]))
+    assert line == [{"t": "Fictional Author, "},
+                    {"a": "Fictional Forum › Fictional thread #1", "href": "https://forum.example.org/t/1"},
+                    {"t": ", 2001-02-03, "},
+                    {"a": "Fictional Licence 9.9", "href": "https://licence.example.org/9.9/"},
+                    {"t": ". “A fictional sentence, quoted only by Sautium's tests.”"}]
+    assert plain(line) == ("Fictional Author, Fictional Forum › Fictional thread #1 (https://forum.example.org/t/1), "
+                           "2001-02-03, Fictional Licence 9.9 (https://licence.example.org/9.9/). “A fictional sentence, "
+                           "quoted only by Sautium's tests.”")
+    # A source without a licence prints none
+    assert "Fictional Licence" not in json.dumps(_everything(atlas), ensure_ascii=False)
+
+
+def test_a_sources_line_links_where_it_was_said_to_its_address_and_one_without_prints_it_as_text(tmp_path, atlas):
+    # CC BY-NC-SA 3.0 §4(d), as Creative Commons' attribution practice reads it. The
+    # site links each source item's "where" to its post; so does the card,
+    # for every row that holds an address, and the words write it out
+    card = _card(atlas, "filter", "demo-sinc-a", PCM)
+    items = [it["line"] for it in card["sections"][-1]["items"]]
+    post = next(line for line in items if "Fictional Author" in plain(line))
+    assert post == [{"t": "Fictional Author, "},
+                    {"a": "Fictional Forum › Fictional thread #1", "href": "https://forum.example.org/t/1"},
+                    {"t": ", 2001-02-03. “A fictional sentence, quoted only by Sautium's tests.”"}]
+    # A row without an address (a manual section, read off a file) keeps its "where" as text
+    manual = next(line for line in items if "Fictional Vendor" in plain(line))
+    assert manual == [{"t": "Fictional Vendor, Fictional User Manual 0.0.0, §9.9 Fictional filter table, 2001-01-01."}]
+    # A row whose address is gone prints its "where" alone, no link and no brackets
+    doc = _doc()
+    del doc["sources"][1]["url"]
+    card = _card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM)
+    post = next(it["line"] for it in card["sections"][-1]["items"] if "Fictional Author" in plain(it["line"]))
+    assert post == [{"t": "Fictional Author, Fictional Forum › Fictional thread #1, 2001-02-03. “A fictional sentence, "
+                          "quoted only by Sautium's tests.”"}]
+    # An address the schema allows — a query, a fragment — is read and linked as written
+    doc = _doc()
+    doc["sources"][1]["url"] = "https://forum.example.org/index.php?do=findComment&comment=1#c"
+    card = _card(_read(tmp_path, doc), "filter", "demo-sinc-a", PCM)
+    post = next(it["line"] for it in card["sections"][-1]["items"] if "Fictional Author" in plain(it["line"]))
+    assert post[1] == {"a": "Fictional Forum › Fictional thread #1",
+                       "href": "https://forum.example.org/index.php?do=findComment&comment=1#c"}
+    # A row never re-read in full shows no address of its own
+    doc = _doc()
+    doc["sources"][2]["url"] = "https://forum.example.org/t/2"
+    assert "forum.example.org/t/2" not in json.dumps(_everything(_read(tmp_path, doc)))
 
 
 def test_a_jussi_source_is_cited_as_the_site_cites_one(tmp_path):

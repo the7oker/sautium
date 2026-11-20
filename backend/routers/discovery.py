@@ -477,7 +477,7 @@ def run_search(
     own — two search implementations is how one of them goes stale (the API-
     provider tools spent months calling /search/* endpoints that no longer
     existed)."""
-    from discovery_engine import build
+    from discovery_engine import WORD_ARM_MIN, build
 
     instruments = list(instruments or [])
     genres = list(genres or [])
@@ -537,6 +537,8 @@ def run_search(
         # ORDER BY in the branch re-sorts relaxed_order's stream anyway.
         db.execute(text("SET LOCAL hnsw.ef_search = 1000"))
         db.execute(text("SET LOCAL hnsw.iterative_scan = relaxed_order"))
+        db.execute(text("SET LOCAL pg_trgm.strict_word_similarity_threshold = :t"),
+                   {"t": WORD_ARM_MIN})
         rows = db.execute(text(sql), params).fetchall()
     # A short page IS the end of the block: the engine bounds the candidate pool at
     # its retrieve horizon and the dominance cut trims the junk tail, so there is no

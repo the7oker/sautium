@@ -544,20 +544,21 @@ def sources(openers: List[dict]) -> Sources:
     """What HQPlayer will decode from these queue slots, the first being the
     one it reads — their source rates for the rate check, in one query: a
     file's from the row the scan or the library sync wrote (a CUE image's
-    every slice its own slot), a DSD file counted apart, and so is a stream.
-    A file whose row gives no rate, and a slot nothing can serve, are in
-    none of them."""
+    every slice its own slot), a DSD file counted apart — DSF, DFF, or one
+    bit a sample (WavPack holds DSD too) — the first slot's own rate kept,
+    and so is a stream. A file whose row gives no rate, and a slot nothing
+    can serve, are in none of them."""
     files = [(n, o) for n, o in enumerate(openers, 1) if o.get("kind") in ("file", "hqp")]
     rows = db_query("""
         SELECT r.sample_rate AS rate, r.dsd, count(*) AS slots, bool_or(s.n = 1) AS first
           FROM unnest(%(ns)s::int[], %(kinds)s::text[], %(paths)s::text[], %(endpoints)s::int[])
                AS s(n, kind, path, endpoint)
          CROSS JOIN LATERAL (
-               SELECT mf.sample_rate, coalesce(mf.file_format IN ('DSF', 'DFF'), false) AS dsd
+               SELECT mf.sample_rate, coalesce(mf.file_format IN ('DSF', 'DFF') OR mf.bit_depth = 1, false) AS dsd
                  FROM media_files mf
                 WHERE s.kind = 'file' AND mf.file_path = s.path AND mf.sample_rate > 0
                UNION ALL
-               SELECT f.sample_rate, coalesce(f.file_format IN ('DSF', 'DFF'), false)
+               SELECT f.sample_rate, coalesce(f.file_format IN ('DSF', 'DFF') OR f.bit_depth = 1, false)
                  FROM hqp_library_files f JOIN album_variants av ON av.id = f.album_variant_id
                 WHERE s.kind = 'hqp' AND av.hqp_endpoint_id = s.endpoint AND f.hqp_path = s.path
                   AND f.sample_rate > 0
@@ -567,11 +568,12 @@ def sources(openers: List[dict]) -> Sources:
           "paths": [o.get("path") for _, o in files],
           "endpoints": [o.get("endpoint") for _, o in files]}) if files else []
     pcm: Dict[int, int] = {}
-    dsd, first = 0, None
+    dsd, first, first_dsd = 0, None, None
     for r in rows:
         if r["dsd"]:
             dsd += r["slots"]
+            first_dsd = r["rate"] if r["first"] else first_dsd
         else:
             pcm[r["rate"]] = r["slots"]
             first = r["rate"] if r["first"] else first
-    return Sources(pcm, dsd, sum(1 for o in openers if o.get("kind") in _STREAMED), first)
+    return Sources(pcm, dsd, sum(1 for o in openers if o.get("kind") in _STREAMED), first, first_dsd)

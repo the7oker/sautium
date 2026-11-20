@@ -452,7 +452,7 @@ def test_ab_pair_offers_the_approved_pairs_with_their_size_and_the_steps(tmp_pat
         "  Measured where both play: 1x · 44.1k → 705.6k.",
         "  HQPlayer describes demo-gauss-x as Any and demo-gauss-xa as 2^x up.",
         "  Not measured: the window. From the manual (§9.9)."]
-    assert text[-6:] == list(hqp_assistant.AB_STEPS)
+    assert text[-len(hqp_assistant.AB_STEPS):] == list(hqp_assistant.AB_STEPS)
     near = _say("ab_pair", _read(_dated(tmp_path)), axis="apodizing", near="demo-poly-lp")
     assert "None of them holds demo-poly-lp." in near
     sdm = _say("ab_pair", _read(_dated(tmp_path), "sdm"), axis="order").split("\n")
@@ -488,6 +488,27 @@ def test_filter_facts_adds_the_rate_checks_lines_for_the_name_as_if_set(tmp_path
     assert "in both filter slots" not in _say("filter_facts", read._replace(adaptive="checked"),
                                                name="demo-gauss-xa")
     assert "in both filter slots" not in _say("filter_facts", read, name="demo-gauss-x")   # Any
+
+
+def test_the_assistant_says_no_may_hqplayer_disproved_at_the_setting(tmp_path):
+    # demo-gauss-xa (2^x up, never tried) at 705.6 kHz on an HQPlayer of engine 6, 768 kHz tracks in the queue: it
+    # may stop on them — until HQPlayer was heard playing one at that setting (the backend's rate_heard)
+    read = _read(_dated(tmp_path), engine="6.2.4", adaptive="not checked", sources=Sources({768000: 1}, first=768000))
+    assert "so HQPlayer may stop on the 768 kHz tracks in the queue at 705.6 kHz." in _say("filter_facts", read,
+                                                                                            name="demo-gauss-xa")
+    heard = read._replace(heard=lambda key: frozenset({768000}))
+    assert "in both filter slots" not in _say("filter_facts", heard, name="demo-gauss-xa")
+    # heard with demo-gauss-xa in the Nx slot and none in the 1x one, which leaves it running every source: the
+    # setting the assistant asks of
+    import hqp_rate_check
+    nx = next(f["index"] for f in read.lists["filters"] if f["name"] == "demo-gauss-xa")
+    state = {**read.state, "filterNx": nx, "filter1x": -1}
+    lists = read.lists
+    real = hqp_rate_check.check(hqp_rate_check.inputs(state, lists["modes"], lists["rates"], lists["filters"],
+                                                      lists["shapers"], adaptive=read.adaptive, engine="6.2.4"),
+                                read.sources).key
+    heard = read._replace(state=state, heard=lambda key: frozenset({768000}) if key == real else frozenset())
+    assert "in both filter slots" not in _say("filter_facts", heard, name="demo-gauss-xa")
 
 
 def test_an_empty_line_of_the_file_is_an_empty_line_never_an_error(tmp_path):
@@ -597,6 +618,31 @@ def test_no_word_ranks_and_no_rate_is_said_as_a_label(tmp_path):
     assert {m for text in said for m in re.findall(r"(?:1x|Nx) · [0-9.]+k → [0-9.]+k", text)} == contexts
 
 
+def test_every_same_output_the_tools_say_carries_where_it_was_compared(tmp_path):
+    # The atlas compared its twins only where its groups say: a tool's own words
+    # say "the same output" with "where the atlas compared them", and an answer
+    # says it in a group's lead alone, the group's say — the curation's scope —
+    # with it ("whether they give the same output" until 2026-10-23)
+    own = list(_constants()) + [t.description for t in hqp_assistant.TOOLS] + [
+        p.description for t in hqp_assistant.TOOLS for p in t.params]
+    for text in own:
+        for m in re.finditer(r"same output", text, re.IGNORECASE):
+            assert text[m.end():].startswith(" where the atlas compared them"), text
+    leads = {f"Same output as {other} — the same output within one step, in this fictional file."
+             for other in ("demo-sinc-a", "demo-sinc-b")}
+    said = [line.strip() for text in _every_output(_dated(tmp_path)) for line in text.split("\n")
+            if re.search(r"same output", line, re.IGNORECASE)]
+    assert set(said) == leads
+    # A group without a say: its card names the members alone, so no answer says it
+    doc = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    del doc["groups"][0]["say"]
+    doc["releases"] = {"9.4.1/pcm": "2001-05-06", "9.4.1/sdm": "2001-05-06"}
+    (tmp_path / "unsaid").mkdir()
+    unsaid = _shipped(tmp_path / "unsaid", json.dumps(doc, ensure_ascii=False))
+    assert not [line for text in _every_output(unsaid) for line in text.split("\n")
+                if re.search(r"same output", line, re.IGNORECASE)]
+
+
 def test_both_prompts_carry_the_block_once_and_it_ranks_nothing_and_names_no_finding():
     import assistant_prompt
     block = assistant_prompt._HQPLAYER_FILTERS
@@ -608,6 +654,12 @@ def test_both_prompts_carry_the_block_once_and_it_ranks_nothing_and_names_no_fin
     # A model told to "offer a pair" offered two names with the same output,
     # on a property no axis holds: the block names the tool's pairs alone
     assert "approved pairs hqplayer_ab_pair returns" in block and "are no pair to listen to" in block
+    # A sameness holds as exact as, and where, it was compared: the model says it with the tool's scope, never
+    # wider ("within one LSB" kept), and beyond it says that nothing measured tells whether it holds
+    assert "within the scope the tool gives that sameness — for the same output, its precision, the comparisons" \
+        in block
+    assert "Say the sameness only with that scope" in block
+    assert "beyond it nothing measured says whether that sameness holds" in block
     # No engine number, no address and no measured value: the block is public text
     assert re.search(r"\d|sautium\.net|https?:", block.replace("n/5", "")) is None
     for tool in hqp_assistant.TOOLS:

@@ -182,7 +182,11 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   that Worker sends (verification codes, invites).
 - **HQPlayer** (Signalyst) — a separate commercial product the node drives
   over its network control protocol and finds by its discovery datagram;
-  nothing of it is shipped.
+  nothing of the program is shipped. The HQPlayer atlas's data file
+  (`backend/hqp_atlas.json`, Sautium's measurements under CC BY 4.0) carries
+  quotations of Signalyst's manual and release notes, attributed per source,
+  and of Roon Community posts under CC BY-NC-SA 3.0, each with its licence
+  (`docs/HQPLAYER_INTEGRATION.md` § The atlas).
 - **spinorama.org** — loudspeaker measurements (CEA-2034 aggregates) for the
   gear registry, fetched as `metadata.json` when the owner refreshes it;
   **AutoEq** — headphone measurements, imported from a clone the owner

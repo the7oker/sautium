@@ -21,14 +21,15 @@ A number stays the text the file writes (`Num`): nothing here rounds, formats
 or computes a measured value, and nothing ranks by one — every list keeps
 HQPlayer's order or the file's. A name is looked up in the file's registry,
 never turned into a slug, so a name the registry lacks is not measured. A
-relation, an axis or a difference without words here shows nothing and is
-logged by its name, once. A source not re-read in full (status other than O)
-is never quoted or cited, and no link is given while an entry's release has
-no date.
+relation, an axis, a difference or a word across the rate families without
+words here shows nothing and is logged by its name, once. A source not
+re-read in full (status other than O) is never quoted or cited, and no link
+is given while an entry's release has no date.
 
-What a screen gets is wire-ready: a phrase is a list of parts, {"t": text} or
-{"n": a number's token}, so a number reaches the screen as the file wrote it;
-`plain` prints the same phrase as text.
+What a screen gets is wire-ready: a phrase is a list of parts, {"t": text},
+{"n": a number's token} or {"a": a link's text, "href": its address}, so a
+number reaches the screen as the file wrote it; `plain` prints the same phrase
+as text, a link's address in brackets after its text.
 
 `rate_name` names a rate HQPlayer reports as the HQPlayer screen does, for
 every text the node words about one; it reads no atlas. `near_full_scale`
@@ -60,6 +61,14 @@ MINUS = "−"
 class Num(str):
     """A number as the file writes it: "0.100" stays "0.100", "6.0" stays
     "6.0", "-0.5" stays "-0.5". The screen shows the token."""
+
+
+class Link(NamedTuple):
+    """A text the screen draws as a link to `href`: where a source was said,
+    to the post or page itself, and a licence a source's terms ask every
+    copy of it to name, to the licence's own address."""
+    text: str
+    href: str
 
 
 # -- The words -------------------------------------------------------------------
@@ -96,9 +105,13 @@ APOD_CLAUSE = "Apod {mark} per the manual"
 CLAUSES = " · "
 NOT_MEASURED = "not measured on engine {engine}"
 NOT_MEASURED_TITLE = "Listed by HQPlayer, not measured on engine {engine}"
+# A twin's line, short: the relation and, for a group compared sample by
+# sample, the output rates its comparisons went into, as the site's index
+# words them — "compared into", since "into" alone reads as every conversion
+# into those rates. The group's say stands on its card
 TWIN = {
-    "bit_identical": "Same output as {other} (bit for bit)",
-    "within_1_lsb": "Same output as {other} (within one step)",
+    "bit_identical": "Same output as {other} (bit for bit, compared into {rates})",
+    "within_1_lsb": "Same output as {other} (within one step, compared into {rates})",
     "same_figures_within_precision": "Same figures as {other} (within the measurement's precision)",
 }
 ORDER = {"5": "fifth", "7": "seventh"}
@@ -157,10 +170,20 @@ RELATION = {
     "same_figures_within_precision": "Same figures as",
     "same_magnitude": "Same magnitude as",
 }
+# A group's lead on its card, as the site's member box says it: the say
+# carries the group's scope (a twin's: where the two were compared). Without a
+# say the card names the members alone — the relation's word says more than
+# any comparison made
 GROUP_LEAD = "{relation} {others} — {say}."
-GROUP_LEAD_PLAIN = "{relation} {others}."
-ACROSS = "Across rate families: {families}."
+GROUP_LEAD_PLAIN = "{names}."
+# What HQPlayer did with each member in the one conversion across the rate
+# families the atlas tried, in the past tense, as the site's box says it: a
+# member the file holds no word for was not tried there, and a word without
+# its past tense here shows no line
+ACROSS = "Across rate families, in the one conversion the atlas tried: {families}."
 ACROSS_ONE = "{name}: {what}"
+PLAYED = {"plays": "played", "refused": "refused"}
+NOT_TRIED = "not tried"
 PROPERTIES = "Properties"
 OTHER_CONTEXTS = "The other contexts"
 ROWS = (
@@ -248,6 +271,7 @@ SOURCES = "Sources"
 MEASURED_BY = "Measured by Sautium on HQPlayer engine {engine}."
 CONTEXT_FILTER = "Measured with {filter} in both filter slots."
 SOURCE = "{who}, {where}, {date}."
+SOURCE_LICENSED = "{who}, {where}, {date}, {license}."
 QUOTE = " “{quote}”"
 CITE_MANUAL = "the manual ({section})"
 CITE_DOC = "Signalyst, {where}, {date}"
@@ -368,6 +392,12 @@ _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 # raise instead of refusing the file
 _ENGINE = re.compile(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+# The screen puts it in an href: https alone, no quote, space or scheme of its own
+_HTTPS = re.compile(r"https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~%/-]*)?")
+# A source's address, as the atlas schema's common.json holds it (a query or a
+# fragment allowed): https and a host in lower case, no user, no port, no space
+# — the reader refuses no row the publish step let through
+_SOURCE_URL = re.compile(r"https://[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:[/?#][^\s@\\]*)?")
 _CONTEXT = re.compile(r"(?:1x|nx)-[0-9.]+k-[0-9.]+k")
 # No leading zero: two keys must never name one rate
 _RATE = re.compile(r"[1-9][0-9]{0,9}")
@@ -507,6 +537,12 @@ def _check(doc: Any) -> None:
         _one_of(s.get("status"), ("O", "S"), f"{at}.status")
         if "quote" in s:
             _text(s["quote"], f"{at}.quote")
+        if "url" in s:
+            _text(s["url"], f"{at}.url", _SOURCE_URL)
+        _need(("license" in s) == ("license_url" in s), "a licence without its address, or an address alone", at)
+        if "license" in s:
+            _text(s["license"], f"{at}.license")
+            _text(s["license_url"], f"{at}.license_url", _HTTPS)
         _need(sid not in sources, "a source id held twice", at)
         sources[sid] = s
 
@@ -526,9 +562,15 @@ def _check(doc: Any) -> None:
             _text(g["choose_by"], f"{at}.choose_by")
         if "sources" in g:
             _cites(g["sources"], f"{at}.sources", sources, 0)
+        # A twin's line names the output rates its comparisons went into
+        for j, c in enumerate(_arr(g.get("comparisons", []), f"{at}.comparisons")):
+            _obj(c, f"{at}.comparisons[{j}]")
+            fs_out = c.get("fs_out")
+            _need(isinstance(fs_out, Num) and _RATE.fullmatch(fs_out), "not a rate", f"{at}.comparisons[{j}].fs_out")
         if "cross_family" in g:
+            # As the export writes it: a word for each member the try named, none for the others
             across = _obj(g["cross_family"], f"{at}.cross_family")
-            _need(sorted(across) == sorted(members), "not one word per member", f"{at}.cross_family")
+            _need(set(across) <= set(members), "a word for a name that is no member", f"{at}.cross_family")
             for what in across.values():
                 _one_of(what, ("plays", "refused", "void", "substituted"), f"{at}.cross_family")
         _need(gid not in groups, "a group id held twice", at)
@@ -1079,12 +1121,15 @@ def _join(phrases: List[List[Any]], sep: str) -> List[Any]:
 
 
 def wire(phrase: List[Any]) -> List[Dict[str, str]]:
-    """A phrase as the screen takes it: {"t": text} and {"n": a number's
-    token}, adjacent texts merged."""
+    """A phrase as the screen takes it: {"t": text}, {"n": a number's
+    token} and {"a": a link's text, "href": its address}, adjacent texts
+    merged."""
     out: List[Dict[str, str]] = []
     for part in phrase:
         if isinstance(part, Num):
             out.append({"n": str(part)})
+        elif isinstance(part, Link):
+            out.append({"a": part.text, "href": part.href})
         elif part:
             if out and "t" in out[-1]:
                 out[-1] = {"t": out[-1]["t"] + part}
@@ -1095,8 +1140,10 @@ def wire(phrase: List[Any]) -> List[Dict[str, str]]:
 
 def plain(parts: List[Dict[str, str]]) -> str:
     """Wire parts as text, a negative number's hyphen-minus drawn as the minus
-    sign — as the screen draws it."""
-    return "".join(p["t"] if "t" in p else _minus(p["n"]) for p in parts)
+    sign — as the screen draws it — and a link's address in brackets after
+    its text, where the screen links the text: a copy in words names it too."""
+    return "".join(p["t"] if "t" in p else f"{p['a']} ({p['href']})" if "a" in p else _minus(p["n"])
+                   for p in parts)
 
 
 def _minus(token: str) -> str:
@@ -1114,10 +1161,17 @@ def context_label(key: str) -> str:
     return CONTEXT_LABEL.format(slot="Nx" if slot == "nx" else "1x", source=source, output=output)
 
 
+def _k_rate(hz: int) -> str:
+    """A rate of the atlas's comparisons as its pages write it, as a context
+    does: "705.6k", "768k". A rate HQPlayer reports is rate_name's."""
+    return f"{Decimal(hz) / 1000}k"
+
+
 def rate_name(hz: int) -> str:
     """A rate HQPlayer reports, named as the HQPlayer screen names it
     (app-shell.js fmtRateLabel) — the one namer for every text the node
-    words: kHz up to 768 kHz; above, a DSD rate by its power-of-two multiple
+    words of one (the atlas's own rates are its pages': context_label,
+    _k_rate): kHz up to 768 kHz; above, a DSD rate by its power-of-two multiple
     (64 and up) of a 44.1k, 48k or 32k base, any base but 44.1k said beside
     it ("DSD256", "DSD512 (48k)", "DSD64 (32k)"); anything else — the PCM
     rates 1.4112 and 1.536 MHz among them — in MHz. "—" for none."""
@@ -1337,12 +1391,21 @@ def _modulator_chips(found: Found) -> List[Dict[str, Any]]:
 
 
 def _twin(atlas: Atlas, found: Found) -> Optional[List[Dict[str, str]]]:
-    """A twin's line: the other member of an identical group of two."""
+    """A twin's line: the other member of an identical group of two, in
+    TWIN's words — for a group compared sample by sample, with the output
+    rates its comparisons went into; None for such a group with no comparison,
+    as the relation alone says more than any comparison made."""
     ident = atlas.identical(found)
-    if ident is None or len(ident[0]["members"]) != 2:
+    g = ident[1] if ident else None
+    if g is None or len(g["members"]) != 2:
         return None
-    other = next(m for m in ident[0]["members"] if m != found.entry["name"])
-    return wire(_phrase(TWIN[ident[0]["relation"]], other=other))
+    other = next(m for m in g["members"] if m != found.entry["name"])
+    if g["relation"] == "same_figures_within_precision":
+        return wire(_phrase(TWIN[g["relation"]], other=other))
+    rates = sorted({int(c["fs_out"]) for c in g.get("comparisons", ())})
+    if not rates:
+        return None
+    return wire(_phrase(TWIN[g["relation"]], other=other, rates=words([_k_rate(hz) for hz in rates])))
 
 
 def _bracket(atlas: Atlas, found: Found, rows: List[Dict[str, Any]],
@@ -1491,9 +1554,14 @@ def group_section(g: Dict[str, Any], name: str, order: Dict[str, int]) -> Option
     members = _in_order(g["members"], order)
     others = ", ".join(m for m in members if m != name)
     items = [_line(_phrase(GROUP_LEAD, relation=relation, others=others, say=g["say"]) if g.get("say")
-                   else _phrase(GROUP_LEAD_PLAIN, relation=relation, others=others))]
-    if "cross_family" in g:
-        across = "; ".join(ACROSS_ONE.format(name=m, what=g["cross_family"][m]) for m in members)
+                   else _phrase(GROUP_LEAD_PLAIN, names=_group_names(members, order)))]
+    tried = g.get("cross_family") or {}
+    unworded = sorted({word for word in tried.values() if word not in PLAYED})
+    for word in unworded:
+        _no_words("cross_family word", word)
+    if tried and not unworded:
+        across = "; ".join(ACROSS_ONE.format(name=m, what=PLAYED[tried[m]] if m in tried else NOT_TRIED)
+                           for m in members)
         items.append(_line(_phrase(ACROSS, families=across)))
     if g.get("choose_by"):
         items.append(_line(_phrase(CHOOSE_BY, choose_by=g["choose_by"])))
@@ -1824,7 +1892,8 @@ def pair_items(atlas: Atlas, found: Found, p: Dict[str, Any], used: set) -> List
         _no_words("axis", p["axis"])
         return []
     i = p["members"].index(found.entry["name"])
-    items = [_line(_phrase(PAIR_LEAD, axis=axis, other=p["members"][1 - i]))]
+    # `other`: the member the line names, for the card's "Compare by ear"
+    items = [{**_line(_phrase(PAIR_LEAD, axis=axis, other=p["members"][1 - i])), "other": p["members"][1 - i]}]
     items += [_note(detail) for detail in pair_detail(p, i, used)]
     tail = pair_tail(atlas, p)
     return items + ([_note(tail)] if tail else [])
@@ -1884,7 +1953,15 @@ def _sources(atlas: Atlas, found: Found) -> Optional[Dict[str, Any]]:
         s = atlas.source(sid)
         if s is None:
             continue
-        line = _phrase(SOURCE, who=s["who"], where=s["where"], date=s["date"])
+        # where it was said linked to the post itself, as the site's source
+        # items are and as Creative Commons' attribution practice asks (CC
+        # BY-NC-SA 3.0 §4(d)): on the screen and, in brackets, in words
+        where = Link(s["where"], s["url"]) if "url" in s else s["where"]
+        if "license" in s:
+            line = _phrase(SOURCE_LICENSED, who=s["who"], where=where, date=s["date"],
+                           license=Link(s["license"], s["license_url"]))
+        else:
+            line = _phrase(SOURCE, who=s["who"], where=where, date=s["date"])
         if "quote" in s:
             line += _phrase(QUOTE, quote=s["quote"])
         items.append(_line(line))

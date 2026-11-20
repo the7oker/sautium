@@ -136,7 +136,7 @@ class PlaybackManager:
             raise OutputHeld(hold)
 
     @contextmanager
-    def hold(self, by: str, label: str) -> Iterator[None]:
+    def hold(self, by: str, label: str, spot: Optional[Spot] = None) -> Iterator[None]:
         """Lend the HQPlayer output to `by` (the benchmark), which drives
         HQPlayer on a connection of its own. The backend is detached — its
         poller ended, so no tick reaches the tracker and no mirror fights the
@@ -148,7 +148,8 @@ class PlaybackManager:
         canonical queue stays the owner's: an edit lands in it as it does
         with no output attached. The release attaches HQPlayer again — still
         held, so no switch lands in between — and the attach mirrors the
-        queue back into it and keeps its slot.
+        queue back into it and keeps its slot — or stands at `spot`, where a
+        comparison began (playback.hqp_ab: its play press resumes there).
 
         The hold begins only once nothing else is driving HQPlayer: it takes
         the mutation lock (a queue replace still adding its tracks finishes
@@ -190,13 +191,18 @@ class PlaybackManager:
             with self._mutate_lock, self._ensure_lock:
                 link.reclaim()
                 try:
-                    self.activate("hqplayer", by_hold=True)
+                    self.activate("hqplayer", by_hold=True, spot=spot)
                 except Exception as e:      # activate rolled back and said "disconnected"
                     logger.warning("HQPlayer not re-attached after the %s (%s) — "
                                    "the next play attaches it", by, e)
                 finally:
                     self._hold = None
                     self._push_status(dict(self._latest_status))
+
+    def publish_status(self) -> None:
+        """The latest status again, to every page: a job that never got the
+        output (hold refused it) tells its sheet so."""
+        self._push_status(dict(self._latest_status))
 
     def update_hold(self, **progress) -> None:
         """Publish the holding job's progress on the status channel."""

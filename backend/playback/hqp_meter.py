@@ -57,6 +57,15 @@ apart than RUN_GAP_S. All-zero frames are silence: HQPlayer sends them
 while it pauses, through the tail it plays out after an entry's end — a
 while after Status says stopped — and for a source's digital silence. The
 source is rebuilt only while a page wants readings.
+
+A run's `start` is the arrival of the read that held its first sounding
+frame — up to a 160 ms burst late; its `onset` is that frame's own time,
+the read's arrival less the hops of the frames after it in the read (the
+lab run of AB-1, 2026-11-17: the frame's time is the start's clock to a σ
+of 12–23 ms in PCM). A comparison by ear (playback.hqp_ab) taps the stream
+itself (tap): every read's arrival, hop and which of its frames sound, told
+on the meter's thread while the tap lasts — the tap holds the socket open
+as a start window does.
 """
 
 import asyncio
@@ -277,6 +286,8 @@ class HqpMeter:
         # Told on the meter's thread of each run's first frame: the status
         # poller's wake-up (attach)
         self._on_run = None
+        # Told of every read of frames (tap), by key
+        self._taps: Dict[object, Callable] = {}
 
     # -- the HqpBackend's lifecycle --------------------------------------------
 
@@ -303,6 +314,7 @@ class HqpMeter:
         with self._cond:
             self._target = None
             self._watches.clear()
+            self._taps.clear()
             self._on_run = None
             self._generation += 1
             self._unavailable = None
@@ -350,6 +362,30 @@ class HqpMeter:
             if not self._wanted_locked():
                 self._stop_locked()
 
+    def tap(self, key, attachment: int, fn: Callable[[float, float, Tuple[bool, ...]], None]) -> bool:
+        """`fn(at, hop_s, sounds)` is told of every read of frames for the
+        attachment `attachment` (attach's number), on the meter's thread,
+        until untap or a detach: when the read arrived (time.time()), the
+        hop between its frames in seconds, and for each frame in order
+        whether it sounds. The tap wants the stream as a start window does
+        — and is a fresh edge: it connects even after a port that refused
+        (the person asked for it now). False when that attachment is gone."""
+        with self._cond:
+            if attachment != self._generation or self._target is None:
+                return False
+            self._taps[key] = fn
+            if self._sock is None and not self._connecting:
+                self._unavailable = None
+                self._due = True
+                self._ensure_thread()
+                self._cond.notify()
+            return True
+
+    def untap(self, key) -> None:
+        with self._cond:
+            if self._taps.pop(key, None) is not None and not self._wanted_locked():
+                self._stop_locked()
+
     def seen(self) -> dict:
         """What the stream showed (hqp_diagnostics.started): its sessions —
         when each opened, gave its first frame of any kind (None: none yet),
@@ -358,7 +394,8 @@ class HqpMeter:
         session's open for a session's first run. Times are time.time()."""
         with self._cond:
             return {"sessions": [{k: s[k] for k in ("open", "first", "closed")} for s in self._sessions],
-                    "runs": [{k: r[k] for k in ("since", "start", "last", "frames")} for r in self._runs]}
+                    "runs": [{k: r[k] for k in ("since", "start", "onset", "last", "frames")}
+                             for r in self._runs]}
 
     def set_gain(self, gain_db: Optional[float]) -> None:
         """What HQPlayer applies ahead of its limiter, from every status
@@ -441,7 +478,7 @@ class HqpMeter:
             self._thread.start()
 
     def _wanted_locked(self) -> bool:
-        return self._paging_locked() or bool(self._watches)
+        return self._paging_locked() or bool(self._watches) or bool(self._taps)
 
     def _paging_locked(self) -> bool:
         return any(p.on for p in self._pages.values())
@@ -622,9 +659,14 @@ class HqpMeter:
                 return delivered, ("protocol", str(e))
             if frames:
                 delivered = True
-                began, paging = self._came(sock, at, sum(1 for _, spectra in frames if spectra.any()))
+                sounds = tuple(bool(spectra.any()) for _, spectra in frames)
+                rate, spectra = frames[0]
+                hop = (spectra.shape[1] - 1) / rate
+                began, paging, taps = self._came(sock, at, sounds, hop)
                 if began is not None:
                     began()
+                for fn in taps:
+                    fn(at, hop, sounds)
                 if not paging:
                     rebuild = None      # a page that turns the meter on later starts afresh
                 for rate, spectra in frames if paging else ():
@@ -640,33 +682,39 @@ class HqpMeter:
                 buf = buf[:fill] + bytearray(need - fill)
                 view = memoryview(buf)
 
-    def _came(self, sock: socket.socket, at: float, sound: int) -> Tuple[Optional[Callable], bool]:
-        """Frames came in one read at `at`, `sound` of them not all zero: the
-        session's newest run of sound goes on, or one begins — RUN_GAP_S or
-        more after the sound before it, or the session's first.
+    def _came(self, sock: socket.socket, at: float, sounds: Tuple[bool, ...],
+              hop: float) -> Tuple[Optional[Callable], bool, List[Callable]]:
+        """Frames came in one read at `at`, `sounds` saying which are not all
+        zero, `hop` seconds apart: the session's newest run of sound goes
+        on, or one begins — RUN_GAP_S or more after the sound before it, or
+        the session's first — its onset the first sounding frame's own time.
         Returns whom to tell that one began (attach's `on_run`, taken under
-        the lock: a detach clears it), and whether a page wants readings —
-        while none does, the last reading goes: a page that turns the meter
-        on later is never shown one from before."""
+        the lock: a detach clears it), whether a page wants readings — while
+        none does, the last reading goes: a page that turns the meter on
+        later is never shown one from before — and the taps to tell of the
+        read."""
         with self._cond:
             if self._sock is not sock:
-                return None, False
+                return None, False, []
             paging = self._paging_locked()
+            taps = list(self._taps.values())
             if not paging:
                 self._last = None
             session = self._current
             if session["first"] is None:
                 session["first"] = at
+            sound = sum(sounds)
             if not sound:
-                return None, paging
+                return None, paging, taps
             run = self._runs[-1] if self._runs and self._runs[-1]["session"] is session else None
             if run is not None and at - run["last"] < RUN_GAP_S:
                 run["last"] = at
                 run["frames"] += sound
-                return None, paging
+                return None, paging, taps
+            after = len(sounds) - 1 - sounds.index(True)
             self._runs.append({"session": session, "since": run["last"] if run is not None else session["open"],
-                               "start": at, "last": at, "frames": sound})
-            return self._on_run, paging
+                               "start": at, "onset": at - after * hop, "last": at, "frames": sound})
+            return self._on_run, paging, taps
 
     def _reading(self, sock: socket.socket, peaks: Optional[np.ndarray]) -> None:
         floor = 10 ** (SILENT_DB / 20)

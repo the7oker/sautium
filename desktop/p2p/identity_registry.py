@@ -588,6 +588,9 @@ class IdentityGate:
     async def admit(self, pubkey: str, cert: dict, proof: Optional[dict],
                     addr: Optional[str]) -> Admission:
         pubkey = pubkey.lower()
+        if not cert:
+            # Absent is not invalid: said apart, a guest's log tells which
+            return Admission("invalid", "identity certificate required")
         if not (isinstance(cert, dict) and self._verify_certificate(cert)
                 and cert.get("pubkey", "").lower() == pubkey):
             return Admission("invalid", "identity certificate invalid")

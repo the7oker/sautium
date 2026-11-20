@@ -13,7 +13,7 @@ implementation details live in the code, DB and git history.
 | **P2** | Last.fm enrichment (bios, tags, similar; the album wiki fetch was removed 2026-06-09), text embeddings (BGE-M3), enhanced RAG | DONE |
 | **P3.1** | Audio feature extraction (librosa + CLAP zero-shot, no essentia) | DONE |
 | **P3.2** | HQPlayer control via XML protocol (port 4321) | DONE |
-| **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (47 tools) | DONE |
+| **P3.3** | MCP server for HQPlayer + PostgreSQL + search + gear (48 tools) | DONE |
 | **P3.4** | Desktop launcher (CustomTkinter; Windows installer + macOS bundle as carriers) | DONE |
 | **P2P-P0..P4** | Launcher↔backend bridge, UUID v5 refactor, P2P sync, NAT traversal, account system, E2E chat, email CA | DONE — see `P2P_NETWORK.md` |
 
@@ -28,6 +28,16 @@ implementation details live in the code, DB and git history.
   `album_descriptions`, `lb_recording`), not JSONB blobs. Allows per-source re-fetch and
   provenance tracking. First iteration used JSONB in `external_metadata`, that
   was scrapped because PostgreSQL functions on JSONB get unreadable fast.
+- **A composer is a credit, not an artist (2026-11-18, CREDITS-1).** Of 191
+  sites reading or writing `track_artists`, 61 would change with a
+  `composer` role, 25 of them the engagement gate and its fan-out (similars,
+  slice pools, the announce tail, the rare search), which read every role on
+  purpose so that a featured artist engages. So a composer lives in a table
+  of its own, `track_credits`, with its own role enum and a `source` (tag or
+  MusicBrainz): the gate stays in the schema, not in every reader's memory.
+  `artist_id` RESTRICTs rather than cascades — every `DELETE FROM artists`
+  is a sweep or a merge written against `track_artists`, and one that forgot
+  the new table now fails in its test instead of losing a credit quietly.
 - **Canonical UUID v5 for shareable entities**. Artist/Album/Track/Genre/Tag/
   EmbeddingModel all use `uuid5(NAMESPACE, "entity:{normalize(...)}")` so the
   same data on different nodes collapses to the same ID. Namespace is
@@ -158,6 +168,29 @@ implementation details live in the code, DB and git history.
   alone it answers albums and artists, as a genre does. Both run in SQL: the
   quality gate is an `EXISTS` over `owned_files` on the `track_id` indexes of
   both file tables, the year gate a range on `idx_albums_release_year`.
+
+- **A name is found by any whole word of it (2026-11-18, CREDITS-1 2a).**
+  Trigram similarity dilutes a short query in a long name: "bach" ~ "johann
+  sebastian bach" is 0.23, "mozart" ~ "wolfgang amadeus mozart" 0.29, both
+  under the 0.3 floor and neither a prefix — a classical owner's first
+  search found nothing. The names source has a third arm, pg_trgm's strict
+  word similarity (`<<%` at 0.6 on the same GIN index, `WORD_ARM_MIN`),
+  scored 0.85 ×, as a prefix is — under an exact name's 1.0 — and zero
+  below its threshold, so a word fragment trigrams find keeps its own score.
+  The weight is what the measurement decided (T14 through the engine,
+  CREDITS-1-DESIGN §12.3–§12.4 in the private docs): with a library's 3 197
+  names owned and a node-sized phantom layer (289 k MusicBrainz names) under
+  `corpus=all`, at 0.8 an owned "Johann Sebastian Bach" ranked 33rd, past
+  Discovery's first 30, behind every phantom name that merely starts with
+  "bach" at a prefix's 0.85 — ownership only breaks ties, so the whole word
+  had to tie the prefix. At 0.85 it ranks 3rd; "mozart", "handel", "reich",
+  "part" and "elgar" rank an owned whole-word name first, and before the arm
+  all of them but "reich" had it outside the first fifty. Words of any length are
+  taken: the fragment share of "the", "love" and "orchestra" in the first 30
+  does not rise. The threshold stays 0.6: a one-letter near surname passes
+  ("reichl" 0.63 for "reich"), as do the typos a person types (0.69–0.71).
+  The arm costs up to 33 ms on that layer (45 → 78 ms for "the") and
+  up to 0.3 s on all of MusicBrainz's 2.68 M names.
 
 ### Audio analysis
 
@@ -729,7 +762,9 @@ implementation details live in the code, DB and git history.
   built-in coding-agent prompt (the `--system-prompt` analog) and is
   re-read on every spawn, `exec resume` included (measured 2026-08-25);
   volatile player context prefixes the user message so the instructions
-  prefix stays cacheable. Until 2026-08-25 the prompt rode as AGENTS.md
+  prefix stays cacheable (until 2026-11-19: since then what plays is the
+  answer of the assistant tool `get_player_state`, in no prompt and no
+  message, SEC-S4). Until 2026-08-25 the prompt rode as AGENTS.md
   and every turn after the first ran WITHOUT it: `exec resume` takes no
   `--cd`, the process cwd fell back to the backend's (the repo, on the
   launcher), and codex told the model the AGENTS.md instructions "no
@@ -3674,6 +3709,25 @@ assistant's lists of rates, which call rate 0 "Auto" as the Rate knob does,
 and, since 2026-10-21, a modulator's rates on its card and its row
 ("DSD128 · from 44.1k" there before), as the tools name them.
 
+A twin's line, since 2026-10-23, says in one short line where the two were
+compared: "Same output as sinc-Mx (bit for bit, compared into 705.6k and
+768k)" — the relation and the output rates the group's comparisons went
+into, as the site's index words them ("into" alone would read as every
+conversion into those rates), on every twin's row, in SDM mode too; the
+group's say, the curation's whole sentence, stands on its card. A twin
+compared sample by sample with no comparison in the file gets no line, and a
+card names any group without a say by its members alone, a magnitude
+group's too. Before, the line was the relation's word alone ("Same output as
+sinc-Mx (bit for bit)"), as was the card's lead without a say, which said
+more than any comparison the atlas made.
+
+What HQPlayer did across the rate families a card says in the past and of
+the one conversion the atlas tried, as the site's box does (since
+2026-10-23; "plays" before, a rule from one try): "Across rate families, in
+the one conversion the atlas tried: sinc-Lh: refused; sinc-long-h: played."
+A member the file holds no word for reads "not tried", and the file may hold
+words for some members only, as the export writes them.
+
 Open (2026-10-18): a row of either sheet takes the second click of a
 double-click on the knob that opened it as a pick — the sheet covers the
 knob at once, so that click lands on whatever row is under it — as the
@@ -3695,7 +3749,10 @@ refused for that track's family — with HQPlayer's log line once its log is
 read, or that line alone. The next step names a filter HQPlayer describes as
 Any, the adaptive output rate in HQPlayer's own settings, or a rate of
 HQPlayer's list the tracks reach; for a modulator, another modulator or
-rate. The adaptive output rate is read in its three states, by the manual's
+rate (since 2026-10-21 also, below, a filter described without "up", or the
+track's own rate or a power-of-two multiple of it — a DSD track's, twice the
+rate HQPlayer converted it to or more — and another filter or rate after a
+1:1 refusal). The adaptive output rate is read in its three states, by the manual's
 names — not checked, grayed, checked (`settings.xml`'s `adaptive_rate` and
 `auto_family`); grayed took a lower rate the filter reaches, as the manual
 says, so the rule says nothing there, as in checked (2026-10-18). The rule
@@ -3706,7 +3763,8 @@ there as on every screen of the node's; while a track of such a queue that
 can play plays or is paused, a notice says it, its toast once per onset in
 a tab — the onset new whenever the HQPlayer backend serves the notice for
 a queue and setting other than the last it served it for, or first since
-HQPlayer was attached; since 2026-10-19
+HQPlayer was attached (and since 2026-10-22 a "cannot play" while its onset
+is a "may not play" one, once); since 2026-10-19
 the tab remembers the onsets it has met, toasted or painted at connect, so
 neither a gap in the notice nor (while sessionStorage keeps them) a reload
 toasts one again — its Why? leading to that screen, from the toast and
@@ -3726,11 +3784,81 @@ stopped tick plus twice the output delay plus 11 s (the longest build
 measured), or at once on HQPlayer's refusal line where its log is read here;
 a start on the same take after that withdraws the verdict.
 
-Open (2026-10-19), not yet fixed: a DSD track HQPlayer stopped on is
-judged as a PCM rate (the trace keeps no `src_sdm`), though the rule leaves
-DSD tracks unchecked; the facts keep the Nx slot's filter alone, so with no
-filter reported in the ticks a base-rate source is judged by it; a log line
-naming another cause (a file not opened) does not take `rate_refused` back;
+**HQPlayer's "up": measured 2026-10-19, the rule since 2026-10-21, "will
+stop" only of a filter measured stopping since 2026-10-22.** The rule said
+nothing of an output rate under the source's — "HQPlayer's own stop for
+every class" was wrong. Measured on engine 6.2.4 (Desktop, PCM mode, each
+filter in both slots, the adaptive output rate off): FFT, FIR and
+poly-sinc-ext2 converted 88.2 → 44.1 kHz and 352.8 → 176.4 kHz; of the four
+filters tried that HQPlayer describes "up", closed-form, sinc-medium and
+poly-sinc-ext2-short played 1:1 and upward and were stopped in every
+downward cell, a DSD64 track's included (converted to 176.4 kHz first) — ×½
+the one downward ratio tried — and sinc-M converted downward and was never
+stopped; FFT and FIR were refused at 1:1. The rule drawn from it speaks on
+an HQPlayer of that major alone, naming the engine (another major may change
+what a name does, as the atlas keeps its modulators to theirs). Under the
+source's rate, at any downward ratio, the three HQPlayer stopped will stop,
+and a filter described "up" that was not tried may: under the source's rate
+"HQPlayer will stop" is said only of a filter measured stopping (until
+2026-10-22 the untried were said to stop by their class). A queue whose
+findings are all such filters "may not play" in the notice's title, and an
+attempt with one waits for the window instead of closing at HQPlayer's first
+stop; once it stopped, the verdict says so as for the measured. While the
+take of the slot a "may" names starts — under a second past where its first
+status read it (a start at a spot, as a resume after a rebuild is, reads the
+spot at once; a Seek sent after that status was asked starts the take anew,
+since it moves the position with nothing heard; and a filter HQPlayer builds
+before it refuses shows one playing status) — what the tick before served for that queue and setting
+stands, and none is served otherwise — as on any tick whose slot is not yet
+the one the check was judged for (a skip, a row tapped); past it the take
+plays, and the notice leaves its rate out, heard or not — a stop is the
+verdict's, and a rate said there would be withdrawn as soon as a status
+heard it (after one slow status, or a pause), a toast for nothing. A "may"
+HQPlayer disproves by playing — that take, HQPlayer's own Status naming that
+source rate, the output rate checked and the filter the "may" names, with
+the DSP keeping up — is said no more at that setting and engine while
+HQPlayer stays attached (what was heard is the backend's, not the
+database's), on the screen, in the notice and by the assistant, while the
+other tracks' findings still stand. A "cannot play" while the onset is a
+"may not play" one is a notice anew, once per queue and setting, and only
+that. A later measurement moves a name from "may" to "will". sinc-M gets the
+class's words ("made for upsampling, not for decimation") and its one
+measured conversion, 352.8 → 176.4 kHz, without a stop, where the check's
+lines are said (the screen, the assistant), never as a notice or a verdict,
+and for a source of its family only (nothing was measured across the
+families, so nothing is said there of it). sinc-Mx, never tried downward,
+is an "up" filter not tried, and may stop (since 2026-10-23): the atlas
+compared it with sinc-M only into 705.6 and 768 kHz, so sinc-M's
+conversion says nothing of it under the source's rate — until then it got
+the class's words and sinc-M's conversion, without a stop, as sinc-M's
+twin. FFT and FIR stop at 1:1, by name, the other 2^x and Int filters not
+having been tried there. "For upsampling, not decimation" is the plain
+sense of what was measured, said as Sautium's beside HQPlayer's
+description, never inside it.
+A rate the fix would name is dropped where a measured refusal stops (FFT or
+FIR at 1:1). sinc-medium's refusal comes after its filter built ("lInRate >
+lOutRate", one playing status at 0 s between): the refused-rate log cause
+too, and an advance closed on it is judged by it even when that status came
+last. A refused rate is a play's, so where the first cause from the file's
+add on is one, the log read after a close takes the newest refusal from
+there — a queue handed over at once logged every add before any play, and
+the first one after the add was another track's — while another cause found
+first still answers as before (an earlier track's decode error can); an
+advance keeps the refusal its follower heard since the stop, as the sheet's
+cause too. A DSD track reaches the filter at a PCM rate HQPlayer names only
+in its log, so it is never judged by its DSD rate and never by an assumed
+ratio: unchecked before a play, judged after one by the rate the log names
+for that play, in PCM mode; a file of one bit a sample counts as DSD
+whatever its format (WavPack holds DSD too, its tags a PCM-looking rate, so
+a verdict calls it a DSD track). That closes 2026-10-19's open item of a DSD
+track judged as a PCM rate: the trace keeps `sdm`, and the facts say whether
+the source is DSD.
+
+Open (2026-10-19), not yet fixed: the facts keep the Nx slot's filter alone,
+so with no filter reported in the ticks a base-rate source is judged by it;
+a log line
+naming another cause (a file not opened) does not take `rate_refused` back,
+an "up" filter not tried included;
 nothing wakes the notices channel on an output switch, so the rate check's
 notice stays until another wake, and while HQPlayer answers nothing it
 stays as last judged, served at every wake until the poller judges it
@@ -3747,10 +3875,16 @@ five go one at a time, so those still to go pass between the commands of a
 press, a mutation or an intent that begins meanwhile — between a replace and
 its owed Play too; a database error in its judgement drops it until another
 event — the next tick raises one itself while the slot HQPlayer reads is not
-the one judged last, a warning each time — and the judgement before is
+the one judged last, a warning each time — and what was served before is
 served meanwhile while the queue generation holds; and the verdict's queue
 rates read the slot and the queue in two looks, so a track removed or added
-before that slot between them shifts them by one.
+before that slot between them shifts them by one. Open too (2026-10-22): the
+HQPlayer screen's rate-check lines are as read when it opened or was last
+refreshed — a "may" heard since, like the queue moved to another slot, shows
+at Refresh; nothing wakes the screen when the check's words change. And
+while a refused list parks the check, a slot moved to is not judged: the
+notice keeps what the tick before served until the park ends, as it does
+while a judgement fails.
 
 ### The assistant speaks of filters and modulators from what was published (2026-10-20)
 
@@ -3777,13 +3911,18 @@ the chat's replies, which a backup, a life merge and a support warrant's
 this host's speeds and "Sautium has published no measurement of it".
 Nothing ranks: lists keep HQPlayer's order, the file's or their labels',
 two values stand side by side, and "the same output" comes only from the
-file's own groups. A number is the token the file wrote; a rate that
+file's own groups — in a group's lead with its say, where the members were
+compared, and in the tools' descriptions "where the atlas compared them"
+(since 2026-10-23). A number is the token the file wrote; a rate that
 stands alone is named as the HQPlayer screen names it, and a filter's
 measured context as the site names it. This host's speeds are the
 Benchmark's and the listens' own, grouped by the source they were measured
 from — never another machine's. The prompt tells the model to call them
-first, to rank nothing, to give each number as the tool writes it, and
-that Sautium holds no rules that tie a DAC to these settings yet; the
+first, to rank nothing, to give each number as the tool writes it, to say
+a sameness only with the scope the tool gives it (its precision, where it
+was compared) and that beyond it nothing measured says whether it holds
+(since 2026-10-23), and that Sautium holds no rules that tie a DAC to these
+settings yet; the
 chat's pip says "looking up filters and modulators…" while one runs, not
 "controlling playback…".
 
@@ -4256,6 +4395,40 @@ catalogue: the scan compared paths only, Rescan included
   "New in my collection" orders by the birth time on this disk (statx,
   CreationTime, st_birthtime), else the first read — never the mtime.
   Through WSL's drvfs and Docker Desktop's 9p there is no birth time.
+
+### The identity worker belongs to the process, not to a file (2026-11-18)
+
+An account made in a Docker node's Web UI never got a proof: the backend
+skipped its miner when `node_info.json` sat in the identity folder ("the
+launcher owns the miner", 2026-08-19), and since the Web UI's setup that file
+is how every account lies on disk. The lab Pi's Support stayed offline; its
+handshakes went to the master with no certificate at all, ten times, then
+parked for a proof nothing mined (B-110).
+
+- **Who runs it is who serves the peer surface** (`settings.
+  serves_peer_surface`: P2P on and a peer port of its own) — the one
+  predicate the chat client's start reads too. A launcher-mode backend runs
+  neither; the launcher's P2P manager does.
+- **One worker per identity folder, by the OS.** The worker holds an
+  exclusive lock on `identity_worker.lock` for its whole run (flock,
+  `msvcrt.locking`); a second one over the folder — another process, or this
+  one — stands down having published nothing. The lock dies with its process.
+  This, not a file's presence, is what keeps the Mac stand's two miners of
+  2026-08-19 (two processes on one machine) impossible. It binds one kernel's
+  processes: between a host and a container on a Docker Desktop bind mount the
+  process rule alone keeps them apart.
+- **The account, a new key and a new certificate are events.** The account's
+  creation starts the worker, an identity change restarts it (the old thread
+  ended first — it holds the lock, and a proof or a state it wrote after the
+  new one's would be the old key's), an email verified here or on another
+  device of the key restarts it on the `email` certificate, which is `ready`
+  at once; `NOTIFY sautium_identity_cert` tells a launcher's own worker. The
+  worker's `ready` wakes the chat client.
+- **A handshake refused for what our own identity lacks waits for it to
+  change** — the certificate as well as the proof — instead of asking every
+  15 s for the same answer; and an issuer says an absent certificate is
+  *required*, not *invalid* (the Pi's log pointed at a bad certificate that
+  was never sent).
 
 ## Known Gotchas
 

@@ -39,95 +39,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
-
-# ---------------------------------------------------------------------------
-# Player context (for AI assistant awareness of what's playing)
-# ---------------------------------------------------------------------------
-
-def _get_player_context() -> Optional[str]:
-    """Current playback state, straight from the player router.
-
-    Output-agnostic: get_status() reports whatever backend is active, so this
-    is right whether the sound is going to HQPlayer, a renderer, a local
-    device or the browser."""
-    try:
-        from routers.player import get_status, get_playlist
-
-        status = get_status()
-        parts = []
-
-        # Which output is chosen, because it decides which tools work at all:
-        # the hqplayer_* family commands the HQPlayer device and refuses when
-        # the sound is going elsewhere. Without this the agent has to guess,
-        # and it guesses HQPlayer.
-        #
-        # The status payload always names the selected output, attached or not
-        # (PlaybackManager.output_info) — a sleeping renderer or a stalled
-        # HQPlayer poll still has an answer to "which output did the user
-        # pick", and the agent needs it precisely then, to explain why
-        # playback will not start.
-        out = status.get("output") or {}
-        otype = out.get("type") or "none"
-        label = out.get("label")
-        live = status.get("state") not in ("disconnected", None)
-        if not out.get("attached", live):
-            note = " — not currently attached"
-        elif not live:
-            note = " — attached but reporting no status"
-        else:
-            note = ""
-        parts.append(
-            f"Active audio output: {otype}{f' ({label})' if label else ''}{note}. "
-            + ("HQPlayer transport/DSP tools are available."
-               if otype == "hqplayer" else
-               "hqplayer_* tools will refuse — use play_track / play_album / "
-               "play_similar / add_to_queue, which follow this output."))
-        if not live:
-            return "\n".join(parts)
-
-        # Now playing
-        state = status.get("state", "unknown")
-        song = status.get("song")
-        artist = status.get("artist")
-        album = status.get("album")
-        genre = status.get("genre")
-
-        if song:
-            np = f"Now playing ({state}): \"{song}\" by {artist or 'Unknown'}"
-            if album:
-                np += f" | Album: {album}"
-            if genre:
-                np += f" | Genre: {genre}"
-            pos = status.get("position_formatted", "")
-            length = status.get("length_formatted", "")
-            if pos and length:
-                np += f" | Position: {pos}/{length}"
-            parts.append(np)
-        else:
-            parts.append(f"Player state: {state} (no track loaded)")
-
-        # Playlist
-        try:
-            pl = get_playlist()
-            pl_tracks = pl.get("tracks", [])
-            if pl_tracks:
-                current_idx = status.get("track_index")
-                playlist_lines = [f"Playlist ({len(pl_tracks)} tracks):"]
-                for t in pl_tracks:
-                    marker = " >>> " if t.get("index") == (current_idx - 1 if current_idx else -1) else "     "
-                    tid = f" [ID:{t['id']}]" if t.get("id") else ""
-                    playlist_lines.append(f"{marker}{t.get('artist', '?')} - {t.get('title', '?')}{tid}")
-                parts.append("\n".join(playlist_lines))
-        except Exception:
-            pass
-
-        return "\n".join(parts)
-
-    except Exception as e:
-        logger.debug(f"Failed to get player context: {e}")
-        return None
-
-
 # ---------------------------------------------------------------------------
 # CLI agent integration (Claude Code / Codex)
 # ---------------------------------------------------------------------------
@@ -191,6 +102,10 @@ def _hydrate_blocks(blocks: list[dict]) -> list[dict]:
         elif kind == "tracks":
             ids = [it.get("track_id") for it in items if it.get("track_id")]
             hydrated = hydrate_tracks(ids)
+        elif kind == "hqp_ab":
+            # A name, not a row: the sheet it opens checks it against
+            # HQPlayer's list then
+            hydrated = items[:1]
         else:
             continue
         if not hydrated:
@@ -613,7 +528,6 @@ def _build_provider_stream(
     session_id: int,
     message: str,
     history: list[dict],
-    player_context: Optional[str],
     model: Optional[str],
 ) -> Iterator[StreamEvent]:
     """Pick the right streaming source for the provider name. For
@@ -625,7 +539,7 @@ def _build_provider_stream(
         from claude_code_runner import call_claude_code_stream
 
         claude_sid = _get_agent_session_id(session_id, "claude_code")
-        prompt = get_system_prompt("claude_code", player_context)
+        prompt = get_system_prompt("claude_code")
         return call_claude_code_stream(
             message=message,
             system_prompt=prompt,
@@ -637,13 +551,11 @@ def _build_provider_stream(
     if provider_name == "codex":
         from codex_runner import call_codex_stream
 
-        # The runner owns the system prompt (an instructions file codex
-        # re-reads on every spawn) and folds the volatile player context
-        # into the message itself — codex has no --system-prompt flag.
+        # The runner owns the system prompt: an instructions file codex
+        # re-reads on every spawn (codex has no --system-prompt flag).
         thread_id = _get_agent_session_id(session_id, "codex")
         return call_codex_stream(
             message=message,
-            player_context=player_context,
             thread_id=thread_id,
             resume=bool(thread_id),
             model=model,
@@ -657,12 +569,11 @@ def _build_provider_stream(
         raise HTTPException(status_code=503, detail=f"Provider '{provider_name}' is not available")
 
     pm_history = [ProviderMessage(role=h["role"], content=h["content"]) for h in (history or [])]
-    prompt = get_system_prompt(provider_name, player_context)
+    prompt = get_system_prompt(provider_name)
     return provider.chat_stream(
         message=message,
         history=pm_history,
         system_prompt=prompt,
-        player_context=player_context,
         model=model,
     )
 
@@ -689,7 +600,7 @@ async def send_message(session_id: int, req: ChatMessageRequest):
     """Stream the assistant's reply as Server-Sent Events.
 
     Pre-stream (synchronous): pick provider, save user message,
-    update session metadata, gather history + player context.
+    update session metadata, gather history.
 
     Stream events:
       - `meta`   — once at the start; carries the persisted user_msg.
@@ -752,15 +663,12 @@ async def send_message(session_id: int, req: ChatMessageRequest):
         history_rows.reverse()
         history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
 
-        player_context = _get_player_context()
-
         try:
             provider_stream = _build_provider_stream(
                 provider_name=provider_name,
                 session_id=session_id,
                 message=req.message,
                 history=history,
-                player_context=player_context,
                 model=model_resolved,
             )
         except HTTPException:
@@ -1040,8 +948,6 @@ class LegacyChatRequest(BaseModel):
 @router.post("")
 async def legacy_chat(req: LegacyChatRequest):
     """Stateless chat endpoint for backward compatibility with existing frontend."""
-    player_context = _get_player_context()
-
     from providers import get_provider as _get_provider
     if _get_provider("claude_code") is None:
         raise HTTPException(status_code=503, detail="Claude Code is not installed or not signed in")
@@ -1050,7 +956,7 @@ async def legacy_chat(req: LegacyChatRequest):
         from claude_code_runner import call_claude_code
         from assistant_prompt import get_system_prompt
 
-        prompt = get_system_prompt("claude_code", player_context)
+        prompt = get_system_prompt("claude_code")
 
         result = call_claude_code(
             message=req.message,

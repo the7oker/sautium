@@ -220,6 +220,33 @@ _SEED_KIN_PRED = """EXISTS (
     WHERE kta.track_id = e.track_id AND kta.role = 'primary')"""
 
 
+# The names search's whole-word arm: the strict word similarity a name's
+# word must reach and the weight its score takes — a prefix's 0.85, so a
+# whole word and a prefix tie and ownership breaks the tie (at 0.8 an owned
+# "Johann Sebastian Bach" ranked 33rd behind phantom names that start with
+# "bach"; CREDITS-1 Q13). The score and the retrieve both compare with
+# WORD_ARM_MIN themselves: `<<%` alone reads the session's
+# pg_trgm.strict_word_similarity_threshold (default 0.5), and a fragment it
+# let in scores 0 — which the dominance cut keeps when nothing scores more.
+# run_search sets the threshold to WORD_ARM_MIN only so that the GIN index
+# hands over no more rows than the predicate keeps.
+WORD_ARM_MIN = 0.6
+WORD_ARM_WEIGHT = 0.85
+
+
+def _word_arm(col: str) -> str:
+    """The arm's score: zero below WORD_ARM_MIN, so a word fragment another
+    branch retrieved is not lifted by it either."""
+    return (f"CASE WHEN strict_word_similarity(:ql, {col}) >= {WORD_ARM_MIN} "
+            f"THEN {WORD_ARM_WEIGHT} * strict_word_similarity(:ql, {col}) ELSE 0 END")
+
+
+def _word_retrieve(col: str) -> str:
+    """The arm's retrieve: `<<%` for the GIN index, the comparison for the
+    threshold whatever the session's setting."""
+    return f"(:ql <<% {col} AND strict_word_similarity(:ql, {col}) >= {WORD_ARM_MIN})"
+
+
 TOOLS: dict[str, Tool] = {
     # SCOPED text search (2026-07-18): the old mega-tool blended lexical +
     # three vector channels on every keystroke — expensive (3 GPU encodes +
@@ -232,17 +259,29 @@ TOOLS: dict[str, Tool] = {
         # pg_trgm.similarity_threshold default 0.3 == these sources' floor) +
         # prefix LIKE — `similarity(col,q) >= x` can't use the index and
         # seq-scans 3M-row joins under corpus=all (proven: shm blowup).
+        # The whole-word arm (CREDITS-1, 2026-11-18): a surname inside a long
+        # full name falls under the trigram floor — the name's many trigrams
+        # dilute the few it shares with the query ("bach" ~ "johann sebastian
+        # bach" 0.23, "mozart" ~ "wolfgang amadeus mozart" 0.29). pg_trgm's
+        # strict word similarity scores whole words 1.0 and word fragments low
+        # ("offenbach" 0.25, "bachman" 0.44, "bacharach" 0.56); `<<%` admits
+        # it at WORD_ARM_MIN on the same GIN index,
+        # and its score equals a prefix's 0.85, below an exact name's 1.0.
         Source("artist_name", "artists",
                "GREATEST(similarity(a.name_latin,:ql), "
                "CASE WHEN a.name_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "
+               f"{_word_arm('a.name_latin')}, "
                "similarity(a.name,:q))",     # original-script exact match too
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
-               retrieve="(a.name_latin % :ql OR a.name_latin LIKE :qlpfx OR a.name % :q)"),
+               retrieve="(a.name_latin % :ql OR a.name_latin LIKE :qlpfx "
+                        f"OR {_word_retrieve('a.name_latin')} OR a.name % :q)"),
         Source("artist_alias", "artist_name_aliases",   # 0b: CJK cutlet + human file-tag readings
                "GREATEST(similarity(ana.alias_latin,:ql), "
-               "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",
+               "CASE WHEN ana.alias_latin LIKE :qlpfx THEN 0.85 ELSE 0 END, "
+               f"{_word_arm('ana.alias_latin')})",
                targets=("artist",), floor=0.3, ceil=1.0, weight=1.0,
-               retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx)"),
+               retrieve="(ana.alias_latin % :ql OR ana.alias_latin LIKE :qlpfx "
+                        f"OR {_word_retrieve('ana.alias_latin')})"),
         Source("album_title", "albums",
                "GREATEST(similarity(al.title_latin,:ql), "
                "CASE WHEN al.title_latin LIKE :qlpfx THEN 0.85 ELSE 0 END)",

@@ -58,6 +58,7 @@ from playback import hqp_meter
 from playback import queue as queue_mod
 from playback.base import (Capabilities, OutputRefused, PlaybackStatus, PlayerBackend,
                            ReorderPlan, new_id)
+from playback import hqp_ab
 from playback import hqp_benchmark
 from playback.hqp_benchmark import _building
 from playback.hqp_link import (NOT_ANSWERING, QUESTION_WAIT_S, UNFINISHED, Building, Dropped,
@@ -163,6 +164,7 @@ class _DspChange:
                 # The person's change: a run cut short here owes its put-back
                 # no more — written where it happens, not only on the link
                 hqp_benchmark.left_by_person(link.host, link.port, "a DSP change came first")
+                hqp_ab.left_by_person(link.host, link.port)
                 hqp = link.client
                 self.spot = self._spot_of(hqp.get_status())
                 try:
@@ -1356,6 +1358,11 @@ class HqpBackend(PlayerBackend):
         # under the takeover's spot (_RefusalReads, _read_refusal_again, §6.1
         # P13). Under _spot_lock
         self._refusal_read: Optional[_RefusalReads] = None
+        # A start HQPlayer did not play whose close met a reading that says
+        # nothing yet (no entry named, a stop under way): (its attempt, its
+        # track, its second), judged at the next reading that says it
+        # (_judge_rest). The poller's alone
+        self._rest_due: Optional[tuple] = None
         # HQPlayer was found stopped at the attach (its queue mirrored), so
         # the slot an output switch keeps is a spot (resume_at)
         self._stopped_at_attach = False
@@ -1438,6 +1445,14 @@ class HqpBackend(PlayerBackend):
         self._rate_gen: Optional[int] = None
         self._rate_slot: Optional[int] = None
         self._rate_onset: Optional[tuple] = None
+        # The source rates a "may" of the check named that HQPlayer was heard
+        # playing, by the setting (Check.key) and engine they were heard at
+        self._rate_heard: Dict[tuple, frozenset] = {}
+        # The take of the slot a "may" names (queue, slot, setting,
+        # track_serial), the position its first status read and when that
+        # status was asked: its first second counts from there, and a Seek
+        # sent after it starts the take anew
+        self._rate_take: Optional[tuple] = None
         self._rate_served: Optional[dict] = None
         self._info: dict = {}
         # When a listen leaves a DSP sample (playback.hqp_load).
@@ -1657,6 +1672,10 @@ class HqpBackend(PlayerBackend):
                                   again=self._recover_later)
         except (OSError, RuntimeError, psycopg2.Error) as e:
             logger.warning("benchmark recovery failed: %s", e)
+        try:
+            hqp_ab.recover(self.endpoint_id, self._link, again=self._recover_later)
+        except psycopg2.Error as e:
+            logger.warning("comparison recovery failed: %s", e)
 
     def _recover_later(self) -> None:
         self._recover_due = True
@@ -1744,6 +1763,7 @@ class HqpBackend(PlayerBackend):
         # person switched, so no later answer or restart puts it back
         hqp_benchmark.left_by_person(self._link.host, self._link.port,
                                      "the output was switched away")
+        hqp_ab.left_by_person(self._link.host, self._link.port)
         return told
 
     def _reads_any(self, status, given: _Layout) -> bool:
@@ -2756,6 +2776,9 @@ class HqpBackend(PlayerBackend):
                             and listed is not None):
                         self._read_refusal_again(status, [t.get("uri") for t in hqp_playlist])
                     self._judge_start(status, playing)
+                    if self._judge_rest(status, playing):
+                        # The spot set on this reading: what HQPlayer reads, said with it
+                        playing = self._playing(status) or playing
                     if self._reconverge_due and link.owed is None:
                         # Once per loss: HQPlayer answers again — the add it
                         # owed among it — and gets the queue back
@@ -2784,7 +2807,7 @@ class HqpBackend(PlayerBackend):
                     elif (playing is not None and playing[0] and self._rate_reads is not None
                           and playing[0] != self._rate_slot):
                         self._rate_event()      # the slot of ours HQPlayer reads moved
-                    served = self._rate_notice_now(status, playing)
+                    served = self._rate_notice_now(status, playing, read_at)
                     if served != self._rate_served:
                         self._rate_served = served
                         _notify_notices()
@@ -3005,27 +3028,80 @@ class HqpBackend(PlayerBackend):
             engine=self._info.get("engine"))
         self._rate_check, self._rate_gen, self._rate_slot = hqp_rate_check.check(inputs, src), generation, slot
 
-    def _rate_notice_now(self, status, playing: Optional[tuple]) -> Optional[dict]:
+    def _rate_notice_now(self, status, playing: Optional[tuple], read_at: float) -> Optional[dict]:
         """What the notices channel serves of the held check: while HQPlayer
-        plays or pauses a slot of ours that can play and refused tracks lie
-        ahead — a started slot refused speaks through its verdict instead,
-        another controller's playlist through nothing — with its onset, new
-        whenever this backend serves the notice for a queue generation and
-        setting (Check.key) other than the last it served it for, its first
-        serving included (an attach is a new backend), and the same while it
-        serves it for that one, a gap included (a source rate joining the
-        refused ones in the same generation changes the words only), and the
-        module's words."""
+        plays or pauses a slot of ours that can play and tracks it will or
+        may refuse lie ahead — a started slot a finding says will stop
+        speaks through its verdict instead, another controller's playlist
+        through nothing. On a tick whose slot is not the one the check was
+        judged for (judged again at a later tick, unless the check is parked
+        or its judgement fails), or that gives no verdict (HQPlayer opening
+        an entry, a queue edit in flight on an HQPlayer whose Status names no
+        URI: withdrawn there, the notice came back at the next tick — two
+        wakes for nothing), what the tick before served for this queue and
+        setting stands, and none is served otherwise. The slot a "may"
+        names: while its take starts — under a second past the position the
+        take's first status read (a start at a spot, as a resume after a
+        rebuild is, reads the spot at once; a Seek sent after that status was
+        asked moves the position with nothing heard, and the take starts anew
+        at the status after it; a filter HQPlayer builds before it refuses
+        shows one playing status) — what the tick before served
+        stands in the same way; past it the take plays, and
+        the notice says the other tracks' findings, never that rate's "may":
+        a stop is the verdict's. A "may" HQPlayer disproved is said no more
+        anywhere at that setting and engine while HQPlayer stays attached
+        (rate_heard): heard once its own Status names that source rate, the
+        check's output rate and the filter the "may" names, playing past
+        that second with the DSP keeping up. Its onset is new whenever this
+        backend serves the notice for a queue generation and setting
+        (Check.key) other than the last it served it for, its first serving
+        included (an attach is a new backend), or a "cannot play" while the
+        onset is a "may not play" one — once for them — and the same while
+        it serves it for that one, a gap included (a source rate joining
+        the refused ones in the same generation changes the words only, but
+        for that turn), and the module's words."""
         check = self._rate_check
         if (check is None or not check.groups or check.started_refused
                 or self._rate_gen != self._queue.generation
                 or status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED)
-                or playing is None or playing[1] is None or playing[2] or self.drift):
+                or (playing is not None and (playing[1] is None or playing[2])) or self.drift):
             return None
-        key = (self._rate_gen, check.key)
-        if self._rate_onset is None or self._rate_onset[0] != key:
-            self._rate_onset = (key, datetime.now(timezone.utc).isoformat())
-        return {"since": self._rate_onset[1], "data": hqp_rate_check.notice(check)}
+        kept = (self._rate_served if self._rate_onset is not None
+                and self._rate_onset[0] == (self._rate_gen, check.key) else None)
+        if playing is None or playing[0] != self._rate_slot:
+            return kept
+        unsaid = self.rate_heard(check.key)
+        if check.started_may and check.first not in unsaid:
+            take, seek = (self._rate_gen, playing[0], check.key, status.track_serial), self._seek_mark
+            if (self._rate_take is None or self._rate_take[0] != take or status.position < self._rate_take[1]
+                    or seek is not None and seek[1] > self._rate_take[2]):
+                # a position read earlier starts it anew, and so does a Seek
+                # sent after the first status was asked: a resume's own, or
+                # one while HQPlayer builds, moves it with no sound out
+                self._rate_take = (take, status.position, read_at)
+            if status.position - self._rate_take[1] < 1.0:
+                return kept
+            if (status.state == PlaybackState.PLAYING
+                    and (status.process_speed is None or status.process_speed >= 1.0)
+                    and status.src_rate == check.first and not status.src_sdm
+                    and status.active_rate == check.rate and status.active_filter == check.started_may):
+                unsaid = unsaid | {check.first}
+                self._rate_heard[(check.key, self._info.get("engine"))] = unsaid
+            unsaid = unsaid | {check.first}     # the take plays: the notice leaves its rate to the verdict
+        data = hqp_rate_check.notice(check, unsaid)
+        if data is None:
+            return None
+        key, may = (self._rate_gen, check.key), all(g.why == "may" for g in check.groups)
+        if self._rate_onset is None or self._rate_onset[0] != key or (self._rate_onset[2] and not may):
+            self._rate_onset = (key, datetime.now(timezone.utc).isoformat(), may)
+        return {"since": self._rate_onset[1], "data": data}
+
+    def rate_heard(self, key: tuple) -> frozenset:
+        """The source rates a "may" of the rate check named that HQPlayer was
+        heard playing at the setting `key` (Check.key) on the engine it runs
+        now, since this backend attached: disproved there, said no more on
+        the screen, in the notice or by the assistant."""
+        return self._rate_heard.get((key, self._info.get("engine")), frozenset())
 
     def rate_notice(self) -> Optional[dict]:
         """The rate check's notice as the poller last judged it, for the
@@ -4637,22 +4713,89 @@ class HqpBackend(PlayerBackend):
         track with its diagnosis, Play starts it, Next and Previous move from
         it — erased as any spot is, with its item or once a start from it is
         taken. Only an entry of ours in an intact mirror (an advance aims at
-        none elsewhere: _advance), only while HQPlayer still rests (not once
-        anything plays again — the person's word in its own window, another
-        controller, whose takeover leaves its own spot: _note_listen), and a
+        none elsewhere: _advance), only while HQPlayer still rests at the
+        reading the attempt closed on (_rest_at) — the poller's own, never
+        the tick the status last showed, which a reading with no verdict
+        leaves older: there HQPlayer opening another entry had the spot set
+        under what plays, and Pause then Play restarted the refused track.
+        A close on a reading that says nothing yet (no verdict and no URI
+        that names an entry, a state the SDK does not name, a stop under way)
+        leaves the rest to the next reading that says it (_judge_rest). A
         spot set since stays. Called on the poller."""
         item, second = att.target if att.target is not None else (None, 0.0)
-        last = self._last_tick
-        if (item is None or last is None or last.state != "stopped"
-                or last.extra.get("source") == "external" or self._queue.index_of(item) is None):
+        if item is None or self._queue.index_of(item) is None:
             return
+        status, playing = self._before or (None, None)
+        closed_on = att.ticks[-1]["ts"] if att.ticks else None
+        rests = (self._rest_at(status, playing, item)
+                 if status is not None and closed_on == self._before_at else None)
+        if rests is None:
+            self._rest_due = (att, item, second)
+        elif rests:
+            self._leave_spot(att, item, second)
+
+    def _rest_at(self, status, playing: Optional[tuple], item: QueueItem) -> Optional[bool]:
+        """Does HQPlayer rest on `item`'s start at this reading: stopped, or
+        saying it plays that very entry — the one PLAYING answer of a filter
+        it builds before it refuses, which an advance closed on the refusal
+        its log named can meet last, no play, as _spot_played reads one (a
+        position moving on spends the spot); its entry named by the reading's
+        verdict, or with none (HQPlayer's opening answer, a queue edit in
+        flight) by what its URI names. Another entry playing — the person's
+        word in HQPlayer's own window, another controller, whose takeover
+        leaves its own spot (_note_listen) — or a pause is no rest. None —
+        nothing said yet — when nothing names the entry it plays, and while a
+        stop is under way (STOPREQ: the stop after it is a rest, as any stop
+        is)."""
+        if status.state == PlaybackState.STOPPED:
+            return True
+        if status.state == PlaybackState.STOPREQ:
+            return None
+        if status.state != PlaybackState.PLAYING:
+            return False
+        if playing is not None:
+            return playing[1] is item and not playing[2]
+        readings = self._readings(status.uri)
+        if not readings:
+            return None
+        return any(_reads_item(r, item) for r in readings)
+
+    def _judge_rest(self, status, playing: Optional[tuple]) -> bool:
+        """The rest a start's close left to a later reading (_rests_on_its_start),
+        judged at the first that says one (_rest_at): a stop a rest, its own
+        entry playing one too, another entry or a pause none — dropped once
+        any start is watched or closed since (the node's Play, a tap, Next or
+        Previous onto an entry, a new queue: the person's word is newer;
+        HQPlayer's own advance: it played something), or its item left the
+        queue. Whether it set the spot. Called on the poller."""
+        due = self._rest_due
+        if due is None:
+            return False
+        att, item, second = due
+        if self._attempt is not None or self._last_closed is not att or self._queue.index_of(item) is None:
+            self._rest_due = None
+            return False
+        rests = self._rest_at(status, playing, item)
+        if rests is None:
+            return False
+        self._rest_due = None
+        if rests:
+            return self._leave_spot(att, item, second)
+        return False
+
+    def _leave_spot(self, att: diag.Attempt, item: QueueItem, second: float) -> bool:
+        """The spot a start HQPlayer did not play leaves at its track and
+        second, unless one was set since: whether it did. Called on the
+        poller."""
         with self._spot_lock:
             if self._spot is not None:
-                return
+                return False
             self._spot, self._spot_gen = (item, int(second)), self._spot_gen + 1
             self._rest_gen, self._rest_left = self._spot_gen, time.time()
-        logger.info("HQPlayer stopped on the start of slot %d by itself — Play starts it again",
-                    self._queue.index_of(item))
+        logger.info("HQPlayer did not play the start of slot %d (%s) — the spot stays there, Play starts it again",
+                    self._queue.index_of(item), att.verdict["code"])
+        self.poke()
+        return True
 
     def _attach_log(self, att: diag.Attempt, uri: Optional[str]) -> None:
         source = diag.log_source(self._link.host, self._info)
@@ -4761,10 +4904,11 @@ class HqpBackend(PlayerBackend):
         file's entries whose release has a date — a verdict leaves the node
         (backend.log, a warrant's playback scope), and neither the node's own
         copy of the atlas nor a file put at the shipped path before its
-        release may. The source: the rate HQPlayer reported, else the slot's
-        file row; and the PCM rates of the queue from that slot to its end,
-        in the same one query — the verdict names a rate to pick only when
-        every one of them is refused. None without the reads."""
+        release may. The source: the rate HQPlayer reported, a DSD one or
+        not as it said, else the slot's file row; and the PCM rates of the
+        queue from that slot to its end, in the same one query — the verdict
+        names a rate to pick only when every one of them is refused. None
+        without the reads."""
         import hqp_library
         state, lists = (reads or {}).get("state"), (reads or {}).get("lists") or {}
         if state is None or any(lists.get(k) is None for k in ("modes", "rates", "filters", "shapers")):
@@ -4779,7 +4923,8 @@ class HqpBackend(PlayerBackend):
             state, lists["modes"], lists["rates"], lists["filters"], lists["shapers"],
             adaptive=None if _stream_mode() else hqp_library.local_engine().adaptive_rate,
             atlas=hqp_atlas.read(hqp_atlas.SHIPPED, None), engine=self._info.get("engine"), published=True)
-        source = next((t["src_rate"] for t in ticks if t.get("src_rate")), None)
+        said = next((t for t in ticks if t.get("src_rate")), None)
+        source, dsd = (said["src_rate"], bool(said.get("sdm"))) if said else (None, False)
         queue = None
         if item is not None:
             slot = self._queue.index_of(item)
@@ -4791,9 +4936,10 @@ class HqpBackend(PlayerBackend):
                 # and its rate to pick, never the poll: it is not HQPlayer failing
                 logger.warning("A stopped track's source rates not read: %s", e)
             else:
-                source = source or ahead.first
+                if source is None:
+                    source, dsd = (ahead.first, False) if ahead.first else (ahead.first_dsd, bool(ahead.first_dsd))
                 queue = ahead.pcm if slot is not None else None
-        return diag.rate_facts(inputs, source, queue)
+        return diag.rate_facts(inputs, source, queue, dsd)
 
     def _queue_refs(self) -> set:
         """Every path and verbatim URI the queue hands over, as HQPlayer's

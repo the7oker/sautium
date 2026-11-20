@@ -121,9 +121,11 @@
     ],
     "modulator": "DMX7 512+fs",
     "refused": {},
-    "engine": null
+    "engine": null,
+    "measured": null
    },
    "source": 48000,
+   "dsd": false,
    "queue": {
     "48000": 1
    }
@@ -140,7 +142,8 @@
   "cause": {
    "code": "rate_filter",
    "sentence": "HQPlayer refused this rate combination.",
-   "line": "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/12288000, stop"
+   "line": "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 48000/12288000, stop",
+   "rate_in": 48000
   },
   "note": null
  }

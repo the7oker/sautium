@@ -50,6 +50,8 @@ _KIND_CANONICAL = {
     "artist": "artist", "artists": "artist",
     "album": "album", "albums": "album",
     "track": "tracks", "tracks": "tracks",
+    # Comparing by ear (AB-1): one filter, the other side his own
+    "hqp_ab": "hqp_ab",
 }
 
 
@@ -89,6 +91,12 @@ def _normalize_block(b: Any) -> dict | None:
             tid = it.get("track_id") or it.get("id") or it.get("media_file_id")
             if tid is not None and str(tid).strip():
                 items.append({"track_id": str(tid).strip()})
+        elif kind == "hqp_ab":
+            # The filter to hear against his own, by HQPlayer's name; one
+            # a block — the button compares one pair
+            name = str(it.get("filter") or "").strip()
+            if name and len(name) <= 128 and not items:
+                items.append({"filter": name})
 
     if not items:
         return None

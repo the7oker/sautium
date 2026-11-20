@@ -69,7 +69,13 @@ Design rules: the device token lives in `localStorage`, which is per-origin,
 so a foreign page cannot forge a signature (CSRF); a client-supplied `Host`
 is never resolved and only the node's own addresses pass the unsigned
 whitelist (DNS rebinding); no credential crosses the network in the clear —
-the token never travels, and the exchange that earns it is boxed; the peer
+the token never travels, and the exchange that earns it is boxed, as is,
+since 2026-11-18, every other secret typed in the Web UI (an AI provider's
+key, a sign-in's code, the email's code, a friend's invite link pasted to
+add them); the changes that act outside the
+node and outlast "Sign out everywhere" (the account email, an invite link
+with rights, the AI key, an agent's sign-in) take the account's password
+through the same box; the peer
 surface writes to P2P tables only and never reveals configuration or
 secrets; a source address is a signal, never an authentication input.
 
@@ -118,6 +124,16 @@ extension on the host (any process running as the user can read the signing
 secret); a compromised build of the client. Exposure beyond the LAN — a
 "headless" mode, multiple users — is outside this model: it would need real
 per-user credentials, not only a TLS front.
+
+The chat assistant's instructions hold the product's own text alone (since
+2026-11-19): what is playing, the queue and the output's name reach the model
+only as the answer of a tool, `get_player_state`, which marks each name and
+title as data. Its other tools and its database queries return names,
+titles and biographies as they are — in a tool's answer, never in its
+instructions. That narrows what such text can make a model do; it does not
+make a model immune, which is why the assistant's tools are bounded as well:
+a fixed list per call, and a database role that reads the catalogue and
+nothing else.
 
 ## Secrets
 

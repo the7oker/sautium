@@ -306,6 +306,14 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
             INSERT INTO track_artists (track_id, artist_id, role)
             SELECT :new, artist_id, role FROM track_artists WHERE track_id = :old
             ON CONFLICT DO NOTHING"""), p)
+        db.execute(text("""
+            INSERT INTO track_credits (track_id, role, artist_id, source, position)
+            SELECT :new, o.role, o.artist_id, o.source,
+                   o.position + COALESCE((SELECT max(x.position) + 1 FROM track_credits x
+                                           WHERE x.track_id = :new AND x.role = o.role
+                                             AND x.source = o.source), 0)
+            FROM track_credits o WHERE o.track_id = :old
+            ON CONFLICT DO NOTHING"""), p)
         # One-per-(track, key) tables: move what the target lacks.
         db.execute(text("""
             UPDATE track_lyrics tl SET track_id = :new
@@ -609,6 +617,20 @@ def delete_orphan_tracks(db: Session) -> int:
     return res.rowcount
 
 
+def repoint_track_credits(db: Session, source: str, target: str) -> None:
+    """An artist merging into another takes its credits along. A credit the
+    target already holds for the same track, role and source is the same
+    credit: the source's copy goes."""
+    p = {"s": source, "t": target}
+    db.execute(text("""
+        UPDATE track_credits SET artist_id = :t WHERE artist_id = :s
+        AND NOT EXISTS (SELECT 1 FROM track_credits x
+            WHERE x.track_id = track_credits.track_id AND x.artist_id = :t
+              AND x.role = track_credits.role AND x.source = track_credits.source)
+    """), p)
+    db.execute(text("DELETE FROM track_credits WHERE artist_id = :s"), p)
+
+
 def recanonicalize_artist(db: Session, source_id, canonical_name: str) -> str:
     """Move an artist (and its primary tracks/albums) onto a canonical name.
 
@@ -669,6 +691,7 @@ def recanonicalize_artist(db: Session, source_id, canonical_name: str) -> str:
               AND x.role = album_artists.role)
     """), {"t": canonical_id, "s": source_str})
     db.execute(text("DELETE FROM album_artists WHERE artist_id = :s"), {"s": source_str})
+    repoint_track_credits(db, source_str, canonical_id)
     db.execute(text("DELETE FROM artists WHERE id = :s"), {"s": source_str})
 
     _stamp()

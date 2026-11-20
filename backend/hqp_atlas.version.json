@@ -1,0 +1,29 @@
+{
+ "dataset": "hqp-atlas",
+ "schema": "v1",
+ "manifest_sha256": "7a4dac4d7d83c506bb540fb9a7b6b4c2094ef159cd8f006e4859cf0640b72b90",
+ "app_sha256": "5b28ea79f24b3d050f0405d150a295b1cd300d901632418ef69274c52862f612",
+ "code": "e2afb72c6610f057d5879e3996fedc048132d746",
+ "releases": [
+  {
+   "engine": "6.2.3",
+   "family": "pcm",
+   "published": "2026-11-19"
+  },
+  {
+   "engine": "6.2.3",
+   "family": "sdm",
+   "published": "2026-11-19"
+  },
+  {
+   "engine": "6.3.3",
+   "family": "pcm",
+   "published": "2026-11-19"
+  },
+  {
+   "engine": "6.3.3",
+   "family": "sdm",
+   "published": "2026-11-19"
+  }
+ ]
+}

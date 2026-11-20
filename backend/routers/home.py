@@ -138,9 +138,9 @@ def get_favourite_artists(
     seed-pick artists not heard in the window at the tail."""
 
     # A completed listen weighs its duration × exp(-age / FAVOURITE_TAU_DAYS)
-    # and counts only for the primary artist of its track — featured /
-    # composer / conductor rows in track_artists would otherwise hoist
-    # soundtrack composers into Favourites for any film-score listener, but
+    # and counts only for the primary artist of its track — a featured row
+    # in track_artists would otherwise hoist a guest into Favourites (a
+    # composer is no track_artists row at all: track_credits), but
     # the artist page lists albums only where they are primary, so the tile
     # would lead to an empty detail screen. The co-primary artists of a duet
     # share every weight; the id orders their tie stably.

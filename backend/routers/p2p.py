@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 import psycopg2
 import psycopg2.extensions
 from config import settings
+import device_auth
+from routers.auth import StepUp, boxed, step_up
 from db_pool import Listener, db_query as _db_query, db_query_one as _db_query_one, db_execute as _db_execute, get_conn as _get_conn
 
 logger = logging.getLogger(__name__)
@@ -50,13 +52,26 @@ class InviteByEmailRequest(BaseModel):
     message: str = Field(default="", max_length=500)
 
 
+# The account email acts at the Worker and outlasts "Sign out everywhere": a
+# token holder's own mailbox there would take the node's invite and
+# acceptance mails. So the flow — the address set, its code sent, the code
+# verified — takes the account's password at its first step (routers/auth.
+# step_up), whose sealed reply carries the grant the later steps quote; the
+# grant lives as long as the Worker's code does.
+EMAIL_FLOW_SECONDS = 15 * 60
+
+
+class SetEmailRequest(StepUp):
+    email: str = Field(..., min_length=3, max_length=320)
+
+
+class SendCodeRequest(StepUp):
+    grant: str = Field(default="", max_length=64)
+
+
 class VerifyCodeRequest(BaseModel):
     code: str = Field(..., min_length=1, max_length=10)
-    message: str = Field(default="", max_length=500)
-
-
-class SetEmailRequest(BaseModel):
-    email: str = Field(..., min_length=3, max_length=320)
+    grant: str = Field(default="", max_length=64)
 
 
 # -- Chat SSE infrastructure --------------------------------------------------
@@ -174,7 +189,8 @@ def _busy(resp) -> HTTPException:
         when = f"in about {round(wait / 60)} minutes"
     else:
         when = f"in about {round(wait / 3600)} hours"
-    return HTTPException(429, f"The verification service is busy — please try again {when}.")
+    return HTTPException(429, f"The verification service is busy — please try again {when}.",
+                         headers={"Retry-After": str(wait)} if wait else None)
 
 
 async def _worker_post(path: str, payload: dict) -> Optional[dict]:
@@ -247,11 +263,13 @@ async def get_account() -> Dict[str, Any]:
 
 
 @router.put("/account/email")
-async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
-    """Set or change the account email. Persisted to node_info.json
-    (desktop mode only) and resets user_profile.email_verified — both
-    a new email and changing an existing one invalidate the Worker's
+async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
+    """Set or change the account email, on the account's password; the
+    sealed answer carries the grant its code steps quote. Persisted to
+    node_info.json (desktop mode only) and resets user_profile.email_verified
+    — both a new email and changing an existing one invalidate the Worker's
     `invite_code → email` mapping for this identity."""
+    req, reply = opened
     email = req.email.strip()
     if "@" not in email or "." not in email.split("@", 1)[1]:
         raise HTTPException(400, "Invalid email address")
@@ -268,6 +286,7 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
     info_path = Path(settings.p2p_identity_dir) / "node_info.json"
     if not info_path.exists():
         raise HTTPException(500, "node_info.json is missing")
+    await step_up(req)
     try:
         data = json.loads(info_path.read_text(encoding="utf-8"))
     except Exception as e:
@@ -287,7 +306,7 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
     # that is busy leaves the flag False: /email/status re-derives it on
     # the next Profile render, and the Verify row stays.
     try:
-        result = await _worker_check_email(_get_identity())
+        result = await _check_email_upgrade(_get_identity())
     except HTTPException as e:
         logger.warning(f"check-email after email change: {e.detail}")
         result = None
@@ -297,7 +316,8 @@ async def set_account_email(req: SetEmailRequest) -> Dict[str, Any]:
         info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
 
-    return {"email": email, "email_verified": verified}
+    return reply({"email": email, "email_verified": verified,
+                  "grant": None if verified else device_auth.grant("email", EMAIL_FLOW_SECONDS)})
 
 
 # One server-side truth for "online" — imported by routers/settings.py's
@@ -426,7 +446,15 @@ async def list_friends(cursor: str = "", limit: int = 50,
 
 
 @router.post("/friends/add")
-async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
+async def add_friend(opened=boxed(AddFriendRequest)) -> Dict[str, Any]:
+    """The pasted share string rides the credential box: an invite link or a
+    mailed invite carries another node's bearer token, which a LAN reader
+    could spend first; the answer comes back sealed (add_share_string)."""
+    req, reply = opened
+    return reply(await add_share_string(req.invite_code))
+
+
+async def add_share_string(string: str) -> Dict[str, Any]:
     """Add a friend by share string (chat_wire.parse_share): a code, short
     or long, an invite link (`…#<token-uuid>`) or a mailed invite
     (`…#i-<token>`).
@@ -448,7 +476,7 @@ async def add_friend(req: AddFriendRequest) -> Dict[str, Any]:
     from desktop.p2p import chat_wire
 
     try:
-        share = chat_wire.parse_share(req.invite_code)
+        share = chat_wire.parse_share(string)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid invite code")
     return await _add_share(share, tell=True)
@@ -686,7 +714,7 @@ async def delete_friend(friend_id: int) -> Dict[str, Any]:
 
 # -- Invite tokens (issuer-side management) -----------------------------------
 
-class TokenCreate(BaseModel):
+class TokenCreate(StepUp):
     label: str = Field(default="", max_length=128)
     rights: List[str] = Field(default_factory=lambda: ["can_message"])
     max_uses: Optional[int] = Field(default=None, ge=1)
@@ -697,7 +725,7 @@ class TokenCreate(BaseModel):
     id: Optional[str] = None
 
 
-class TokenPatch(BaseModel):
+class TokenPatch(StepUp):
     label: Optional[str] = Field(default=None, max_length=128)
     rights: Optional[List[str]] = None
     max_uses: Optional[int] = Field(default=None, ge=1)
@@ -736,8 +764,40 @@ async def list_tokens() -> List[Dict[str, Any]]:
     return rows
 
 
+# A token with rights is spent later by whoever holds its link, and outlasts
+# "Sign out everywhere": minting one, or widening any link — a right added,
+# more uses, a later expiry or none — takes the account's password
+# (routers/auth.step_up): a link widened without rights now would carry the
+# reach nobody approved into the rights its owner adds later. Minting a link
+# without rights is a friend's add, which stays on the device token;
+# narrowing is never asked.
+_TOKEN_TERMS = """
+    SELECT t.max_uses, t.expires_at,
+           ARRAY(SELECT p2p_right::text FROM invite_token_rights
+                 WHERE token_id = t.id ORDER BY 1) AS rights,
+           (%(expires)s IS NOT NULL AND t.expires_at IS NOT NULL
+            AND (NULLIF(%(expires)s, '') IS NULL
+                 OR NULLIF(%(expires)s, '')::timestamptz > t.expires_at)) AS extends
+    FROM invite_tokens t WHERE t.id = %(id)s
+"""
+
+
+def _widens(terms: Dict[str, Any], req: "TokenPatch", rights: Optional[List[str]]) -> bool:
+    """Whether the patch leaves the token reaching further than before: a
+    right added, more uses, a later expiry or none."""
+    before = set(terms["rights"])
+    after = before if rights is None else set(rights)
+    more_uses = (req.max_uses is not None and terms["max_uses"] is not None
+                 and req.max_uses > terms["max_uses"])
+    return bool(after - before) or more_uses or bool(terms["extends"])
+
+
 @router.post("/tokens")
-async def create_token(req: TokenCreate) -> Dict[str, Any]:
+async def create_token(opened=boxed(TokenCreate)) -> Dict[str, Any]:
+    """Mint an invite link; with any right, on the account's password. The
+    body rides the box (a custom id is typed from an old share string) and
+    the share string comes back sealed."""
+    req, reply = opened
     rights = _validate_rights(req.rights)
     token_id = str(uuid.uuid4())
     if req.id:
@@ -745,6 +805,8 @@ async def create_token(req: TokenCreate) -> Dict[str, Any]:
             token_id = str(uuid.UUID(req.id.strip()))
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid token id")
+    if rights:
+        await step_up(req)
     try:
         _db_execute("""
             INSERT INTO invite_tokens (id, label, max_uses, expires_at,
@@ -764,13 +826,28 @@ async def create_token(req: TokenCreate) -> Dict[str, Any]:
         share = f"{chat_wire.long_code(identity['username'], identity['public_key_hex'])}#{token_id}"
     else:
         share = token_id
-    return {"id": token_id, "share_string": share, "rights": rights}
+    return reply({"id": token_id, "share_string": share, "rights": rights})
 
 
 @router.patch("/tokens/{token_id}")
-async def patch_token(token_id: str, req: TokenPatch) -> Dict[str, Any]:
+async def patch_token(token_id: str, opened=boxed(TokenPatch)) -> Dict[str, Any]:
     """Edits affect FUTURE uses only — existing friendships keep their
-    rights snapshot."""
+    rights snapshot. A patch that widens the token (_widens) takes the
+    account's password, and lands only on the token as it was when the
+    password was asked for: under the row's lock, with the edit, a vouched
+    patch finds the terms it was judged on (another edit during the
+    derivation is a 409, asked again), an unvouched one is judged again."""
+    import psycopg2.extras
+    from db_pool import transaction
+    req, reply = opened
+    rights = _validate_rights(req.rights) if req.rights is not None else None
+    terms_args = {"id": token_id, "expires": req.expires_at}
+    terms = _db_query_one(_TOKEN_TERMS, terms_args)
+    if not terms:
+        raise HTTPException(status_code=404, detail="Token not found")
+    judged, vouched = terms, _widens(terms, req, rights)
+    if vouched:
+        await step_up(req)
     sets, params = [], []
     if req.label is not None:
         sets.append("label = %s")
@@ -784,21 +861,28 @@ async def patch_token(token_id: str, req: TokenPatch) -> Dict[str, Any]:
     if req.welcome_message is not None:
         sets.append("welcome_message = %s")
         params.append(req.welcome_message)
-    if sets:
-        row = _db_execute(
-            f"UPDATE invite_tokens SET {', '.join(sets)}"
-            " WHERE id = %s RETURNING id", params + [token_id])
-        if not row:
+    with transaction(psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(_TOKEN_TERMS + " FOR UPDATE OF t", terms_args)
+        terms = cur.fetchone()
+        if not terms:
             raise HTTPException(status_code=404, detail="Token not found")
-    if req.rights is not None:
-        rights = _validate_rights(req.rights)
-        _db_execute("DELETE FROM invite_token_rights WHERE token_id = %s",
-                    (token_id,))
-        for r in rights:
-            _db_execute(
-                "INSERT INTO invite_token_rights (token_id, p2p_right)"
-                " VALUES (%s, %s) ON CONFLICT DO NOTHING", (token_id, r))
-    return {"ok": True}
+        if vouched and terms != judged:
+            raise HTTPException(status_code=409,
+                                detail="This link changed meanwhile: open it again and save")
+        if not vouched and _widens(terms, req, rights):
+            raise HTTPException(status_code=403,
+                                detail="This link changed meanwhile, and the change now widens it: "
+                                       "type the account's password",
+                                headers={"X-Sautium-Auth-Error": "step-up"})
+        if sets:
+            cur.execute(f"UPDATE invite_tokens SET {', '.join(sets)} WHERE id = %s",
+                        params + [token_id])
+        if rights is not None:
+            cur.execute("DELETE FROM invite_token_rights WHERE token_id = %s", (token_id,))
+            for r in rights:
+                cur.execute("INSERT INTO invite_token_rights (token_id, p2p_right)"
+                            " VALUES (%s, %s) ON CONFLICT DO NOTHING", (token_id, r))
+    return reply({"ok": True})
 
 
 @router.post("/tokens/{token_id}/revoke")
@@ -1097,7 +1181,8 @@ async def _get_own_birth_cert(refresh: bool = False) -> Optional[dict]:
             "signature": signature,
         })
     if cert and cert.get("pubkey") == pubkey and verify_certificate(cert):
-        p2p_identity.save_certificate(settings, cert)
+        if p2p_identity.save_certificate(settings, cert):
+            _certificate_stored()
         return cert
     return None
 
@@ -1145,55 +1230,224 @@ async def _worker_check_email(identity: dict) -> Optional[dict]:
     return result
 
 
-async def identity_proof_task(stop: threading.Event) -> None:
-    """Startup task: make sure this node holds its identity certificate and,
-    for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
-    same policy the launcher runs). Progress is published to
-    user_settings['p2p.identity'] + NOTIFY sautium_identity for the Web UI.
-    A node whose email is verified but whose certificate predates v2 gets
-    the method:email certificate from /check-email here — no work needed."""
+# -- The identity worker -------------------------------------------------------
+#
+# One per node, in the process that serves the node's peer surface
+# (settings.serves_peer_surface): a launcher-mode backend leaves it to the
+# launcher's P2P manager, as it leaves the chat client. Started at the
+# lifespan's start for a node with an account and the moment an account
+# exists (routers/auth.create_account); restarted when the identity changes
+# (device_auth._after_rotation) or its certificate does (_certificate_changed).
+# Behind it, the identity folder's own lock (identity_proof.worker_lock): one
+# worker per folder, across processes.
+
+class _IdentityWorker:
+    def __init__(self):
+        self.stop = threading.Event()        # the mining thread's, between attempts
+        self.certified = asyncio.Event()     # a certificate stored while it waits for one
+        self.task: Optional[asyncio.Task] = None
+        self.mining: Optional[asyncio.Future] = None
+
+
+_identity_worker: Optional[_IdentityWorker] = None
+_identity_worker_lock = asyncio.Lock()
+_identity_worker_closed = False
+
+
+async def start_identity_worker() -> None:
+    """The worker for this node's identity, unless one ran or runs for it
+    already: a worker done (ready) stays done until a restart."""
+    async with _identity_worker_lock:
+        await _start_worker()
+
+
+async def close_identity_worker() -> None:
+    """At the backend's stop: the worker stopped and waited for — its Worker
+    requests cancelled (they publish nothing), its mining thread returning
+    between two attempts (one Argon2 call at most) — and none started after,
+    by a start or a restart that waited on the lock meanwhile."""
+    global _identity_worker_closed
+    async with _identity_worker_lock:
+        _identity_worker_closed = True
+        await _stop_worker()
+
+
+async def restart_identity_worker() -> None:
+    """For an identity or a certificate that changed under the worker: the
+    old one stopped and waited for first — a proof it saved or a state it
+    published after the new one's would be the old identity's."""
+    async with _identity_worker_lock:
+        await _stop_worker()
+        await _start_worker()
+
+
+async def _start_worker() -> None:
+    global _identity_worker
+    if _identity_worker is not None or _identity_worker_closed:
+        return
+    if not settings.serves_peer_surface:
+        if settings.p2p_enabled:
+            logger.info("identity worker: the launcher's process runs it (this backend serves "
+                        "no peer surface)")
+        return
+    if _get_identity() is None:
+        return
+    worker = _IdentityWorker()
+
+    async def run():
+        try:
+            await identity_proof_task(worker)
+        except Exception:
+            logger.exception("identity worker failed")
+    worker.task = asyncio.create_task(run())
+    _identity_worker = worker
+
+
+async def _stop_worker() -> None:
+    global _identity_worker
+    worker, _identity_worker = _identity_worker, None
+    if worker is None:
+        return
+    worker.stop.set()
+    cancelled = worker.task.cancel()
+    await asyncio.gather(worker.task, return_exceptions=True)
+    if worker.mining is not None and cancelled:
+        # Cancelled, the task does not see how its thread ends: said here
+        try:
+            await worker.mining
+        except Exception:
+            logger.exception("identity proof mining failed")
+
+
+def _certificate_stored() -> None:
+    """A certificate this node did not hold was stored (_get_own_birth_cert):
+    a worker waiting out the Worker's absence goes on now, whoever asked —
+    this backend's, or in launcher mode the launcher's, which started none
+    without a certificate (NOTIFY sautium_identity_cert, p2p_manager)."""
+    if _identity_worker is not None:
+        _identity_worker.certified.set()
+    if not settings.serves_peer_surface:
+        _db_execute("NOTIFY sautium_identity_cert")
+
+
+def _publish_identity_state(state: dict) -> None:
+    """A worker's state to the Web UI (user_settings['p2p.identity'] + NOTIFY
+    sautium_identity); a `ready` one also wakes the chat client, whose
+    handshakes parked on our missing certificate or proof go out now — the
+    launcher's worker sends the same wake (p2p_manager)."""
+    try:
+        from routers.settings import _write
+        _write("p2p.identity", state)
+        _db_execute("NOTIFY sautium_identity")
+    except Exception as e:
+        logger.warning(f"identity state not published: {e}")
+    if state.get("status") == "ready":
+        import p2p_chat
+        client = p2p_chat.chat_client()
+        if client is not None:
+            client.resolve_soon()
+
+
+async def _worker_certificate() -> tuple[Optional[dict], Optional[int]]:
+    """(the certificate, None), or (None, the wait the Worker asked for) when
+    it refused for volume (429) with none held: the worker's own Worker reads.
+    A refusal of a read that only checks a certificate held for a newer one
+    leaves the one held standing."""
+    try:
+        cert = await _get_own_birth_cert()
+    except HTTPException as e:
+        if e.status_code != 429:
+            raise
+        retry = (e.headers or {}).get("Retry-After", "")
+        return None, int(retry) if retry.isdigit() else None
+    if cert is not None and cert["method"] == "pow":
+        # Portable identity: the email upgrade may have happened on
+        # another device holding the same key — one Worker read before
+        # committing minutes of mining to a possibly superseded cert.
+        cert = await _unless_braked(_get_own_birth_cert(refresh=True)) or cert
+    if cert is not None and cert["method"] != "email":
+        row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+        if row and row.get("email_verified"):
+            result = await _unless_braked(_worker_check_email(_get_identity() or {}))
+            if result and result.get("birth_cert"):
+                cert = result["birth_cert"]
+    return cert, None
+
+
+async def _unless_braked(read):
+    """A Worker read the worker can do without: None when the Worker asks it
+    to wait (429)."""
+    try:
+        return await read
+    except HTTPException as e:
+        if e.status_code != 429:
+            raise
+        logger.info(f"identity worker: the Worker asks to wait — the certificate held stands ({e.detail})")
+        return None
+
+
+async def identity_proof_task(worker: _IdentityWorker) -> None:
+    """The worker's body: make sure this node holds its identity certificate
+    and, for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
+    same policy the launcher runs), publishing every state
+    (_publish_identity_state). A node whose email is verified but whose
+    certificate predates v2 gets the method:email certificate from
+    /check-email here — no work needed."""
     from desktop.p2p import identity_proof
     import p2p_identity
 
-    def publish(state: dict) -> None:
-        try:
-            from routers.settings import _write
-            _write("p2p.identity", state)
-            _db_execute("NOTIFY sautium_identity")
-        except Exception as e:
-            logger.debug(f"identity state publish failed: {e}")
-
     backoff = 300
-    while not stop.is_set():
-        cert = await _get_own_birth_cert()
-        if cert is not None and cert["method"] == "pow":
-            # Portable identity: the email upgrade may have happened on
-            # another device holding the same key — one Worker read before
-            # committing minutes of mining to a possibly superseded cert.
-            cert = await _get_own_birth_cert(refresh=True) or cert
+    while True:
+        worker.certified.clear()
+        cert, wait = await _worker_certificate()
         if cert is None:
-            # Worker unreachable / not configured: retry with backoff — the
-            # certificate is a network fact, nothing local can replace it.
-            logger.warning(f"identity certificate unavailable — retry in {backoff}s")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 3600)
+            # Worker unreachable, not configured or braking: the certificate
+            # is a network fact, nothing local can replace it — wait for the
+            # Worker's own word, the backoff, or a certificate a route stored
+            wait = max(wait or 0, backoff)
+            logger.warning(f"identity certificate unavailable — retry in {wait}s")
+            try:
+                await asyncio.wait_for(worker.certified.wait(), wait)
+            except asyncio.TimeoutError:
+                backoff = min(backoff * 2, 3600)
             continue
-        if cert["method"] != "email":
-            row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
-            if row and row.get("email_verified"):
-                result = await _worker_check_email(_get_identity() or {})
-                if result and result.get("birth_cert"):
-                    cert = result["birth_cert"]
         path = p2p_identity.proof_path(settings)
         if path is None:
             logger.warning("p2p_identity_dir unset — identity proof cannot be stored")
             return
         from desktop.p2p import load_meter
         meter = load_meter.current()
-        await asyncio.to_thread(identity_proof.ensure_identity_proof, cert, path,
-                                stop=stop, on_state=publish,
-                                hold=meter.mining_hold if meter else (lambda: None))
+        # Shielded: a stop cancels this task, never the thread — which it
+        # waits for instead (_stop_worker)
+        worker.mining = asyncio.ensure_future(asyncio.to_thread(
+            identity_proof.ensure_identity_proof, cert, path, stop=worker.stop,
+            on_state=_publish_identity_state,
+            hold=meter.mining_hold if meter else (lambda: None)))
+        await asyncio.shield(worker.mining)
         return
+
+
+def _certificate_changed() -> None:
+    """This node's certificate changed under its worker — an email verified
+    here (verify-code) or found verified on another device of the same key
+    (/check-email, _check_email_upgrade): the worker starts again on it, and
+    an `email` certificate is `ready` at once — the publish and the wake
+    every state takes. A launcher's own worker is told by NOTIFY
+    sautium_identity_cert (p2p_manager); this backend owns none there."""
+    import p2p_chat
+    p2p_chat.soon(restart_identity_worker())
+    _db_execute("NOTIFY sautium_identity_cert")
+
+
+async def _check_email_upgrade(identity: dict) -> Optional[dict]:
+    """_worker_check_email for a route: a certificate it stored that this
+    node did not hold is the certificate's change."""
+    import p2p_identity
+    held = p2p_identity.load_certificate(settings)
+    result = await _worker_check_email(identity)
+    if result and result.get("birth_cert") and p2p_identity.load_certificate(settings) != held:
+        _certificate_changed()
+    return result
 
 
 @router.get("/email/status")
@@ -1214,7 +1468,7 @@ async def email_status() -> Dict[str, Any]:
     if row and row.get("email_verified"):
         return {"email": email, "verified": True}
 
-    result = await _worker_check_email(identity)
+    result = await _check_email_upgrade(identity)
     verified = bool(result and result.get("verified"))
     if verified:
         _db_execute(
@@ -1224,14 +1478,20 @@ async def email_status() -> Dict[str, Any]:
 
 
 @router.post("/email/send-code")
-async def email_send_code() -> Dict[str, Any]:
-    """Ask the Worker to generate and email a verification code.
+async def email_send_code(opened=boxed(SendCodeRequest)) -> Dict[str, Any]:
+    """Ask the Worker to generate and email a verification code — on the
+    grant the address's own setting handed this browser, or the account's
+    password (the Verify row of an address set earlier); the sealed answer
+    carries a grant for the code's own lifetime.
 
     The code exists only on the Worker (hash, 15 min TTL) — mailbox
     ownership is proven server-side at /email/verify-code."""
+    req, reply = opened
     identity = _get_identity()
     if not identity or not identity.get("email"):
         raise HTTPException(400, "No email configured (set P2P_EMAIL in .env)")
+    if not device_auth.grant_holds("email", req.grant):
+        await step_up(req)
 
     if not await _born():
         raise HTTPException(502, "Birth certificate unavailable")
@@ -1252,14 +1512,21 @@ async def email_send_code() -> Dict[str, Any]:
     if not result or result.get("status") != "sent":
         raise HTTPException(502, "Failed to send verification email")
 
-    return {"status": "sent", "email": email}
+    return reply({"status": "sent", "email": email,
+                  "grant": device_auth.grant("email", EMAIL_FLOW_SECONDS)})
 
 
 @router.post("/email/verify-code")
-async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
+async def email_verify_code(opened=boxed(VerifyCodeRequest)) -> Dict[str, Any]:
     """Register the email on the Worker: it checks the entered code against
     its stored hash and requires this node's birth certificate (the verified
-    record then carries born_at)."""
+    record then carries born_at). The code rides the box, with the grant its
+    send handed this browser; a verified address spends the grant."""
+    req, reply = opened
+    if not device_auth.grant_holds("email", req.grant):
+        raise HTTPException(status_code=403, detail="Send the code again from here: this one was not "
+                                                    "asked for by this page, or its time is up",
+                            headers={"X-Sautium-Auth-Error": "grant"})
     identity = _get_identity()
     if not identity or not identity.get("email"):
         raise HTTPException(400, "No email configured")
@@ -1284,17 +1551,21 @@ async def email_verify_code(req: VerifyCodeRequest) -> Dict[str, Any]:
     })
 
     if not result or result.get("status") != "registered":
-        return {"verified": False, "error": "Invalid or expired code"}
+        return reply({"verified": False, "error": "Invalid or expired code"})
 
-    if result.get("birth_cert"):
+    changed = False
+    if result.get("birth_cert") and result["birth_cert"] != cert:
         import p2p_identity
-        p2p_identity.save_certificate(settings, result["birth_cert"])
+        changed = p2p_identity.save_certificate(settings, result["birth_cert"])
 
     # Persist so future /email/status checks return verified without a
     # Worker round-trip. Email-change and password-change flows (when
     # they land) must clear this flag.
     _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
-    return {"verified": True, "email": email}
+    device_auth.drop_grant("email")
+    if changed:
+        _certificate_changed()
+    return reply({"verified": True, "email": email})
 
 
 @router.post("/chat/wake")

@@ -244,6 +244,176 @@ def test_the_logs_cause_names_neither_the_filter_nor_the_modulator():
     assert diag.classify([line])["sentence"] == "HQPlayer refused this rate combination."
 
 
+# A DSD64 track in PCM mode at 88.2 kHz, refused after its filter built, as
+# Desktop 6.2.4 logs it: the rate the engine took in, its stop
+_DSD_ADD = "I 2001/05/06 10:00:00 AddURI(): file:///E:/Music/D/01.dsf"
+_DSD_REFUSED = [_DSD_ADD, "& 2001/05/06 10:00:01 Play (1/0)",
+                "  2001/05/06 10:00:01 SDM conversion parameters (8, 12)",
+                "  2001/05/06 10:00:01 Rate: 176400, block size: 8192, frame size: 32768",
+                "  2001/05/06 10:00:01 Playback engine ratio: 0.5",
+                "  2001/05/06 10:00:01 Filter: medium sinc (low)",
+                "! 2001/05/06 10:00:01 clHQPlayerEngine::Execute(): lInRate > lOutRate",
+                "  2001/05/06 10:00:01 Stop request (reset)"]
+
+
+def test_both_of_hqplayers_refusals_are_one_cause_with_the_rate_its_engine_took_in():
+    cause = diag.classify(_DSD_REFUSED, "file:///E:/Music/D/01.dsf")
+    assert (cause["code"], cause["rate_in"], cause["line"]) == ("rate_filter", 176400, _DSD_REFUSED[6])
+    assert cause["sentence"] == "HQPlayer refused this rate combination."
+    # the line before the engine starts names the rate itself
+    line = "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 176400/88200, stop"
+    assert diag.classify([_DSD_ADD, line], "file:///E:/Music/D/01.dsf")["rate_in"] == 176400
+    # a rate the engine took in before the track's add is another play's
+    earlier = ["  2001/05/06 09:59:00 Rate: 96000, block size: 10240, frame size: 1280", _DSD_ADD, _DSD_REFUSED[6]]
+    assert diag.classify(earlier, "file:///E:/Music/D/01.dsf")["rate_in"] is None
+    # no line names the file: the newest cause, and the rate taken in just before it
+    assert diag.classify(_DSD_REFUSED[1:])["rate_in"] == 176400
+
+
+def test_a_refused_rate_is_the_newest_plays_after_the_add_with_that_plays_rate():
+    # a queue handed over at once: both adds, then the PCM track's refused play, then the DSD track's
+    pcm_add = "I 2001/05/06 10:00:00 AddURI(): file:///E:/Music/D/02.flac"
+    lines = [_DSD_ADD, pcm_add, "& 2001/05/06 10:00:01 Play (2/0)",
+             "  2001/05/06 10:00:01 Rate: 88200, block size: 4704, frame size: 588",
+             "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination 88200/44100, stop",
+             *_DSD_REFUSED[1:]]
+    cause = diag.classify(lines, "file:///E:/Music/D/01.dsf")
+    assert (cause["line"], cause["rate_in"]) == (_DSD_REFUSED[6], 176400)
+    # the PCM track's own, read when it stopped: its line and its rate
+    assert diag.classify(lines[:5], "file:///E:/Music/D/02.flac")["rate_in"] == 88200
+    # a refusal before the engine starts that names no rates: no "Rate:" line is its
+    bare = [_DSD_ADD, "  2001/05/06 10:00:01 Rate: 96000, block size: 10240, frame size: 1280",
+            "E 2001/05/06 10:00:01 Requested filter not possible with this rate combination, stop"]
+    assert diag.classify(bare, "file:///E:/Music/D/01.dsf")["rate_in"] is None
+
+
+def _dsd(out=88200, filter=("sinc-medium", "Any", True), mode="pcm", measured="6.2.4"):
+    """rate_refused_filter's trace, its track a DSD64 one HQPlayer reported as such."""
+    facts = _trace("rate_refused_filter")
+    rate = facts["rate"]
+    inputs = {**rate["inputs"], "mode": mode, "rate": out, "measured": measured,
+              "filter": dict(zip(("name", "ratio", "up"), filter))}
+    return {**facts, "rate": {**rate, "inputs": inputs, "source": 2822400, "dsd": True, "queue": {"44100": 1}}}
+
+
+def test_a_dsd_track_is_judged_by_the_rate_hqplayers_log_names_never_its_own():
+    facts, log = _dsd(), {"cause": diag.classify(_DSD_REFUSED, "file:///E:/Music/D/01.dsf")}
+    # by its own 2.8 MHz every "up" filter would read as one that stops, or may, at any PCM rate: nothing until the
+    # log names the rate
+    assert not diag.names_cause(facts["rate"])
+    assert diag.verdict(facts)["code"] == "not_played"
+    v = diag.verdict(facts, log)
+    assert (v["code"], v["cause"]) == ("rate_refused", "filter")
+    assert v["sentence"] == (
+        "HQPlayer describes sinc-medium as Any up: 88.2 kHz is under the 176.4 kHz HQPlayer converted this DSD64 "
+        "track to, and HQPlayer stopped on this track. HQPlayer's log: “clHQPlayerEngine::Execute(): lInRate > "
+        "lOutRate”.")
+    assert v["next"] == ("Filters described with “up” are made for upsampling, not for decimation: pick one HQPlayer "
+                         "describes without “up”, or as the output rate twice 176.4 kHz or a higher power-of-two "
+                         "multiple of it.")
+    # above the rate it took in, nothing the rule names: HQPlayer's line alone
+    assert diag.verdict(_dsd(out=352800), log)["cause"] == "line"
+    # in SDM mode nothing was measured of a DSD track: the line alone
+    assert diag.verdict(_dsd(mode="sdm"), log)["cause"] == "line"
+    # the log's other line: its first number is that rate
+    other = {"cause": diag.classify([_DSD_ADD, "E 2001/05/06 10:00:01 Requested filter not possible with this rate "
+                                               "combination 176400/88200, stop"], "file:///E:/Music/D/01.dsf")}
+    v = diag.verdict(_dsd(filter=("closed-form", "2^x", True)), other)
+    assert v["sentence"].startswith("HQPlayer describes closed-form as 2^x up: 88.2 kHz is under the 176.4 kHz "
+                                    "HQPlayer converted this DSD64 track to")
+
+
+def test_the_rate_a_dsd_track_reached_the_filter_at_is_the_logs_never_a_ratio_assumed():
+    # another conversion setting, another rate taken in: 352.8 kHz for the same DSD64 track
+    took = [line.replace("Rate: 176400", "Rate: 352800") for line in _DSD_REFUSED]
+    log = {"cause": diag.classify(took, "file:///E:/Music/D/01.dsf")}
+    assert log["cause"]["rate_in"] == 352800
+    v = diag.verdict(_dsd(out=176400), log)
+    assert v["sentence"].startswith("HQPlayer describes sinc-medium as Any up: 176.4 kHz is under the 352.8 kHz "
+                                    "HQPlayer converted this DSD64 track to")
+    # the refusal with no rate named before it: HQPlayer's line speaks alone
+    bare = {"cause": diag.classify([_DSD_ADD, _DSD_REFUSED[6]], "file:///E:/Music/D/01.dsf")}
+    assert bare["cause"]["rate_in"] is None
+    v = diag.verdict(_dsd(), bare)
+    assert (v["cause"], v["sentence"]) == ("line", "HQPlayer stopped on it: “clHQPlayerEngine::Execute(): lInRate > "
+                                                   "lOutRate”.")
+
+
+def test_a_pcm_track_an_up_filter_stopped_under_its_rate_closes_at_the_first_stop():
+    facts = _trace("rate_refused_filter")
+    rate = facts["rate"]
+    down = {**rate, "source": 88200, "inputs": {**rate["inputs"], "rate": 44100, "measured": "6.2.4",
+                                                "filter": {"name": "sinc-medium", "ratio": "Any", "up": True}}}
+    assert diag.names_cause(down)
+    v = diag.verdict({**facts, "rate": down})
+    assert (v["code"], v["cause"]) == ("rate_refused", "filter")
+    assert v["sentence"] == ("HQPlayer describes sinc-medium as Any up: 44.1 kHz is under 88.2 kHz, and HQPlayer "
+                             "stopped on this track.")
+    # sinc-M: never stopped there, nothing named
+    m = {**down, "inputs": {**down["inputs"], "filter": {"name": "sinc-M", "ratio": "2^x", "up": True}}}
+    assert not diag.names_cause(m) and diag.verdict({**facts, "rate": m})["code"] == "not_played"
+    # an "up" filter not tried may stop — sinc-Mx among them, compared with sinc-M only into 705.6 and 768 kHz:
+    # its attempt waits for the window, and the stop, once seen, is said
+    for name, ratio in (("sinc-short", "Any"), ("sinc-Mx", "2^x")):
+        may = {**down, "inputs": {**down["inputs"], "filter": {"name": name, "ratio": ratio, "up": True}}}
+        assert not diag.names_cause(may), name
+        v = diag.verdict({**facts, "rate": may})
+        assert (v["code"], v["cause"]) == ("rate_refused", "filter"), name
+        assert v["sentence"] == (f"HQPlayer describes {name} as {ratio} up: 44.1 kHz is under 88.2 kHz, and "
+                                 "HQPlayer stopped on this track.")
+
+
+def test_an_advance_closed_on_the_refusal_of_a_filter_hqplayer_built_is_judged_by_it():
+    # HQPlayer's own advance onto an 88.2 kHz entry, sinc-medium at 44.1 kHz: it builds the filter, shows one
+    # playing status at 0 s, and logs its refusal — the attempt closed on that line can meet that status last
+    case = _case("rate_refused_advance")
+    facts = case["facts"]
+    rate = facts["rate"]
+    playing = {**facts["ticks"][-1], "state": "playing", "position": 0.0}
+    built = {**facts, "end": "refused", "ticks": facts["ticks"] + [playing],
+             "rate": {**rate, "source": 88200,
+                      "inputs": {**rate["inputs"], "mode": "pcm", "rate": 44100, "measured": "6.2.4",
+                                 "filter": {"name": "sinc-medium", "ratio": "Any", "up": True}}}}
+    line = "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate"
+    v = diag.verdict(built, {"cause": diag.classify([line])})
+    assert (v["code"], v["cause"]) == ("rate_refused", "filter"), v
+    assert v["sentence"].endswith("HQPlayer's log: “clHQPlayerEngine::Execute(): lInRate > lOutRate”.")
+    # the same status last with no refusal heard: nothing it says explains a stop
+    assert diag.verdict({**built, "end": "window"})["code"] != "rate_refused"
+    # nor for a Play: its close at the first stopped tick is the one that says "refused"
+    play = {k: v for k, v in built.items() if k != "advance"}
+    assert diag.verdict(play)["code"] != "rate_refused"
+
+
+def test_an_advance_keeps_the_refusal_it_heard_when_its_log_is_read_after(fresh):
+    # a DSD64 entry HQPlayer moved onto by itself, its refusal heard since the stop with the rate taken in;
+    # the tail read after the close finds, from the file's add on, another play's cause first
+    case = _case("rate_refused_advance")
+    facts = case["facts"]
+    rate = facts["rate"]
+    line = "! 2001/05/06 10:00:09 clHQPlayerEngine::Execute(): lInRate > lOutRate"
+    playing = {**facts["ticks"][-1], "state": "playing", "position": 0.0}
+    a = diag.advance(1, facts["advance"]["serial"], 1.0, facts["t0"])
+    # the facts read before the follower heard it: the close puts what it heard in the trace
+    dsd = {**facts, "end": "refused", "advance": a.snapshot()["advance"], "ticks": facts["ticks"] + [playing],
+           "rate": {**rate, "source": 2822400, "dsd": True,
+                    "inputs": {**rate["inputs"], "mode": "pcm", "rate": 88200, "measured": "6.2.4",
+                               "filter": {"name": "sinc-medium", "ratio": "Any", "up": True}}}}
+    a.heard(line, 176400)
+    diag.close(a, dsd)
+    assert (a.facts["advance"]["line"], a.facts["advance"]["rate_in"]) == (line, 176400)
+    assert (a.verdict["code"], a.verdict["cause"]) == ("rate_refused", "filter"), a.verdict
+    assert "under the 176.4 kHz HQPlayer converted this DSD64 track to" in a.verdict["sentence"]
+    seek = "E 2001/05/06 10:00:02 FLAC__STREAM_DECODER_SEEK_ERROR"
+    tail = {"lines": [_DSD_ADD, seek], "cause": diag.classify([_DSD_ADD, seek], "file:///E:/Music/D/01.dsf")}
+    assert tail["cause"]["code"] == "decode_failed"
+    diag.attach_log(a, tail)
+    # the sheet shows the cause the verdict speaks of, the tail's lines beside it
+    assert a.hqp_log["lines"] == tail["lines"] and a.hqp_log["cause"]["line"] == line
+    assert a.verdict["code"] == "rate_refused"
+    assert "under the 176.4 kHz HQPlayer converted this DSD64 track to" in a.verdict["sentence"]
+
+
 # -- HQPlayer's own advance -----------------------------------------------------------
 
 def _wait(pred, timeout=5.0):
@@ -258,7 +428,8 @@ def _wait(pred, timeout=5.0):
 def _stopped_status(serial=5):
     return SimpleNamespace(track_index=0, position=0.0, length=0.0, process_speed=0.0, input_fill=0.0,
                            output_fill=0.0, tracks_total=0, active_mode="PCM", active_filter="demo-sinc-a",
-                           active_shaper="TPDF", active_rate=768000, src_rate=None, track_serial=serial)
+                           active_shaper="TPDF", active_rate=768000, src_rate=None, src_sdm=None,
+                           track_serial=serial)
 
 
 def test_the_start_signal_counts_an_advances_own_take_only():
@@ -464,6 +635,23 @@ def test_hqplayers_log_is_followed_from_the_stop_a_whole_line_at_a_time(tmp_path
     att.follower.wake()
     assert _wait(woke.is_set)
     assert att.end == "refused" and att.snapshot()["advance"]["line"] == line
+
+
+def test_a_filter_hqplayer_built_and_then_refused_closes_an_advance_too(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "hqplayer_data_dir", str(tmp_path))
+    log = tmp_path / "HQPlayer9Desktop.log"
+    log.write_text("", encoding="utf-8")
+    woke = threading.Event()
+    att = diag.advance(1, 5, 1.0, time.time())
+    att.follow({"version": "9"}, woke.set)
+    assert _wait(lambda: att.snapshot()["advance"]["log"] == "followed")
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("\n".join(_DSD_REFUSED[2:]) + "\n")
+    att.follower.wake()
+    assert _wait(woke.is_set)
+    # with the rate its engine took in, read since the stop: that play's own
+    assert att.end == "refused" and att.snapshot()["advance"]["line"] == _DSD_REFUSED[6]
+    assert att.snapshot()["advance"]["rate_in"] == 176400
 
 
 def test_a_log_gone_or_cut_leaves_an_advance_to_its_deadline_with_one_line(tmp_path, monkeypatch, caplog):

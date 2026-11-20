@@ -22,6 +22,13 @@
   "groups": [
     {"id": "demo-sinc-a+demo-sinc-b", "kind": "filter", "relation": "within_1_lsb",
      "members": ["demo-sinc-a", "demo-sinc-b"],
+     "comparisons": [
+       {"context": "signal", "fs_in": 44100, "fs_out": 705600, "identical": false, "max_lsb": 1,
+        "run": "demo-run", "samples": 1000, "samples_differ": 3, "samples_nonzero": 900},
+       {"context": "signal", "fs_in": 48000, "fs_out": 768000, "identical": false, "max_lsb": 1,
+        "run": "demo-run", "samples": 1000, "samples_differ": 2, "samples_nonzero": 900},
+       {"context": "music", "fs_in": 44100, "fs_out": 705600, "identical": true, "max_lsb": 0,
+        "run": "demo-run", "samples": 2000, "samples_differ": 0, "samples_nonzero": 1800}],
      "cross_family": {"demo-sinc-a": "plays", "demo-sinc-b": "refused"},
      "say": "the same output within one step, in this fictional file",
      "choose_by": "the fictional listener's own ears",

@@ -130,8 +130,9 @@ Rules:
 - **Tablet layers, bottom up:** mini-player 49, rail 50, More card 52,
   section window 55, then the task overlays a section opens — add-gear
   sheets 60, the three cards 100/110, the HQPlayer filter and modulator
-  picker 200, a name's detail card over it 210 (since 2026-10-17),
-  `<dialog>` in the top layer. Anything opened from inside a window
+  picker 200, a name's detail card over it 210 (since 2026-10-17), the
+  comparison by ear over both 220 (since 2026-11-17), `<dialog>` in the
+  top layer. Anything opened from inside a window
   sits at 60 or above; the ladder lives next to `.route-window` in
   `style.css`.
 - The compact rendering must not change when a wider mode is added:
@@ -558,10 +559,10 @@ seen, `restored_notice`), a run whose put-back could not read the mode it
 measured or set the owner's selection there back, until that mode is judged
 at HQPlayer's nearest rest or a new run's start (`unchecked_notice`), one
 whose check left HQPlayer in that mode, until it is back where it was found
-(`stayed_notice`), a queue that meets a rate HQPlayer cannot reach while a
-track of it that can play plays or is paused (the check the HQPlayer
-backend holds, `rate_notice`, since 2026-10-18) and the CLI agents' sign-ins
-(`claude_code.auth`, `codex_cli.auth`: while the assistant runs on one, or
+(`stayed_notice`), a queue that meets a rate HQPlayer cannot reach, or may
+not, while a track of it that can play plays or is paused (the check the
+HQPlayer backend holds, `rate_notice`, since 2026-10-18) and the CLI agents'
+sign-ins (`claude_code.auth`, `codex_cli.auth`: while the assistant runs on one, or
 gear research waits for Claude Code — the gear chips and sheet say so in
 place, and the `ai_signin` guidance task lights the trail to the Sign in
 button until the sign-in is back) — the

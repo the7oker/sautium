@@ -122,6 +122,15 @@ def upnp_heuristic(upnp, dht):
     return None
 
 
+# What a cert-gated issuer answers a handshake whose identity lacks its
+# certificate or its proof (identity_registry.IdentityGate.admit). An issuer
+# before 2026-11-18 answered an absent certificate "invalid".
+_LACKING_REFUSALS = {
+    "certificate": ("identity certificate required", "identity certificate invalid"),
+    "proof": ("identity proof required",),
+}
+
+
 @dataclass(frozen=True)
 class ClientIdentity:
     """This node's account as the client speaks it. `cert_bundle()` is
@@ -276,7 +285,10 @@ class ChatClient:
         self._tasks: list = []
         self._notify: Optional[asyncio.Event] = None
         self._resolve_nudge: Optional[asyncio.Event] = None
-        self._proof_wait_invites: set = set()
+        # Token handshakes parked on what our own identity lacks (its
+        # certificate, its proof), and the identity they were parked under
+        self._identity_wait_invites: set = set()
+        self._identity_wait_for: Optional[tuple] = None
         self._dht_refresh_inflight: set = set()
         # The resolver pass a contact last nudged in (its monotonic start),
         # by friend id: a contact nudges at most one pass in NUDGE_RETRY_S
@@ -767,14 +779,22 @@ class ChatClient:
         bundle = ident.cert_bundle()
         own_cert = bundle["cert"] if bundle else None
         own_proof = bundle.get("proof") if bundle else None
-        # While our own pow proof is still being mined, a cert-gated issuer
-        # can only answer "proof required" — friends parked on that answer
-        # are skipped instead of re-asked every tick. Mining completion
-        # calls resolve_soon, so the retry happens the moment it can succeed.
-        proof_pending = bool(own_cert and own_cert.get("method") == "pow"
-                             and own_proof is None)
-        if not proof_pending:
-            self._proof_wait_invites.clear()
+        # While our own identity lacks its certificate (not issued yet) or
+        # its pow proof (still being mined), a cert-gated issuer can only
+        # refuse — friends parked on that refusal are skipped instead of
+        # re-asked every tick, until the identity read here changes. The
+        # worker's `ready` calls resolve_soon, so the retry happens the
+        # moment it can succeed.
+        if own_cert is None:
+            lacking = "certificate"
+        elif own_cert.get("method") == "pow" and own_proof is None:
+            lacking = "proof"
+        else:
+            lacking = None
+        held = (own_cert and own_cert.get("sig"), own_proof and own_proof.get("nonce"))
+        if held != self._identity_wait_for:
+            self._identity_wait_invites.clear()
+            self._identity_wait_for = held
 
         for friend in pending:
             invite = friend.get("invite_code", "")
@@ -788,8 +808,8 @@ class ChatClient:
             # it as its anti-sybil gate.
             per_friend = dict(handshake_data)
             join_token = friend.get("join_token_id")
-            if join_token and proof_pending and invite in self._proof_wait_invites:
-                logger.debug(f"Handshake for {invite} waits for our identity proof")
+            if join_token and lacking and invite in self._identity_wait_invites:
+                logger.debug(f"Handshake for {invite} waits for our identity {lacking}")
                 continue
             if join_token:
                 ts = int(time.time())
@@ -853,15 +873,16 @@ class ChatClient:
                                 except Exception:
                                     pass
                                 if err.startswith("identity"):
-                                    if "proof required" in err and proof_pending:
+                                    if lacking and err in _LACKING_REFUSALS[lacking]:
                                         # A known-failing precondition on OUR
-                                        # side: park this friend until the
-                                        # proof is mined instead of asking
+                                        # side: park this friend until our
+                                        # identity changes instead of asking
                                         # again for the same answer.
-                                        self._proof_wait_invites.add(invite)
+                                        self._identity_wait_invites.add(invite)
                                         logger.info(
-                                            f"Handshake for {invite} parked "
-                                            f"until our identity proof is mined")
+                                            f"Handshake for {invite} parked until our identity "
+                                            + ("proof is mined" if lacking == "proof"
+                                               else "certificate is issued"))
                                         break      # same answer from every address
                                     logger.info(
                                         f"Handshake for {invite} refused by "

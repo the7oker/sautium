@@ -684,6 +684,12 @@ def test_sources_reads_the_queues_source_rates_in_one_query(db):
                         (track, local, path, fmt, rate, cue))
         cur.execute("INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path, file_format, "
                     "sample_rate, channels) VALUES (%s, %s, '/box/Q/01.flac', 'FLAC', 96000, 2)", (track, held))
+        # WavPack holding DSD: one bit a sample, the rate its tags give
+        cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, file_format, sample_rate, "
+                    "bit_depth, channels) VALUES (%s, %s, '/m/Q/06.wv', 'WV', 352800, 1, 2)", (track, local))
+        cur.execute("INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path, file_format, "
+                    "sample_rate, bit_depth, channels) VALUES (%s, %s, '/box/Q/02.wv', 'WV', 352800, 1, 2)",
+                    (track, held))
     try:
         def f(path, **span):
             return {"kind": "file", "path": path, "format": "FLAC", **span}
@@ -696,9 +702,13 @@ def test_sources_reads_the_queues_source_rates_in_one_query(db):
                    f("/m/Q/05.flac"), {"kind": "unplayable"}]
         assert hqp_load.sources(openers) == Sources({44100: 2, 48000: 1, 88200: 2, 96000: 1}, dsd=1,
                                                     streamed=2, first=44100)
-        # the slot HQPlayer reads first a stream, or a DSD file: no PCM rate of its own
+        # the slot HQPlayer reads first a stream, or a DSD file: no PCM rate of its own — the DSD
+        # file's own kept apart, for a verdict to know it a DSD track
         assert hqp_load.sources(openers[8:]) == Sources({}, streamed=2)
-        assert hqp_load.sources(openers[5:7]) == Sources({96000: 1}, dsd=1)
+        assert hqp_load.sources(openers[5:7]) == Sources({96000: 1}, dsd=1, first_dsd=2822400)
+        # a DSD file of another format counts as one, never as a PCM rate
+        assert hqp_load.sources([f("/m/Q/06.wv"), {**held_file, "path": "/box/Q/02.wv"}, f("/m/Q/01.flac")]) == \
+            Sources({44100: 1}, dsd=2, first_dsd=352800)
         assert hqp_load.sources([]) == Sources({})
     finally:
         with db.cursor() as cur:

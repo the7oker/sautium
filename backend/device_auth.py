@@ -33,7 +33,9 @@ LAN"), so the transport hides nothing. Every exchange that carries a
 credential — a password or PIN in, a device token out — is boxed end to end
 instead (NaCl box: X25519 + XSalsa20-Poly1305) between the browser and a
 per-exchange server key that the node's identity key signs. See "Credential
-channel" below.
+channel" below. So does every other secret the Web UI sends (an AI key, a
+sign-in's code, the email's code — routers/auth.boxed), and the changes a
+device token alone does not make take the password through it (step_up).
 
 BRUTE FORCE. The two doors need different locks:
   * PIN — 40 bits, short-lived: it expires in minutes, dies after
@@ -444,9 +446,10 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     code a page opened from the host carries (WrongPin; a wrong one costs
     one of MAX_PIN_ATTEMPTS, as at the pairing door).
 
-    Everything in this process that cached the old key is told; the P2P
+    Everything in this process that cached the old key is told, and its
+    chat client and identity worker start again on the new one; the P2P
     layer learns through NOTIFY (the launcher restarts its manager on it —
-    a Docker node restarts the backend, its peer surface is bound to the
+    a Docker node restarts the backend for its peer surface, bound to the
     key at start)."""
     d = _identity_dir()
     if d is None:
@@ -457,16 +460,59 @@ async def rotate_identity(username: str, password: str, current_password: str = 
         if not (d / "node_info.json").exists():
             raise RuntimeError("This identity comes from the node's environment "
                                "(P2P_USERNAME, P2P_PASSWORD): change it there")
-        if account_anonymous():
-            # No code at all is a page that was not opened from the host: it
-            # costs the code the host shows nothing
-            if not pin or not await redeem_pin(pin):
-                raise WrongPin()
-        elif not await password_tried(current_password, signed=True):
-            raise WrongPassword()
+        await step_up(current_password, pin)
         result = await _rotate_locked(d, username, password)
     _after_rotation(result["info"]["public_key_hex"])
     return result["info"]
+
+
+async def step_up(password: str, pin: str) -> None:
+    """The person's own word for a change a device token alone does not
+    make: who the node is (rotate_identity), and the rare changes that act
+    outside the node and outlast "Sign out everywhere" — the account email
+    at the Worker, an invite token with rights, the AI provider's key, an
+    agent's sign-in (routers/auth.step_up). The account's password, at the
+    signed door (counted, shut past the free failures, the owner told —
+    password_tried; Shut, Busy); an anonymous account has no password anyone
+    has seen, so its host vouches instead, by the pairing code it shows now
+    (a wrong one costs one of MAX_PIN_ATTEMPTS). WrongPassword / WrongPin
+    otherwise — a node with no account has nobody to vouch."""
+    if account_configured() and account_anonymous():
+        # No code at all is a page that was not opened from the host: it
+        # costs the code the host shows nothing
+        if not pin or not await redeem_pin(pin):
+            raise WrongPin()
+    elif not await password_tried(password, signed=True):
+        raise WrongPassword()
+
+
+# A flow of several requests (an email set, its code sent and verified; an
+# agent's sign-in started, its code pasted or read) takes the password at its
+# first step, and that step's sealed reply carries a GRANT the later steps
+# quote inside their own boxes: a device token alone never sees one, so it
+# stands for the password typed in this flow. One per flow kind — a new
+# step-up replaces it — in memory, for the flow's own lifetime.
+_grants: dict = {}                   # kind → (value, expires_at)
+_grants_lock = threading.Lock()
+
+
+def grant(kind: str, ttl: float) -> str:
+    value = secrets.token_urlsafe(16)
+    with _grants_lock:
+        _grants[kind] = (value, time.time() + ttl)
+    return value
+
+
+def grant_holds(kind: str, value: str) -> bool:
+    with _grants_lock:
+        held = _grants.get(kind)
+    return (held is not None and held[1] >= time.time() and bool(value)
+            and hmac.compare_digest(held[0].encode(), value.encode()))
+
+
+def drop_grant(kind: str) -> None:
+    with _grants_lock:
+        _grants.pop(kind, None)
 
 
 async def _rotate_locked(d, username: str, password: str) -> dict:
@@ -489,8 +535,10 @@ def _after_rotation(pubkey: str) -> None:
     p2p_identity.forget_cached()
     p2p_router.forget_identity()
     p2p_chat.forget_service()
-    # The chat client is built on the old key: it starts again on the new.
+    # The chat client and the identity worker are built on the old key: they
+    # start again on the new (the worker's old thread stopped first).
     p2p_chat.soon(p2p_chat.restart_client())
+    p2p_chat.soon(p2p_router.restart_identity_worker())
     _record_signing_key(pubkey)
     # The Worker's invite code → mailbox mapping named the old code.
     db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")

@@ -1215,19 +1215,15 @@ class SyncServer:
         conn = self._chat_service.db_conn()
 
         # -- idempotent re-accept: friendship already established -----------
+        # The grant is signed with the snapshot the accept made and a token
+        # id this node knows the friend by (invite_tokens.reaccept_terms),
+        # never with what the guest presents now.
         if resolved is not None and (token_id or grant_in):
-            tid = token_id or grant_in["token_id"]
-            rights = invite_tokens.friend_rights(conn, resolved["id"])
-            if not rights and resolved.get("source") == "token":
-                # First accept was interrupted between add_friend and the
-                # snapshot — the guest's 15s retry loop lands here to heal
-                # it. The use was already burned, so read rights directly.
-                rights = (invite_tokens.token_rights(conn, token_id)
-                          if token_id else grant_in.get("rights", []))
-                invite_tokens.snapshot_rights(conn, resolved["id"], rights)
+            tid, rights = invite_tokens.reaccept_terms(conn, resolved["id"], grant_in,
+                                                       own_pubkey, peer_pubkey)
             self._chat_service.update_friend_last_seen(peer_pubkey)
             await self._witness_handshake(body, peer_pubkey)
-            return _accept(self._mint_grant(tid, rights, peer_pubkey))
+            return _accept(self._mint_grant(tid, rights, peer_pubkey) if tid else None)
 
         if token_id:
             requires_cert = invite_tokens.token_requires_cert(conn, token_id)

@@ -171,9 +171,9 @@ def test_a_library_turn_offers_the_model_its_servers_tools_and_runs_only_those(
 
 
 def test_a_resumed_turn_sends_the_system_prompt_its_own_launch_passes(claude, shared, monkeypatch):
-    """The player context rides the system prompt, and a CLI that records
-    the first one (2.1.312 and later) would resend the first turn's on every
-    resume."""
+    """A CLI that records the first system prompt (2.1.312 and later) would
+    resend the first turn's on every resume — the file of each launch's own
+    included."""
     library = shared / "mcp.json"
     library.write_text(json.dumps({"mcpServers": {}}))
     monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(library))
@@ -215,9 +215,35 @@ def test_a_call_turns_the_prompt_record_off_only_on_a_cli_that_lists_the_switch(
 
     assert result["is_error"] is False
     argv = (shared / "argv.txt").read_text().split("\0")
-    at = argv.index("--system-prompt") + 2
+    at = argv.index("-p") + 2
     assert argv[at:at + len(switch)] == switch
     assert ("--system-prompt-snapshot" in argv) == bool(switch)
+    assert "--system-prompt-file" in argv and "--system-prompt" not in argv
+
+
+def test_a_library_turn_reads_its_prompt_from_a_file_and_its_message_from_stdin(
+        claude, shared, monkeypatch):
+    """Nothing of either rides the command line (SEC-S4): the request carries
+    the file's text as written — an "@" mention in it read as words, the file
+    it names never — and the message whole, Unicode and line ends kept."""
+    library = shared / "mcp.json"
+    library.write_text(json.dumps({"mcpServers": {}}))
+    monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(library))
+    local = _local_file(shared)
+    api = claude([{"text": "ok"}])
+    prompt = f"PROMPT-MARK ⟦outside-text #t⟧ read @{local}\nsecond line"
+    message = "Що грає?\n" + "довге повідомлення " * 600 + "кінець"
+
+    done = list(runner.call_claude_code_stream(message, prompt))[-1]
+
+    assert done.error is None
+    body = api.bodies("/messages")[-1]
+    system = "\n".join(b.get("text", "") for b in body["system"])
+    assert prompt in system
+    sent = json.dumps(body["messages"], ensure_ascii=False)
+    assert json.dumps(message, ensure_ascii=False)[1:-1] in sent
+    assert "contents of a local file" not in system + sent
+    assert not list(runner.agent_workdir("claude-agent").glob("system-*.md"))
 
 
 def test_gear_research_offers_the_web_pair_and_loads_no_server_of_the_users(claude, shared):

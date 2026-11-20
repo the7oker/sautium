@@ -245,7 +245,7 @@ assistant tool, no control in the Web UI (as of 2026-11-18):
   /api/hqplayer/config` sends the same knobs in the same order through
   `hqp_backend.change_dsp`, which waits out each knob's build (below); it
   takes a filter and a shaper by name and sends the index HQPlayer's list
-  gives that name right before the Set* (since 2026-11-08, B-60: an index is
+  gives that name right before the Set* (since 2026-11-08: an index is
   a place in the current mode's list, and the list moves between modes and
   builds); a filter both slots already hold (State's `filterNx` and
   `filter1x`, as HQPlayer reports them) is taken as it stands, no SetFilter
@@ -271,8 +271,8 @@ modulators, the atlas, and words each fact for the HQPlayer screen's pickers
 and a card per name: HQPlayer's own facts from its live lists (the rating, the
 focus words in HQPlayer's order, the ratio class, a modulator's generation)
 and, while the node holds an atlas file, the measured ones. It reads the file
-shipped beside it (`backend/hqp_atlas.json`, not in the tree as of
-2026-10-17) or, only while none is shipped, the node's own copy at
+shipped beside it (`backend/hqp_atlas.json`, in the tree since the atlas's
+first release, 2026-11-19) or, only while none is shipped, the node's own copy at
 `HQP_ATLAS_OVERLAY`: on Docker `./data/atlas/hqp_atlas.json`, mounted
 read-only at `/app/data/atlas/` (a directory, so a node without the file gets
 an empty folder, never a directory named like the file); under the launcher
@@ -298,9 +298,20 @@ release dated), a subset this module would refuse, or one whose releases are
 not each dated as the manifest dates them (an entry without a published date
 among them) refuses the sync, and nothing is written; the bytes checked are
 the bytes copied, and each file is replaced whole, the data first (a version
-file is the data's when its `app_sha256` is). It publishes nothing: both files
-stay out of git (`.gitignore`) and out of an image (`backend/.dockerignore`)
-until the release that ships them.
+file is the data's when its `app_sha256` is). It publishes nothing by itself:
+a release's commit carries both files, in the tree and in an image since the
+first, 2026-11-19.
+
+The atlas data in the shipped file — Sautium's measurements and the curated
+words that are part of the dataset, such as the notes and the stated
+purposes — is licensed under Creative Commons Attribution 4.0 International
+(CC BY 4.0, https://creativecommons.org/licenses/by/4.0/), as the atlas's
+method page states. Attribute it as "Sautium HQPlayer atlas,
+https://sautium.net/hqplayer/atlas/, CC BY 4.0". Quotations, HQPlayer's names
+and descriptions and the manual's marks belong to their authors; where a
+source licenses its copies, its Sources line names that licence (Roon
+Community's posts: CC BY-NC-SA 3.0). The code that reads the file is under
+this repository's `LICENSE`.
 
 The HQPlayer screen's own read, `GET /api/hqplayer/state?dsp=1`, joins it by
 name in HQPlayer's order: each row of the filter and shaper lists gains
@@ -308,6 +319,20 @@ name in HQPlayer's order: each row of the filter and shaper lists gains
 group's bracket, whether it has a card), and while the node holds an atlas
 file `atlas` carries the sheets' head lines and where the file was read from
 — without a file there is no `atlas` key and `facts` are HQPlayer's alone.
+A twin's line names the relation and, for a group compared sample by
+sample, the output rates its comparisons went into ("Same output as sinc-Mx
+(bit for bit, compared into 705.6k and 768k)"), none when the file holds no
+comparison for it; a same-figures twin's says "within the measurement's
+precision". The group's say stands on its card, which names any group
+without a say by its members alone (since 2026-10-23).
+A card's Sources print each source it cites that was re-read in full — who,
+where, the date, its quote — and, for a source whose terms license its copies
+(Roon's posts: CC BY-NC-SA 3.0), the licence after the date as the site prints
+it, linked to the licence's text on the screen and its address written out in
+the assistant's words (since 2026-10-26). Where the file holds a source's
+address, its "where" links to the post or page itself, as the site's source
+items do, and the assistant's words write that address out too (since
+2026-10-27, Creative Commons' attribution practice; CC BY-NC-SA 3.0 §4(d)).
 A file's releases are per engine and family — the filters' PCM, the
 modulators' SDM — and a shipped file holds the dated ones alone. Each sheet
 is shown the newest engine of HQPlayer's own major that holds its family's
@@ -357,7 +382,9 @@ The module also holds the node's one rate namer (since 2026-10-17):
 progress), a verdict's DSP line, the assistant's lists of rates and, since
 2026-10-21, a modulator's rates on its card and its row use it — never with
 the source beside a rate: a file's rate is a DSD rate of its source's family,
-which the name says.
+which the name says. The atlas's own rates — a measured context's, a twin's
+comparisons' (since 2026-10-23) — are written as its pages write them
+("44.1k → 705.6k", "705.6k").
 
 ### Answers: `result` and HQPlayer's reason
 Setters and transport commands echo their element with `result="OK"` or
@@ -630,14 +657,30 @@ comes after the control port answers again — so neither can end the wait.
   Now Playing keeps that track with its diagnosis, Play starts it, Next and
   Previous move from it; HQPlayer playing another entry of ours on a take no
   command of the node's made — the person's start in HQPlayer's own window —
-  spends it (since 2026-11-09, ROON-COEX §6.1 P8: Pause then Play restarted
+  spends it (since 2026-11-09, Roon coexistence: Pause then Play restarted
   the refused track), never a takeover's; on HQPlayer 6 the take that plays
   tells who made it, so a filter change of the node's at the spot before the
   person's start spends it all the same, and a Seek, Next or Previous that
   moved the spot (sending nothing) leaves it the rest rule's on either. HQPlayer's own advance onto the next entry of ours,
   stopped on the same way, leaves it too, at that slot at 0 (since
   2026-11-01): an album boundary into a rate the output family refuses — a
-  44.1 kHz album, then a 96 kHz one — is the commonest road there. Only an
+  44.1 kHz album, then a 96 kHz one — is the commonest road there. An
+  advance closed on the refusal its log named can meet, last, the one
+  playing status at 0 s of a filter HQPlayer builds before it refuses: no
+  play, and the spot is set there all the same (since 2026-11-01) — a
+  position moving on spends it, as above. The rest is judged at the reading
+  the attempt closed on (since 2026-11-09), never at the tick the status last
+  showed: an opening answer gives no verdict, and judged on the stop before
+  it the spot stood under what HQPlayer opened, Pause then Play restarting
+  the refused track. A reading with no verdict is judged by what its URI
+  names — the start's own entry is a rest (the build's playing answer in its
+  opening shape), another entry none — and a close on one that says nothing
+  yet (no URI from this build, a state the SDK does not name, a stop under
+  way) leaves the rest to the next reading that says it: a stop is a rest,
+  whatever names its entry, its own entry playing one too, another entry or
+  a pause none. Any start watched or closed meanwhile (the node's Play, a
+  tap, Next or Previous onto an entry, a new queue, HQPlayer's own advance)
+  drops it. Only an
   entry of ours in a mirror in step or a tail mirror (the advance names its
   target only there); not a stop while another controller holds HQPlayer
   (Roon, its own window), and a spot set since stays. Another controller
@@ -648,7 +691,7 @@ comes after the control port answers again — so neither can end the wait.
   that slot and the second of the node's last own reading. So does a tick
   whose playlist holds an entry the node never gave HQPlayer, the take moved
   since, whatever HQPlayer plays or refuses of it (since 2026-11-09,
-  ROON-COEX F7: Roon's stream at a rate the output family refuses, its Play
+  Roon coexistence: Roon's stream at a rate the output family refuses, its Play
   sent again and again — nothing of it ever plays; before, no spot was
   left); where HQPlayer names no take (HQPlayer 5), only for a listen read
   while the playlist was the queue's mirror. A start of the node's still in
@@ -668,8 +711,8 @@ comes after the control port answers again — so neither can end the wait.
   the node's own Play ("Output events", below). A take-back that
   controller stops before it plays — Roon's own Stop, sent a set time after
   its Pause (5 s, recorded), landing on a start made meanwhile — is that
-  controller's stop, not HQPlayer's refusal (since 2026-11-10, ROON-COEX §6.2
-  P6; the words a draft): a Stop the node did not send while a start asked
+  controller's stop, not HQPlayer's refusal (since 2026-11-10, Roon coexistence;
+  the words a draft): a Stop the node did not send while a start asked
   for under another controller's hold goes — a Play pressed, a new queue
   played — that controller holding HQPlayer paused (its own Stop due) or
   HQPlayer having started it (its audio left: one playing answer at 0 s is
@@ -684,8 +727,8 @@ comes after the control port answers again — so neither can end the wait.
   log is read and the refusal it names is said in the node's words — "HQPlayer
   refused the other app's track", "No output rate for 96 kHz in its output
   family. Play takes HQPlayer back at …" — as a toast (since 2026-11-11; from
-  2026-11-09 to then a row of its own under Now Playing's meta row, ROON-COEX
-  §6.1 P7 and P12; the words a draft) whose Why? opens the
+  2026-11-09 to then a row of its own under Now Playing's meta row;
+  the words a draft) whose Why? opens the
   Why sheet with HQPlayer's own line: an attempt of its own (the Diagnostics
   list's "Another app's track"), never one of the node's plays. Each refused
   track of that app's gets its own, and so does one after a takeover whose
@@ -697,8 +740,8 @@ comes after the control port answers again — so neither can end the wait.
   its Play names nothing and the next take is read; a playlist is read for
   no more once a row names its refusal or a second read finds none (a cause
   the node has no words for: the other app's Play sent again costs two
-  reads, not one a second) (since 2026-11-10, ROON-COEX §6.1 P13). A known limit (since
-  2026-11-10, ROON-COEX F9): after the node takes HQPlayer back from a Roon
+  reads, not one a second) (since 2026-11-10). A known limit (since
+  2026-11-10): after the node takes HQPlayer back from a Roon
   that had stopped itself, Roon keeps its link, and its next Play Now sends no
   Stop — HQPlayer keeps playing the node's track, Roon's stream waiting behind
   it while Roon's screen names its own. The node cannot tell that from Roon's
@@ -711,7 +754,7 @@ comes after the control port answers again — so neither can end the wait.
   a takeover, read off the playlist at that tick, never an advance of the
   node's (below). Next and Previous there — and at any spot while another controller
   holds HQPlayer — start the slot beside it, from its start, as a tap there
-  (since 2026-11-09, ROON-COEX L11: a press that starts playback takes the
+  (since 2026-11-09: a press that starts playback takes the
   output back; at either end of the queue the spot stays); Pause and Stop
   while another controller plays through HQPlayer send it nothing, the spot
   standing, and a start that waited for its stream leaves its own. A listen
@@ -747,7 +790,7 @@ comes after the control port answers again — so neither can end the wait.
   HQPlayer — as the poller last read it, whatever the status says meanwhile
   (a take-back that waits for its stream says "loading") — or HQPlayer rests
   on its playlist with nothing of ours read (drifted to an entry the node
-  never gave: Roon's stream before its Play, since 2026-11-09 — or F7's
+  never gave: Roon's stream before its Play, since 2026-11-09 — or Roon's
   refused stream under the takeover's spot, Roon's Play sent again), an append (a
   filler's, the radio's, a person's), the radio's own clear and a new queue
   put together without playing it are the queue's alone: nothing goes into
@@ -846,7 +889,7 @@ comes after the control port answers again — so neither can end the wait.
     our own playlist is read too, and stays ours: one PlaylistGet — and so,
     since 2026-11-11, is the stopped tick of HQPlayer's own advance from an
     entry of ours (left out as explained until then): the entry it moved
-    onto may be one another controller put behind ours (ROON-COEX F9).
+    onto may be one another controller put behind ours (a Roon that keeps its link, above).
   - **The play press** on a playlist that is no mirror: Play on a pause of
     an entry of ours only resumes (the tail behind the entry read is
     repaired as above); Play from a stop, a tap, Next or Previous while it
@@ -1130,6 +1173,70 @@ wish undid is spent as the session opens, never read as the stream's end
 (since 2026-10-13). While the socket is open
 no DSP sample is written (`hqp_load`): metering costs HQPlayer work.
 
+### Comparing by ear (AB-1, 2026-11-17)
+
+`playback/hqp_ab.py` (the engine) and `playback/hqp_ab_search.py` (who is
+compared, in what order, when it stops), behind `/api/hqplayer/ab*` and a
+sheet over the HQPlayer screen ("Compare by ear"). The owner's design is
+ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
+
+- **Two forms.** *Find my filter*: the person's filter (the slot the track's source
+  runs) against one candidate a step — Better / No difference / Worse —
+  the champion replayed after "worse" as a focus check, six steps a
+  sitting; candidates are probed contrast first on three axes the atlas
+  measures (the phase type, the −3 dB point over Nyquist, the ringing in
+  source samples), a bracket per axis narrowed by the answers and resumed
+  from the log at the next sitting; it waits for the atlas. *Two filters,
+  blind*: their filter against one they choose from what this computer keeps
+  up with, "1 / 2" in blocks of two rounds (each side first once a block),
+  stopped by two "no difference", a clear pick (a flat Beta prior,
+  P > 95 %) or ten rounds. Filters only, in PCM and in SDM mode; never PCM
+  against DSD; never a pair at two output rates.
+- **The fragment** is a FLAC cut of the track's own file — the passage the
+  person chose on the sheet, 20 ms fades, after a lead of digital silence
+  (`transcode.flac_fragment_path_for_file`) — handed to HQPlayer through
+  the media proxy. Owned PCM files here only: a track at the HQPlayer's own
+  library, a stream or a DSD file is refused in words.
+- **The start is a resume.** The lab run of 2026-11-17 on Legion's HQPlayer
+  (engine 6.3.3, through the capture stand) found Play's own start
+  unstable — Play to the sound at the output moved by up to 0.94 s in PCM
+  (once 3.77 s) and 1.4 s in SDM, its median with the filter — and a resume
+  from a pause stable (69 ms of spread in PCM, 154 ms in SDM). So each
+  fragment is played into its lead, paused at the meter's first frame of it
+  (all-zero: nothing is heard), and resumed so its sound leaves the output
+  the sitting's silence after the sound before it, or after the person's
+  tap. The meter's onset is a frame's own time (`hqp_meter`'s run `onset`:
+  the read's arrival less the hops after it) plus Status's `output_delay`
+  for the filter — to σ 12–23 ms in PCM, ~0.1 s in SDM.
+- **The warm-up** — at the bottom of HQPlayer's volume range, read back,
+  before the sheet — plays every filter the sitting may play once and
+  measures its delay, its start, its resume's way to the output, its
+  pause's position and how long after its sound its end shows (HQPlayer
+  sends all-zero frames through its output delay after an entry's end, and
+  sinc-M's ran 2 s longer in PCM). The silence is one value a sitting: the
+  slowest end, start and resume plus 0.5 s; the lead the latest pause plus
+  0.3 s, never under 1 s. Every silence played is checked from the same
+  events (0.15 s in PCM, 0.3 s in SDM); a step that missed is played again
+  with the silence grown, never stored as an answer.
+- **The hold.** A sitting holds the output as the benchmark does
+  (`PlaybackManager.hold`, label "Comparing filters"): nothing else drives
+  HQPlayer, no surface names the filter, no listen is recorded. It drives
+  HQPlayer on a connection of its own and taps HQPlayer's meter
+  (`hqp_meter.tap`). A swap writes the context's slot only (1x or Nx), at
+  once. At the end the champion (the chain) or their filter (the pair) and
+  their volume are put back; a sitting cut short (the process died, the
+  connection went) is put back at HQPlayer's next answer (`hqp_ab.recover`,
+  one put-back of a row at a time, whatever HQPlayer then plays); a DSP
+  change from elsewhere, or another controller playing while it sits, ends
+  it as left, nothing put back; a put-back HQPlayer refuses twice alike is
+  left to the person, the filter and the volume named in a notice.
+- **What is kept**: `hqp_ab_sittings` and `hqp_ab_duels`, the person's own
+  record under the track's context (mode, slot, a conversion across rate
+  families) — in the node backup and its life-data merge, never in the
+  sync, carry, the share export, the seed or a support bundle; "Forget
+  this library" removes its sittings. The filter picker shows "your pick ·
+  N" from them, in the current track's context only, never re-sorting.
+
 ## Usage
 
 ### Basic Connection
@@ -1255,7 +1362,7 @@ DSP sample, the benchmark holds back, and the listen that was open ends there �
 unless another controller cut it: it leaves its spot, which the status names
 instead (the spot, above; on a DLNA renderer the same spot, which Play loads there
 and a Seek moves, since 2026-11-01), and the play tracker holds that listen as a
-pause holds it (`taken`, since 2026-11-09, ROON-COEX F6), none of the other
+pause holds it (`taken`, since 2026-11-09), none of the other
 controller's seconds counted, until the output plays an entry of ours again. Taken
 back at the spot, the same listen goes on: one history row, one scrobble at the
 usual line, no second now-playing. Another track started instead ends it at its
@@ -1317,7 +1424,7 @@ began, other than its track's or its transport's as the wait began, read in an e
 asked of it at the stream's landing: what it held before the person's word is none, and a
 take-back asked while another app played on it outlasts that app's own next track. A
 controller past UPnP may leave no URI of its own to read: a DLNA renderer under Roon's RAAT says
-our URI paused at its second (ROON-COEX, 2026-11-02), and the node keeps the renderer's
+our URI paused at its second (Roon coexistence, 2026-11-02), and the node keeps the renderer's
 word — paused, its Play resuming our track — said as the renderer's when the node sent no
 Pause ("Paused on ‹renderer›", since 2026-11-09): its own remote, or another app; a toast
 says so once on every open page (since 2026-11-11, "Output events" below). A takeover read
@@ -1325,20 +1432,18 @@ within the end's slack of our track (the last 3 s, what a Stop there reads as fi
 finds a track that counted as played: no listen is held and the spot is the slot after it,
 at 0, none at the queue's last slot (since 2026-11-11, as on HQPlayer). A URI of
 ours the renderer plays again by itself while another controller held it (its own controls
-resuming our media) is ours again (since 2026-11-09, ROON-COEX §6.1 P9): the external state
+resuming our media) is ours again (since 2026-11-09): the external state
 ends, the node's Pause and Stop reach it, the listen held at the takeover goes on from the
 takeover's second until the position poll reads the renderer's own — another slot's, the next
 it had armed, from that stream's start. The slot is the one its token names (the quality tier
 it was handed in and an Opus seek's `?ss=` aside) — every lookup of a slot by its URL goes by
 the token so, a queue edit after ours again included; a track queued twice is ours again at
 the takeover's own slot, else the nearest, the one after first (the next it had
-armed). A URI of ours an earlier attachment handed is ours too (since 2026-11-09, ROON-COEX
-§6.1 P11 and round 3's H6): one whose token names no queued track — a track since removed — is
+armed). A URI of ours an earlier attachment handed is ours too (since 2026-11-09): one whose token names no queued track — a track since removed — is
 ours at no slot: the external state ends, the node's Pause and Stop reach it, Now Playing names
 it by what the renderer reports of it with no slot, no listen of it is kept, its end advances
 nothing, and the next Play loads the queue's slot; Next and Previous count from that slot, as
-from a removal playing out — Next loads it, Previous the one before (since 2026-11-10,
-ROON-COEX §6.1 P13). A take-back of the person's under way — its load, or its wait for the slot's stream
+from a removal playing out — Next loads it, Previous the one before (since 2026-11-10). A take-back of the person's under way — its load, or its wait for the slot's stream
 — is the newer word: nothing is ours again meanwhile.
 
 **A restarted HQPlayer gets the queue back.** The status poller
@@ -1351,7 +1456,7 @@ reads the playlist at once and, when it differs from the queue, marks the
 mirror lost; HQPlayer, back and stopped, takes the queue afresh at once (the
 mirror's state, above), and the play press rebuilds whatever is left. A
 playlist read back so that holds an entry the node never gave HQPlayer is no
-restart (since 2026-11-09, ROON-COEX §6.1 P1): another controller's — Roon's
+restart (since 2026-11-09): another controller's — Roon's
 cycle went on while HQPlayer answered nothing past the client's timeout, a
 heavy engine's Stop — so the mirror drifts and nothing is sent, a mirror lost
 in the silence (an add owed, an edit's hand-over) too, its reconverge given up;
@@ -1685,7 +1790,7 @@ checked in this order — positive evidence before any absence of it:
 | `proxy_error` | the media proxy answered 404 (token not registered — the restart race), 500 (file gone, CUE cut failed), 502/504 (provider), 401/403 (a bug) | play again / check the music folder |
 | `no_fetch` | an http hand-over HQPlayer never requested (none from the hand-over to 5 s after Play) | same LAN, the firewall for the media port, the Docker forward — host and port named |
 | `rejected` | PlaylistAdd or Play refused (HQPlayer's words quoted; "Empty transport" = nothing was taken), or the expected entry missing from its playlist | the file must be readable here; a copy in HQPlayer's library: Rescan it |
-| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with; in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); another modulator or rate |
+| `rate_refused` | taken, then stopped at its start without moving, where the rate check (`backend/hqp_rate_check.py`) names why — the filter HQPlayer ran, by the ratio class HQPlayer describes it with and, on an engine of 6.2.4's major, the rule drawn from what was measured there: a filter described "up" under the track's rate (sinc-M aside; one HQPlayer stopped will stop, one not tried may — sinc-Mx too, since 2026-10-23), FFT or FIR at 1:1; a DSD track by the PCM rate HQPlayer's log names it converted the track to, never by its own (PCM mode only, since 2026-10-21); in SDM first the modulator, at a rate the atlas as published (the shipped file, its release dated) measured it refused for the track's family — or HQPlayer's log names a refused rate combination (its line quoted, attributed to nothing); judged at HQPlayer's first stop when the check names a cause without a hedge — a hedged one, the adaptive output rate not known, an "up" filter not tried, and a DSD track's, at the window; HQPlayer's own advance at its deadline, or at once on its log line here | a filter HQPlayer describes as Any, the adaptive output rate in HQPlayer's own settings, a rate of HQPlayer's list every track still to play reaches (named only when every one is refused, all of one family); after an "up" filter's stop, a filter described without "up", or the track's own rate or a power-of-two multiple of it (a DSD track: twice the rate HQPlayer converted it to, or a higher power-of-two multiple); after a 1:1 refusal, another filter or rate; another modulator or rate |
 | `not_played` | taken (bytes served, or a path) but never `playing`, or it stopped again | HQPlayer's log, the DSP line |
 | `unknown` / `interrupted` | nothing explains it / another action took over first (not counted) | HQPlayer's log |
 
@@ -1892,6 +1997,63 @@ the manual names them. Grayed or checked, HQPlayer picks the rate as it plays
 filter), so the check says nothing; another pair, or an HQPlayer elsewhere,
 reads as not known.
 
+Since 2026-10-21 the check also says what Sautium measured of HQPlayer's
+"up" on engine 6.2.4 (Desktop, PCM mode, each filter in both slots, the
+adaptive output rate off, 2026-10-19), on an HQPlayer of that major alone,
+naming the engine. **Measured:** of the four filters described "up" that
+were tried, closed-form, sinc-medium and poly-sinc-ext2-short played 1:1 and
+upward and were stopped in every downward cell — 88.2 → 44.1 kHz, 352.8 →
+176.4 kHz, and DSD64 → 88.2 kHz, the DSD track converted to 176.4 kHz first;
+×½ was the one downward ratio tried — while sinc-M converted downward and
+was never stopped. FFT and FIR, without "up", were refused at 1:1 (44.1,
+88.2 and 352.8 kHz) and played every downward cell, as poly-sinc-ext2 did.
+**The rule** (since 2026-10-22, "will stop" only of a filter measured
+stopping): under the source's rate, at any downward ratio, the three
+HQPlayer stopped will stop, and a filter described "up" that was not tried
+may stop — "may not play" in the notice's title when such filters are all it
+names, and its attempt judged at the window, not at HQPlayer's first stop.
+While the take of the slot a "may" names starts — under a second past where
+its first status read it (a start at a spot, as a resume after a rebuild is,
+reads the spot at once; a Seek sent after that status was asked — a resume's
+own, one while HQPlayer builds — starts the take anew at the status after
+it; and a filter HQPlayer builds and then refuses shows one playing status) — what the tick before served for that queue and setting
+stands, and none is served otherwise — as on any tick whose slot is not yet
+the one the check was judged for (a skip, a row tapped), and on one that
+gives no verdict (HQPlayer opening an entry, a queue edit in flight on an
+HQPlayer whose Status names no URI; since 2026-11-09 — withdrawn there, the
+notice came back at the next tick: two wakes, no toast); past it the take
+plays, and the notice leaves its rate out, heard or not (a stop is the
+verdict's). A "may" HQPlayer disproves by playing — that take, HQPlayer's
+own Status naming that source rate, the output rate checked and the filter
+the "may" names, with the DSP keeping up — is said no more at that setting
+and engine while HQPlayer stays attached, on the screen, in the notice and
+by the assistant. A later measurement moves a name from "may" to "will".
+sinc-M gets the class's words and its one measured conversion (352.8 → 176.4
+kHz) without a stop — where the check's lines are said (the HQPlayer screen,
+the assistant), for a source of its family only, never as a notice or a
+verdict; across the families nothing is said of it. sinc-Mx, never tried
+downward, is, since 2026-10-23, an "up" filter not tried: the atlas compared
+it with sinc-M only into 705.6 and 768 kHz, and until then it was said with
+sinc-M's conversion, as its twin. The 1:1 is said of FFT and FIR by name,
+the other 2^x and Int filters not having been tried there. HQPlayer refuses
+in two ways:
+"Requested filter not possible with this rate combination A/B, stop" before
+its engine starts, and, from a filter it built first (sinc-medium), one
+playing status at 0 s, then "clHQPlayerEngine::Execute(): lInRate >
+lOutRate" — a log cause of the same kind since 2026-10-21, and an advance
+closed on it is judged by it even when that playing status came last. A
+refused rate is a play's: where the first cause read after the close from
+the file's add on is one, the newest refusal from there is the attempt's (a
+queue handed over at once logs every add before any play) — another cause
+found first still answers, as before — and an advance keeps the refusal its
+follower heard since the stop, on the sheet as in the verdict. A DSD track
+reaches the filter at a PCM rate HQPlayer names only in its log ("Rate:
+176400, block size: …", the refused play's own; a refusal before the engine
+starts names it), so before a play it is not checked, and a verdict judges
+it by that rate in PCM mode, never by its DSD rate; the trace keeps whether
+the source is DSD (Status `sdm` while it plays, else its file row: DSF, DFF,
+or one bit a sample).
+
 Before a play the check speaks on the HQPlayer screen (since 2026-10-18):
 `GET /api/hqplayer/state?dsp=1` carries `rate_check`, `{"filter": […],
 "modulator": […]}` — its phrases under the row each names — for the queue
@@ -1901,45 +2063,45 @@ speaks too, the screen being the node's own. The key is absent with nothing
 to say, while HQPlayer is not the output, and while another controller's
 playlist plays (an entry not ours, a mirror that drifted). The screen draws
 the phrases in the limiter line's colour, the filter's after its facts, the
-modulator's under its row. While a track of such a queue that can play
-plays or is paused, the same is said as the notice `hqplayer.rate_check`,
-its toast once per onset in a tab — the onset new whenever the HQPlayer
-backend serves the notice for a queue and setting other than the last it
-served it for, and the same while it serves it for that one, a gap
-included. The setting is the mode, the output rate, both filters, the
-adaptive output rate and, in SDM, the modulator (a PCM dither is not part
-of it), so a setting left and returned to keeps the onset unless the
-notice was served in between, and HQPlayer attached anew as the output
-(any attach, such as a switch back to it, another HQPlayer picked, a
-benchmark run's end, a play after one that found it offline or a restart
-of the node) takes a new one. The notice is served only while such a
-track plays or is paused,
-as the poller last judged it (an HQPlayer that stops answering leaves it
-as it was), and since 2026-10-19 the tab remembers the onsets it has met:
-one toasts the first
-time the tab meets it, however old, unless that is in the connect-time
-snapshot, which paints it only; so neither a gap (an advance's tail, a
-Stop) nor, while sessionStorage keeps them, a reload toasts one again.
-Why? is on the toast and, since 2026-10-21, on the notice's row on Sync &
-P2P, opening the HQPlayer screen, whose line says it in place; the row names
-the reason in its own text too. The
-HQPlayer backend holds the check, judged again on the poller's tick after an
-event — a queue change, a DSP change of this node's, HQPlayer coming back,
-the attach, the slot read moving, a sampled State that differs — reading
-State for a new queue, a DSP change, a return, the attach or a park's first
-play (below) and the lists when none are held, the mode moved or HQPlayer
-came back, begun never while
-a mutation or a play press runs nor before a watched intent's first transport
-command — checked once, before its questions go one at a time, so what
-begins meanwhile has the rest pass between its commands. A list HQPlayer
-refuses (no output device) parks the check: it is asked again only after an
-event that can change the answer — HQPlayer back, a DSP change of this
-node's, the mode moving as sampled while HQPlayer plays, or the first status
-asked for since the park in which HQPlayer plays a slot of ours, its output
-answering then (once a park) — while a question left unanswered or a build
-asks again on the next tick; the park and its end are logged once each
-(since 2026-10-19). A started track that cannot play
-speaks through its verdict alone.
+modulator's under its row. While a track of such a queue that can play plays
+or is paused, the same is said as the notice `hqplayer.rate_check`, its
+toast once per onset in a tab — the onset new whenever the HQPlayer backend
+serves the notice for a queue and setting other than the last it served it
+for, or (since 2026-10-22) a "cannot play" while the onset is a "may not
+play" one — once for them — and the same while it serves it for that one, a
+gap included. The setting is the mode, the output rate, both filters (an
+unset 1x slot counts as the Nx filter, which then runs every source), the
+adaptive output rate and, in SDM, the modulator (a PCM dither is not part of
+it), so a setting left and returned to keeps the onset unless the notice was
+served in between, and HQPlayer attached anew as the output (any attach,
+such as a switch back to it, another HQPlayer picked, a benchmark run's end,
+a play after one that found it offline or a restart of the node) takes a new
+one. The notice is served only while such a track plays or is paused, as the
+poller last judged it (an HQPlayer that stops answering leaves it as it
+was), and since 2026-10-19 the tab remembers the onsets it has met: one
+toasts the first time the tab meets it, however old, unless that is in the
+connect-time snapshot, which paints it only; so neither a gap (an advance's
+tail, a Stop) nor, while sessionStorage keeps them, a reload toasts one
+again. Why? is on the toast and, since 2026-10-21, on the notice's row on
+Sync & P2P, opening the HQPlayer screen, whose line says it in place; the
+row names the reason in its own text too. The HQPlayer backend holds the
+check, judged again on the poller's tick after an event — a queue change, a
+DSP change of this node's, HQPlayer coming back, the attach, the slot read
+moving, a sampled State that differs — reading State for a new queue, a DSP
+change, a return, the attach or a park's first play (below) and the lists
+when none are held, the mode moved or HQPlayer came back, begun never while
+a mutation or a play press runs nor before a watched intent's first
+transport command — checked once, before its questions go one at a time, so
+what begins meanwhile has the rest pass between its commands. A list
+HQPlayer refuses (no output device) parks the check: it is asked again only
+after an event that can change the answer — HQPlayer back, a DSP change of
+this node's, the mode moving as sampled while HQPlayer plays, or the first
+status asked for since the park in which HQPlayer plays a slot of ours, its
+output answering then (once a park) — while a question left unanswered or a
+build asks again on the next tick; the park and its end are logged once each
+(since 2026-10-19). A started track that cannot play speaks through its
+verdict alone; a "may" HQPlayer disproved by playing is said no more at that
+setting (since 2026-10-22).
 
 **HQPlayer's own log** is read on demand — the Diagnostics screen, an
 attempt that ends `not_played` / `unknown` / `rate_refused` / `rejected`
@@ -2012,7 +2174,7 @@ Another app that also controls the output — Roon on the same HQPlayer, or
 past UPnP on the same renderer — may take it, stop it, have its own track
 refused, or pause the renderer. The person learns it wherever they are in
 the Web UI, from a toast in the form of the output-unavailable one (the
-owner's decision at ROON-COEX's listening check; before, a line and a row on
+owner's decision at the Roon coexistence listening check, 2026-11-11; before, a line and a row on
 Now Playing alone, which he did not see). Now Playing keeps the state in one
 line, the action first.
 
@@ -2610,4 +2772,5 @@ class TrackStatus:
 - **HQPlayer Desktop**: Signalyst (https://www.signalyst.com/)
 - **SDK**: HQPlayer Control API SDK v5.29.2 (HQP5) / v6.0.1 (HQP6)
 - **License**: the integration code is Sautium's own, under the
-  PolyForm Noncommercial License 1.0.0 (`LICENSE`)
+  PolyForm Noncommercial License 1.0.0 (`LICENSE`); the atlas's shipped
+  data, `backend/hqp_atlas.json`, is CC BY 4.0 (§ The atlas)

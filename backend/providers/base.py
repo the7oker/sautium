@@ -89,7 +89,6 @@ class BaseProvider(ABC):
         message: str,
         history: Optional[list[ProviderMessage]] = None,
         system_prompt: str = "",
-        player_context: Optional[str] = None,
         model: Optional[str] = None,
     ) -> ProviderResult:
         """Send a message and get a response, possibly with tool calls.
@@ -98,7 +97,6 @@ class BaseProvider(ABC):
             message: User message text
             history: Previous messages for context
             system_prompt: System prompt to use
-            player_context: Current HQPlayer state info
             model: Model identifier to use (from self.models())
 
         Returns:
@@ -120,7 +118,6 @@ class BaseProvider(ABC):
         message: str,
         history: Optional[list[ProviderMessage]] = None,
         system_prompt: str = "",
-        player_context: Optional[str] = None,
         model: Optional[str] = None,
     ) -> Iterator[StreamEvent]:
         """Stream a chat response as a sequence of `StreamEvent`s.
@@ -134,7 +131,6 @@ class BaseProvider(ABC):
             message=message,
             history=history,
             system_prompt=system_prompt,
-            player_context=player_context,
             model=model,
         )
         if result.answer:

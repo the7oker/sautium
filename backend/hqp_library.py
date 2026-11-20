@@ -627,7 +627,9 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
     if not track_ids:
         return stats
     credited = [str(r[0]) for r in db.execute(text("""
-        SELECT DISTINCT artist_id FROM track_artists WHERE track_id = ANY(CAST(:tids AS uuid[]))
+        SELECT artist_id FROM track_artists WHERE track_id = ANY(CAST(:tids AS uuid[]))
+        UNION
+        SELECT artist_id FROM track_credits WHERE track_id = ANY(CAST(:tids AS uuid[]))
     """), {"tids": track_ids}).fetchall()]
     album_ids = [str(r[0]) for r in db.execute(text("""
         DELETE FROM album_variants
@@ -657,6 +659,7 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
             WHERE a.id = ANY(CAST(:aids AS uuid[])) AND a.created_at >= :since
               AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
               AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = a.id)
+              AND NOT EXISTS (SELECT 1 FROM track_credits tc WHERE tc.artist_id = a.id)
         """), {"aids": sorted(set(credited)), "since": since}).rowcount
     return stats
 

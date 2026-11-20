@@ -3,8 +3,11 @@
 > **What this is.** What HQPlayer's modes, filters, modulators and rates are,
 > the lists HQPlayer itself reports, and the advice that has a source: the
 > HQPlayer manual, cited by version and section where it has one, and the
-> author's dated public statements, attributed. Nothing here ranks one
-> setting above another, and nothing here is Sautium's own recommendation.
+> author's dated public statements, attributed. What Sautium measured is
+> marked as such, with its engine, and links [the HQPlayer
+> atlas](https://sautium.net/hqplayer/atlas/) where the atlas publishes it.
+> Nothing here ranks one setting above another, and nothing here is
+> Sautium's own recommendation.
 >
 > **Which HQPlayer.** The lists are the names HQPlayer engine 6.2.3
 > (HQPlayer Desktop 6.1.0) reports at runtime — `GetFilters` and
@@ -307,9 +310,10 @@ are Signalyst's text, and this file does not reproduce them.
 - **Ratio class**: what the description ends with — `Int`, `2ˣ` (HQPlayer
   writes `2^x`), `Any` or `1:1`. The manual's filter table has a Ratio column
   too (6.1, §4.6). In PCM mode HQPlayer writes `up` after some classes
-  (`2^x up`), which the manual does not explain. The class can differ
-  between modes: `poly-sinc-mqa/mp3-lp` is `Int up` in PCM mode and `Any` in
-  SDM mode.
+  (`2^x up`); the manual does not explain it, and what HQPlayer did with such
+  filters when Sautium measured it is under "Ratio class and rate
+  families". The class can differ between modes: `poly-sinc-mqa/mp3-lp` is
+  `Int up` in PCM mode and `Any` in SDM mode.
 - Names ending in **`-2s`** are two-stage variants. 6.2.3 lists them in SDM
   mode only.
 - **The manual's notes** (5.7.3): it advises against ASRC (heavy to compute)
@@ -329,26 +333,85 @@ are Signalyst's text, and this file does not reproduce them.
     `sinc-Lm`, `sinc-Ll`, `sinc-Lh` and the `closed-form` filters are `2ˣ up`
     in PCM mode and `2ˣ` in SDM mode;
   - `FFT` is `2ˣ`.
+
+  Each filter's page in [the atlas](https://sautium.net/hqplayer/atlas/)
+  prints its class, and [Any or 2^x](https://sautium.net/hqplayer/concepts/any-vs-2x/)
+  shows filters HQPlayer played or refused across the rate families.
+- **What `up` does, as measured.** Sautium played synthetic tracks through
+  HQPlayer Desktop, engine 6.2.4, in PCM mode, each filter in both filter
+  slots, the adaptive output rate off (2026-10-19):
+  - [closed-form](https://sautium.net/hqplayer/filters/closed-form/)
+    (`2ˣ up`), [sinc-medium](https://sautium.net/hqplayer/filters/sinc-medium/)
+    (`Any up`) and [poly-sinc-ext2-short](https://sautium.net/hqplayer/filters/poly-sinc-ext2-short/)
+    (`Int up`) played 1:1 (44.1, 88.2 and 352.8 kHz) and upward
+    (44.1 → 88.2 kHz), and HQPlayer stopped them in every downward cell:
+    88.2 → 44.1 kHz, 352.8 → 176.4 kHz, and a DSD64 track at 88.2 kHz —
+    HQPlayer converted the DSD64 track to 176.4 kHz in PCM mode before the
+    filter (its log: "Rate: 176400"), so the filter's source was above the
+    output rate there too, and the same track played at 352.8 kHz. In plain
+    terms: these filters are made for upsampling (interpolation), not for
+    decimation.
+  - [sinc-M](https://sautium.net/hqplayer/filters/sinc-m-mx/) (`2ˣ up`) is
+    the exception to the stops: HQPlayer converted 352.8 → 176.4 kHz with it
+    and never stopped it, though its description carries the same `up`.
+    Whether it decimates cleanly was not measured.
+  - [FFT](https://sautium.net/hqplayer/filters/fft/) (`2ˣ`) and
+    [FIR](https://sautium.net/hqplayer/filters/fir/) (`Int`), without `up`,
+    were refused at 1:1 at all three rates, and played every downward
+    conversion; [poly-sinc-ext2](https://sautium.net/hqplayer/filters/poly-sinc-ext2/)
+    (`Any`) played every one.
+  - Not tried: the other 20 filters described `up`, sinc-Mx among them; the
+    other `2ˣ` and `Int` filters at 1:1; downward ratios other than ½;
+    conversions across the rate families, and the 48 kHz family at all; DSD
+    above DSD64, and a DSD64 track at 176.4 kHz (1:1 from the rate it was
+    converted to); SDM mode; CUDA; HQPlayer Embedded, Desktop on other
+    operating systems, and other engines. Each cell ran once, but sinc-M's
+    44.1 → 88.2 kHz three times.
+  - Sautium's check before Play applies this as a rule of its own, naming
+    engine 6.2.4, on an HQPlayer of engine 6 alone, and says "will stop"
+    only of a filter measured stopping: under the source's rate, at any
+    downward ratio, closed-form, sinc-medium and poly-sinc-ext2-short will
+    stop, and a filter described `up` that was not tried may stop, sinc-Mx
+    among them (the atlas compared it with sinc-M only into 705.6 and
+    768 kHz); for a source of its family, sinc-M is said without a stop,
+    across the families nothing of it; FFT and FIR stop at 1:1.
 - **A rate combination HQPlayer refuses** is named in its log: "Requested
   filter not possible with this rate combination", the source rate over the
-  output rate, then "stop". The class is HQPlayer's description, and this
-  file reads no rule into it: which combinations a filter takes is
-  HQPlayer's to say. The adaptive output rate lets HQPlayer pick the rate
-  itself ("Adaptive output rate" below).
+  output rate, then "stop" — or, after it has built the filter (sinc-medium
+  above), "clHQPlayerEngine::Execute(): lInRate > lOutRate". The class is
+  HQPlayer's description, and which combinations a filter takes is
+  HQPlayer's to say: this file reads no rule into a class beyond what was
+  measured; the check's rule above is Sautium's. The adaptive output rate
+  lets HQPlayer pick the rate itself ("Adaptive output rate" below).
 
 ### Special filters
 
 #### sinc-MGa vs sinc-MG
 - **sinc-MG**: not apodizing, a variant of poly-sinc-gauss-xl
 - **sinc-MGa**: APODIZING, a variant of poly-sinc-gauss-xla
-- Both: million taps @ 16x rates (65536 x conversion ratio)
 - Both: extremely high attenuation
 
-#### Constant-time filters
-- **sinc-Mx**: 65536 x conversion ratio
-- **sinc-MG**: 65536 x conversion ratio
-- **sinc-MGa**: 65536 x conversion ratio
-- Million taps at 16x PCM output rates (768 kHz)
+#### Length, measured into 705.6 and 768 kHz
+Measured on engine 6.2.3 (the impulse response's non-zero samples, from
+44.1 and 48 kHz at ×16 and from 88.2 and 96 kHz at ×8, each into 705.6 or
+768 kHz):
+- [**sinc-M and sinc-Mx**](https://sautium.net/hqplayer/filters/sinc-m-mx/)
+  (one group in the atlas: the same output, bit for bit, in every
+  comparison made, each into 705.6 or 768 kHz; not compared from 88.2 kHz,
+  where their readings agree): about 0.80–0.82 million output samples —
+  1158.8 ms at 705.6 kHz from 44.1 kHz, 1130.7 ms at 705.6 kHz from
+  88.2 kHz.
+- [**sinc-MG**](https://sautium.net/hqplayer/filters/sinc-mg/) and
+  [**sinc-MGa**](https://sautium.net/hqplayer/filters/sinc-mga/): about
+  0.58–0.60 million output samples — 851.3 ms at 705.6 kHz from 44.1 kHz,
+  824.0 ms (sinc-MGa: 824.1 ms) from 88.2 kHz.
+
+At ×8 they are about as long, in output samples, as at ×16 (2–3 % shorter):
+into the same output rate, their length did not grow with the conversion
+ratio from ×8 to ×16, the two ratios measured — "65536 × the conversion
+ratio", which this file gave before, would double it. No length was
+measured into another output rate. HQPlayer's log names sinc-M "sinc (1M
+taps)" and sinc-Mx "sinc (constant time M)".
 
 ### Apodizing
 
@@ -565,6 +628,8 @@ DSD1024 = 44100 × 1024 = 45,158,400 Hz = 45.1584 MHz ≈ 45.2 MHz
 ### Signal processing
 
 - **Upsampling** = raising the sample rate
+- **Decimation** = lowering the sample rate; HQPlayer's DSD → PCM conversion
+  decimates a DSD track before the filter, which then converts from that rate
 - **Oversampling** = the same as upsampling
 - **Noise shaping** = moving quantization noise to higher frequencies (PCM)
 - **Dithering** = adding noise to linearize (PCM)
@@ -602,7 +667,6 @@ DSD1024 = 44100 × 1024 = 45,158,400 Hz = 45.1584 MHz ≈ 45.2 MHz
 - **Apod counter** = HQPlayer's count of the errors it detects in the source;
   the manual advises an apodizing filter at least when it goes above 10
   during a track
-- **Constant-time filter** = a filter with a fixed tap count regardless of rate
 - **Half-band filter** (hb) = cutoff at half the Nyquist frequency
 - **2-stage processing** (*-2s) = two stages: ≥8x upsampling, then the final
   filter
@@ -653,6 +717,10 @@ published atlas (`backend/hqp_assistant.py`) — not from this file.
   PCM and SDM mode
 - **Jussi Laako's posts** on Roon › HQ Player, as dated and linked above
 - **SDK**: HQPlayer Control SDK (hqp-control, Signalyst)
+- **Sautium's measurements**: the filters' and modulators' properties on
+  engine 6.2.3, published as [the HQPlayer atlas](https://sautium.net/hqplayer/atlas/)
+  with [its method](https://sautium.net/hqplayer/atlas/method/); what `up`
+  does, measured on engine 6.2.4 (2026-10-19), as described above
 
 ---
 

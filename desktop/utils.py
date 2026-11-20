@@ -169,11 +169,12 @@ def get_claude_prefix() -> Path:
 def get_claude_executable() -> Optional[Path]:
     """Path to the native Claude Code binary, bypassing npm's shim.
 
-    The .cmd shim on Windows runs through cmd.exe (8191-char arg limit),
-    which truncates our ~13k system_prompt. The native binary
-    (`bin/claude.exe`, same name on every platform — postinstall copies
-    the platform-matched binary over the placeholder) takes the same args
-    via CreateProcessW (32k limit). Lookup order: bundled prefix → npm
+    The .cmd shim on Windows runs through cmd.exe (8191-character limit,
+    and its own parsing); the native binary (`bin/claude.exe`, same name
+    on every platform — postinstall copies the platform-matched binary
+    over the placeholder) is started by CreateProcessW (32,767). No call
+    puts text on Claude's command line since 2026-11-19 (the prompt is a
+    file, the message stdin). Lookup order: bundled prefix → npm
     shim in PATH redirected to its sibling .exe → raw shim as last resort."""
     bin_rel = (
         Path("node_modules") / "@anthropic-ai" / "claude-code"
@@ -365,10 +366,10 @@ def _codex_native_binary(node_modules: Path) -> Optional[Path]:
 
 
 def get_codex_executable() -> Optional[Path]:
-    """Prefer the native binary (skips the node shim hop); a shim is an
-    acceptable fallback — codex argv stays tiny (the assistant prompt travels
-    as an instructions file on disk, not the command line, so cmd.exe's 8191-char
-    cap never bites the way it did for claude). Shim priority: the
+    """Prefer the native binary (skips the node shim hop); a shim is the
+    fallback. The assistant prompt travels as an instructions file on disk,
+    so codex's argv is its flags and the chat's message — under cmd.exe's
+    8191-character cap through a shim. Shim priority: the
     prefix's own node_modules/.bin (survives any future vendor-layout
     change) before whatever is on PATH."""
     prefix_nm = get_codex_prefix() / "node_modules"
