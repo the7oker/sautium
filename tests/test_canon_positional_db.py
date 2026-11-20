@@ -173,6 +173,59 @@ def test_two_groups_that_fit_abstain_unless_the_barcode_names_one(node):
         assert cur.fetchone() == (rg2,)
 
 
+def test_a_barcode_naming_its_own_release_binds_it_beside_a_box_that_fits_closer(node):
+    """§12.9 Q18, the harness's case 1215: the copy's barcode names its own
+    release; a box's first medium carrying the same recordings fits a little
+    closer. A smaller error among fitting releases is no preference — the
+    witness binds its release."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        s, leader, ens = _mb(cur)
+        own = str(uuid.uuid4())
+        _release(s, cur, own, "Polarity", [(ens, "Hoff Ensemble")], fmt=CD, barcode="7041888520023")
+        box = str(uuid.uuid4())
+        _box(s, cur, box, "The Box", [(ens, "Hoff Ensemble")], disc=1)
+        cur.execute("UPDATE mb_track t SET length = t.length + 500 FROM mb_medium m JOIN mb_release r "
+                    "ON r.id = m.release JOIN mb_release_group g ON g.id = r.release_group "
+                    "WHERE t.medium = m.id AND g.gid = %s AND m.position = 1", (box,))
+        cur.execute("UPDATE mb_medium SET format = %s", (CD,))
+        cur.execute("UPDATE media_files SET barcode = '7041888520023'")
+        assert _run()["bound_albums"] == 1
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == (own,)
+
+
+@pytest.mark.parametrize("same_group", (False, True))
+def test_a_witness_naming_a_release_that_does_not_fit_contradicts_another_group_s(node, same_group):
+    """§3.3 as §12.9 Q18 reads it: the copy's barcode names a candidate
+    release that does not fit (five positions against four files) while a
+    release of another group does — no bind. Editions in one group (the
+    barcode a deluxe's, the positions the standard's) are no contradiction."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        s, leader, ens = _mb(cur)
+        fits_rg = str(uuid.uuid4())
+        _release(s, cur, fits_rg, "Polarity", [(ens, "Hoff Ensemble")])
+        named_rg = fits_rg if same_group else str(uuid.uuid4())
+        c = s.credit((ens, "Hoff Ensemble"))
+        cur.execute("SELECT id FROM mb_release_group WHERE gid = %s", (named_rg,))
+        row = cur.fetchone()
+        g = row[0] if row else s.release_group(named_rg, "Polarity (Deluxe)", c)
+        deluxe = s.release(str(uuid.uuid4()), "Polarity (Deluxe)", g, c,
+                           [(f"Movement {i}", ms, str(uuid.uuid4())) for i, ms in enumerate(LENGTHS + (300000,), 1)])
+        cur.execute("UPDATE mb_release SET barcode = '7041888520047' WHERE id = %s", (deluxe,))
+        cur.execute("UPDATE mb_medium SET format = %s", (DM,))
+        cur.execute("UPDATE media_files SET barcode = '7041888520047'")
+        st = _run()
+        assert st["bound_albums"] == (1 if same_group else 0)
+        cur.execute("SELECT musicbrainz_id::text FROM albums WHERE id = %s", (album,))
+        assert cur.fetchone() == ((fits_rg if same_group else None),)
+
+
 def test_under_three_positions_a_second_witness_is_needed(node):
     conn, _fake = node
     with conn.cursor() as cur:

@@ -3,8 +3,10 @@ rights societies every node's scanner never reads as an artist (TONO, GEMA,
 JASRAC, BMI, ASCAP, SACEM, … — CANON-CLASSICAL-DESIGN §4.2).
 
 The list is MusicBrainz's own (CC0): every label of the type "Rights
-Society" with its aliases, each folded by uuid_utils.normalize, read from a
-core dump archive (mbdump-*.tar.bz2, its checksum and signature verified as
+Society" with its aliases, each folded by uuid_utils.normalize — less the
+labels MusicBrainz types so that are no rights society (NOT_SOCIETIES, each by
+its MBID with the reason; CANON-CLASSICAL-DESIGN §12.9) — read from a core
+dump archive (mbdump-*.tar.bz2, its checksum and signature verified as
 mb_dump_load verifies them). The dump node's tables do not hold labels, and
 a node without the dump needs the list too, so the file ships with the
 release; this script only says how it was made.
@@ -28,6 +30,23 @@ from uuid_utils import normalize  # noqa: E402
 OUT = ROOT / "backend" / "rights_societies" / "rights_societies.json"
 MEMBERS = ("mbdump/label_type", "mbdump/label", "mbdump/label_alias")
 
+# Labels MusicBrainz types "Rights Society" that collect no rights: their
+# names and aliases would read as a society in a publishing credit. Read from
+# the 2026-11-11 dump (the name, its disambiguation, its label code).
+NOT_SOCIETIES = {
+    "744b5733-3512-4bb0-89b8-f94cc1c56799": ("Limelight",
+                                             "a licensing service (disambiguation \"licensing\"), no society"),
+    "4bbca89e-288d-40ec-ac8a-4c6568e1773d": ("Azure Voice",
+                                             "a record label: label code LC 205244, \"Voice of Africa\""),
+    "8f5f60be-647e-406c-91b0-84ba462db7d0": ("Raplarue", "a casting show (disambiguation \"Casting Show\")"),
+    "7e2809d0-cd83-4b3a-aa49-178f33b0332f": ("The Bridgeman Art Library", "a picture library"),
+    "241c8fa8-dd3f-4a2c-9640-acdbcd9437eb": ("Writers' Guild of Great Britain",
+                                             "a writers' trade union, no music rights society"),
+    "1ac78115-da2a-4e9b-b42f-3d2fafafe3e2": ("Pulse-8 Records Ltd", "a record label"),
+    "8cbcc38d-d2da-40cd-b391-77a2da18e75d": ("Keep a/c",
+                                             "\"Keep Account\": no society goes by it; no disambiguation, area or label code"),
+}
+
 
 def read(archive: str) -> dict:
     """{"dump": version, "names": sorted folded names}. MB's columns: label_type
@@ -45,7 +64,7 @@ def read(archive: str) -> dict:
                 if m.name == "mbdump/label_type":
                     kinds[c[0]] = c[1]
                 elif m.name == "mbdump/label":
-                    labels[c[0]] = (c[2], c[10])
+                    labels[c[0]] = (c[2], c[10], c[1])
                 else:
                     aliases.append((c[1], c[2]))
             want.discard(m.name)
@@ -53,11 +72,14 @@ def read(archive: str) -> dict:
                 break
     proc.kill()
     society = next(k for k, name in kinds.items() if name == "Rights Society")
-    ids = {lid for lid, (_name, kind) in labels.items() if kind == society}
+    ids = {lid for lid, (_name, kind, gid) in labels.items() if kind == society and gid not in NOT_SOCIETIES}
     names = {labels[lid][0] for lid in ids} | {name for lid, name in aliases if lid in ids}
     version = Path(archive).name.removeprefix("mbdump-").removesuffix(".tar.bz2")
     return {"source": "MusicBrainz labels of type Rights Society, with their aliases (CC0)",
-            "dump": version, "names": sorted({normalize(n) for n in names} - {""})}
+            "dump": version,
+            "not_societies": [{"mbid": gid, "name": name, "why": why}
+                              for gid, (name, why) in sorted(NOT_SOCIETIES.items(), key=lambda x: x[1][0])],
+            "names": sorted({normalize(n) for n in names} - {""})}
 
 
 def main() -> int:

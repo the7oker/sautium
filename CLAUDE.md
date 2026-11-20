@@ -340,9 +340,10 @@ See:
   (`canon_classical_v1`); the canon restates its own rows of an older matcher
   (`content._LOCAL_BINDING_WINS`) and drops the ones no file of the track
   carries. The scanner reads a TITLE of several values as one
-  `Work: Movement`, drops a rights society from a credit
-  (`backend/rights_societies/rights_societies.json`, MusicBrainz's labels of
-  type Rights Society, made by `scripts/make_rights_societies.py`) and keeps
+  `Work: Movement`, drops a rights society from a publishing credit
+  (`Society / status`; `backend/rights_societies/rights_societies.json`,
+  MusicBrainz's labels of type Rights Society less those that are none,
+  made by `scripts/make_rights_societies.py`) and keeps
   the barcode; a file read by an older reader (`scanner.TAGS_READ_REV`) is
   read again by the next scan that meets it — a node whose mount sends no
   events queues one at its start until a whole walk has read the library

@@ -74,10 +74,18 @@ def test_the_title_values_join_as_musicbrainz_writes_a_classical_title():
 
 
 def test_a_rights_society_is_a_publishing_credit_never_an_artist():
+    """T13 and §12.9 (Q17): the rule reads ` / ` alone, the form measured."""
     assert scanner.without_rights_societies("TONO / Manuscript") is None
-    assert scanner.without_rights_societies("Trio Mediæval; GEMA") == "Trio Mediæval"
+    assert scanner.without_rights_societies("Trio Mediæval / GEMA") == "Trio Mediæval"
     assert scanner.without_rights_societies("Tono") == "Tono"                  # a whole name stays
     assert scanner.without_rights_societies("Simon & Garfunkel") == "Simon & Garfunkel"
+    # CASH is Hong Kong's society, and these are artists: no other separator voids or drops
+    assert scanner.without_rights_societies("Cash, Johnny") == "Cash, Johnny"
+    assert scanner.without_rights_societies("Cash & Carry") == "Cash & Carry"
+    assert scanner.without_rights_societies("Johnny Cash & Koda") == "Johnny Cash & Koda"
+    assert scanner.without_rights_societies("Trio Mediæval; GEMA") == "Trio Mediæval; GEMA"
+    # MusicBrainz types these labels Rights Society and they are not (scripts/make_rights_societies.py)
+    assert scanner.without_rights_societies("Limelight / Anyone") == "Limelight / Anyone"
 
 
 def test_two_title_values_read_as_one_title_with_the_barcode(cur, library, tone):

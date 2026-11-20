@@ -1,6 +1,43 @@
 {
  "source": "MusicBrainz labels of type Rights Society, with their aliases (CC0)",
  "dump": "20261111-002335",
+ "not_societies": [
+  {
+   "mbid": "4bbca89e-288d-40ec-ac8a-4c6568e1773d",
+   "name": "Azure Voice",
+   "why": "a record label: label code LC 205244, \"Voice of Africa\""
+  },
+  {
+   "mbid": "8cbcc38d-d2da-40cd-b391-77a2da18e75d",
+   "name": "Keep a/c",
+   "why": "\"Keep Account\": no society goes by it; no disambiguation, area or label code"
+  },
+  {
+   "mbid": "744b5733-3512-4bb0-89b8-f94cc1c56799",
+   "name": "Limelight",
+   "why": "a licensing service (disambiguation \"licensing\"), no society"
+  },
+  {
+   "mbid": "1ac78115-da2a-4e9b-b42f-3d2fafafe3e2",
+   "name": "Pulse-8 Records Ltd",
+   "why": "a record label"
+  },
+  {
+   "mbid": "8f5f60be-647e-406c-91b0-84ba462db7d0",
+   "name": "Raplarue",
+   "why": "a casting show (disambiguation \"Casting Show\")"
+  },
+  {
+   "mbid": "7e2809d0-cd83-4b3a-aa49-178f33b0332f",
+   "name": "The Bridgeman Art Library",
+   "why": "a picture library"
+  },
+  {
+   "mbid": "241c8fa8-dd3f-4a2c-9640-acdbcd9437eb",
+   "name": "Writers' Guild of Great Britain",
+   "why": "a writers' trade union, no music rights society"
+  }
+ ],
  "names": [
   "a m c o s",
   "aadi",
@@ -60,7 +97,6 @@
   "autores paraguayos asociados",
   "autortiesību un komunicēšanās konsultāciju aģentūra latvijas autoru apvienība",
   "awa",
-  "azure voice",
   "b m i",
   "bami",
   "bbda",
@@ -132,10 +168,6 @@
   "japanese society for rights of authors composers and publishers",
   "jasrac",
   "jrc",
-  "k a",
-  "keep a c",
-  "keep ac",
-  "keep account",
   "koda",
   "komca",
   "korea music copyright association",
@@ -156,7 +188,6 @@
   "lietuvos gretutinių teisių asociacija",
   "lietuvos gretutinių teisių asociacija agata",
   "lietuvos kultūros taryba",
-  "limelight",
   "lithuanian association for collective administration of copyright",
   "lithuanian copyright collective administration association",
   "lithuanian council for culture",
@@ -221,10 +252,7 @@
   "prs for music",
   "prs for music limited",
   "prsp",
-  "pulse 8 records ltd",
   "rao",
-  "rap la rue",
-  "raplarue",
   "recording industry association singapore",
   "rias",
   "risa",
@@ -324,7 +352,6 @@
   "svenska tonsättares internationella musikbyrå",
   "säveltäjäin tekijänoikeustoimisto teosto ry",
   "teosto",
-  "the bridgeman art library",
   "the mechanical licensing collective",
   "the mechanical licensing collective mlc",
   "the mlc",
@@ -339,7 +366,6 @@
   "vegap",
   "vevam",
   "vg bild kunst",
-  "writers guild of great britain",
   "zaiks",
   "zamcops",
   "zimura",

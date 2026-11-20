@@ -25,7 +25,9 @@ The rule (§3.1, the tolerances of §12.6 Q15):
     positions only with a second witness (the group's name like the album's
     title, or the barcode or catalogue number); across groups only when the
     barcode or the catalogue number names exactly one — a witness never
-    makes a candidate and never binds alone (§3.3);
+    makes a candidate and never binds alone; a witness naming a candidate
+    release that does not fit, while another group's release does, is a
+    contradiction and abstains (§3.3, §12.9);
   - an album whose copies fit different groups is bound to none (§3.1.6).
 
 What it binds: the group (`mb_match_confidence = 'positional'`), the copy's
@@ -224,6 +226,53 @@ def _catno(value):
     return "".join(ch for ch in (value or "").lower() if ch.isalnum()) or None
 
 
+def load_copies(cur, copies) -> None:
+    """The copies asked, as _CANDIDATES_SQL, _FITS_SQL and _NAMED_SQL read
+    them (TEMP _pcopies): each copy's lengths, candidate artists, title (with
+    the edition-stripped base, as resolve_artist's _abase keeps it) and
+    witnesses. `copies`: dicts with v, durs, cands, title, barcode and
+    catalog_number."""
+    cur.execute("""CREATE TEMP TABLE _pcopies (v int PRIMARY KEY, durs float8[], cands uuid[], title text,
+                                                atitle text, abase text, barcode text, catno text)
+                   ON COMMIT DROP""")
+    psycopg2.extras.execute_values(cur, "INSERT INTO _pcopies VALUES %s", [
+        (c["v"], c["durs"], c["cands"], c["title"] or "", None, release_match_key(c["title"] or ""),
+         c["barcode"], _catno(c["catalog_number"])) for c in copies],
+        template="(%s, %s, %s::uuid[], %s, %s, %s, %s, %s)")
+    cur.execute(f"UPDATE _pcopies SET atitle = {_norm('title')}, abase = coalesce(nullif(abase, ''), {_norm('title')})")
+
+
+# The candidate releases a copy's own witness names, whatever their positions
+# (§3.3 as §12.9 reads it): the releases of its candidate artists, of the
+# album types, whose barcode is the copy's or one of whose catalogue numbers
+# is. One that does not fit while another group's release does is a
+# contradiction.
+_NAMED_SQL = """
+SELECT DISTINCT c.v, r.id AS rel, rg.gid::text AS rg_mbid
+  FROM (SELECT * FROM _pcopies WHERE barcode IS NOT NULL OR catno IS NOT NULL) c
+  JOIN mb_artist a ON a.gid = ANY(c.cands)
+  JOIN mb_artist_credit_name acn ON acn.artist = a.id
+  JOIN mb_release r ON r.artist_credit = acn.artist_credit
+   AND (r.status IS NULL OR r.status NOT IN (3, 4))
+  JOIN mb_release_group rg ON rg.id = r.release_group
+  LEFT JOIN mb_release_group_primary_type pt ON pt.id = rg.type
+ WHERE (rg.type IS NULL OR pt.name IN ('Album', 'EP', 'Single'))
+   AND ((c.barcode IS NOT NULL AND regexp_replace(coalesce(r.barcode, ''), '\\D', '', 'g') = c.barcode)
+        OR (c.catno IS NOT NULL AND EXISTS (
+            SELECT 1 FROM mb_release_label rl WHERE rl.release = r.id
+               AND lower(regexp_replace(rl.catalog_number, '[^[:alnum:]]', '', 'g')) = c.catno)))
+"""
+
+
+def named_releases(cur) -> dict:
+    """{copy: [(release id, its group's MBID)]} that the copy's witnesses name (_NAMED_SQL)."""
+    cur.execute(_NAMED_SQL)
+    out: dict = {}
+    for r in cur.fetchall():
+        out.setdefault(r["v"], []).append((r["rel"], r["rg_mbid"]))
+    return out
+
+
 # The rule's own version, in every digest: a change to the tolerances or to
 # decide asks every copy it abstained on again. Bump it with any such change.
 RULE_VERSION = 1
@@ -249,10 +298,18 @@ def _digest(copy: dict, mb_data: str, siblings: list) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-def decide(copy: dict, fits: list):
-    """(release row, why) for one copy's fitting releases, or (None, why)."""
+def decide(copy: dict, fits: list, named=()):
+    """(release row, why) for one copy's fitting releases, or (None, why).
+    `named`: the candidate releases its witnesses name (named_releases), as
+    (release id, group MBID) — one that does not fit while a release of
+    another group does is a contradiction (§3.3, §12.9 Q18). A smaller error
+    among fitting releases is no preference: every fit is inside the
+    tolerance."""
     if not fits:
         return None, "none_fit"
+    fitting = {f["rel"] for f in fits}
+    if any(rel not in fitting and any(f["rg_mbid"] != rg for f in fits) for rel, rg in named):
+        return None, "contradiction"
     groups = {f["rg_mbid"] for f in fits}
     barcode, catno = copy["barcode"], _catno(copy["catalog_number"])
 
@@ -309,16 +366,8 @@ def run(waiting: set = None, take_arriving: bool = True) -> dict:
                 if not ask:
                     conn.commit()
                     return st
-                cur.execute("""CREATE TEMP TABLE _pcopies (v int PRIMARY KEY, durs float8[], cands uuid[],
-                                                            atitle text, abase text) ON COMMIT DROP""")
-                psycopg2.extras.execute_values(cur, "INSERT INTO _pcopies VALUES %s", [
-                    (v, copies[v]["durs"], copies[v]["cands"], None,
-                     release_match_key(copies[v]["title"] or "")) for v in ask],
-                    template="(%s, %s, %s::uuid[], %s, %s)")
-                # the edition-stripped base as resolve_artist's _abase keeps it
-                cur.execute(f"UPDATE _pcopies p SET atitle = {_norm('al.title')}, "
-                            f"abase = coalesce(nullif(p.abase, ''), {_norm('al.title')}) "
-                            "FROM album_variants av JOIN albums al ON al.id = av.album_id WHERE av.id = p.v")
+                load_copies(cur, [copies[v] for v in ask])
+                named = named_releases(cur)
                 cur.execute(_CANDIDATES_SQL)
                 cur.execute(_FITS_SQL)
                 fits: dict = {}
@@ -327,7 +376,7 @@ def run(waiting: set = None, take_arriving: bool = True) -> dict:
                 # a copy of an album this tier bound is decided among that
                 # group's releases alone: another group's fit is no tie
                 decisions = {v: decide(copies[v], [f for f in fits.get(v, []) if not copies[v]["album_rg"]
-                                                   or f["rg_mbid"] == copies[v]["album_rg"]])
+                                                   or f["rg_mbid"] == copies[v]["album_rg"]], named.get(v, ()))
                              for v in ask}
                 st.update(_apply(cur, copies, decisions, digests, waiting, bound))
                 if bound:

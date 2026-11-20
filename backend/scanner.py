@@ -1232,35 +1232,31 @@ def joined_title(values: List[str]) -> Optional[str]:
 
 
 # Rights societies (TONO, GEMA, JASRAC, …): MusicBrainz's labels of that
-# type with their aliases, folded (scripts/make_rights_societies.py; every
-# node has the list, dump or not). A publishing credit is no artist
-# (CANON-CLASSICAL-DESIGN §4.2, D4).
+# type with their aliases, folded, less the labels it types so that are not
+# (scripts/make_rights_societies.py; every node has the list, dump or not). A
+# publishing credit is no artist (CANON-CLASSICAL-DESIGN §4.2, §12.9, D4).
 _RIGHTS_SOCIETIES = frozenset(json.loads(
     (Path(__file__).resolve().parent / "rights_societies" / "rights_societies.json")
     .read_text(encoding="utf-8"))["names"])
-# The parts of an artist value, as the canon's name fallback splits a
-# collaboration (canon.content._collab_members), separators kept.
-_CREDIT_PARTS = re.compile(r"( & | and | with | / |,|;)")
 
 
 def without_rights_societies(value: Optional[str]) -> Optional[str]:
-    """An ARTIST or ALBUMARTIST value as the artist it names: one whose
-    first part is a rights society is a publishing credit ("TONO /
-    Manuscript": the society, then the publication status) and reads as
-    absent; a society as a later part is dropped from the compound. A whole
-    value that is only a society's name ("Tono" is an artist too) stays."""
+    """An ARTIST or ALBUMARTIST value as the artist it names. The rule reads
+    the publishing-credit form alone, parts joined by ` / ` ("TONO /
+    Manuscript": the society, then the publication status): a value whose
+    part before ` / ` is a rights society reads as absent, and a society after
+    one is dropped. No other separator voids or drops anything — "Cash,
+    Johnny" and "Cash & Carry" are artists (CASH is Hong Kong's society) — and
+    a whole value that is only a society's name ("Tono" is an artist too)
+    stays (§12.9, Q17)."""
     if not value:
         return value
-    pieces = _CREDIT_PARTS.split(value)
+    pieces = value.split(" / ")
     if len(pieces) == 1:
         return value
     if normalize(pieces[0]) in _RIGHTS_SOCIETIES:
         return None
-    kept = [pieces[0]]
-    for sep, part in zip(pieces[1::2], pieces[2::2]):
-        if normalize(part) not in _RIGHTS_SOCIETIES:
-            kept += [sep, part]
-    return "".join(kept).strip()
+    return " / ".join([pieces[0]] + [p for p in pieces[1:] if normalize(p) not in _RIGHTS_SOCIETIES]).strip()
 
 
 def _barcode(value: Optional[str]) -> Optional[str]:
