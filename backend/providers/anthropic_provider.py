@@ -119,7 +119,6 @@ class AnthropicProvider(BaseProvider):
         message: str,
         history: Optional[list[ProviderMessage]] = None,
         system_prompt: str = "",
-        player_context: Optional[str] = None,
         model: Optional[str] = None,
     ) -> ProviderResult:
         from tools.converters import to_anthropic_tools
@@ -234,7 +233,6 @@ class AnthropicProvider(BaseProvider):
         message: str,
         history: Optional[list[ProviderMessage]] = None,
         system_prompt: str = "",
-        player_context: Optional[str] = None,
         model: Optional[str] = None,
     ) -> Iterator[StreamEvent]:
         """Streaming variant of `chat`. Yields `TextDelta`s as the model

@@ -967,6 +967,16 @@ def get_track_info(track_id: str) -> str:
         return f"Error getting track info: {e}"
 
 
+@mcp.tool(description=aq.PLAYER_STATE_DOC)
+def get_player_state(queue_offset: int = 0, queue_limit: int = 50) -> str:
+    try:
+        return aq.player_state(_backend_get("/api/player/status", {}) or {},
+                               _backend_get("/api/player/playlist", {}) or {},
+                               queue_offset, queue_limit)
+    except Exception as e:
+        return f"Error reading the player: {e}"
+
+
 # =============================================================================
 # SMART PLAY (7 tools)
 # =============================================================================

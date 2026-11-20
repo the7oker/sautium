@@ -23,7 +23,6 @@ class CodexProvider(BaseProvider):
         message: str,
         history: Optional[list[ProviderMessage]] = None,
         system_prompt: str = "",
-        player_context: Optional[str] = None,
         model: Optional[str] = None,
     ) -> ProviderResult:
         # Sentinel: registered for `available_providers()` but the chat

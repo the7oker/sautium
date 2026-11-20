@@ -18,9 +18,10 @@ Differences from the Claude runner, all forced by the CLI surface
   the cwd fell back to the backend's own, no AGENTS.md lives there, and
   codex told the model "the previously provided AGENTS.md instructions
   no longer apply" — every turn after the first ran with no prompt at
-  all. The volatile player context still prefixes the user message:
-  baked into the instructions it would change the prompt prefix every
-  turn and defeat prompt caching.
+  all. What plays rides neither the instructions nor the message: the
+  model asks the assistant server's get_player_state (since 2026-11-19;
+  before, the player context prefixed the message, outside text with the
+  user's authority, on the command line).
 - Every spawn runs with cwd = the workdir (Popen cwd, since `exec
   resume` rejects `--cd`): the environment context codex shows the
   model, and the root its file tool would write under, must never be
@@ -80,7 +81,8 @@ if sys.platform not in ("win32", "darwin"):
 
 import codex_cli
 from providers.base import StreamDone, StreamEvent, TextDelta, ToolStart
-from claude_code_runner import AGENT_USER, library_mcp_config, library_turn, spawn_kwargs
+from claude_code_runner import (AGENT_USER, library_mcp_config, library_turn, spawn_failure,
+                                spawn_kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -224,13 +226,14 @@ def _write_instructions(workdir: Path) -> Path:
     every spawn and re-read by codex on every spawn, resume included, so
     rule changes ship with code updates and reach sessions already in
     flight; the atomic rename keeps a concurrent spawn from reading a
-    torn file. Player state stays out of it (see module doc). A leftover
+    torn file; bytes, as the Claude runner's prompt file is (text mode on
+    Windows would end every line in CRLF). A leftover
     AGENTS.md from the earlier carrier goes away: codex would inject it
     as a second, user-role copy of the prompt."""
     from assistant_prompt import get_system_prompt
     path = workdir / INSTRUCTIONS_FILE
     tmp = workdir / (INSTRUCTIONS_FILE + ".tmp")
-    tmp.write_text(get_system_prompt("codex", None), encoding="utf-8")
+    tmp.write_bytes(get_system_prompt("codex").encode("utf-8"))
     os.chmod(tmp, 0o644)
     tmp.replace(path)
     (workdir / "AGENTS.md").unlink(missing_ok=True)
@@ -356,24 +359,8 @@ def _spawn_codex(cmd: List[str]):
     return subprocess.Popen(cmd, **kwargs)
 
 
-def _prefix_player_context(message: str, player_context: Optional[str]) -> str:
-    """The volatile now-playing/output state rides in the message (the
-    Claude runner bakes it into --system-prompt instead; here it would
-    change the instructions prefix every turn and defeat prompt caching)."""
-    if not player_context:
-        return message
-    return (
-        "[Player state — live app context refreshed for this message, "
-        "not written by the user]\n"
-        f"{player_context}\n"
-        "[End player state]\n\n"
-        f"{message}"
-    )
-
-
 def call_codex_stream(
     message: str,
-    player_context: Optional[str] = None,
     thread_id: Optional[str] = None,
     resume: bool = False,
     model: Optional[str] = None,
@@ -388,11 +375,11 @@ def call_codex_stream(
     without that thread's context; the chat's own history is untouched."""
     with library_turn():
         said = False
-        for event in _codex_stream(message, player_context, thread_id, resume, model):
+        for event in _codex_stream(message, thread_id, resume, model):
             if (isinstance(event, StreamDone) and resume and thread_id and not said
                     and event.error and _UNKNOWN_THREAD.search(event.error)):
                 logger.info(f"Codex holds no thread {thread_id}: the turn goes on as a new thread")
-                yield from _codex_stream(message, player_context, None, False, model)
+                yield from _codex_stream(message, None, False, model)
                 return
             said = said or not isinstance(event, StreamDone)
             yield event
@@ -406,7 +393,6 @@ _UNKNOWN_THREAD = re.compile(r"thread/resume failed: no rollout found for thread
 
 def _codex_stream(
     message: str,
-    player_context: Optional[str],
     thread_id: Optional[str],
     resume: bool,
     model: Optional[str],
@@ -458,7 +444,7 @@ def _codex_stream(
         cmd += ["resume", thread_id]
     cmd += _base_flags(use_model, REASONING_EFFORT, with_mcp=True,
                        instructions=instructions)
-    cmd += ["--", _prefix_player_context(message, player_context)]
+    cmd += ["--", message]
 
     logger.info(
         f"Codex stream call: message of {len(message)} chars, resume={resume}, "
@@ -467,9 +453,10 @@ def _codex_stream(
 
     try:
         proc = _spawn_codex(cmd)
-    except FileNotFoundError:
-        yield StreamDone(model=use_model, provider="codex",
-                         error="Codex CLI is not installed")
+    except OSError as e:
+        failure = spawn_failure("Codex", e)
+        logger.error(failure)
+        yield StreamDone(model=use_model, provider="codex", error=failure)
         return
     except Exception as e:
         logger.error(f"Failed to spawn codex: {e}")
@@ -655,7 +642,7 @@ def _write_text_instructions(workdir: Path, text: str) -> Path:
     path = workdir / f"text-{digest}.md"
     if not path.is_file():
         tmp = workdir / f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_bytes(text.encode("utf-8"))
         os.chmod(tmp, 0o644)
         tmp.replace(path)
     return path

@@ -703,7 +703,7 @@ def test_a_codex_chat_whose_thread_the_cli_does_not_hold_goes_on_as_a_new_thread
     from providers.base import StreamDone, TextDelta
     calls = []
 
-    def stream(message, player_context, thread_id, resume, model):
+    def stream(message, thread_id, resume, model):
         calls.append((thread_id, resume))
         if resume:
             yield StreamDone(model="m", provider="codex",
@@ -714,17 +714,17 @@ def test_a_codex_chat_whose_thread_the_cli_does_not_hold_goes_on_as_a_new_thread
 
     monkeypatch.setattr(codex_runner, "library_turn", contextlib.nullcontext)
     monkeypatch.setattr(codex_runner, "_codex_stream", stream)
-    events = list(codex_runner.call_codex_stream("hi", None, thread_id="0199", resume=True))
+    events = list(codex_runner.call_codex_stream("hi", thread_id="0199", resume=True))
     assert calls == [("0199", True), (None, False)]
     assert events[-1].agent_session_id == "new-thread" and events[-1].error is None
 
-    def other(message, player_context, thread_id, resume, model):
+    def other(message, thread_id, resume, model):
         calls.append((thread_id, resume))
         yield StreamDone(model="m", provider="codex", error="Codex timed out after 150s")
 
     calls.clear()
     monkeypatch.setattr(codex_runner, "_codex_stream", other)
-    events = list(codex_runner.call_codex_stream("hi", None, thread_id="0199", resume=True))
+    events = list(codex_runner.call_codex_stream("hi", thread_id="0199", resume=True))
     assert calls == [("0199", True)] and events[-1].error == "Codex timed out after 150s"
 
 
@@ -766,7 +766,7 @@ def test_a_codex_failure_after_the_answer_began_is_the_answer_as_it_was(monkeypa
     from providers.base import StreamDone, TextDelta
     calls = []
 
-    def stream(message, player_context, thread_id, resume, model):
+    def stream(message, thread_id, resume, model):
         calls.append(resume)
         yield TextDelta(text="part of an answer")
         yield StreamDone(model="m", provider="codex",
@@ -774,7 +774,7 @@ def test_a_codex_failure_after_the_answer_began_is_the_answer_as_it_was(monkeypa
 
     monkeypatch.setattr(codex_runner, "library_turn", contextlib.nullcontext)
     monkeypatch.setattr(codex_runner, "_codex_stream", stream)
-    events = list(codex_runner.call_codex_stream("hi", None, thread_id="0199", resume=True))
+    events = list(codex_runner.call_codex_stream("hi", thread_id="0199", resume=True))
     assert calls == [True] and "no rollout found" in events[-1].error
     # the CLI's log chatter naming a "session not found" is no unknown thread
     assert not codex_runner._UNKNOWN_THREAD.search("WARN mcp: session not found, retrying")

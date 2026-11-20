@@ -125,6 +125,16 @@ secret); a compromised build of the client. Exposure beyond the LAN — a
 "headless" mode, multiple users — is outside this model: it would need real
 per-user credentials, not only a TLS front.
 
+The chat assistant's instructions hold the product's own text alone (since
+2026-11-19): what is playing, the queue and the output's name reach the model
+only as the answer of a tool, `get_player_state`, which marks each name and
+title as data. Its other tools and its database queries return names,
+titles and biographies as they are — in a tool's answer, never in its
+instructions. That narrows what such text can make a model do; it does not
+make a model immune, which is why the assistant's tools are bounded as well:
+a fixed list per call, and a database role that reads the catalogue and
+nothing else.
+
 ## Secrets
 
 The node's Ed25519 identity and the API signing secret live in the identity

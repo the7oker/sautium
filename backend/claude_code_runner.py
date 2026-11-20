@@ -14,6 +14,12 @@ Two flavours:
   --include-partial-messages`, yields text deltas / tool starts / a
   final done event so the chat router can pipe them into SSE. Always the
   library profile.
+
+No variable text rides the command line, which Windows caps at 32,767
+characters: the system prompt is a file (`--system-prompt-file`) and a chat
+turn's message goes to the CLI's stdin. On 2026-11-19 the rendered prompt
+alone was 32,917 characters, and the launcher's every turn failed with
+WinError 206.
 """
 
 import contextlib
@@ -25,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
@@ -83,17 +90,19 @@ _NO_MCP = json.dumps({"mcpServers": {}})
 LIBRARY_SERVERS = ("postgres", "assistant")
 # The CLI reads any file a prompt names after an "@" into the request,
 # wherever the prompt's text came from (measured 2026-11-02 on 2.1.241 and
-# 2.1.316, argv and stdin alike), and sends the system prompt as written. A
-# call built from data — a title's exchange, the canon's entries, a gear
-# model's name — therefore carries it in the system prompt, and its -p is
-# this line. A chat turn's -p is what the owner typed.
+# 2.1.316, argv and stdin alike), and sends the system prompt as written —
+# from --system-prompt-file too (measured 2026-11-19 on 2.1.241, 2.1.278,
+# 2.1.316 and 2.1.328). A call built from data — a title's exchange, the
+# canon's entries, a gear model's name — therefore carries it in the system
+# prompt, and its -p is this line. A chat turn's -p is what the owner typed.
 _ONE_SHOT_TURN = "Answer as the system prompt asks."
 
 # A CLI that records the system prompt (on by default since 2.1.312) resends
 # the first request's copy on every resume, whatever a later launch passes —
 # measured through this runner on 2.1.316: a resumed turn given prompt B sent
-# prompt A. A chat would keep its first turn's player context and catalogue
-# text for good, so recording is off wherever the CLI has the switch. Its
+# prompt A. A chat would keep its first turn's library size and the prompt of
+# the release it began on for good, so recording is off wherever the CLI has
+# the switch. Its
 # --help says so: 2.1.278 already lists it ("no effect where recording is not
 # yet enabled"), 2.1.241 refuses it as an unknown option.
 _SNAPSHOT_SWITCH = "--system-prompt-snapshot"
@@ -173,11 +182,12 @@ def _resolve_claude_executable() -> Optional[str]:
     """Path to the native Claude Code binary, bypassing npm's shim.
 
     The .cmd shim that npm creates on Windows runs through cmd.exe, which
-    caps the command line at 8191 chars — far less than our system_prompt
-    (~13.5k). Calling the native binary directly uses CreateProcessW with
-    the 32k Win32 limit, which fits comfortably. The native binary is
-    named `claude.exe` on every platform (the postinstall script copies
-    a platform-matched ELF/Mach-O/PE over the placeholder).
+    caps the command line at 8191 characters and re-parses it; the native
+    binary is started by CreateProcessW (32,767). No call puts text on the
+    command line since 2026-11-19 (module doc), so either would hold it;
+    the binary keeps cmd.exe's parsing out. It is named `claude.exe` on
+    every platform (the postinstall script copies a platform-matched
+    ELF/Mach-O/PE over the placeholder).
 
     Resolution order: bundled per-user prefix (wizard install) → npm shim
     in PATH redirected to its sibling .exe → raw shim as last resort."""
@@ -344,6 +354,52 @@ def _agent_kwargs() -> dict:
     return kwargs
 
 
+def _remove(path: str) -> None:
+    """A call's own file, after the call: a removal that fails leaves a file
+    behind, never a call that succeeded reported as failed."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning(f"Claude Code's call file {path} stays: {e}")
+
+
+@contextlib.contextmanager
+def _system_prompt_file(text: str):
+    """`text` as the file a call's --system-prompt-file names, for as long as
+    the call runs: one of its own, in the agent's working directory, which
+    the agent's account reads. UTF-8 bytes with the lines as they are — a
+    file written in text mode on Windows ends them in CRLF, and the CLI sends
+    each as a blank line (measured on 2.1.278)."""
+    fd, path = tempfile.mkstemp(prefix="system-", suffix=".md",
+                                dir=agent_workdir("claude-agent"))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            if sys.platform != "win32":
+                os.fchmod(f.fileno(), 0o644)
+            f.write(text.encode("utf-8"))
+        yield path
+    finally:
+        _remove(path)
+
+
+@contextlib.contextmanager
+def _turn_input(text: str):
+    """A chat turn's message as the CLI's stdin (`-p` with no text reads it
+    there): a file the child inherits open, so the account it runs as needs
+    no right to it, and one the OS removes with its last handle — at once on
+    POSIX, at the close of the last handle on Windows (a child of the CLI
+    that inherited it included) — so no path is left to clean up, not even
+    by a crash. Not a pipe: the CLI gives up on stdin 3 s after it starts if
+    nothing has arrived, which a feeder held up that long would miss
+    (measured on 2.1.241-2.1.316); a file has its bytes there from the
+    start. Written as bytes — a text-mode file on Windows writes "\n" as
+    CRLF."""
+    with tempfile.TemporaryFile(prefix="message-", dir=agent_workdir("claude-agent")) as f:
+        f.write(text.encode("utf-8"))
+        f.seek(0)
+        yield f
+
+
 def call_claude_code(
     message: str,
     system_prompt: str,
@@ -386,9 +442,9 @@ def call_claude_code(
         }
 
     if tools == LIBRARY:
-        turn = ["-p", message, "--system-prompt", system_prompt]
+        turn, prompt, stdin = ["-p"], system_prompt, message
     else:
-        turn = ["-p", _ONE_SHOT_TURN, "--system-prompt", f"{system_prompt}\n\n{message}"]
+        turn, prompt, stdin = ["-p", _ONE_SHOT_TURN], f"{system_prompt}\n\n{message}", None
     cmd = [
         claude_exe,
         *turn,
@@ -408,21 +464,26 @@ def call_claude_code(
 
     try:
         kwargs = _agent_kwargs()
-        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                      encoding="utf-8", errors="replace", timeout=wallclock)
-        with library_turn() if tools == LIBRARY else contextlib.nullcontext():
-            result = subprocess.run(cmd, **kwargs)
+        kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=wallclock)
+        with contextlib.ExitStack() as call:
+            prompt_file = call.enter_context(_system_prompt_file(prompt))
+            if stdin is not None:
+                kwargs["stdin"] = call.enter_context(_turn_input(stdin))
+            if tools == LIBRARY:
+                call.enter_context(library_turn())
+            result = subprocess.run([*cmd, "--system-prompt-file", prompt_file], **kwargs)
+        stdout = result.stdout.decode("utf-8", "replace")
 
         # A failed call still prints its result object: since CLI 2.1.x it
         # exits 1 with the cause in `result` and nothing on stderr, so the
         # exit code alone read as "unknown error" (2026-10-09).
         try:
-            output = json.loads(result.stdout)
+            output = json.loads(stdout)
         except json.JSONDecodeError:
             output = None
         if not isinstance(output, dict):
             if result.returncode != 0:
-                stderr = result.stderr.strip()
+                stderr = result.stderr.decode("utf-8", "replace").strip()
                 logger.error(f"Claude Code failed (rc={result.returncode}): {stderr}")
                 return {
                     "answer": f"Claude Code error: {stderr or 'unknown error'}",
@@ -430,9 +491,9 @@ def call_claude_code(
                     "model": use_model,
                     "is_error": True,
                 }
-            logger.error(f"Failed to parse Claude Code JSON; stdout: {result.stdout[:500]}")
+            logger.error(f"Failed to parse Claude Code JSON; stdout: {stdout[:500]}")
             return {
-                "answer": result.stdout.strip() or "Failed to parse Claude Code response",
+                "answer": stdout.strip() or "Failed to parse Claude Code response",
                 "claude_session_id": None,
                 "model": use_model,
                 "is_error": True,
@@ -473,10 +534,11 @@ def call_claude_code(
             "model": use_model,
             "is_error": True,
         }
-    except FileNotFoundError:
-        logger.error("Claude Code CLI not found. Is it installed?")
+    except OSError as e:
+        failure = spawn_failure("Claude Code", e)
+        logger.error(failure)
         return {
-            "answer": "Claude Code CLI is not installed in this environment.",
+            "answer": failure,
             "claude_session_id": None,
             "model": use_model,
             "is_error": True,
@@ -553,10 +615,30 @@ def spawn_kwargs(env: dict) -> dict:
     return kwargs
 
 
-def _spawn_claude(cmd: list[str], stdout=subprocess.PIPE, stderr=subprocess.PIPE):
-    """A chat turn's subprocess. Returns the Popen handle."""
+# Python raises FileNotFoundError for more than a missing program on Windows:
+# a command line past 32,767 characters is WinError 206 (ERROR_FILENAME_EXCED_RANGE)
+# in that class too, which read as "not installed" on every launcher turn until
+# 2026-11-19 (measured on the stand). Absent or 2/3 (file, path not found) is
+# the program missing.
+_NOT_FOUND_WINERRORS = (None, 2, 3)
+
+
+def spawn_failure(cli: str, e: OSError) -> str:
+    """What a CLI's spawn that raised `e` tells the person: not installed only
+    when the program is not there; otherwise what did happen."""
+    winerror = getattr(e, "winerror", None)
+    if isinstance(e, FileNotFoundError) and winerror in _NOT_FOUND_WINERRORS:
+        return f"{cli} CLI is not installed. Open Settings to run AI agent setup."
+    if winerror == 206:
+        return f"{cli} could not start: its command line is longer than Windows allows (WinError 206)."
+    return f"{cli} could not start: {e}"
+
+
+def _spawn_claude(cmd: list[str], stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE):
+    """A chat turn's subprocess, its message the open file `stdin`
+    (_turn_input). Returns the Popen handle."""
     kwargs = _agent_kwargs()
-    kwargs.update(stdout=stdout, stderr=stderr, text=True,
+    kwargs.update(stdin=stdin, stdout=stdout, stderr=stderr, text=True,
                   encoding="utf-8", errors="replace")
     return subprocess.Popen(cmd, **kwargs)
 
@@ -568,14 +650,17 @@ def call_claude_code_stream(
     resume: bool = False,
     model: Optional[str] = None,
 ) -> Iterator[StreamEvent]:
-    """`_claude_code_stream` as one library turn (library_turn)."""
-    with library_turn():
-        yield from _claude_code_stream(message, system_prompt, session_id, resume, model)
+    """`_claude_code_stream` as one library turn (library_turn), its system
+    prompt and its message in files for as long as the turn runs."""
+    with library_turn(), _system_prompt_file(system_prompt) as prompt_file, \
+            _turn_input(message) as stdin:
+        yield from _claude_code_stream(message, prompt_file, stdin, session_id, resume, model)
 
 
 def _claude_code_stream(
     message: str,
-    system_prompt: str,
+    prompt_file: str,
+    stdin,
     session_id: Optional[str],
     resume: bool,
     model: Optional[str],
@@ -605,12 +690,12 @@ def _claude_code_stream(
 
     cmd = [
         claude_exe,
-        "-p", message,
+        "-p",
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",  # required for stream-json
         "--model", use_model,
-        "--system-prompt", system_prompt,
+        "--system-prompt-file", prompt_file,
         *_prompt_flags(claude_exe),
         *_tool_flags(LIBRARY),
     ]
@@ -623,19 +708,15 @@ def _claude_code_stream(
     )
 
     try:
-        proc = _spawn_claude(cmd)
-    except FileNotFoundError:
-        logger.error("Claude Code CLI not found")
-        yield StreamDone(
-            model=use_model, provider="claude_code",
-            error="Claude Code CLI is not installed",
-        )
+        proc = _spawn_claude(cmd, stdin)
+    except OSError as e:
+        failure = spawn_failure("Claude Code", e)
+        logger.error(failure)
+        yield StreamDone(model=use_model, provider="claude_code", error=failure)
         return
     except Exception as e:
         logger.error(f"Failed to spawn Claude Code: {e}")
-        yield StreamDone(
-            model=use_model, provider="claude_code", error=str(e),
-        )
+        yield StreamDone(model=use_model, provider="claude_code", error=str(e))
         return
 
     claude_sid: Optional[str] = None
