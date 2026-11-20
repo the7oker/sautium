@@ -268,6 +268,12 @@ def _check_completeness(conn, bundle: dict, envelopes: dict) -> dict:
 def apply_seed(conn, db_dsn: str, info: dict) -> dict:
     """Import the bundle `info` describes. Returns {"complete": bool, ...};
     the caller writes the marker only on complete=True."""
+    # Before the bundle is fetched: a node whose streaming library is off
+    # (a small board from its birth) downloads none of it
+    if phantom_layer_off(conn):
+        logger.info("seed: discovery.phantom_layer is explicitly off — skipping")
+        return {"complete": False, "skipped": "phantom_layer_off"}
+
     bundle = _load_bundle(info)
     if bundle is None:
         return {"complete": False, "skipped": "bundle_unavailable"}
@@ -278,10 +284,6 @@ def apply_seed(conn, db_dsn: str, info: dict) -> dict:
             "skipping; the fix is re-exporting the bundle on the current rule",
             bundle.get("identity_rule"), IDENTITY_RULE)
         return {"complete": False, "skipped": "identity_rule_mismatch"}
-
-    if phantom_layer_off(conn):
-        logger.info("seed: discovery.phantom_layer is explicitly off — skipping")
-        return {"complete": False, "skipped": "phantom_layer_off"}
 
     out: dict = {"complete": False}
     try:

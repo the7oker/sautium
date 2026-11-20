@@ -46,7 +46,8 @@ _WATCHED_SUFFIXES = None     # the scanner's audio extensions and ".cue", read a
 
 
 def _watched(name: str) -> bool:
-    return os.path.splitext(name)[1].lower() in _WATCHED_SUFFIXES
+    from scanner import hidden_name
+    return os.path.splitext(name)[1].lower() in _WATCHED_SUFFIXES and not hidden_name(name)
 
 
 # ── The mount's kind ─────────────────────────────────────────────────────

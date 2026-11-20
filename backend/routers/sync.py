@@ -50,13 +50,24 @@ SYNC_CAPABILITIES = ["segments"]
 # between "off" and a full inventory dump — it has to actually work.
 # Cached briefly: a sync run fires many pulls and each would otherwise cost
 # a settings query.
+#
+# The switch has two sides, and a second switch splits them (since
+# 2026-11-19, PI-NODE-2B): `sharing_enabled` is the TAKING side — the walk,
+# the slice cycles, a lookup asked of another node — and follows
+# sync.p2p_enabled alone; `serving_enabled` is the PASSING-ON side — every
+# route below, what /health says, the LAN beacon, the DHT's tail, the
+# carry this node offers — and holds only while sync.pass_on is on too. A
+# node born small takes without passing on (db_migrate's birth preset) until
+# its owner says otherwise; it tells the network less, never more: asking is
+# unchanged, and what it holds is told to nobody.
 _SHARING_TTL = 10.0
-_sharing_cache: tuple[float, bool] = (0.0, True)
-# Moved on by every change of the switch: a read begun before one is not kept
+_sharing_cache: tuple[float, tuple[bool, bool]] = (0.0, (True, True))
+# Moved on by every change of a switch: a read begun before one is not kept
 _sharing_generation = 0
 
 
-def sharing_enabled() -> bool:
+def _switches() -> tuple[bool, bool]:
+    """(taking, passing on), read together."""
     import time as _time
     global _sharing_cache
     now = _time.monotonic()
@@ -66,13 +77,24 @@ def sharing_enabled() -> bool:
     generation = _sharing_generation
     try:
         from routers.settings import _read
-        val = bool(_read("sync.p2p_enabled"))
+        sharing = bool(_read("sync.p2p_enabled"))
+        val = (sharing, sharing and bool(_read("sync.pass_on")))
     except Exception as e:                       # settings unreadable: fail closed
         logger.warning(f"sharing flag unreadable ({e}) — refusing to serve")
-        val = False
+        val = (False, False)
     if generation == _sharing_generation:
         _sharing_cache = (now, val)
     return val
+
+
+def sharing_enabled() -> bool:
+    """This node asks the network (the taking side)."""
+    return _switches()[0]
+
+
+def serving_enabled() -> bool:
+    """This node passes on what it holds (the serving side)."""
+    return _switches()[1]
 
 
 # Told when the switch moves (main.py: a host-networked node's LAN beacon,
@@ -81,17 +103,17 @@ sharing_hooks: list = []
 
 
 def sharing_changed() -> None:
-    """The owner moved the switch (routers/settings.put_sync_prefs): serving,
+    """The owner moved a switch (routers/settings.put_sync_prefs): serving,
     and what /health says of it, follow at once — not at the cache's expiry."""
     global _sharing_cache, _sharing_generation
     _sharing_generation += 1
-    _sharing_cache = (0.0, True)
+    _sharing_cache = (0.0, (True, True))
     for hook in sharing_hooks:
         hook()
 
 
 def _require_sharing() -> None:
-    if not sharing_enabled():
+    if not serving_enabled():
         raise HTTPException(status_code=403, detail="sharing disabled")
 
 # Single source: desktop/p2p/mb_slice_queries.py. In Docker the desktop tree

@@ -651,7 +651,7 @@ def test_an_mps_node_caps_the_threads_of_its_cpu_inference():
     def threads(device, name="full"):
         return hardware_profile.HardwareProfile(
             name=name, source="auto", device=device, accel_name=None, accel_memory_gb=24.0,
-            ram_gb=24.0, cores=10, ml_available=True).torch_cpu_threads
+            ram_gb=24.0, cores=10, models="on").torch_cpu_threads
 
     assert (threads("mps"), threads("mps", "lite"), threads("cpu"), threads("cuda")) == (
         8, 5, 8, None)

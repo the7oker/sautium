@@ -22,6 +22,7 @@ its body through `boxed`, and the latter the password through `step_up`
 
 import asyncio
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
@@ -183,7 +184,29 @@ async def auth_status() -> dict:
         # account password is the only way in, so it is never minted away
         "pin_door": device_auth.pin_door(),
         "username": device_auth.account_username(),
+        # While the setup form is open: this node never earns its identity
+        # by computing (it runs no model — routers/p2p._email_road), so the
+        # form's optional email is the way to one, and says so
+        "email_road": onboarding and _runs_no_model(),
     }
+
+
+def _runs_no_model() -> bool:
+    import hardware_profile
+    return not hardware_profile.resolve().ml_available
+
+
+@router.get("/device-links")
+async def device_links(request: Request) -> dict:
+    """"Add a device": this node's own addresses as links with their QR
+    codes (device_links.py). A signed route — the page of a device already
+    signed in shows them; the other device then signs in with the account's
+    password. Nothing is minted."""
+    import device_links as links
+    # The port the page reached the node on; a page that came through a
+    # front (a name, the scheme's own port) is given the node's own door
+    port = request.url.port or int(os.getenv("UVICORN_PORT") or 8800)
+    return {"links": await asyncio.to_thread(links.links, port)}
 
 
 class CreateAccountRequest(BaseModel):
@@ -231,6 +254,10 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
     except device_auth.WrongSetupCode:
         raise HTTPException(status_code=403, detail="That is not this node's setup code: the node writes a "
                                                     "new one at each start, to its log and its identity folder")
+    except device_auth.Shut as e:
+        raise HTTPException(status_code=429,
+                            detail=f"Too many wrong setup codes: the next is taken in {e.seconds} s",
+                            headers={"Retry-After": str(e.seconds), "X-Sautium-Auth-Error": "shut"})
     except ValueError as e:                       # username shape
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

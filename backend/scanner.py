@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Optional, Dict, Any, List, Sequence, Set, Tuple
 
 import mutagen
@@ -55,6 +55,48 @@ _ALBUM_GENRE_UPSERT = text("""
 
 # Supported audio extensions
 AUDIO_EXTENSIONS = {'.flac', '.ape', '.wav', '.aiff', '.wv', '.tta', '.dsf', '.dff', '.mp3', '.ogg', '.m4a'}
+
+
+def hidden_name(name: str) -> bool:
+    """A name that is never music, whatever its extension: the AppleDouble
+    file macOS leaves beside every file it writes to a FAT or exFAT disk
+    (`._Track.flac` — resource-fork bytes under an audio extension, tried and
+    failed as audio at every scan before this rule). The walk, the picker's
+    count and the folder watcher share it."""
+    return name.startswith("._")
+
+
+def link_admitted(path: str) -> bool:
+    """Whether a link to a file is followed. Everywhere but on a node that
+    reads its music under roots (library_root): there a link that resolves
+    outside them is left where it lies — on a disk a stranger made, a name
+    ending in .flac may point at any file the node can read."""
+    import library_root
+    return not library_root.picks() or library_root.within(path) is not None
+
+
+def scope_has_drive(rel: str) -> bool:
+    """`rel` as Windows reads it names a drive or a root (`C:/Windows`,
+    `C:Windows`, `\\\\server\\share`): joining it to a folder leaves that folder."""
+    windows = PureWindowsPath(rel)
+    return bool(windows.drive or windows.root)
+
+
+def scope_admitted(library_path, rel: str) -> bool:
+    """Whether a scan's scope names a folder inside the library: no `..` on
+    its way anywhere, and — on a node that reads its music under roots — no
+    link that leaves them. The walk judges the entries inside a scope
+    (link_admitted); this judges the scope's own folder, which a request
+    names."""
+    if ".." in rel.replace("\\", "/").split("/"):
+        return False
+    # A scope with a root or — on Windows — a drive of its own is no folder
+    # of the library: joined to the library's path it would replace it
+    if os.path.isabs(rel) or (os.name == "nt" and scope_has_drive(rel)):
+        return False
+    import library_root
+    return not library_root.picks() or library_root.within(os.path.join(str(library_path), rel)) is not None
+
 
 # A Docker bind is fixed when its container starts: a drive reconnected under
 # a running node stays invisible to it until the restart.
@@ -1297,6 +1339,9 @@ class LibraryScanner:
 
     def __init__(self, library_path: Optional[str] = None):
         """Initialize scanner with library path."""
+        if not (library_path or settings.music_library_path):
+            # Path("") is the working directory: never a library
+            raise ValueError("No music folder is chosen")
         self.library_path = Path(library_path or settings.music_library_path)
 
         if not self.library_path.exists():
@@ -1466,6 +1511,8 @@ class LibraryScanner:
         if scopes is None:
             if subpath:
                 scan_path = self.library_path / subpath
+                if not scope_admitted(self.library_path, subpath):
+                    raise ValueError(f"Subpath is not inside the library: {subpath}")
                 if not scan_path.exists():
                     raise ValueError(f"Subpath does not exist: {scan_path}")
                 logger.info(f"Searching for audio files in {scan_path} (subpath: {subpath})")
@@ -1491,11 +1538,15 @@ class LibraryScanner:
         # without a word, and os.walk files a folder whose type it could not
         # read (a stale nested mount) as a plain name. Entry types come from
         # the directory listing, so a regular file costs no stat; a symlink is
-        # followed to its file (rglob's is_file did the same) but never into
-        # a folder. Absolute from the root, as every path the prune compares.
+        # followed to its file (rglob's is_file did the same; link_admitted
+        # says where not) but never into a folder. Absolute from the root, as
+        # every path the prune compares.
         folders = []
         for rel, recursive in scopes:
             root = (self.library_path / rel) if rel else self.library_path
+            if rel and not scope_admitted(self.library_path, rel):
+                logger.warning("scan scope %s is not inside the library — not walked", rel)
+                continue
             if rel and not root.is_dir():
                 if gone is not None:
                     gone.append(rel)
@@ -1512,10 +1563,18 @@ class LibraryScanner:
             try:
                 with os.scandir(folder) as it:
                     for entry in it:
+                        if hidden_name(entry.name):
+                            continue
                         if entry.is_dir(follow_symlinks=False):
                             subfolders.append(entry.path)
                         elif entry.is_file():    # not a FIFO, a socket, a dangling link
                             suffix = os.path.splitext(entry.name)[1].lower()
+                            if suffix not in AUDIO_EXTENSIONS and suffix != ".cue":
+                                continue
+                            if entry.is_symlink() and not link_admitted(entry.path):
+                                logger.warning(f"Not scanned: {entry.path} is a link that "
+                                               "leaves the folders this node reads")
+                                continue
                             if suffix in AUDIO_EXTENSIONS:
                                 if stat_entry(entry):
                                     here_audio.append(Path(entry.path))

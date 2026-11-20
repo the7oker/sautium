@@ -294,6 +294,7 @@ def test_health_reads_its_counts_once_a_minute_one_refresh_at_a_time(monkeypatch
     monkeypatch.setattr(p2p_app, "lb_dump_version", lambda: None)
     monkeypatch.setattr(p2p_app, "lb_inventory", lambda: (0, None))
     monkeypatch.setattr(p2p_app, "node_pubkey_hex", lambda: "ab" * 32)
+    monkeypatch.setattr(p2p_app, "serving_enabled", lambda: True)    # a node that passes on: it tells its counts
     monkeypatch.setattr(sync, "mb_slice_queries", None)
     import p2p_identity
     monkeypatch.setattr(p2p_identity, "served_certificate", lambda s: None)

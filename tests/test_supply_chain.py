@@ -201,6 +201,7 @@ def test_a_runtime_replaced_at_the_same_path_gets_its_packages_installed_again(t
     backend = tmp_path / "backend"
     backend.mkdir()
     (backend / "requirements.txt").write_text("fastapi>=0.133.0\n", encoding="utf-8")
+    (backend / "requirements-ml.txt").write_text("librosa>=0.10.1\n", encoding="utf-8")
 
     installs = []
     real_run = subprocess.run
@@ -224,12 +225,19 @@ def test_a_runtime_replaced_at_the_same_path_gets_its_packages_installed_again(t
     assert manager._ensure_backend_deps() is None
     assert manager._ensure_backend_deps() is None
     assert len(installs) == 1                      # the second start found them in place
+    # one resolution over the node's packages and the model stack
+    assert [installs[0][i + 1] for i, word in enumerate(installs[0]) if word == "-r"] == [
+        str(backend / "requirements.txt"), str(backend / "requirements-ml.txt")]
+
+    (backend / "requirements-ml.txt").write_text("librosa>=0.11\n", encoding="utf-8")
+    assert manager._ensure_backend_deps() is None
+    assert len(installs) == 2                      # a change to either file installs again
 
     import shutil
     shutil.rmtree(runtime)
     venv.create(runtime, with_pip=False)           # the same path, a fresh runtime
     assert manager._ensure_backend_deps() is None
-    assert len(installs) == 2
+    assert len(installs) == 3
 
 
 def test_the_launcher_installs_no_package_while_it_runs():
@@ -425,12 +433,72 @@ def test_the_arm64_image_fingerprints_with_the_release_images_ffmpeg():
     def bases(text):
         return [line for line in text.splitlines() if line.startswith("FROM ")]
     assert bases(release) == ["FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04"]
-    assert bases(arm64) == ["FROM ubuntu:22.04"]
+    # One base under both of its stages: the packages are built on the FFmpeg
+    # and Python the image runs them on
+    assert bases(arm64) == ["FROM ubuntu:22.04 AS base", "FROM base AS build", "FROM base"]
     for text in (release, arm64):
         for wanted in ("ppa:deadsnakes/ppa", "libchromaprint-tools", "lbzip2",
                        "unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc", "jammy-pgdg main",
                        "pip install --no-index /tmp/${PIP_WHEEL}"):
             assert wanted in text, wanted
+
+
+def _stages(text: str) -> dict:
+    """A Dockerfile's text by stage: its name, or "" for the last"""
+    stages, name = {}, None
+    for line in text.splitlines():
+        if line.startswith("FROM "):
+            name = line.split(" AS ")[1] if " AS " in line else ""
+        if name is not None:
+            stages[name] = stages.get(name, "") + line + "\n"
+    return stages
+
+
+def test_the_cpu_image_leaves_its_compilers_in_the_build_stage():
+    """No variant of the image carries compilers or headers (PI-NODE-1 A4:
+    372 MB of 5.5 GB): pip runs in a stage that has them, and the image takes
+    what pip wrote."""
+    stages = _stages("\n".join(line for line in _dockerfile("Dockerfile.mac").splitlines()
+                                if not line.lstrip().startswith("#")))
+    for package in ("build-essential", "-dev"):
+        assert package in stages["build"] and package not in stages["base"] + stages[""], package
+    assert "pip install" not in stages["base"] + stages[""]
+    assert "COPY --from=build /usr/local/lib/python3.11/dist-packages" in stages[""]
+
+
+def test_an_image_without_the_models_installs_the_nodes_packages_alone():
+    """MODELS=0 leaves out exactly requirements-ml.txt and torch; every other
+    install reads both files in one resolution, and no package is named in
+    both."""
+    build = _stages(_dockerfile("Dockerfile.mac"))["build"]
+    assert 'if [ "${MODELS}" = 1 ]; then' in build
+    assert ("pip install --no-cache-dir -r requirements.txt -r requirements-ml.txt; \\\n"
+            "    else \\\n        pip install --no-cache-dir -r requirements.txt; \\\n") in build
+    assert "pip install --no-cache-dir -r requirements.txt -r requirements-ml.txt" in _dockerfile("Dockerfile")
+    from desktop.service_manager import BACKEND_REQUIREMENTS
+    assert BACKEND_REQUIREMENTS == ("requirements.txt", "requirements-ml.txt")
+    for runtime in _RUNTIMES:
+        node = _requirements(REPO / "backend" / "requirements.txt", runtime)
+        models = _requirements(REPO / "backend" / "requirements-ml.txt", runtime)
+        assert not set(node) & set(models), runtime
+        assert not {"torch", "transformers", "librosa", "ctranslate2", "sentence-transformers"} & set(node)
+    assert "torch" not in _requirements(REPO / "backend" / "requirements-ml.txt", "intel-mac")
+    assert "torch" in _requirements(REPO / "backend" / "requirements-ml.txt", "linux-arm")
+
+
+def test_the_cpu_image_names_a_digest_for_each_architecture_it_builds_on():
+    import re
+    final = _stages(_dockerfile("Dockerfile.mac"))[""]
+    release = _dockerfile("Dockerfile")
+    for tool in ("NODE", "DENO"):
+        digests = dict(re.findall(rf"ARG {tool}_SHA256_(ARM64|AMD64)=([0-9a-f]{{64}})\n", final))
+        assert set(digests) == {"ARM64", "AMD64"} and digests["ARM64"] != digests["AMD64"]
+        # x86-64's is the release image's own download
+        version = re.search(rf"ARG {tool}_VERSION=(\S+)", final).group(1)
+        assert f"ARG {tool}_VERSION={version}\nARG {tool}_SHA256={digests['AMD64']}\n" in release
+    # An architecture with no digest stops the build; a tool left out downloads nothing
+    assert final.count("exit 1 ;;") == 2
+    assert 'if [ "${ASSISTANT_CLI}" = 1 ]; then' in final and 'if [ "${STREAMING}" = 1 ]; then' in final
 
 
 def _compose(name: str) -> dict:
@@ -466,7 +534,8 @@ def test_the_arm64_compose_files_are_the_release_file_but_for_what_their_host_ne
     # The Linux file runs the backend on the host's network (its own ports,
     # its own port for the Web UI, nothing published) and mounts the host
     # agent's requests folder
-    host_network = ({"UVICORN_PORT", "SAUTIUM_HOST_NETWORK"}, {"/run/sautium/requests"}, set())
+    host_network = ({"UVICORN_PORT", "SAUTIUM_HOST_NETWORK", "SAUTIUM_BIRTH_PRESET"},
+                    {"/run/sautium/requests"}, set())
     for name, other_mounts, (more_env, more_mounts, their_published) in (
             ("docker-compose.mac.yml", set(), (set(), set(), ports)),
             ("docker-compose.pi.yml", {"/home/agent/.claude/projects"}, host_network)):
@@ -508,7 +577,7 @@ def test_the_node_reads_no_bytecode_it_cannot_write():
         assert "ENV PYTHONPYCACHEPREFIX=/usr/local/lib/sautium/pycache" in text
         assert "ENV PYTHONDONTWRITEBYTECODE=1" in text
         assert text.index("PYTHONPYCACHEPREFIX") < text.index("COPY . .")
-        assert "CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1" in text
+        assert "CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/healthz || exit 1" in text
     ignored = (REPO / "backend" / ".dockerignore").read_text(encoding="utf-8").splitlines()
     assert "**/__pycache__/" in ignored and "**/*.pyc" in ignored
 

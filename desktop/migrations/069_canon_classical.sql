@@ -1,4 +1,4 @@
--- 068 — CANON-CLASSICAL (2026-11-18): the same DDL as 001_initial.sql's
+-- 069 — CANON-CLASSICAL (2026-11-18; 069 since 2026-11-20, after PI-NODE-2B's 068): the same DDL as 001_initial.sql's
 -- blocks, for nodes that ran the earlier files. Idempotent: a no-op on the
 -- schema 001 just created.
 --

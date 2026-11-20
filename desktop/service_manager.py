@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 # A backend that survived this long crashed on its own trouble, not a boot
 # loop — the restart budget resets.
+# What the backend's runtime installs, in one pip resolution: the node's
+# packages and the model stack (an image built with MODELS=0 reads the first
+# alone; here the second's own markers leave out what a platform has no wheel of)
+BACKEND_REQUIREMENTS = ("requirements.txt", "requirements-ml.txt")
+
 _STABLE_UPTIME_SECONDS = 300
 _MAX_CRASH_RESTARTS = 3
 # The backend announces itself bound (desktop/backend_serve.py). The window
@@ -230,11 +235,12 @@ class ServiceManager:
         they are in place, otherwise why not.
 
         Skip-fast condition: a marker inside the interpreter's own
-        site-packages (_deps_marker) holds the SHA-256 of requirements.txt from
-        the last successful install into it. If it matches the current file,
-        the environment is up to date and we return immediately.
-        Any change to requirements.txt (added/removed/version-bumped package)
-        invalidates the marker and forces a `pip install -r requirements.txt`,
+        site-packages (_deps_marker) holds the SHA-256 of the requirements
+        files (the node's packages and the model stack, requirements-ml.txt)
+        from the last successful install into it. If it matches the current
+        files, the environment is up to date and we return immediately.
+        Any change to either (added/removed/version-bumped package)
+        invalidates the marker and forces one `pip install -r` of both,
         which top-ups whatever is missing.
         """
         # Ensure embedded Python 3.12 is available
@@ -248,14 +254,15 @@ class ServiceManager:
         python = self._get_backend_python()
         logger.info(f"Backend Python for deps: {python}")
 
-        req_file = self._backend_dir / "requirements.txt"
-        if not req_file.exists():
-            logger.error(f"requirements.txt not found: {req_file}")
-            return "backend/requirements.txt is missing"
+        req_files = [self._backend_dir / name for name in BACKEND_REQUIREMENTS]
+        for req_file in req_files:
+            if not req_file.exists():
+                logger.error(f"{req_file.name} not found: {req_file}")
+                return f"backend/{req_file.name} is missing"
 
         import hashlib
         from desktop.config_manager import get_data_dir
-        req_hash = hashlib.sha256(req_file.read_bytes()).hexdigest()
+        req_hash = hashlib.sha256(b"".join(f.read_bytes() for f in req_files)).hexdigest()
         marker = self._deps_marker(python)
         if marker is None:
             return f"The backend's Python does not start: {python}"
@@ -271,7 +278,7 @@ class ServiceManager:
         # on every requirements.txt edit would cost minutes and re-download
         # multi-GB wheels for no reason).
         #
-        # Versions are pinned to the same trio as backend/requirements.txt
+        # Versions are pinned to the same trio as backend/requirements-ml.txt
         # (torch._dynamo is sensitive to the torch×stdlib pair — see the
         # comment there). The CUDA index must carry those exact versions:
         # cu124 stopped at torch 2.6, which used to make a fresh install grab
@@ -290,7 +297,7 @@ class ServiceManager:
         # cannot have the pinned trio at all. Such a machine has neither CUDA
         # nor MPS, which makes it `lite` in hardware_profile, and without the
         # ML stack it does no local analysis, no pre-warm, no translation —
-        # so the backend runs without it. requirements.txt
+        # so the backend runs without it. requirements-ml.txt
         # carries the matching environment marker; skipping here keeps the
         # launcher from reporting a failure for a package it must not install.
         no_ml_wheels = is_macos and platform.machine() == "x86_64"
@@ -358,11 +365,11 @@ class ServiceManager:
 
         if progress_cb:
             progress_cb("Installing/updating backend dependencies...")
-        logger.info("Installing backend dependencies from requirements.txt")
+        logger.info("Installing backend dependencies from %s", " and ".join(BACKEND_REQUIREMENTS))
 
         cmd = [
             python, "-m", "pip", "install",
-            "-r", str(req_file),
+            *(arg for req_file in req_files for arg in ("-r", str(req_file))),
             "--quiet",
         ]
         # On Windows, force binary-only to avoid build issues

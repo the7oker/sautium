@@ -370,8 +370,9 @@ def test_a_check_answers_what_the_survey_found(monkeypatch):
 
 
 def test_a_diagnostics_report_carries_no_setup_code():
-    text = "setup code: K7QM-ZP4X-9HTR\nnot one: K7QM-ZP4X\n"
-    assert ha._scrub(text) == "setup code: XXXX-XXXX-XXXX\nnot one: K7QM-ZP4X\n"
+    # A code of before 2026-11-19 had three groups: scrubbed too, as two of them and a tail
+    text = "setup code: K7QM-ZP4X\nan older one: K7QM-ZP4X-9HTR\nnot one: K7QM ZP4X\n"
+    assert ha._scrub(text) == "setup code: XXXX-XXXX\nan older one: XXXX-XXXX-9HTR\nnot one: K7QM ZP4X\n"
     sys.path.insert(0, str(REPO / "backend"))
     import device_auth
     assert ha.SETUP_CODE.pattern == device_auth._SETUP_CODE_FORM.pattern
@@ -962,6 +963,46 @@ def test_no_new_mount_lands_inside_a_folder_the_node_writes(name):
     nested = {target for _, target, _ in mounts
               if any(target != w and target.startswith(w + "/") for w in writable)}
     assert nested <= NESTED_IN_WRITABLE, (name, nested - NESTED_IN_WRITABLE)
+
+
+def test_an_update_builds_what_env_says_the_image_carries(checkout, monkeypatch):
+    """The console setup records what it built without (the models, the
+    assistant's CLI, the demo channel's runtime); an update that built the
+    Dockerfile's defaults would put them back, gigabytes of them on a card."""
+    up = _Update(checkout, monkeypatch)
+    built = []
+    real = up.run
+
+    def run(args, **kw):
+        if args[:2] == ["docker", "build"]:
+            built.append(args)
+        return real(args, **kw)
+
+    monkeypatch.setattr(ha, "_run", run)
+    with open(checkout / ".env", "a") as f:
+        f.write("SAUTIUM_IMAGE_MODELS=0\nSAUTIUM_IMAGE_STREAMING=0\n")
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"
+    assert built == [["docker", "build", "-f", "Dockerfile.mac", "--build-arg", "MODELS=0",
+                      "--build-arg", "STREAMING=0", "-t", "sautium-backend:v0.3.0-cccccccccccc", "-"]]
+
+
+def test_a_value_that_is_no_choice_stops_the_update_before_a_build(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch)
+    with open(checkout / ".env", "a") as f:
+        f.write("SAUTIUM_IMAGE_MODELS=0 --network=host\n")
+    state = {}
+    outcome, detail, _, _ = ha.verb_update(state, 1000.0, checkout)
+    assert outcome == "refused" and "SAUTIUM_IMAGE_MODELS in .env is neither 0 nor 1" in detail
+    assert "build" not in up.calls and "update_failed" not in state
+
+
+def test_the_image_arguments_are_the_dockerfiles_the_compose_files_and_the_agents():
+    yaml = pytest.importorskip("yaml")
+    dockerfile = (REPO / "backend" / ha.DOCKERFILE).read_text(encoding="utf-8")
+    args = yaml.safe_load((REPO / ha.COMPOSE_FILE).read_text())["services"]["backend"]["build"]["args"]
+    assert args == {arg: f"${{{key}:-1}}" for arg, key in ha.IMAGE_ARGS}
+    for arg, _ in ha.IMAGE_ARGS:
+        assert f"ARG {arg}=1\n" in dockerfile
 
 
 def test_a_release_whose_image_did_not_build_is_not_built_again_for_a_day(checkout, monkeypatch):

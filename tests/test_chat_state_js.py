@@ -1,10 +1,11 @@
 """B-92's surface: backend/static/app-shell.js's own functions, run as written
-under Node — the Support contact's line when it is offline (the friend row
-and the chat header say the same) and a message's state under its bubble
-(every waiting and kept one, `Delivered` under the newest delivered one only,
-nothing under a friend's); and the API's words they render — `state` on an
-outgoing message, `mailbox` on the Support contact's row only, and only while
-it is not online — on a real PostgreSQL (skipped without a cluster)."""
+under Node — the Support contact's line (the friend row and the chat header
+say the same: what becomes of a message, never a presence — PI-NODE-2B Q21)
+and a message's state under its bubble (every waiting and kept one,
+`Delivered` under the newest delivered one only, nothing under a friend's);
+and the API's words they render — `state` on an outgoing message, `reach` on
+the Support contact's row only, true while this node can deliver or deposit
+— on a real PostgreSQL (skipped without a cluster)."""
 
 import asyncio
 import json
@@ -55,12 +56,16 @@ process.stdout.write(JSON.stringify(out));
 """
 
 FRIENDS = [
-    {"username": "Sautium", "source": "master", "mailbox": True, "last_seen": None},
-    {"username": "Sautium", "source": "master", "mailbox": True,
+    {"username": "Sautium", "source": "master", "reach": True, "last_seen": None},
+    {"username": "Sautium", "source": "master", "reach": False,
      "last_seen": "2026-11-17T10:00:00+00:00"},
-    {"username": "ada", "mailbox": False, "last_seen": None},
-    {"username": "Sautium", "source": "master", "mailbox": False, "is_online": True},
+    {"username": "ada", "last_seen": None},
+    {"username": "Sautium", "source": "master", "reach": True, "is_online": True},
+    {"username": "bo", "last_seen": "2026-11-17T10:00:00+00:00"},
+    {"username": "cy", "is_online": True},
 ]
+KEPT = "Write any time — your message is kept until Support reads it"
+WAITS = "Your message waits on this node and is sent once it can reach Support"
 MESSAGES = [
     {"direction": "out", "content": "one", "state": "delivered"},
     {"direction": "in", "content": "hi", "state": None},
@@ -74,17 +79,17 @@ MESSAGES = [
 def test_the_support_line_and_each_messages_state_are_what_the_server_says(monkeypatch):
     fns = "\n".join([
         "function lastSeenLabel(iso) { return iso ? '3h ago' : ''; }",
-        _function("offlineLabel(friend)"), _function("paintChatStatus(statusEl, friend)"),
+        _function("offlineLabel(friend)"), _function("supportLine(friend)"),
+        _function("paintChatStatus(statusEl, friend)"),
         _function("friendRowInner(friend)"),
         _const("MESSAGE_STATE_LINE"), _function("renderThreadHTML(messages)")])
     driver = DRIVER % {"fns": fns, "friends": json.dumps(FRIENDS), "messages": json.dumps(MESSAGES)}
     proc = subprocess.run([NODE, "-e", driver], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
-    assert out["rows"][:3] == ["offline · messages are kept", "last seen 3h ago · messages are kept",
-                               "offline"]
-    assert out["header"] == ["offline · messages are kept", "last seen 3h ago · messages are kept",
-                             "offline", "online"]
+    # Support never reads "offline", nor "online": a friend does
+    assert out["rows"][:5] == [KEPT, WAITS, "offline", KEPT, "last seen 3h ago"]
+    assert out["header"] == [KEPT, WAITS, "offline", KEPT, "last seen 3h ago", "online"]
     assert out["thread"] == ["one", "hi", "two", "  Delivered", "three", "  Kept for Support",
                              "four", "  Not sent yet"]
 
@@ -130,16 +135,16 @@ def test_the_api_names_each_outgoing_messages_state_and_supports_kept_mail(scrat
         assert [(m["content"], m["state"]) for m in msgs] == [
             ("a", "delivered"), ("b", "kept"), ("c", "waiting"), ("e", "waiting"), ("d", None)]
         rows = asyncio.run(p2p.list_friends())
-        flags = {r["username"]: r["mailbox"] for r in rows["pinned"] + rows["items"]}
-        assert flags == {"Sautium": True, "ada": False, "bo": False}
+        flags = {r["username"]: r.get("reach") for r in rows["pinned"] + rows["items"]}
+        assert flags == {"Sautium": True, "ada": None, "bo": None}
         certified["yes"] = False                     # the Worker takes mail from no other key
         rows = asyncio.run(p2p.list_friends())
-        assert {r["username"]: r["mailbox"] for r in rows["items"]}["Sautium"] is False
+        assert {r["username"]: r.get("reach") for r in rows["items"]}["Sautium"] is False
         certified["yes"] = True
         with conn.cursor() as cur:
             cur.execute("UPDATE friends SET last_seen = now() WHERE id = %s", (support,))
         rows = asyncio.run(p2p.list_friends())
-        assert {r["username"]: r["mailbox"] for r in rows["items"]}["Sautium"] is False   # online now
+        assert {r["username"]: r.get("reach") for r in rows["items"]}["Sautium"] is True   # online or not
     finally:
         conn.close()
         db_pool.close_pool()

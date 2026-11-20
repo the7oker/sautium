@@ -19,7 +19,7 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -27,6 +27,7 @@ import claude_code
 import codex_cli
 import device_auth
 import gear_research_worker
+import host_channel
 import library_watch
 from config import settings as app_settings
 from database import get_db_context
@@ -174,6 +175,48 @@ def notify_notice_subscribers() -> None:
                 continue
 
 
+# /api/events subscribers of this node's identity state (the worker's
+# p2p.identity; NOTIFY sautium_identity): Friends and every chat header say
+# why nothing connects while the node has no identity it can use.
+_identity_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+_identity_sse_lock = threading.Lock()
+
+
+def identity_sse_register(evt, loop) -> None:
+    with _identity_sse_lock:
+        _identity_sse_clients.append((evt, loop))
+
+
+def identity_sse_unregister(evt, loop) -> None:
+    with _identity_sse_lock:
+        try:
+            _identity_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
+
+
+def notify_identity_subscribers() -> None:
+    with _identity_sse_lock:
+        for evt, loop in list(_identity_sse_clients):
+            try:
+                loop.call_soon_threadsafe(evt.set)
+            except RuntimeError:
+                continue
+
+
+def identity_event() -> Dict[str, Any]:
+    """This node's identity as the worker last published it, for the page:
+    its status and detail, the lottery's progress, and whether the account's
+    email is verified — the other way to an identity, offered beside a proof
+    that is still being mined or waits for memory. No status while no
+    worker ever published (no account yet, P2P off)."""
+    state = _read("p2p.identity") or {}
+    row = db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+    return {"status": state.get("status"), "detail": state.get("detail"),
+            "attempts": state.get("attempts"), "p_done": state.get("p_done"),
+            "email_verified": bool(row and row.get("email_verified"))}
+
+
 def notify_library_subscribers() -> None:
     """Thread-safe wake of every connected Library SSE client.
     Workers call this after start / phase transition / completion."""
@@ -239,6 +282,8 @@ codex_cli.auth.on_change(_codex_signin_changed)
 def _on_sync_notify(notifies: list) -> None:
     if any(note.channel == "sautium_notices" for note in notifies):
         notify_notice_subscribers()
+    if any(note.channel == "sautium_identity" for note in notifies):
+        notify_identity_subscribers()
     notify_library_subscribers()
 
 
@@ -264,6 +309,12 @@ def stop_sync_listener() -> None:
 # run users get a sensible Settings screen with no prior writes.
 _DEFAULTS: Dict[str, Any] = {
     "sync.p2p_enabled":          True,
+    # "Pass on what this node holds": the serving side of sharing — the peer
+    # routes, what /health says, the LAN beacon, the DHT's tail, the carry
+    # this node offers (routers/sync.serving_enabled). Off, the node still
+    # asks and takes. A node born small starts with it off (db_migrate's
+    # birth preset); everywhere else it is on and not shown.
+    "sync.pass_on":              True,
     "sync.auto_interval_min":    30,
     # Size of the rare-artist DHT announce tail (0/null = node key only).
     # 150 = half the traversal lane (dht_service MIN_ANNOUNCE_SPACING): a
@@ -309,6 +360,12 @@ _DEFAULTS: Dict[str, Any] = {
     # exists stays. Removal is the explicit Settings action
     # (POST /phantoms/prune) — no startup job ever drops it.
     "discovery.phantom_layer":   True,
+    # "AI models on this machine" (hardware_profile.MODELS_SETTING): off, the
+    # node loads no model and analyses nothing — the state a small board is
+    # born with (db_migrate's birth preset). Read once at the process's
+    # start, so a change takes a restart; never read through _read by the
+    # profile, which must not import this module.
+    "compute.models":            True,
     # Provider/model default to None so the first-run UI shows
     # "Not selected" instead of pretending Claude is picked when the
     # wizard offered an explicit "no AI" option. An install-time pick
@@ -371,6 +428,11 @@ _DEFAULTS: Dict[str, Any] = {
     # Guidance trail (see _guidance_state): set once the owner has been
     # taken to the Audio output picker, whatever they chose there.
     "guidance.audio_output_seen": False,
+    "guidance.this_node_seen":    False,
+    # The preset a node was born with (db_migrate._apply_birth_preset), a
+    # fact kept for the trail's one-time "this node" mark; None on a node
+    # born with none
+    "node.birth_preset":          None,
     "guidance.hqp_library_seen":  None,    # the HQPlayer address whose library block was shown
 }
 
@@ -560,8 +622,12 @@ def _phantom_section() -> Dict[str, Any]:
         FROM (SELECT count(*) AS total FROM tracks) t,
              (SELECT count(DISTINCT track_id) AS tracks FROM owned_files) o
     """)
+    from streaming import service as streaming_service
     return {
         "enabled":    bool(_read("discovery.phantom_layer")),
+        # False on an install set up without the demo channel's runtime
+        # (deno): what streams there is the 30 s excerpt
+        "demo_runtime": streaming_service.demo_runtime(),
         "tracks":     int(row["tracks"]),
         "artists":    int(row["artists"]),
         "albums":     int(row["albums"]),
@@ -632,8 +698,16 @@ async def _library_state() -> Dict[str, Any]:
         SELECT count(*) AS copies, count(DISTINCT album_id) AS albums
         FROM album_variants WHERE absent_since IS NOT NULL""")
 
+    import library_root
+    from claude_code import is_launcher_mode
     return {
         "music_path":         music_path,
+        # Who names the music folder: "pick" — the owner, here, under the
+        # roots the console setup mounted (library_root; music_path is ""
+        # until a folder is chosen); "launcher" — the launcher's window;
+        # "setup" — the node's .env (a Docker node's MUSIC_LIBRARY_PATH)
+        "music_folder":       ("pick" if library_root.picks()
+                               else "launcher" if is_launcher_mode() else "setup"),
         # Library counts (matches launcher's Library block 2×2)
         "total_tracks":       stats.get("total_tracks", 0),
         "total_artists":      stats.get("total_artists", 0),
@@ -924,6 +998,13 @@ def _sync_state() -> Dict[str, Any]:
 
     return {
         "p2p_enabled":             bool(_read("sync.p2p_enabled")),
+        "pass_on":                 bool(_read("sync.pass_on")),
+        # The pass-on switch is shown where it matters: off, or on a node
+        # that was born small (hardware_profile.nano)
+        "nano":                    _nano(),
+        # This node has a host agent: its machine's diagnostics can be
+        # collected from the Support row (routers/host.py)
+        "host_agent":              host_channel.available(),
         "auto_interval_min":       _read("sync.auto_interval_min"),
         "announce_limit":          _read("sync.announce_limit"),
         "carry_limit":             _read("sync.carry_limit"),
@@ -951,6 +1032,11 @@ def _sync_state() -> Dict[str, Any]:
     }
 
 
+def _nano() -> bool:
+    import hardware_profile
+    return hardware_profile.resolve().nano
+
+
 def _support_state() -> Dict[str, Any]:
     from desktop.p2p import diag_events
     with get_conn() as conn:
@@ -958,6 +1044,9 @@ def _support_state() -> Dict[str, Any]:
         requests = diag_events.waiting_warrants(conn)
     return {
         "enabled":        bool(_read("support.diagnostics_enabled")),
+        # Only a launcher sends its event reports on its own; a Docker node
+        # keeps them until Support asks (P2P_NETWORK.md § Support diagnostics)
+        "sends_reports":  claude_code.is_launcher_mode(),
         "last_report_at": _read("support.last_report_at"),
         "last_bundle_at": _read("support.last_bundle_at"),
         "pending_events": pending,
@@ -1090,7 +1179,7 @@ def _audio_output_state() -> Dict[str, Any]:
 # control itself) and a trail whose steps disagree points nowhere.
 # The client owns only the route each id maps to.
 
-_GUIDANCE_DISMISSIBLE = {"audio_output", "notices", "hqp_library"}
+_GUIDANCE_DISMISSIBLE = {"audio_output", "notices", "hqp_library", "this_node"}
 _SIGNIN_NOTICES = {"claude_code.signed_out", "codex.signed_out"}
 
 
@@ -1154,6 +1243,27 @@ def _guidance_state() -> Dict[str, Any]:
 
     tasks: List[str] = []
 
+    # The account has no verified email (B-96): on a node that never earns
+    # its identity by computing it is the way to one, so it leads the trail
+    # there; on every other node it follows the rest. More tab, the Profile
+    # row, the Email row. Cleared by the verification — a state, never a
+    # visit.
+    unverified = _email_unverified()
+    if unverified and _nano():
+        tasks.append("verify_email")
+
+    # A node whose owner picks the music folder here has none yet: More tab,
+    # the Library row, the Music path row's Choose. Cleared by the choice.
+    import library_root
+    if library_root.picks() and not app_settings.music_library_path:
+        tasks.append("music_folder")
+
+    # A node born with a preset (db_migrate): its owner is shown, once, what
+    # the setup chose for the machine and where to change it — More tab, the
+    # Profile row, the Hardware profile block. Cleared by the visit.
+    if _read("node.birth_preset") and not _read("guidance.this_node_seen"):
+        tasks.append("this_node")
+
     # Nothing plays until an output is picked, and the picker is two
     # levels down. Cleared by VISITING it: an owner who looked and kept
     # what was there has decided, and a node that keeps nagging after
@@ -1199,7 +1309,18 @@ def _guidance_state() -> Dict[str, Any]:
                     and _read("guidance.hqp_library_seen") != f"{host}:{port}"):
                 tasks.append("hqp_library")
 
+    if unverified and "verify_email" not in tasks:
+        tasks.append("verify_email")
+
     return {"tasks": tasks}
+
+
+def _email_unverified() -> bool:
+    """This node has an account whose email is not verified (or has none)."""
+    if not device_auth.account_configured():
+        return False
+    row = db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+    return not (row and row.get("email_verified"))
 
 
 # Conditions with no ledger of their own (a vanished music folder, a missing
@@ -1229,7 +1350,8 @@ def _notices_state() -> Dict[str, Any]:
                       if not (it["key"] in _REPORTS and it["seen"])]}
 
 
-_REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures")
+_REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures",
+            "power.undervoltage", "update.result")
 
 
 def _login_failures_notice() -> Optional[Dict[str, Any]]:
@@ -1446,6 +1568,29 @@ def _notice_items() -> List[Dict[str, Any]]:
     login_failures = _login_failures_notice()
     if login_failures is not None:
         items.append(login_failures)
+    # A signed release newer than the one this node runs, as the host
+    # agent's last check found it (routers/host.py): the Update is one tap,
+    # in Profile's Hardware profile block
+    from routers import host as host_router
+    offered = host_router.offered_release()
+    if offered is not None:
+        items.append({"key": "update.available", "kind": "info", "since": offered["since"],
+                      "until": None, "data": {"release": offered["release"]}})
+    # How the last update ended (the node on the new release, or back on the
+    # one before): a report, dropped once seen
+    updated = host_router.update_report()
+    if updated is not None:
+        items.append({"key": "update.result",
+                      "kind": "info" if updated["outcome"] == "updated" else "warning",
+                      "since": updated["since"], "until": None,
+                      "data": {"outcome": updated["outcome"], "release": updated["release"],
+                               "running": _software()["version"]}})
+    # A Raspberry Pi's supply dropped under its voltage since this start
+    # (power_watch): a report, dropped once seen
+    import power_watch
+    undervoltage = power_watch.notice()
+    if undervoltage is not None:
+        items.append(undervoltage)
     seen = _read("notice.seen") or {}
     for item in items:
         item["seen"] = seen.get(item["key"]) == item["since"]
@@ -2201,12 +2346,125 @@ def put_albums_sort(req: AlbumsSortUpdate) -> Dict[str, Any]:
 # Hardware profile (full / standard / lite — HARDWARE-TIERS.md)
 # ============================================================
 
+def _hardware_state() -> Dict[str, Any]:
+    """The profile this process resolved at its start, and the owner's model
+    switch as it is stored now: the two differ from a change of the switch
+    until the restart that applies it (`restart_required`)."""
+    import hardware_profile
+    profile = hardware_profile.resolve()
+    state = profile.describe()
+    wanted = hardware_profile.models_switch()
+    state["models_switch"] = wanted
+    state["restart_required"] = profile.models != "absent" and wanted != profile.ml_available
+    # What this install carries beside the models (an image's build
+    # arguments, backend/Dockerfile.mac): a screen that would offer one says
+    # "set up without it" instead
+    from streaming import service as streaming_service
+    state["image"] = {"models": profile.models != "absent",
+                      "assistant_cli": shutil.which("claude") is not None,
+                      "streaming": streaming_service.demo_runtime()}
+    # The downloaded models on a node that runs none, where the cache is the
+    # node's own: its owner may remove them
+    import model_cache
+    if not profile.ml_available and model_cache.store_is_own():
+        state["models_cache_bytes"] = model_cache.store_bytes()
+    state["machine"] = _machine_name()
+    state["software"] = _software()
+    # A node a restart policy holds (the image) can be restarted from here
+    from claude_code_runner import IN_DOCKER
+    state["restartable"] = IN_DOCKER
+    return state
+
+
+_CPUINFO = "/proc/cpuinfo"
+
+
+def _machine_name() -> Optional[str]:
+    """The board as its kernel names it (a Raspberry Pi's "Model" line —
+    /proc/device-tree is masked in a container, /proc/cpuinfo is not); None
+    where the kernel names none."""
+    try:
+        with open(_CPUINFO, encoding="ascii", errors="replace") as f:
+            for line in f:
+                if line.startswith("Model"):
+                    return line.partition(":")[2].strip()[:80] or None
+    except OSError:
+        pass
+    return None
+
+
+def _software() -> Dict[str, Any]:
+    """What this node runs: the version its tree states (the release it was
+    cut for, desktop/build_common.py) and the checkout's commit."""
+    from config import build_identity
+    from desktop import updater
+    version = updater.installer_version()
+    return {"version": ".".join(map(str, version)) if version != (0, 0, 0) else None,
+            **build_identity()}
+
+
 @router.get("/hardware")
 def get_hardware_profile() -> Dict[str, Any]:
-    """Read-only: selection is automatic (SAUTIUM_PROFILE env is the only
-    override, for diagnostics). Feeds the info block on the Library screen."""
+    """The tier's selection is automatic (SAUTIUM_PROFILE env is the only
+    override, for diagnostics); the model axis is the owner's switch
+    (PUT /hardware/models). Feeds the Hardware profile block."""
+    return _hardware_state()
+
+
+class ModelsPrefs(BaseModel):
+    on: bool
+
+
+@router.put("/hardware/models")
+def put_models_switch(req: ModelsPrefs) -> Dict[str, Any]:
+    """"AI models on this machine". Stored now, applied at the next start:
+    the profile is resolved once a process, before anything imports torch.
+    Off removes nothing stored — the node's own analysis stays, sealed and
+    served; it only stops making more. An install set up without the models
+    has no switch to move."""
     import hardware_profile
-    return hardware_profile.resolve().describe()
+    if hardware_profile.resolve().models == "absent":
+        raise HTTPException(status_code=409,
+                            detail="This install was set up without the AI models")
+    _write(hardware_profile.MODELS_SETTING, bool(req.on))
+    return _hardware_state()
+
+
+@router.delete("/hardware/models/cache")
+def delete_models_cache() -> Dict[str, Any]:
+    """"Downloaded models · Remove", on a node that runs none: its owner's
+    explicit act on files in the node's own cache folder. Refused while a
+    model can still be loaded from them, and where that folder is not the
+    node's own (a launcher's is the machine's, shared with every program)."""
+    import hardware_profile
+    import model_cache
+    if not model_cache.store_is_own():
+        raise HTTPException(status_code=409,
+                            detail="The models here are in this machine's shared cache, not Sautium's own")
+    if hardware_profile.resolve().ml_available:
+        raise HTTPException(status_code=409,
+                            detail="The models are in use: turn them off and restart Sautium first")
+    return {"freed_bytes": model_cache.remove_store()}
+
+
+@router.post("/restart")
+async def post_restart():
+    """"Restart Sautium": the backend ends its own process as a stop does —
+    its shutdown runs — and the container's restart policy starts it again.
+    Only where such a policy holds the node (the image); a launcher's
+    backend is the launcher's to restart. Any signed-in device may ask: it
+    can already do everything a signed-in device can."""
+    import os
+    import signal
+    from claude_code_runner import IN_DOCKER
+    if not IN_DOCKER:
+        raise HTTPException(status_code=409, detail="This node is restarted from its launcher")
+    from starlette.background import BackgroundTask
+    from starlette.responses import JSONResponse
+    logger.info("restart asked from the Web UI")
+    # Run once this answer has been sent: the stop closes every connection
+    return JSONResponse({"restarting": True},
+                        background=BackgroundTask(os.kill, os.getpid(), signal.SIGTERM))
 
 
 # ============================================================
@@ -2536,6 +2794,7 @@ def load_hqplayer_from_db() -> None:
 
 class SyncPrefs(BaseModel):
     p2p_enabled:             Optional[bool] = None
+    pass_on:                 Optional[bool] = None
     auto_interval_min:       Optional[int]  = None  # null disables
     announce_limit:          Optional[int]  = None  # rare-artist tail size
     carry_limit:             Optional[int]  = None  # foreign tracks carried
@@ -2547,8 +2806,11 @@ class SyncPrefs(BaseModel):
 
 @router.put("/sync")
 def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
-    if req.p2p_enabled is not None:
-        _write("sync.p2p_enabled", bool(req.p2p_enabled))
+    if req.pass_on is not None:
+        _write("sync.pass_on", bool(req.pass_on))
+    if req.p2p_enabled is not None or req.pass_on is not None:
+        if req.p2p_enabled is not None:
+            _write("sync.p2p_enabled", bool(req.p2p_enabled))
         # The launcher's LAN beacon and its serving follow the switch now
         # (desktop/p2p/p2p_manager._sharing_changed), not at a cache's expiry,
         # and so does this process's peer surface — and every requester of
@@ -2694,7 +2956,50 @@ def get_databases() -> Dict[str, Any]:
     /phantoms: that payload counts the whole phantom layer (~0.4 s) and this
     screen wakes on every load-progress tick. A new dump family is a key
     here and an entry in the UI's DUMP_FAMILIES."""
-    return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section()}
+    # `nano`: the screen says why the dumps are not offered there
+    return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section(), "nano": _nano()}
+
+
+# ============================================================
+# The music folder, chosen under the node's roots (library_root.py)
+# ============================================================
+
+@router.get("/library/folders")
+def get_library_folders(under: Optional[str] = Query(None, max_length=4096)) -> Dict[str, Any]:
+    """The folder sheet's listing: the places a choice can start at, or the
+    folders of `under`. Only what stays under a root is ever listed; every
+    name in the answer is a stranger's text."""
+    import library_root
+    try:
+        return library_root.folders(under)
+    except library_root.Refused as e:
+        raise HTTPException(status_code=400 if library_root.picks() else 409, detail=str(e))
+
+
+class LibraryRootChoice(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+
+
+@router.put("/library/root")
+def put_library_root(req: LibraryRootChoice) -> Dict[str, Any]:
+    """"Use this folder": stored, the folder watcher armed on it, and the
+    library scanned for what is there. What the catalogue holds from another
+    folder is not touched — a Rescan asks about it, as for any music it no
+    longer finds."""
+    import library_root
+    import library_watch
+    from main import request_scan
+    try:
+        path = library_root.choose(req.path)
+    except library_root.Refused as e:
+        raise HTTPException(status_code=400 if library_root.picks() else 409, detail=str(e))
+    library_watch.stop()
+    library_watch.start(request_scan)
+    # Where the mount delivers no events the watch queues nothing: asked here
+    request_scan({"": True}, explicit=True)
+    db_execute("NOTIFY sautium_notices")
+    notify_library_subscribers()
+    return {"music_path": path}
 
 
 class PhantomPrefs(BaseModel):
@@ -2713,6 +3018,11 @@ def get_phantom_state() -> Dict[str, Any]:
 @router.put("/phantoms")
 def put_phantom_prefs(req: PhantomPrefs) -> Dict[str, Any]:
     _write("discovery.phantom_layer", bool(req.enabled))
+    # Streaming follows the library: its providers, yt-dlp's build and the
+    # refresh loop start and stop here
+    from config import settings as app_settings
+    from streaming import service as streaming_service
+    streaming_service.follow_switch(app_settings)
     if req.enabled:
         # Imported scrobbles waiting on names only the phantom layer can place.
         from canon import scrobbles

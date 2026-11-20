@@ -170,12 +170,20 @@ def test_the_launcher_beacons_as_the_switch_says_and_asks_for_the_walk_turned_ba
                                  _walk=types.SimpleNamespace(request=asked.append))
     for sharing in (True, False, True, True):
         node._sharing_lock = asyncio.Lock()
-        node._sync_server = types.SimpleNamespace(sharing_changed=lambda s=sharing: s)
+        node._sync_server = types.SimpleNamespace(sharing_changed=lambda s=sharing: (s, s))
         asyncio.run(P2PManager._sharing_changed(node))
         assert lan._sharing is sharing
     # At start the walk has a first run of its own; turned back on, the run
     # the owner's move requested may have read this process's cached "off".
     assert asked == ["sharing"]
+    # A node that takes and passes nothing on (sync.pass_on off) is named by no beacon, and its walk
+    # goes on: the beacon follows the serving side, the walk the taking one
+    for taking, passing in ((True, False), (False, False), (True, False)):
+        node._sharing_lock = asyncio.Lock()
+        node._sync_server = types.SimpleNamespace(sharing_changed=lambda t=taking, p=passing: (t, p))
+        asyncio.run(P2PManager._sharing_changed(node))
+        assert lan._sharing is False
+    assert asked == ["sharing", "sharing"]
 
 
 class _Reads:
@@ -188,16 +196,16 @@ class _Reads:
         self.release = threading.Event()
         self.second_done = threading.Event()
 
-    def sharing_changed(self) -> bool:
+    def sharing_changed(self) -> tuple:
         with self._lock:
             self._calls += 1
             first = self._calls == 1
         if first:
             self.first_in.set()
             self.release.wait(5)
-            return True
+            return True, True
         self.second_done.set()
-        return False
+        return False, False
 
 
 def test_reads_of_the_switch_apply_in_the_order_they_began():
@@ -312,7 +320,8 @@ def test_a_read_of_the_switch_begun_before_it_moved_is_not_kept(monkeypatch):
     monkeypatch.setattr(sync, "_sharing_cache", (0.0, True))
     assert sync.sharing_enabled() is True       # the read in flight answers its own question
     assert sync.sharing_enabled() is False      # and is not kept: the next one reads again
-    assert len(reads) == 2
+    # the taking side read twice; the first read went on to the serving side, the second had no need
+    assert reads == ["sync.p2p_enabled", "sync.pass_on", "sync.p2p_enabled"]
 
 
 def test_a_docker_node_says_in_its_health_whether_its_owner_shares(scratch_dsn, monkeypatch,

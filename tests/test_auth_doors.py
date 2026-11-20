@@ -432,6 +432,7 @@ def fresh_node(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "p2p_username", "")
     monkeypatch.setattr(device_auth, "_setup_code", None)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
+    monkeypatch.setitem(device_auth._doors, "setup", {"failures": 0, "shut_until": 0.0, "in_flight": 0})
     monkeypatch.setattr(device_auth, "_expected_pubkey",
                         lambda: "ab" * 32 if (tmp_path / "node_ed25519.key").exists() else None)
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
@@ -483,6 +484,72 @@ def test_the_setup_code_is_read_out_of_what_was_pasted_around_it(fresh_node, mon
             asyncio.run(device_auth.create_account("owner", "a password", given))
     pasted = f"backend-1 | WARNING No account yet. The setup code to create it is {code} (also in …)"
     assert asyncio.run(device_auth.create_account("owner", "a password", pasted)) == {"username": "owner"}
+
+
+def test_the_setup_code_is_typed_by_hand_so_it_is_short_and_forgiving(fresh_node, monkeypatch):
+    """Eight characters, taken with no hyphen, with a space, in lower case
+    (PI-NODE-2B Q20: `UBB4UJ65` typed without its hyphen was refused as "not
+    this node's setup code")."""
+    import re
+    made = []
+    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: made.append(u) or {"username": u})
+    for spell in (lambda c: c.replace("-", ""), lambda c: c.replace("-", " "), str.lower,
+                  lambda c: f"  {c.lower().replace('-', ' - ')}\n", lambda c: c.replace("-", "\u2013")):
+        device_auth.prepare_setup()
+        code = device_auth._setup_code
+        assert re.fullmatch("[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}", code)
+        assert asyncio.run(device_auth.create_account("owner", "a password", spell(code))) == {
+            "username": "owner"}
+    assert len(made) == 5
+    # Only a word of the code's shape is a candidate, and of a long paste the last few
+    assert device_auth.setup_candidates("ABCDEFGHJKLMNPQR") == []
+    assert device_auth.setup_candidates("xABCD-EFGH") == [] and device_auth.setup_candidates("ABCD-EFGHx") == []
+    assert device_auth.setup_candidates("abcd efgh, JKLM-NPQR") == ["ABCD-EFGH", "JKLM-NPQR"]
+    many = " ".join(f"AAAA-AAA{c}" for c in "BCDEFGHJ")
+    assert device_auth.setup_candidates(many) == [f"AAAA-AAA{c}" for c in "FGHJ"]
+    assert device_auth._SETUP_CODE_FORM.fullmatch("ABCD-EFGH")
+
+
+def test_wrong_setup_codes_shut_the_setups_door_and_never_burn_the_code(fresh_node, monkeypatch):
+    """Past five wrong tries a delay that doubles; the code stays the one the
+    node wrote, and opens the door once the delay is over."""
+    made = []
+    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: made.append(u) or {"username": u})
+    clock = [1000.0]
+    monkeypatch.setattr(device_auth.time, "time", lambda: clock[0])
+    device_auth.prepare_setup()
+    code = device_auth._setup_code
+    path = fresh_node / device_auth.SETUP_CODE_FILE
+    wrong = "AAAA-AAAA" if code != "AAAA-AAAA" else "BBBB-BBBB"
+
+    def attempt(given):
+        return asyncio.run(device_auth.create_account("owner", "a password", given))
+    for _ in range(device_auth.LOGIN_FREE_FAILURES):
+        with pytest.raises(device_auth.WrongSetupCode):
+            attempt(wrong)
+    waits = []
+    for _ in range(4):
+        with pytest.raises(device_auth.WrongSetupCode):
+            attempt(wrong)                                   # the sixth, seventh…: each shuts the door longer
+        with pytest.raises(device_auth.Shut) as shut:
+            attempt(code)                                    # the right code waits too
+        waits.append(shut.value.seconds)
+        clock[0] += shut.value.seconds
+    assert waits == [1, 2, 4, 8]
+    assert device_auth._setup_code == code and path.read_text().strip() == code and made == []
+    assert attempt(code) == {"username": "owner"}
+    assert device_auth._doors["setup"]["failures"] == 0
+
+
+def test_the_set_up_door_says_when_it_is_shut(fresh_node, doors, monkeypatch):
+    monkeypatch.setattr(device_auth, "_write_identity", lambda *a, **k: pytest.fail("created"))
+    device_auth.prepare_setup()
+    monkeypatch.setitem(device_auth._doors, "setup", {
+        "failures": 9, "shut_until": device_auth.time.time() + 120, "in_flight": 0})
+    r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
+        "username": "owner", "password": "a password", "setup_code": device_auth._setup_code}))
+    assert r.status_code == 429 and r.headers["X-Sautium-Auth-Error"] == "shut"
+    assert 100 < int(r.headers["Retry-After"]) <= 120 and "wrong setup codes" in r.json()["detail"]
 
 
 def test_the_set_up_door_refuses_a_code_that_is_not_the_nodes(fresh_node, doors, monkeypatch):

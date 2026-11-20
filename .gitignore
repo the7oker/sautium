@@ -51,6 +51,9 @@ wheels/
 # Docker volume, root-owned on the host — compose creates it
 data/postgres/
 data/cache/
+# The empty folder that stands at /music on a node that reads its music under
+# roots (./sautium writes MUSIC_LIBRARY_PATH to it)
+data/no-library/
 # Runtime caches and generated presets
 data/registry/
 data/generated_eq/

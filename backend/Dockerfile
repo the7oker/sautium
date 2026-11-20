@@ -99,18 +99,19 @@ WORKDIR /app
 # pulled from the cu130 index explicitly. PyPI's linux wheel is a different
 # variant (no +cu130 local tag) — a plain `-r requirements.txt` install would
 # silently swap the verified build; with the trio pre-installed, the
-# `torch==2.12.0` pin in requirements.txt is already satisfied and pip
-# leaves it alone. Separate layer = requirements.txt edits don't re-download
+# `torch==2.12.0` pin in requirements-ml.txt is already satisfied and pip
+# leaves it alone. Separate layer = requirements edits don't re-download
 # multi-GB torch wheels.
 RUN pip install --no-cache-dir \
     torch==2.12.0 torchvision==0.27.0 torchaudio==2.11.0 \
     --index-url https://download.pytorch.org/whl/cu130
 
 # Copy requirements first for better Docker layer caching
-COPY requirements.txt .
+COPY requirements.txt requirements-ml.txt ./
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies: the node's packages and the model stack, in
+# one resolution
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-ml.txt
 
 # cutlet's Japanese dictionary + tokenizer config (Phase 0a transliteration).
 # unidic-lite is sdist-only (no wheel) so it can't live in requirements.txt (the
@@ -188,8 +189,9 @@ EXPOSE 19001/udp
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
+# (a path of its own, whose access line the node leaves out of its log)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/ || exit 1
+    CMD curl -f http://127.0.0.1:${UVICORN_PORT:-8000}/healthz || exit 1
 
 # Default command (can be overridden in docker-compose.yml)
 CMD ["python", "entrypoint.py"]

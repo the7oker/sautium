@@ -310,7 +310,7 @@ async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
     except HTTPException as e:
         logger.warning(f"check-email after email change: {e.detail}")
         result = None
-    verified = bool(result and result.get("verified"))
+    verified = _verified_for_this_key(result)
     if verified:
         data["email_verified"] = True
         info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -364,24 +364,27 @@ _FRIENDS_SELECT = f"""
 
 
 def _friend_row_out(row: dict) -> dict:
-    """A friend row as the client renders it. `mailbox`: Support (the
-    resolved master contact) is offline and what is written to it is kept in
-    its Worker mailbox (B-92) — its row and the chat header say so. Only
-    where this node deposits at all: P2P on, and a certificate the Worker
+    """A friend row as the client renders it. `reach`, on the Support
+    contact's row alone: this node can deliver to Support or deposit for it
+    (its Worker mailbox, B-92) — the row and the chat header say what becomes
+    of a message, never a presence: a person reads "offline" as "nobody will
+    get this" (PI-NODE-2B Q21). It takes P2P on and a certificate the Worker
     issued (it takes mail from no other key); a `pending:` Support contact
-    has nothing kept for it yet. Accepted gaps: on a launcher-mode backend
-    the P2P switch read is the backend's, not whether the launcher's P2P
-    runs; and a deposit the mailbox refused (full, a cap) leaves this line
-    while that bubble says "Not sent yet"."""
+    is not resolved yet, and what is written to it waits on this node.
+    Accepted gaps: on a launcher-mode backend the P2P switch read is the
+    backend's, not whether the launcher's P2P runs; and a deposit the
+    mailbox refused (full, a cap) leaves this line while that bubble says
+    "Not sent yet"."""
     import master_node
     from p2p_identity import served_certificate
     for k in ("added_at", "last_seen", "last_activity_at"):
         if row.get(k):
             row[k] = row[k].isoformat()
     if "public_key_hex" in row:
-        row["mailbox"] = (row["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
-                          and not row.get("is_online") and settings.p2p_enabled
-                          and served_certificate(settings) is not None)
+        if row.get("source") == "master":
+            row["reach"] = bool(row["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
+                                and settings.p2p_enabled
+                                and served_certificate(settings) is not None)
     return row
 
 
@@ -1230,6 +1233,16 @@ async def _worker_check_email(identity: dict) -> Optional[dict]:
     return result
 
 
+def _verified_for_this_key(result: Optional[dict]) -> bool:
+    """The Worker's /check-email says the address is verified AND bound to
+    this node's key — the one meaning of `user_profile.email_verified`. It
+    answers `verified` with no certificate where the address was verified
+    under another key of the same code (a key rotated since): for this key
+    that is an address not yet verified, and its row offers the verification
+    that binds it."""
+    return bool(result and result.get("verified") and result.get("birth_cert"))
+
+
 # -- The identity worker -------------------------------------------------------
 #
 # One per node, in the process that serves the node's peer surface
@@ -1386,15 +1399,76 @@ async def _unless_braked(read):
         return None
 
 
+def _holds_identity() -> bool:
+    """This node already holds what makes its identity known to others: a
+    certificate verified by email, or a mined proof that binds to the
+    certificate it holds. Read from the disk alone."""
+    from desktop.p2p import identity_proof
+    import p2p_identity
+    cert = p2p_identity.load_certificate(settings)
+    if cert is None:
+        return False
+    if cert["method"] != "pow":
+        return True
+    path = p2p_identity.proof_path(settings)
+    return path is not None and identity_proof.proof_binds(identity_proof.load_proof(path), cert)
+
+
+def _email_road() -> bool:
+    """The road this node's identity takes, decided at every start of the
+    worker and never stored (PI-NODE-2B §2.3): a node that runs no model —
+    Nano — never mines. Its board may have no 2.5 GiB to give the miner, at
+    its birth or ever, and the Worker's protocol already has the other way:
+    a verified email re-signs the certificate, and every node knows that one
+    by its signature. A node that already holds its identity (a proof mined
+    on a bigger machine, a certificate verified elsewhere) keeps it."""
+    import hardware_profile
+    return not hardware_profile.resolve().ml_available and not _holds_identity()
+
+
+async def _verified_email_certificate() -> bool:
+    """On the email road with the account's address recorded as verified and
+    no certificate of it on this disk (a restore; a verification on another
+    device of this key): one read of the Worker's /check-email, which stores
+    the certificate it returns — the read the proof road makes
+    (_worker_certificate). True when the node then holds its identity. Where
+    the Worker answers and has no certificate for this key, the record is
+    not this key's: it is cleared, so the Email row offers the verification
+    again instead of saying "verified" beside an identity that waits for it."""
+    row = _db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
+    if not (row and row.get("email_verified")):
+        return False
+    result = await _unless_braked(_worker_check_email(_get_identity() or {}))
+    if await asyncio.to_thread(_holds_identity):
+        return True
+    if result is not None:
+        _db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+        logger.info("identity: the address was recorded as verified, and the Worker holds no "
+                    "certificate of it for this key — the verification is asked for again")
+    return False
+
+
 async def identity_proof_task(worker: _IdentityWorker) -> None:
     """The worker's body: make sure this node holds its identity certificate
     and, for method:pow, a verified proof (desktop/p2p/identity_proof.py — the
     same policy the launcher runs), publishing every state
     (_publish_identity_state). A node whose email is verified but whose
     certificate predates v2 gets the method:email certificate from
-    /check-email here — no work needed."""
+    /check-email here — no work needed. A node on the email road
+    (_email_road) mines nothing, and asks the Worker only where its address
+    is already recorded as verified (_verified_email_certificate: one
+    /check-email read); otherwise it says `needs_email`, and the
+    verification's own event starts the worker again (_certificate_changed)."""
     from desktop.p2p import identity_proof
     import p2p_identity
+
+    if await asyncio.to_thread(_email_road) and not await _verified_email_certificate():
+        from datetime import datetime, timezone
+        _publish_identity_state({"status": "needs_email", "detail": None, "method": None,
+                                 "updated_at": datetime.now(timezone.utc).isoformat()})
+        logger.info("identity: this node runs no model and does not mine — its identity "
+                    "waits for a verified email")
+        return
 
     backoff = 300
     while True:
@@ -1469,7 +1543,7 @@ async def email_status() -> Dict[str, Any]:
         return {"email": email, "verified": True}
 
     result = await _check_email_upgrade(identity)
-    verified = bool(result and result.get("verified"))
+    verified = _verified_for_this_key(result)
     if verified:
         _db_execute(
             "UPDATE user_profile SET email_verified = TRUE WHERE id = 1"

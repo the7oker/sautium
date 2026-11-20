@@ -1,15 +1,26 @@
 """Process-wide streaming-preview service: the media proxy + provider registry,
-created once at app startup (``main.lifespan``) and shared by the player router.
+shared by the player router.
+
+It follows the owner's switch — the streaming library
+(``discovery.phantom_layer``): up while it is on, down while it is off, and
+the switch's change is the event (``follow_switch``, called at the app's
+start and by the switch's route; since 2026-11-19, PI-NODE-2B). A node whose
+library is off has nothing to stream, so it starts no provider, no yt-dlp
+build and no refresh loop; the media proxy alone still starts for DLNA and a
+remote HQPlayer (``ensure_proxy``). One decision, one switch.
 
 On by default — YouTube ships with the distribution (the node installs
 yt-dlp's stable build itself, streaming/ytdlp_release.py), so a fresh node
 streams phantoms once its first build is in place.
-``streaming_preview_enabled=false`` is an explicit opt-out for nodes that
-never preview."""
+``streaming_preview_enabled=false`` keeps the subsystem down whatever the
+switch says: a deployment's own off (a test stand), never a person's second
+switch."""
 from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import threading
 import time
 from typing import Optional
 
@@ -24,27 +35,74 @@ _proxy: Optional[MediaProxy] = None
 _registry: Optional[ProviderRegistry] = None
 _enricher = None
 _lyrics_enricher = None
+# One change of state at a time: the app's start and the switch's route
+_switch_lock = threading.Lock()
+# The app's loop, kept from its start: the refresh loop is its task, and the
+# switch's route runs on a worker thread
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_refresh_task: Optional[asyncio.Task] = None
+# The proxy's hooks and the status observer are attached once a process; what
+# they reach (the registry, the enrichers) comes and goes with the switch
+_wired = False
 
 
-def init(settings) -> bool:
-    """Start the media proxy and register the core (YouTube) provider. Returns
-    True if the subsystem came up. Called from the app lifespan."""
-    global _proxy, _registry
+def wanted(settings) -> bool:
+    """Whether the subsystem should be up: the owner's streaming library is
+    on, and the deployment did not turn streaming off."""
     if not getattr(settings, "streaming_preview_enabled", False):
-        logger.info("streaming preview disabled (streaming_preview_enabled=false)")
         return False
+    from routers.settings import _read as read_setting
+    return bool(read_setting("discovery.phantom_layer"))
 
-    _registry = ProviderRegistry()
+
+def demo_runtime() -> bool:
+    """The image carries deno, the sandbox yt-dlp runs YouTube's player code
+    in (Dockerfile.mac's STREAMING=0 leaves it out): without it the demo
+    channel cannot work, and the node streams excerpts alone."""
+    return shutil.which("deno") is not None
+
+
+def follow_switch(settings, loop: Optional[asyncio.AbstractEventLoop] = None) -> bool:
+    """Bring the subsystem to what the owner's switch says; True while it is
+    up. The app's start passes its loop; the switch's route calls it after
+    the write."""
+    global _loop
+    with _switch_lock:
+        if loop is not None:
+            _loop = loop
+        up = wanted(settings)
+        if up and _registry is None:
+            _start(settings)
+        elif not up and _registry is not None:
+            _stop()
+        elif not up:
+            logger.info("streaming is off: %s",
+                        "the streaming library is switched off"
+                        if getattr(settings, "streaming_preview_enabled", False)
+                        else "streaming_preview_enabled=false")
+        return up
+
+
+def _start(settings) -> None:
+    """Register the providers, attach to the media proxy, start the yt-dlp
+    refresh loop."""
+    global _proxy, _registry, _wired
+    registry = ProviderRegistry()
     # The provider runs the yt-dlp build the refresh loop puts in place (its
     # first pass is at start); until one lands it answers "unavailable", and
     # the excerpt provider below stands in.
-    _registry.register(YouTubeProvider(ffmpeg_location=settings.ffmpeg_location))
+    demo = demo_runtime()
+    if demo:
+        registry.register(YouTubeProvider(ffmpeg_location=settings.ffmpeg_location))
+    else:
+        logger.info("this install was set up without the demo channel's runtime (deno): "
+                    "tracks stream as 30 s excerpts")
     # The excerpt provider ships in core and needs no tool: 30 s clips from the
     # public catalog API — the fallback when the demo channel is missing or a
     # track's one demo listen is spent (streaming/demo.py), and why a node
     # without yt-dlp still previews, as excerpts.
     from .deezer_preview import DeezerPreviewProvider
-    _registry.register(DeezerPreviewProvider())
+    registry.register(DeezerPreviewProvider())
 
     # Bring-your-own providers (e.g. a lossless provider) drop into the
     # local providers directory — NOT bundled here (DRM providers stay out of tree). Core has no
@@ -54,10 +112,10 @@ def init(settings) -> bool:
     providers_dir = (Path(settings.streaming_providers_dir)
                      if getattr(settings, "streaming_providers_dir", None)
                      else Path(__file__).parent / "providers")
-    n = load_external_providers(_registry, providers_dir)
+    n = load_external_providers(registry, providers_dir)
     if n:
         logger.info("loaded %d external stream provider(s) from %s", n, providers_dir)
-    _persist_registry(_registry)
+    _persist_registry(registry)
 
     # ONE proxy per process: the playback output may already have started
     # a provider-less one (the HQPlayer attach mirrors a restored queue
@@ -65,7 +123,86 @@ def init(settings) -> bool:
     # the global had been repointed at it — leaving the port served by an
     # object nothing references.
     _proxy = ensure_proxy()
+    _start_enrichers(settings)
+    if not _wired:
+        _wire(_proxy)
+        _wired = True
+    # From here the subsystem is up (is_enabled): the resolve finds providers
+    _registry = registry
+    if demo and _loop is not None:
+        # yt-dlp's stable build, put in place at start and kept current for
+        # the life of the subsystem (see the loop's own note on why
+        # start-only refreshes are not enough).
+        _loop.call_soon_threadsafe(_start_refresh_loop)
+    logger.info("streaming preview ready (proxy %s:%d, advertised %s)",
+                settings.media_proxy_host, settings.media_proxy_port,
+                settings.media_proxy_advertised_host)
 
+
+def _start_refresh_loop() -> None:
+    global _refresh_task
+    if _registry is not None and _refresh_task is None:
+        _refresh_task = asyncio.get_running_loop().create_task(ytdlp_refresh_loop())
+
+
+def _stop_refresh_loop() -> None:
+    global _refresh_task
+    if _refresh_task is not None:
+        _refresh_task.cancel()
+        _refresh_task = None
+
+
+def _stop() -> None:
+    """The streaming library was switched off: nothing resolves to a provider
+    from now on, the refresh loop ends, the enrichers take no new job. The
+    media proxy stays (DLNA, a remote HQPlayer), and so does a buffer already
+    fetched for a queued slot."""
+    global _registry
+    _registry = None
+    if _loop is not None:
+        _loop.call_soon_threadsafe(_stop_refresh_loop)
+    stop_enrichers()
+    logger.info("streaming stopped: the streaming library was switched off")
+
+
+def _start_enrichers(settings) -> None:
+    """Tee fetched previews through CLAP/feature analysis (gated on known
+    duration) and lyrics. The audio half needs the model stack: a node whose
+    models are off or absent analyses no stream (it would fail in its first
+    import, once per streamed track)."""
+    global _enricher, _lyrics_enricher
+    if not getattr(settings, "streaming_preview_analyze", False):
+        return
+    import hardware_profile
+    from .enrichment import PreviewEnricher, PreviewLyricsEnricher
+    _enricher = PreviewEnricher() if hardware_profile.resolve().ml_available else None
+    _lyrics_enricher = PreviewLyricsEnricher()
+    logger.info("preview enrichment enabled (%s on preview)",
+                "analyze + lyrics" if _enricher is not None else "lyrics")
+
+
+def _on_track_ready(e) -> None:
+    """The proxy's hook, CLAP-agnostic: audio features (GPU, gated on a known
+    catalog length; never on an excerpt) + lyrics text and its embedding
+    (network/text, metadata-derived, ungated — see the enricher docstrings
+    for the gating rationale)."""
+    from .base import attested_lengths
+    enricher, lyrics = _enricher, _lyrics_enricher
+    if enricher is not None:
+        enricher.submit(
+            e.query.track_id,
+            e.audio.data,
+            attested_lengths(e.query),
+            e.audio.lossless,   # ACTUAL fetch quality (may be a degraded tier)
+            e.provider.manifest.id,  # the row's provenance (stream_providers)
+            excerpt=e.audio.excerpt,
+        )
+    if lyrics is not None:
+        lyrics.submit(e.query)
+
+
+def _wire(proxy: MediaProxy) -> None:
+    """The proxy's hooks and the demo policy's observer, attached once."""
     # The canonical-queue item of a stream is built once, when its buffer is
     # first ready; a REFETCH (a budget eviction, a spent demo buffer) may land
     # on another provider or, as an excerpt, on another length — and DLNA
@@ -86,52 +223,23 @@ def init(settings) -> bool:
         # handed again
         playback_manager.stream_landed(e.token, e.reshaped)
 
-    _proxy.track_ready_hooks.append(_refresh_queue_item)
+    proxy.track_ready_hooks.append(_refresh_queue_item)
     # A fetch that ended with no audio: a start the output parked on it goes,
     # and meets the error the attempt then says
-    _proxy.track_failed_hooks.append(lambda e: playback_manager.stream_failed(e.token))
+    proxy.track_failed_hooks.append(lambda e: playback_manager.stream_failed(e.token))
     # The demo policy: the fetch-time gate and the listen observer.
-    _proxy.link_admissible = demo.link_admissible
+    proxy.link_admissible = demo.link_admissible
     playback_manager.subscribe_status(demo.status_observer)
-
-    # Tee fetched previews through CLAP/feature analysis (gated on known
-    # duration). The proxy stays CLAP-agnostic — it just fires the hook.
-    global _enricher, _lyrics_enricher
-    if getattr(settings, "streaming_preview_analyze", False):
-        from .base import attested_lengths
-        from .enrichment import PreviewEnricher, PreviewLyricsEnricher
-        _enricher = PreviewEnricher()
-        _lyrics_enricher = PreviewLyricsEnricher()
-
-        def _on_track_ready(e):
-            # Audio features (GPU, gated on a known catalog length; never on
-            # an excerpt) + lyrics text and its embedding (network/text,
-            # metadata-derived, ungated — see the enricher docstrings for the
-            # gating rationale).
-            _enricher.submit(
-                e.query.track_id,
-                e.audio.data,
-                attested_lengths(e.query),
-                e.audio.lossless,   # ACTUAL fetch quality (may be a degraded tier)
-                e.provider.manifest.id,  # the row's provenance (stream_providers)
-                excerpt=e.audio.excerpt,
-            )
-            _lyrics_enricher.submit(e.query)
-
-        _proxy.track_ready_hooks.append(_on_track_ready)
-        logger.info("preview enrichment enabled (analyze + lyrics on preview)")
-
-    logger.info("streaming preview ready (proxy %s:%d, advertised %s)",
-                settings.media_proxy_host, settings.media_proxy_port,
-                settings.media_proxy_advertised_host)
-    return True
+    proxy.track_ready_hooks.append(_on_track_ready)
 
 
 def stop_enrichers() -> None:
-    """The node stops: a stream's analysis and lyrics take no new job, and the
-    queued ones go with the process rather than hold its exit (their workers
-    are joined there)."""
-    for enricher in (_enricher, _lyrics_enricher):
+    """The node stops, or the streaming library was switched off: a stream's
+    analysis and lyrics take no new job, and the queued ones go with the
+    process rather than hold its exit (their workers are joined there)."""
+    global _enricher, _lyrics_enricher
+    enrichers, _enricher, _lyrics_enricher = (_enricher, _lyrics_enricher), None, None
+    for enricher in enrichers:
         if enricher is not None:
             enricher.stop()
 
@@ -204,9 +312,9 @@ async def ytdlp_refresh_loop() -> None:
 def ensure_proxy() -> Optional[MediaProxy]:
     """Start the media proxy WITHOUT the provider registry when it isn't
     running yet — the DLNA output and a remote HQPlayer need the plain-http
-    file server even on nodes where streaming preview is disabled. Phantom
-    streaming stays gated on streaming_preview_enabled; init() attaches
-    the providers to this same instance."""
+    file server even on nodes where streaming is off. Phantom streaming
+    follows the owner's switch; follow_switch() attaches the providers to
+    this same instance."""
     global _proxy
     if _proxy is None:
         from config import settings
@@ -274,7 +382,8 @@ def provider_name(key: str) -> str:
     """Display name behind a provider id or a health key (a shared upstream
     reports under its cooldown_source): the manifest name of the provider it
     names, else the key itself."""
-    for p in (_registry.enabled() if _registry is not None else []):
+    registry = _registry        # read once: the switch's stop clears it from another thread
+    for p in (registry.enabled() if registry is not None else []):
         if p.manifest.id == key or health_key(p) == key:
             return p.manifest.name
     return key
@@ -334,9 +443,10 @@ def providers_aside() -> list:
     Its notice is the provider's own voice, under its own id: a shared
     upstream's health key (`health_key`) is cleared by any provider on that
     upstream answering, and an account's state is not the catalog's."""
-    if _registry is None:
+    registry = _registry
+    if registry is None:
         return []
-    return [(p, aside) for p in sorted(_registry.enabled(), key=lambda p: p.manifest.id)
+    return [(p, aside) for p in sorted(registry.enabled(), key=lambda p: p.manifest.id)
             if (aside := p.stepped_aside()) is not None]
 
 
@@ -359,9 +469,10 @@ def providers_preferred() -> list:
     (>=3 strikes), drop them this round entirely. Consumer-side policy over
     api_cooldown — enrichment pauses on cooling_down(), streaming reorders on
     status()."""
-    if _registry is None:
+    registry = _registry
+    if registry is None:
         return []
-    provs = sorted((p for p in _registry.enabled() if p.stepped_aside() is None),
+    provs = sorted((p for p in registry.enabled() if p.stepped_aside() is None),
                    key=lambda p: (p.manifest.excerpt, not p.manifest.lossless, p.manifest.id))
     # cooling_down() is the cheap cache gate; only read the richer status()
     # (a DB hit) on the rare occasions a source is actually cooling.
@@ -382,10 +493,11 @@ def providers_preferred() -> list:
 def get_provider(provider_id: Optional[str] = None) -> Optional[StreamProvider]:
     """A specific provider by id, or — with no id — the preferred one: a lossless
     source ranks above a lossy one (YouTube)."""
-    if _registry is None:
+    registry = _registry
+    if registry is None:
         return None
     if provider_id:
-        return _registry.get(provider_id)
+        return registry.get(provider_id)
     provs = providers_preferred()
     return provs[0] if provs else None
 

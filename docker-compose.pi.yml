@@ -1,17 +1,19 @@
-# Docker Compose for a Linux arm64 host — a Raspberry Pi 5 (8–16 GB) or any
-# native-Docker arm64 machine:
+# Docker Compose for a Linux host with no NVIDIA card — a Raspberry Pi 5, any
+# native-Docker arm64 machine, an x86-64 mini-PC or NAS:
 #   docker compose -f docker-compose.pi.yml up -d --build
 #
 # docker-compose.yml with only what such a host needs changed — keep them in step:
-#   - Dockerfile.mac, the arm64 CPU image (no CUDA): no CUDA variables, no GPU
-#     reservation. With no accelerator the node resolves to the lite profile
+#   - Dockerfile.mac, the CPU image (no CUDA; arm64 or x86-64 by the build's
+#     own architecture): no CUDA variables, no GPU reservation. With no accelerator the node resolves to the lite profile
 #     (backend/hardware_profile.py): it serves, syncs and plays, and analyses
 #     no library in bulk;
 #   - no Codex CLI in that image, so no CODEX_CLI_ENABLED and no ./data/codex;
 #   - the assistant's sessions inside ./data/claude (no ./data/claude_sessions
 #     over projects/: a Pi node never kept them apart);
 #   - the music folder is named in .env, MUSIC_LIBRARY_PATH — there is no
-#     default to guess on Linux;
+#     default to guess on Linux — or, on a node ./sautium set up, chosen in
+#     the Web UI under the roots its override mounts (host/compose.roots.yml,
+#     named in .env's COMPOSE_FILE; MUSIC_LIBRARY_PATH is then an empty folder);
 #   - PostgreSQL sized for a 16 GB board with an NVMe disk (below);
 #   - the backend on the host's own network (network_mode: host, since
 #     2026-11-15): it sees this machine's addresses as a launcher node does —
@@ -112,6 +114,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.mac
+      # What the image carries (backend/Dockerfile.mac): the model stack, the
+      # assistant's CLI, the demo channel's runtime. The console setup records
+      # its choice in .env, and the host agent's update builds with the same.
+      args:
+        MODELS: ${SAUTIUM_IMAGE_MODELS:-1}
+        ASSISTANT_CLI: ${SAUTIUM_IMAGE_ASSISTANT_CLI:-1}
+        STREAMING: ${SAUTIUM_IMAGE_STREAMING:-1}
     # The image the host agent's update built from a verified release, named
     # in .env (scripts/host_agent.py); a build by hand tags this name too.
     image: ${SAUTIUM_BACKEND_IMAGE:-sautium-backend:local}
@@ -249,6 +258,11 @@ services:
       # map turns 8000 into 8800.
       UVICORN_PORT: 8800
       SAUTIUM_HOST_NETWORK: "1"
+      # What a node is born with on this machine (./sautium reads the machine
+      # and writes it to .env; backend/db_migrate.py reads it once, at the
+      # database's first migration pass): "nano" — no models, no streaming
+      # library, nothing passed on. Each is a switch in the Web UI afterwards.
+      SAUTIUM_BIRTH_PRESET: ${SAUTIUM_BIRTH_PRESET:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: http://127.0.0.1:8800
       # The checkout's .git, mounted beside the code (below)

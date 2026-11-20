@@ -1317,7 +1317,8 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
     from routers.gear_models import (research_sse_register,
                                      research_sse_unregister)
     from routers.p2p import chat_sse_register, chat_sse_unregister
-    from routers.settings import (_notices_state, notices_sse_register,
+    from routers.settings import (_notices_state, identity_event, identity_sse_register,
+                                  identity_sse_unregister, notices_sse_register,
                                   notices_sse_unregister)
     from streaming.events import preview_events
 
@@ -1328,6 +1329,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
     lb_evt = asyncio.Event()
     chat_evt = asyncio.Event()
     notice_evt = asyncio.Event()
+    identity_evt = asyncio.Event()
     meter_evt = asyncio.Event()
 
     async def event_generator():
@@ -1339,6 +1341,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
         lb_sse_register(lb_evt, loop)
         chat_sse_register(chat_evt, loop)
         notices_sse_register(notice_evt, loop)
+        identity_sse_register(identity_evt, loop)
         meter = hqp_meter.register(tab, meter_evt, loop) if tab else None
         try:
             yield 'data: {"t": "hello"}\n\n'
@@ -1365,6 +1368,13 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                                  "d": {**await asyncio.to_thread(_notices_state),
                                        "initial": True}})
                    + "\n\n")
+            # The node's identity, as state at connect and as news after: the
+            # page toasts only a change it saw happen
+            yield ("data: "
+                   + json.dumps({"t": "identity",
+                                 "d": {**await asyncio.to_thread(identity_event),
+                                       "initial": True}})
+                   + "\n\n")
             while True:
                 waiters = {
                     asyncio.create_task(status_evt.wait()): "status",
@@ -1373,6 +1383,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                     asyncio.create_task(lb_evt.wait()): "lb",
                     asyncio.create_task(chat_evt.wait()): "chat",
                     asyncio.create_task(notice_evt.wait()): "notice",
+                    asyncio.create_task(identity_evt.wait()): "identity",
                     asyncio.create_task(preview_q.get()): "preview",
                 }
                 if meter is not None:
@@ -1429,6 +1440,12 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                     yield ("data: "
                            + json.dumps({"t": "notice", "d": notices})
                            + "\n\n")
+                if "identity" in kinds:
+                    identity_evt.clear()
+                    yield ("data: "
+                           + json.dumps({"t": "identity",
+                                         "d": await asyncio.to_thread(identity_event)})
+                           + "\n\n")
                 if "meter" in kinds:
                     # Every reading the page has not had yet, in order: the
                     # meter offers them on this loop, so none slips between
@@ -1445,6 +1462,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
             lb_sse_unregister(lb_evt, loop)
             chat_sse_unregister(chat_evt, loop)
             notices_sse_unregister(notice_evt, loop)
+            identity_sse_unregister(identity_evt, loop)
             preview_events.unsubscribe(preview_q)
             if meter is not None:
                 hqp_meter.unregister(meter)
@@ -4018,9 +4036,15 @@ def _radio_start(req: RadioStartRequest):
           AND EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = t.id)
     """, {"t": seed_uuid})
     if not seed_row:
+        # "Play it a moment" is true only where a stream is analysed as it
+        # plays: a node with no model waits for another node's analysis
+        import hardware_profile
         raise HTTPException(
             status_code=409,
-            detail="This track isn't analysed yet — play it a moment, then start radio.")
+            detail=("This track isn't analysed yet — play it a moment, then start radio."
+                    if hardware_profile.resolve().ml_available else
+                    "This track has no sound analysis yet. This node analyses nothing itself: "
+                    "radio starts once another Sautium node has shared its analysis."))
 
     # Clear everything around the reading slot — the seed plays on while the
     # batch flows in behind. New generation supersedes any prior filler. The

@@ -599,12 +599,9 @@ PROFILE_DISPLAY_NAMES = {"full": "Curator", "standard": "Standard", "lite": "Lit
 
 
 def detect_hardware_profile() -> HardwareProfile:
-    """Resolve the hardware tier from the machine alone.
-
-    MIRRORS backend/hardware_profile._auto_tier — the launcher build cannot
-    import backend modules, and the wizard runs before the backend venv
-    exists at all. Update both together.
-    """
+    """Resolve the hardware tier from the machine alone — by the rule the
+    backend applies too (desktop/machine_tier.py; the wizard runs before the
+    backend venv exists, so the rule lives where both can read it)."""
     gpu_available, accel_name, vram_gb = detect_gpu()
     apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
     device = "mps" if apple_silicon else "cuda" if gpu_available else "cpu"
@@ -613,14 +610,8 @@ def detect_hardware_profile() -> HardwareProfile:
     # Unified memory IS system RAM, and a CPU node works out of RAM anyway.
     accel_gb = vram_gb if device == "cuda" else ram_gb
 
-    if device == "cuda":
-        name = "full" if accel_gb >= 7.5 else "standard" if accel_gb >= 5.5 else "lite"
-    elif device == "mps":
-        name = "full" if accel_gb >= 23 else "standard" if accel_gb >= 15 else "lite"
-    else:
-        name = "lite"
-    if ram_gb < 12 and name != "lite":
-        name = "standard" if name == "full" else "lite"
+    from desktop.machine_tier import auto_tier
+    name = auto_tier(device, accel_gb, ram_gb)
 
     # PyTorch stopped at 2.2.2 for macOS x86_64 — service_manager skips the
     # ML stack there, so such a node runs torch-less whatever its tier.

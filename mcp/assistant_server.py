@@ -130,10 +130,17 @@ def _backend_post(path: str, body: dict, timeout: float = 30.0) -> dict:
 def _discovery(target: str, **params) -> list[dict]:
     """One composite discovery-engine query → one target's results. Same engine
     as the Web UI's Discovery search (routers/discovery.py /api/discovery/search)."""
+    return _discovery_noted(target, **params)[0]
+
+
+def _discovery_noted(target: str, **params) -> tuple:
+    """(results, the engine's state in words): a model-backed search on a
+    node where no model runs, or whose model is still loading, says so
+    instead of "(0 results)"."""
     if "limit" in params:
         params["limit"] = min(int(params["limit"]), 30)
     data = _backend_get("/api/discovery/search", {"target": target, **params})
-    return data.get("results", [])
+    return data.get("results", []), aq.search_note(data)
 # -- MCP Server ---------------------------------------------------------------
 mcp = FastMCP(
     "Sautium Assistant",
@@ -510,11 +517,13 @@ def search_semantic(
         corpus: 'owned' (default, playable files) | 'all' (adds phantom discography)
     """
     try:
-        rows = _discovery("track", sound=query, limit=limit, vocalist=vocalist,
-                          gender=gender, genres=genres, instruments=instruments,
-                          bpm_min=bpm_min, bpm_max=bpm_max, year_from=year_from,
-                          year_to=year_to, quality=quality or None, corpus=corpus)
-        return _format_track_list(rows, f"Semantic search for '{query}' ({len(rows)} results):")
+        rows, note = _discovery_noted(
+            "track", sound=query, limit=limit, vocalist=vocalist,
+            gender=gender, genres=genres, instruments=instruments,
+            bpm_min=bpm_min, bpm_max=bpm_max, year_from=year_from,
+            year_to=year_to, quality=quality or None, corpus=corpus)
+        return aq.with_note(_format_track_list(
+            rows, f"Semantic search for '{query}' ({len(rows)} results):"), note)
     except httpx.ConnectError:
         return (
             "Error: Cannot connect to FastAPI backend at "
@@ -536,8 +545,9 @@ def search_lyrics(query: str, limit: int = 15) -> str:
         limit: Maximum number of results (default 15)
     """
     try:
-        rows = _discovery("track", lyrics=query, limit=limit)
-        return _format_track_list(rows, f"Lyrics search for '{query}' ({len(rows)} results):")
+        rows, note = _discovery_noted("track", lyrics=query, limit=limit)
+        return aq.with_note(_format_track_list(
+            rows, f"Lyrics search for '{query}' ({len(rows)} results):"), note)
     except httpx.ConnectError:
         return "Error: Cannot connect to backend for lyrics search."
     except Exception as e:
@@ -560,9 +570,9 @@ def search_artists(query: str, limit: int = 10, by_bio: bool = False) -> str:
     """
     try:
         params = {"scope": "bio"} if by_bio else {}
-        rows = _discovery("artist", q=query, limit=limit, **params)
-        return aq.format_artist_list(
-            rows, f"Artist search for '{query}' ({len(rows)} results):")
+        rows, note = _discovery_noted("artist", q=query, limit=limit, **params)
+        return aq.with_note(aq.format_artist_list(
+            rows, f"Artist search for '{query}' ({len(rows)} results):"), note)
     except httpx.ConnectError:
         return "Error: Cannot connect to backend."
     except Exception as e:

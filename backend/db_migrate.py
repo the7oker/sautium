@@ -103,6 +103,12 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      queues one until a whole walk has read the library under it
      (library_watch.start, scanner.TAGS_READ_KEY).
 
+Right after the schema deltas, once per database, the birth preset
+(`birth_preset_v1`, _apply_birth_preset): the switches a node's setup chose
+for the machine it read (SAUTIUM_BIRTH_PRESET=nano — no models, no streaming
+library, nothing passed on), written only where the owner's row does not
+exist, before the seed step reads the streaming library's switch.
+
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
 (_assistant_role); the runner states its grants after the deltas.
@@ -115,7 +121,9 @@ Beside the migrations, analyze_unrecorded gives back what a crash recovery
 takes from autovacuum (below); the lifespan runs it in the background.
 """
 
+import json
 import logging
+import os
 import time
 
 import psycopg2
@@ -141,6 +149,43 @@ def _mark(conn, name: str) -> None:
         cur.execute(f"INSERT INTO {db_init.MIGRATIONS_TABLE} (filename) VALUES (%s) "
                     "ON CONFLICT (filename) DO NOTHING", (name,))
     conn.commit()
+
+
+# What a node is born with, by the name its setup read off the machine and
+# wrote to .env (SAUTIUM_BIRTH_PRESET; PI-NODE-2B). "nano": no model runs, the
+# streaming library is off, and the node passes nothing on and relays for
+# nobody — each an owner's switch from then on, changed in its own place in
+# the Web UI.
+BIRTH_PRESETS = {
+    "nano": {"compute.models": False, "discovery.phantom_layer": False, "sync.pass_on": False,
+             "p2p.relay_enabled": False},
+}
+
+
+def _apply_birth_preset(conn) -> dict:
+    """The preset's switches, each written only where the owner's row does not
+    exist. Read once, at the first migration pass of a database (the marker
+    lands with or without a preset): a variable added to .env later changes
+    nothing on a node that already lives. Before the seed step, which reads
+    the streaming library's switch."""
+    name = os.environ.get("SAUTIUM_BIRTH_PRESET", "").strip().lower()
+    if not name:
+        return {"preset": None, "written": []}
+    if name not in BIRTH_PRESETS:
+        raise ValueError(f"SAUTIUM_BIRTH_PRESET names no preset: {name!r} "
+                         f"(known: {', '.join(sorted(BIRTH_PRESETS))})")
+    written = []
+    with conn.cursor() as cur:
+        for key, value in BIRTH_PRESETS[name].items():
+            cur.execute("INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb) "
+                        "ON CONFLICT (key) DO NOTHING RETURNING key", (key, json.dumps(value)))
+            if cur.fetchone():
+                written.append(key)
+        # The fact itself, for the Web UI's one-time "this node" mark
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('node.birth_preset', %s::jsonb) "
+                    "ON CONFLICT (key) DO NOTHING", (json.dumps(name),))
+    conn.commit()
+    return {"preset": name, "written": written}
 
 
 def _renormalize_identities() -> dict:
@@ -684,6 +729,10 @@ def apply_pending() -> dict:
         out["adopted_baseline"] = db_init.adopt_baseline(conn)
         _assistant_role(conn)
         out["sql_applied"] = db_init.apply_migrations(conn, logger.info)
+
+        if not _marked(conn, "birth_preset_v1"):
+            out["birth_preset"] = _apply_birth_preset(conn)
+            _mark(conn, "birth_preset_v1")
 
         # First: it reads the seals to tell this node's records from another
         # author's, and the identity re-normalization below sheds every seal
