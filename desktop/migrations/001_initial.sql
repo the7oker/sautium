@@ -630,6 +630,9 @@ CREATE TABLE IF NOT EXISTS album_variants (
     -- The positional pass's last abstention on this copy, as the candidates
     -- it was asked with (canon.positional): asked again only when they change.
     positional_asked TEXT,
+    -- The positional pass bound this copy: its positions chose its release
+    -- and its files' recordings, which no other tier re-decides.
+    positional_bound BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     -- The same directory string can name a local folder AND the folder an

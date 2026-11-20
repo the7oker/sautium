@@ -1460,7 +1460,9 @@ class SyncClient:
         if len(made) < len(items):
             logger.warning("track_mbids: %d binding(s) refused — no matcher version, or one this "
                            "release does not compute (above %d)", len(items) - len(made), rs.MATCHER_VERSION)
-        items = made
+        # one row per recording: a page that names it twice would have the
+        # upsert reach its row twice, which PostgreSQL refuses for the page
+        items = list({i["recording_mbid"]: i for i in sorted(made, key=lambda i: i["matcher_version"])}.values())
         if not items:
             return 0
         uuids = list({item["track_uuid"] for item in items})

@@ -146,6 +146,9 @@ def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
     assert len(sign_audio._materialize_owned_tracklists(slots)) == 3
     cur.execute("SELECT value FROM user_settings WHERE key = %s", (scanner.TAGS_READ_KEY,))
     assert cur.fetchone() == (0,)
+    # as if the positional pass had bound the copy: its to bind again after the split (round 3 M-A)
+    cur.execute("UPDATE album_variants SET positional_bound = TRUE, release_mbid = gen_random_uuid(), "
+                "positional_asked = 'x'")
     stats = _scan()
     assert stats["reread"] == 3 and stats.get("split") == 1
     cur.execute("""SELECT t.title, (SELECT count(*) FROM listening_history h WHERE h.track_id = t.id
@@ -162,6 +165,8 @@ def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
     assert cur.fetchone() == (0,)
     cur.execute("SELECT track_id::text FROM media_files WHERE track_number = 2")
     assert cur.fetchone() == (str(track_uuid("Concerto No. 1 in E major, RV 269: II. Largo", "Anne Akiko Meyers")),)
+    cur.execute("SELECT positional_bound, release_mbid, positional_asked FROM album_variants")
+    assert cur.fetchall() == [(False, None, None)]
     # the merged track's slots went with the split: each movement takes its own
     cur.execute("SELECT count(*) FROM album_tracks WHERE track_id = %s", (merged,))
     assert cur.fetchone() == (0,)

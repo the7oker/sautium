@@ -214,11 +214,12 @@ ORDER BY c.album_id, c.track_id, c.exact DESC, (grp.recording IS NULL), (c.dd IS
 """
 
 
-# A file of a copy the positional pass bound (canon.positional): its position
-# chose its recording, and the track layer's title match is no evidence over it.
+# A file of a copy the positional pass bound here (canon.positional): its
+# position chose its recording, and the track layer's title match is no
+# evidence over it. Another copy of the album is the track layer's as before.
 _NOT_POSITIONAL = """
-    AND NOT EXISTS (SELECT 1 FROM album_variants pv JOIN albums pa ON pa.id = pv.album_id
-                     WHERE pv.id = {f}.album_variant_id AND pa.mb_match_confidence = 'positional')"""
+    AND NOT EXISTS (SELECT 1 FROM album_variants pv
+                     WHERE pv.id = {f}.album_variant_id AND pv.positional_bound)"""
 
 # Track-centric match — the layer for artists owning TRACKS but no albums (a
 # single or two on a compilation owned by someone else). They are invisible to
@@ -626,10 +627,11 @@ def resolve_artist(artist_id, name: str, take_arriving: bool = True) -> dict:
     (arriving_albums) is left out of the plan."""
     cands = _unrefuted(artist_id, _candidates(name))
     owned = _owned_counts(artist_id)
-    # an album the positional tier bound is not the cascade's to re-decide:
-    # its copies' positions chose the release (canon.positional)
-    for row in db_query("SELECT id::text AS id FROM albums WHERE id = ANY(%(a)s::uuid[]) "
-                        "AND mb_match_confidence = 'positional'", {"a": list(owned)}):
+    # an album the positional tier bound here is not the cascade's to
+    # re-decide: a copy's positions chose the group (canon.positional). An
+    # album only labelled so (a seed's, a share's) is this node's to decide.
+    for row in db_query("SELECT DISTINCT album_id::text AS id FROM album_variants "
+                        "WHERE album_id = ANY(%(a)s::uuid[]) AND positional_bound", {"a": list(owned)}):
         owned.pop(row["id"])
     if not take_arriving:
         for album in arriving_albums(owned):

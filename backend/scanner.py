@@ -906,7 +906,13 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         # (bind_owned_recordings) would bind it back
                         "UPDATE media_files SET recording_mbid = NULL WHERE track_id = ANY(CAST(:t AS uuid[]))",
                         "UPDATE hqp_library_files SET recording_mbid = NULL "
-                        "WHERE track_id = ANY(CAST(:t AS uuid[]))"):
+                        "WHERE track_id = ANY(CAST(:t AS uuid[]))",
+                        # a copy the positional pass bound is its to bind again:
+                        # each position's recording onto the movement's new track
+                        "UPDATE album_variants av SET positional_bound = FALSE, release_mbid = NULL, "
+                        "positional_asked = NULL WHERE av.positional_bound AND EXISTS ("
+                        "SELECT 1 FROM owned_files f WHERE f.album_variant_id = av.id "
+                        "AND f.track_id = ANY(CAST(:t AS uuid[])))"):
                 db.execute(text(sql), {"t": sorted(splits)})
             stats["split"] = stats.get("split", 0) + len(splits)
         for dir_path, md, row in entries:
@@ -1981,7 +1987,8 @@ class LibraryScanner:
             stats["processed"] = total_files
             if not scopes and not subpath and not limit:
                 # a whole walk read every file it met under this reader: the
-                # start's re-read is done (main), whatever it could not read
+                # re-read a start queues where no events come is done
+                # (library_watch.start), whatever it could not read
                 with get_db_context() as db:
                     db.execute(text("""INSERT INTO user_settings (key, value) VALUES (:k, CAST(:v AS jsonb))
                                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"""),

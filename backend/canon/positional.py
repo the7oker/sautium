@@ -110,13 +110,13 @@ f AS (
            coalesce(mf.disc_number, 1) AS dn, mf.track_number AS tn,
            mf.duration_seconds::float AS dur, mf.barcode
       FROM album_variants av JOIN al ON al.id = av.album_id
-       AND (al.musicbrainz_id IS NULL OR av.release_mbid IS NULL)
+       AND (al.musicbrainz_id IS NULL OR NOT av.positional_bound)
       JOIN media_files mf ON mf.album_variant_id = av.id
     UNION ALL
     SELECT av.id, av.album_id, 'hqp_library_files', hf.id, hf.track_id,
            coalesce(hf.disc_number, 1), hf.track_number, hf.duration_seconds::float, NULL
       FROM album_variants av JOIN al ON al.id = av.album_id
-       AND (al.musicbrainz_id IS NULL OR av.release_mbid IS NULL)
+       AND (al.musicbrainz_id IS NULL OR NOT av.positional_bound)
       JOIN hqp_library_files hf ON hf.album_variant_id = av.id),
 ok AS (
     SELECT v FROM f GROUP BY v
@@ -228,15 +228,18 @@ def _catno(value):
 # decide asks every copy it abstained on again. Bump it with any such change.
 RULE_VERSION = 1
 
-# What MusicBrainz's rows here are: the dump's version, and the slices' last
-# change — a reload or a slice can change a release's lengths under its id, and
+# What MusicBrainz's rows here are: the dump's version, and what the slices
+# hold — a reload or a slice can change a release's lengths under its id, and
 # a slice of any name can bring a release credited to the copy's artists (a
 # release whose group credits only the composer arrives with the composer's).
-# A dump node takes no slices; on a slice-fed node the rows are few, so the
-# candidate query a slice makes run again is cheap.
+# The slices by their content (each one's payload, whether it is void), so a
+# re-ask that brings the same slice, or a name with no match, asks nothing
+# again; a dump node takes no slices.
 _MB_DATA_SQL = """
 SELECT coalesce((SELECT value::text FROM user_settings WHERE key = 'musicbrainz.db_version'), '')
-       || '/' || coalesce((SELECT max(fetched_at)::text || ':' || count(*) FROM mb_slice_fetches), '') AS v"""
+       || '/' || coalesce((SELECT md5(string_agg(name_key || ':' || coalesce(payload_sha256, '') || ':' || void,
+                                                ',' ORDER BY name_key))
+                             FROM mb_slice_fetches WHERE matched_ids > 0), '') AS v"""
 
 
 def _digest(copy: dict, mb_data: str, siblings: list) -> str:
@@ -321,7 +324,11 @@ def run(waiting: set = None, take_arriving: bool = True) -> dict:
                 fits: dict = {}
                 for r in cur.fetchall():
                     fits.setdefault(r["v"], []).append(r)
-                decisions = {v: decide(copies[v], fits.get(v, [])) for v in ask}
+                # a copy of an album this tier bound is decided among that
+                # group's releases alone: another group's fit is no tie
+                decisions = {v: decide(copies[v], [f for f in fits.get(v, []) if not copies[v]["album_rg"]
+                                                   or f["rg_mbid"] == copies[v]["album_rg"]])
+                             for v in ask}
                 st.update(_apply(cur, copies, decisions, digests, waiting, bound))
                 if bound:
                     cur.execute("SELECT DISTINCT artist_id::text AS a FROM album_artists "
@@ -420,8 +427,8 @@ def _apply(cur, copies: dict, decisions: dict, digests: dict, waiting, bound: li
         bound_tracks = []
         for v, pick in picks.items():
             c = copies[v]
-            cur.execute("UPDATE album_variants SET release_mbid = %s, positional_asked = NULL WHERE id = %s",
-                        (pick["rel_mbid"], v))
+            cur.execute("UPDATE album_variants SET release_mbid = %s, positional_asked = NULL, "
+                        "positional_bound = TRUE WHERE id = %s", (pick["rel_mbid"], v))
             for tbl, fid, track, rec in zip(c["tbls"], c["fids"], c["tracks"], recordings[v]):
                 cur.execute(f"UPDATE {tbl} SET recording_mbid = %s WHERE id = %s", (rec, fid))
                 cur.execute("INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version) "

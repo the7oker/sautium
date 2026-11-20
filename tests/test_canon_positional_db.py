@@ -546,9 +546,15 @@ def test_any_slice_asks_an_abstained_copy_again(node):
         _dump_node(cur)
         album = _polarity(cur)
         s, leader, ens = _mb(cur)
+        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids, payload_sha256) "
+                    "VALUES ('arvo pärt', 1, repeat('a', 64))")
         assert _run()["abstained"] == 1                 # nothing fits yet
+        # round 3 M-B: the same slice again, or a name with no match, is no change
+        cur.execute("UPDATE mb_slice_fetches SET fetched_at = now() + interval '1 hour'")
+        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids) VALUES ('nobody', 0)")
+        assert _run()["asked"] == 0
         _release(s, cur, str(uuid.uuid4()), "Polarity", [(ens, "Hoff Ensemble")])
-        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids) VALUES ('arvo pärt', 1)")
+        cur.execute("UPDATE mb_slice_fetches SET payload_sha256 = repeat('b', 64) WHERE name_key = 'arvo pärt'")
         st = _run()
         assert (st["asked"], st["bound_albums"]) == (1, 1)
 
@@ -594,6 +600,90 @@ def test_the_collaboration_sweep_finds_a_list_joined_by_semicolons(node, monkeyp
         _dump_node(cur)
         Library(cur, "Trio Mediæval; Arve Henriksen; Anders Jormin").album("Rímur", [("Om Kvelden", 300.0)])
     assert content.split_collaborations(dry_run=True)["candidates"] == 1
+
+
+def test_a_canon_trigger_leaves_an_album_still_arriving(node, monkeypatch):
+    """Round 3 H-A: the canon a slice or MusicBrainz's answers trigger took an
+    album still arriving as an explicit scan does, and the positional pass
+    bound it for good to the release its first files fit."""
+    from tests.test_scan_unreachable import BACKEND
+    monkeypatch.chdir(BACKEND)                     # main mounts static/ relative to its directory
+    import canon
+    import main
+    import mb_backend
+    import mb_dump_load
+    from canon import content
+    seen = []
+    monkeypatch.setattr(mb_backend, "refresh", lambda: True)
+    monkeypatch.setattr(mb_backend, "LOCAL_DUMP", True)
+    monkeypatch.setattr(mb_dump_load, "load_genre_list", lambda: None)
+    monkeypatch.setattr(content, "canonicalize_pending", lambda **kw: seen.append(kw) or {})
+    monkeypatch.setattr(content, "distill_album_residue", lambda **kw: {})
+    monkeypatch.setattr(content, "distill_album_coverage", lambda **kw: {})
+    monkeypatch.setattr(canon, "canonize_phantom_similars", lambda **kw: {})
+    main._canon_run(False, ["00000000-0000-4000-8000-000000000001"], [])
+    main._canon_run(True, [], [])
+    assert [k.get("take_arriving") for k in seen] == [False, False]
+
+
+def test_an_album_only_labelled_positional_is_the_cascade_s(node):
+    """Round 3 M-A: the exclusion was the album's label, which a seed or a
+    share carries: a node whose own copy no position bound left the album to
+    no tier. A copy the pass bound here is what keeps the cascade off."""
+    conn, _fake = node
+    from canon import content
+    names = ("Spring: I. Allegro", "Spring: II. Largo", "Spring: III. Allegro")
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        lib, album, s, c = _meyers(cur, [(n, sec) for n, sec in zip(names, (210.0, 160.0, 250.0))])
+        g = s.release_group(str(uuid.uuid4()), "The Four Seasons", c)
+        s.release(str(uuid.uuid4()), "The Four Seasons", g, c,
+                  [(n, ms, str(uuid.uuid4())) for n, ms in zip(names, (210400, 159800, 250300))])
+        cur.execute("UPDATE albums SET musicbrainz_id = gen_random_uuid(), mb_match_confidence = 'positional' "
+                    "WHERE id = %s", (album,))
+    assert album in {a["album_id"] for a in content.resolve_artist(lib.id, "Anne Akiko Meyers")["albums"]}
+    with conn.cursor() as cur:
+        cur.execute("UPDATE album_variants SET positional_bound = TRUE WHERE album_id = %s", (album,))
+    assert album not in {a["album_id"] for a in content.resolve_artist(lib.id, "Anne Akiko Meyers")["albums"]}
+
+
+def test_a_later_copy_fitting_its_album_s_group_and_another_binds_to_its_album_s(node):
+    """Round 3 L-A: decided before the album's group was applied, such a copy
+    abstained across the two groups although one of them is its album's."""
+    conn, _fake = node
+    with conn.cursor() as cur:
+        _dump_node(cur)
+        album = _polarity(cur)
+        s, leader, ens = _mb(cur)
+        rg = str(uuid.uuid4())
+        rel, recs = _release(s, cur, rg, "Polarity", [(ens, "Hoff Ensemble")])
+        assert _run()["bound_albums"] == 1
+        _release(s, cur, str(uuid.uuid4()), "Polarity (Live)", [(ens, "Hoff Ensemble")])
+        v2 = _second_copy(cur, album)
+        assert _run()["bound_copies"] == 1
+        cur.execute("SELECT release_mbid::text FROM album_variants WHERE id = %s", (v2,))
+        assert cur.fetchone() == (rel,)
+
+
+def test_on_a_slice_fed_node_the_confirm_refuses_a_group_of_another_type(node):
+    """Round 3 L-E: the slice's group an album, MusicBrainz's answer a
+    broadcast: no bind."""
+    conn, fake = node
+    with conn.cursor() as cur:
+        _polarity(cur)
+        s, leader, ens = _mb(cur)
+        rg = str(uuid.uuid4())
+        rel, recs = _release(s, cur, rg, "Polarity", [(ens, "Hoff Ensemble")])
+        cur.execute("INSERT INTO mb_slice_fetches (name_key, matched_ids) VALUES ('hoff ensemble', 1) "
+                    "ON CONFLICT DO NOTHING")
+    fake.artist(ENSEMBLE, "Hoff Ensemble")
+    fake.release_group(rg, "Polarity", credit(("Hoff Ensemble", ENSEMBLE)), primary="Broadcast")
+    fake.release(rel, "Polarity", rg, credit(("Hoff Ensemble", ENSEMBLE)),
+                 [{"title": f"Movement {i}", "length": ms, "recording": r}
+                  for i, (ms, r) in enumerate(zip(LENGTHS, recs), 1)], media_format="Digital Media")
+    assert _run()["waiting"] == 1
+    drain()
+    assert _run()["bound_albums"] == 0
 
 
 def test_the_cascade_leaves_an_album_the_positional_tier_bound(node):

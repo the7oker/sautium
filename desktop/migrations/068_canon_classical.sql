@@ -12,7 +12,8 @@
 -- it (record_sig.MATCHER_VERSION); its seal guard watches it.
 -- title_numbers / title_numbers_disagree: the numeral rule of the matcher.
 -- album_variants: the positional pass's last abstention on the copy, as the
--- candidates it was asked with — asked again only when they change.
+-- candidates it was asked with — asked again only when they change; and
+-- whether the pass bound the copy, which no other tier then re-decides.
 -- mb_release: the positional pass's candidates by the release's credit (on a
 -- dump node an index over the whole table, built once here; the loader keeps
 -- it across reloads).
@@ -44,6 +45,7 @@ BEGIN
 END $$ LANGUAGE plpgsql;
 
 ALTER TABLE album_variants ADD COLUMN IF NOT EXISTS positional_asked TEXT;
+ALTER TABLE album_variants ADD COLUMN IF NOT EXISTS positional_bound BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- The numbers a title carries that tell one work or movement from another
 -- (CANON-CLASSICAL-DESIGN §2.2), read from the raw title: 'c:<system>:<n>' a
