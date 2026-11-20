@@ -1,4 +1,4 @@
-"""The small set of CANON-CLASSICAL (DESIGN §6.3, T6, T7, T9, T10, T17, T18):
+"""The small set of CANON-CLASSICAL (DESIGN §6.3, T6, T7, T9, T10, T17 with its real anchor, T18):
 albums made by the generator from MusicBrainz's real releases (the fixture
 rows, CC0), written as silent FLAC into the test's own music folder, scanned,
 and the canon run on a dump node — each against its known answer: the
@@ -103,6 +103,39 @@ def _recordings(cur, case):
         twin = cur.fetchone()
         out[path] = want if twin and twin[0] else rec
     return out
+
+
+def test_the_real_anchor_reads_as_the_generator_s_two_values_write(library, silence, cur):
+    """T17's anchor (DESIGN §6): one file of the owner's library under its
+    public-domain folder — Musopen's Eroica, I. — its tags in the file's own
+    order, both TITLE values, written back onto silent FLAC as they were. The
+    scanner reads it as `Work: Movement`, and the generator's "2 values" form
+    of the same title writes the same two values in the same order, read to
+    the same track."""
+    import json
+    anchor = json.loads((fx.MB.parent / "anchor_musopen.json").read_text(encoding="utf-8"))
+    real = library / "Musopen" / anchor["file"]
+    real.parent.mkdir(parents=True)
+    shutil.copy(silence(anchor["length"]), real)
+    tags = FLAC(real)
+    if tags.tags is None:
+        tags.add_tags()
+    tags.tags.clear()
+    for key, values in anchor["tags"]:
+        tags[key] = values
+    tags.save()
+    assert list(dict.fromkeys(k.lower() for k, _v in FLAC(real).tags)) == [k for k, _v in anchor["tags"]]
+    title = dict(anchor["tags"])["title"]
+    assert len(title) == 2
+    case = generate({"mbid": "-", "rg": "-", "title": "Musopen Kickstarter Project",
+                     "artists": dict(anchor["tags"])["artist"],
+                     "tracks": [(": ".join(title), int(anchor["length"] * 1000), None)]}, "2 values")
+    (made,) = case.files
+    assert made.tags["title"] == title
+    _write(library, silence, case)
+    scanner.LibraryScanner().scan_and_import()
+    cur.execute("SELECT DISTINCT t.title FROM media_files mf JOIN tracks t ON t.id = mf.track_id")
+    assert cur.fetchall() == [(": ".join(title),)]                      # both files, one track
 
 
 def test_the_generator_is_a_function_of_its_seed():

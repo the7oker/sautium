@@ -162,7 +162,10 @@ Sautium. Source: https://github.com/quodlibet/mutagen.
   in the tree (since 2026-11-19): the names of its labels of type Rights
   Society, with their aliases (`backend/rights_societies/rights_societies.json`,
   from the 2026-11-11 dump), and the rows of fourteen releases the tests load
-  (`tests/fixtures/canon_classical/mb.json`). The list of MusicBrainz's
+  (`tests/fixtures/canon_classical/mb.json`). Beside them, the tags of one file of
+  Musopen's Kickstarter recording of Beethoven's *Eroica*, which Musopen released
+  into the public domain (`tests/fixtures/canon_classical/anchor_musopen.json`,
+  its licence page named there; no audio). The list of MusicBrainz's
   special-purpose artists in `backend/canon/positional.py` is the one
   musicbrainz-server's `Constants.pm` holds (`SPECIAL_ARTIST_GIDS`).
 - **Cover Art Archive** — album art, fetched by the node and served to its

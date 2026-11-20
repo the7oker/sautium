@@ -38,6 +38,44 @@ implementation details live in the code, DB and git history.
   `artist_id` RESTRICTs rather than cascades — every `DELETE FROM artists`
   is a sweep or a merge written against `track_artists`, and one that forgot
   the new table now fails in its test instead of losing a credit quietly.
+- **A classical album is read as MusicBrainz writes it and bound by its
+  positions (2026-11-20, CANON-CLASSICAL).** The owner's library showed the
+  canon damaging classical albums. 138 files carried TITLE as two values
+  (work, movement); the reader kept the first, so a work's movements were one
+  track. The reader now joins them as `Work: Movement`, and the re-read
+  splits such a track file by file. The matcher scored a recording with no
+  length as a perfect duration, so it won over the timed recording of the same
+  name. Now a lengthless recording anchors no duration pass, the album's own
+  group ranks first (timed over lengthless alone moved 141 of the master's
+  bindings off their album's group), and a track's length counts beside its
+  recording's. A fuzzy title must agree on its movement numeral and its
+  catalogue number.
+  - **The positional tier** is a pass of its own after the cascade, over every
+    copy the cascade left without a group. A copy binds to the one release
+    group of its bound artists (track or album credit) whose release, or one
+    medium of a release of several, fits every position's length:
+    - Digital Media within 0.5 s where MusicBrainz keeps milliseconds, and
+      [−0.5, 1.5) s where it keeps the floor of whole seconds; every other
+      medium within 2 s. These are per-copy knees measured on the master; a
+      per-position percentile was whole wrong copies, not drift.
+    - One group per album. A barcode or a catalogue number breaks a tie and
+      never binds alone. Under three positions a second witness is needed.
+    - MusicBrainz's special-purpose artists are never candidates, and nor are
+      'Other' and 'Broadcast' groups.
+    - The bind is the copy's own (`album_variants.positional_bound`), and no
+      other tier re-decides it.
+  - **What it measured:** on a 3 000-album harness drawn from the dump in the
+    library's own tag forms, group precision went from 0.966 to 0.971, and
+    position precision from 0.82 to 0.945. On the master's unbound copies,
+    three fresh draws of 50 binds read right 50 of 50 each, after a first draw
+    with 2 wrong made a medium of a box a candidate too.
+  - **No outcome is the query plan's:** equal-named groups of different
+    performances tied in `_RG_SQL` and the plan picked. Ties now go to the
+    closest summed length, then the MBIDs, so two nodes with the same data
+    reach the same group.
+  - **A binding's seal carries the matcher's methodology**
+    (`record_sig.MATCHER_VERSION`). The first start deleted every imported
+    binding, so their authors' re-derived ones come again.
 - **Canonical UUID v5 for shareable entities**. Artist/Album/Track/Genre/Tag/
   EmbeddingModel all use `uuid5(NAMESPACE, "entity:{normalize(...)}")` so the
   same data on different nodes collapses to the same ID. Namespace is

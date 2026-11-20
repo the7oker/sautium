@@ -1,0 +1,86 @@
+{
+ "about": "CANON-CLASSICAL T17's real anchor (DESIGN §6): the tag layout of one file of the owner's library, keys and values in the file's order, both TITLE values — a metadata snapshot, no audio. The tests write it onto silent FLAC.",
+ "recording": "Ludwig van Beethoven, Symphony No. 3 in E-flat major, Op. 55 \"Eroica\": I. Allegro con brio — Czech National Symphony Orchestra (as Musopen Symphony), Musopen Kickstarter Project, 2012",
+ "file": "Czech National Symphony Orchestra - Symphony No. 3 in E Flat Major ''Eroica'', Op. 55, I. Allegro con brio.flac",
+ "licence": "Public domain: released into the public domain worldwide by its author, Musopen (Creative Commons Public Domain Mark 1.0), as its own page states — read 2026-11-20",
+ "licence_page": "https://commons.wikimedia.org/wiki/File:Beethoven_-_Symphony_No._3_in_E_flat_major,_Op._55_%27Eroica%27_-_I._Allegro_con_brio_(Musopen_Symphony).flac",
+ "source_page": "https://musopen.org/music/1562 (answered 403 to the read on 2026-11-20)",
+ "kind": "FLAC",
+ "vendor": "reference libFLAC 1.2.1 20070917",
+ "length": 911.55,
+ "tags": [
+  [
+   "website",
+   [
+    "http://musopen.org/"
+   ]
+  ],
+  [
+   "replaygain_album_gain",
+   [
+    "+1.07 dB"
+   ]
+  ],
+  [
+   "album",
+   [
+    "Musopen Kickstarter Project"
+   ]
+  ],
+  [
+   "title",
+   [
+    "Symphony No. 3 in E Flat Major \"Eroica\", Op. 55",
+    "I. Allegro con brio"
+   ]
+  ],
+  [
+   "replaygain_track_peak",
+   [
+    "0.890360"
+   ]
+  ],
+  [
+   "composer",
+   [
+    "Ludwig van Beethoven"
+   ]
+  ],
+  [
+   "genre",
+   [
+    "Classical"
+   ]
+  ],
+  [
+   "replaygain_album_peak",
+   [
+    "0.890360"
+   ]
+  ],
+  [
+   "albumartist",
+   [
+    "Czech National Symphony Orchestra"
+   ]
+  ],
+  [
+   "date",
+   [
+    "2012"
+   ]
+  ],
+  [
+   "replaygain_track_gain",
+   [
+    "+0.17 dB"
+   ]
+  ],
+  [
+   "artist",
+   [
+    "Czech National Symphony Orchestra"
+   ]
+  ]
+ ]
+}
