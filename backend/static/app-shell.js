@@ -16035,7 +16035,7 @@
   function supportDetail(s) {
     if (!s) return '';
     const parts = [s.enabled && !s.sends_reports
-      ? 'This node keeps its event reports; they are sent when Support asks'
+      ? 'This node sends nothing to Sautium support yet: it has no account, or its link to the network did not start'
       : s.enabled
       ? 'Event reports are sent on their own, and so is a request from Sautium support for facts about this node; a request that also asks for your conversations, logs or playback traces waits — all of it — until you review it, and those go only if you tick them'
       : 'Nothing is sent to Sautium support'];

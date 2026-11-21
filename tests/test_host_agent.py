@@ -280,7 +280,7 @@ def test_the_answer_is_signed_as_the_nodes_door_checks_it(node):
     assert hmac.compare_digest(headers["X-Sautium-Sig"], auth_hmac.sign(
         KEY.encode(), "POST", ha.ANSWER_PATH, headers["X-Sautium-Ts"], body, headers["X-Sautium-Nonce"]))
     assert json.loads(body) == {"verb": "check", "outcome": "offered", "detail": "Sautium 0.3.0 is available",
-                                "release": "v0.3.0", "report": None}
+                                "release": "v0.3.0", "report": None, "replayed": False}
 
 
 def test_the_answer_follows_no_redirect(node):
@@ -741,7 +741,8 @@ def test_an_answer_the_node_did_not_take_is_said_first_at_the_next_run(checkout,
     (checkout / "run" / "requests" / "check").write_text("")
     ha.run(checkout, api, now=20.0, verbs={"check": lambda s, n, r: ("current", "x", None, None)},
            start_probe=lambda: None)
-    assert [json.loads(b)["verb"] for _, _, b in handler.seen] == ["update", "check"]
+    assert [(json.loads(b)["verb"], json.loads(b)["replayed"]) for _, _, b in handler.seen] == \
+        [("update", True), ("check", False)]        # the earlier run's, said again: no answer to this one
     assert "unsent" not in ha.load_state(checkout)
 
 

@@ -109,8 +109,10 @@ def _p2p_extra() -> dict:
     return {"p2p_status": status, "reachability": client.reachability if client else "unknown"}
 
 
-def sources(host: Optional[dict] = None, unavailable: Optional[dict] = None) -> diag_bundle.Sources:
-    """`host`: the agent's report as host_channel.read_report gives it."""
+def sources(host: Optional[dict] = None, unavailable: Optional[dict] = None,
+            extra: Optional[dict] = None) -> diag_bundle.Sources:
+    """`host`: the agent's report as host_channel.read_report gives it;
+    `extra`: the p2p scope's runtime facts, read on the loop that owns them."""
     sections = (host or {}).get("sections") or {}
     return diag_bundle.Sources(
         config=config_view(), backend=backend_reads(), build=build_identity(), runtime=runtime(),
@@ -119,42 +121,37 @@ def sources(host: Optional[dict] = None, unavailable: Optional[dict] = None) -> 
                       for section, name in host_channel.LOG_SECTIONS.items() if section in sections],
         host=({name: sections[name] for name in host_channel.MACHINE_SECTIONS if name in sections}
               if host is not None else None),
-        unavailable=unavailable or {}, extra=_p2p_extra())
+        unavailable=unavailable or {}, extra=extra or {})
 
 
 async def host_report() -> Tuple[Optional[dict], Optional[str]]:
     """(the agent's report, None) or (None, why there is none): the request
-    left and its answer awaited as an event, all within HOST_WAIT_S. A `done`
-    counts with a report made after the request — the agent's run says an
-    answer the node missed before it does what was asked, and that one is
-    waited past. A floor's answer keeps the report made under ten minutes
-    ago: used when it is that fresh, else named as missing."""
+    left and its answer awaited as an event, at most HOST_WAIT_S — an answer
+    of an earlier run the agent says again first wakes no one (the answer
+    route's `replayed`). A floor's answer keeps the report made under ten
+    minutes ago: used when it is that fresh, else named as missing. A
+    database that fails meanwhile costs the host's part, never the bundle."""
     from routers.host import leave_request
     if not host_channel.available():
         return None, NO_AGENT
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + HOST_WAIT_S
-    asked = int(time.time())
     answer = host_channel.expect("diagnostics")
     try:
         try:
             await asyncio.to_thread(leave_request, "diagnostics")
-        except (host_channel.NoChannel, OSError) as e:
+        except (host_channel.NoChannel, OSError, psycopg2.Error) as e:
             return None, f"the host agent could not be asked: {e}"
-        while True:
-            try:
-                outcome = await asyncio.wait_for(answer, max(0.0, deadline - loop.time()))
-            except asyncio.TimeoutError:
-                return None, f"the host agent did not answer within {HOST_WAIT_S} s"
-            # The next answer's waiter before anything awaits: it may come now
-            answer = host_channel.expect("diagnostics")
-            row = (await asyncio.to_thread(
-                db_query, "SELECT report, detail FROM host_requests WHERE verb = 'diagnostics'"))[0]
-            report = host_channel.read_report(row["report"])
-            if outcome != "done" or (report is not None and report["made_at"] >= asked):
-                break
+        try:
+            outcome = await asyncio.wait_for(answer, HOST_WAIT_S)
+        except asyncio.TimeoutError:
+            return None, f"the host agent did not answer within {HOST_WAIT_S} s"
     finally:
         host_channel.forget("diagnostics", answer)
+    try:
+        row = (await asyncio.to_thread(
+            db_query, "SELECT report, detail FROM host_requests WHERE verb = 'diagnostics'"))[0]
+    except psycopg2.Error as e:
+        return None, f"the host agent's answer could not be read: {e}"
+    report = host_channel.read_report(row["report"])
     if outcome == "failed":
         return None, f"the host agent's diagnostics failed: {row['detail']}"
     if row["report"] is None:
@@ -179,8 +176,9 @@ async def collect(warrant: dict, granted: list, node_pubkey: str) -> bytes:
         host, why = await host_report()
         if host is None:
             unavailable = {"system.host": why, "logs": why}
+    extra = _p2p_extra()            # the DHT's and the client's state: the loop's
     return await asyncio.to_thread(lambda: diag_bundle.collect(
-        db_dsn=settings.database_url, sources=sources(host, unavailable),
+        db_dsn=settings.database_url, sources=sources(host, unavailable, extra),
         warrant=warrant, granted=granted, node_pubkey=node_pubkey))
 
 
@@ -233,6 +231,8 @@ async def _start_when_listening(built: DiagWorker) -> None:
 
 
 async def stop() -> None:
+    """With its client — and earlier, as the Web UI's server begins to stop:
+    a bundle collected after it would read a node that answers no more."""
     global _worker, _listener, _starting
     starting, _starting = _starting, None
     if starting is not None and not starting.done():
@@ -297,3 +297,6 @@ async def end_session() -> None:
         except asyncio.CancelledError:
             pass
     diag_events.clear_session_marker(data_dir())
+
+
+serving.on_web_stopping(stop)

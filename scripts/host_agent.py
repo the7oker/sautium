@@ -932,13 +932,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def answer(verb: str, outcome: str, detail: str, release: Optional[str], report: Optional[str],
-           key: bytes, api: str = NODE_API) -> bool:
+           key: bytes, api: str = NODE_API, replayed: bool = False) -> bool:
     """The answer through the node's API, signed as auth_hmac's canonical
     string has it with the channel's key: False when the node did not take it
     (logged). The node may be hostile: no redirect, ten seconds, its body
-    unread."""
+    unread. `replayed`: an earlier run's answer the node missed, said again
+    — no answer to what the node asks now."""
     body = json.dumps({"verb": verb, "outcome": outcome, "detail": detail[:DETAIL_MAX],
-                       "release": release, "report": report}).encode()
+                       "release": release, "report": report, "replayed": replayed}).encode()
     ts, nonce = str(int(time.time())), secrets.token_hex(16)
     digest = hashlib.sha256(body).hexdigest()
     sig = hmac.new(key, f"POST\n{ANSWER_PATH}\n{ts}\n{nonce}\n{digest}".encode(), hashlib.sha256).hexdigest()
@@ -1039,12 +1040,13 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
         state = load_state(root)
         failed = False
 
-        def said(verb: str, outcome: str, detail: str, release: Optional[str], report: Optional[str]) -> None:
+        def said(verb: str, outcome: str, detail: str, release: Optional[str], report: Optional[str],
+                 replayed: bool = False) -> None:
             nonlocal failed
             failed = failed or outcome == "failed"
             log(f"{verb}: {outcome} — {detail}")
             unsent = state.setdefault("unsent", {})
-            if answer(verb, outcome, detail, release, report, key, api):
+            if answer(verb, outcome, detail, release, report, key, api, replayed):
                 unsent.pop(verb, None)
             else:
                 # The node was down (an update that could not start it): the
@@ -1056,7 +1058,7 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
             save_state(state, root)
 
         for verb, (outcome, detail, release) in list((state.get("unsent") or {}).items()):
-            said(verb, outcome, detail, release, None)
+            said(verb, outcome, detail, release, None, replayed=True)
         asked, _left = drain(root)
         try:
             resumed = resume(state, time.time() if now is None else now, root)

@@ -178,8 +178,8 @@ def node(scratch_dsn, tmp_path, monkeypatch):
         after, with `resend`, the answer of a run the node missed, sent again
         first as the agent's run sends it: without its report."""
         if state.resend:
-            await host.answer(host.Answer(verb="diagnostics", outcome="done", detail="made"),
-                              _Request("host-agent"))
+            await host.answer(host.Answer(verb="diagnostics", outcome=state.resend, detail="earlier",
+                                          replayed=True), _Request("host-agent"))
             await asyncio.sleep(0)
         if state.floor:
             outcome, detail, report = "floor", "made 30 s ago", None
@@ -358,13 +358,14 @@ def test_no_agent_a_silent_one_and_a_floor_say_so(node, monkeypatch):
     assert "did not reach the node" in json.loads(_bundle(node)["manifest.json"])["unavailable"]["system.host"]
 
 
-def test_an_answer_sent_again_is_waited_past_and_keeps_the_report(node):
+@pytest.mark.parametrize("again", ["done", "failed", "floor"])
+def test_an_answer_sent_again_is_waited_past_and_keeps_the_report(node, again):
     _handle(node, _W(node, ["system"]))
     _bundle(node)
     with node.conn.cursor() as cur:
         cur.execute("UPDATE host_requests SET report = jsonb_set(report::jsonb, '{made_at}', "
                     "to_jsonb(extract(epoch FROM now())::int - 700))::text WHERE verb = 'diagnostics'")
-    node.agent, node.resend = {}, True
+    node.agent, node.resend = {}, again
     _handle(node, _W(node, ["system"]))
     assert json.loads(_bundle(node)["manifest.json"])["unavailable"] == {}
     with node.conn.cursor() as cur:
@@ -641,3 +642,25 @@ def test_a_report_is_bounded_by_its_logs_never_cut_as_json():
     assert host_channel.read_report("== versions\nLinux\n") is None
     page = host_channel.report_page(report)
     assert page["report"].startswith("== power\nthrottled=0x0\n") and page["made_at"].startswith("1970")
+
+
+def test_the_worker_ends_before_the_web_ui_stops_answering(monkeypatch):
+    import uvicorn
+
+    import diag_node
+    import serving
+    assert diag_node.stop in serving._web_stopping
+    order = []
+
+    async def stopping():
+        order.append("diag")
+
+    async def closed(self, sockets=None):
+        order.append("listener")
+    monkeypatch.setattr(serving, "_web_stopping", [stopping])
+    monkeypatch.setattr(uvicorn.Server, "shutdown", closed)
+    web = serving.Server(uvicorn.Config(None), ready=serving.WEB_LISTENING)
+    peer = serving.Server(uvicorn.Config(None), what="the peer surface", ready=asyncio.Event())
+    asyncio.run(peer.shutdown())
+    asyncio.run(web.shutdown())
+    assert order == ["listener", "diag", "listener"]

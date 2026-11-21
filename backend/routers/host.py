@@ -41,6 +41,8 @@ class Answer(BaseModel):
     detail: str = Field("", max_length=host_channel.DETAIL_MAX)
     release: Optional[str] = Field(None, max_length=host_channel.RELEASE_MAX)
     report: Optional[str] = Field(None, max_length=host_channel.REPORT_MAX)
+    # An earlier run's answer the node missed, said again (scripts/host_agent.py)
+    replayed: bool = False
 
 
 @router.get("")
@@ -147,7 +149,7 @@ async def answer(body: Answer, request: Request) -> dict:
         # report: the one kept stays
         "report = CASE WHEN EXCLUDED.verb = 'diagnostics' AND EXCLUDED.outcome = 'done' "
         "AND EXCLUDED.report IS NOT NULL THEN EXCLUDED.report ELSE host_requests.report END",
-        body.model_dump())
+        body.model_dump(exclude={"replayed"}))
     logger.info("the host agent answered %s: %s", body.verb, body.outcome)
     if body.verb == "update" and body.outcome in ("failed", "undone"):
         from db_pool import get_conn
@@ -157,7 +159,8 @@ async def answer(body: Answer, request: Request) -> dict:
                 "step": "host agent", "outcome": body.outcome, "error": body.detail[:500]})
     from routers.settings import notify_library_subscribers
     notify_library_subscribers()
-    host_channel.answered(body.verb, body.outcome)
+    if not body.replayed:
+        host_channel.answered(body.verb, body.outcome)
     if body.verb in ("check", "update"):
         # A release offered, or no longer; an update's end: the notices
         # update.available and update.result
