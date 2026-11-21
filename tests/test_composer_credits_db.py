@@ -587,6 +587,7 @@ def test_a_composer_who_heads_the_album_has_it_on_his_composed_shelf(cur, librar
     _scan()
     page = get_artist(_artist_id(cur, BACH), sort="release_year", mbid=None)
     assert page["albums"] == [] and [a["title"] for a in page["composed"]] == ["Goldberg Variations"]
+    assert page["discography_pending"] is False       # no slice is ever asked for a composer
 
 
 def test_an_opened_composer_page_asks_once_whatever_came_of_it(cur, library, templates, monkeypatch):

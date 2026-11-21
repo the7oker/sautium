@@ -796,8 +796,12 @@ def get_artist(
     # slice; until then the discography sync answers no_source and the
     # card stays bare. Say so on the card instead of looking broken — the
     # notices channel carries when the network is asked next.
+    # An artist who only composes here engages nothing, so no slice of his
+    # name is ever asked for: the card promises nothing it will not get.
     from discography import _mb_source_covers
-    artist["discography_pending"] = not _mb_source_covers(artist["name"])
+    composer_only = db_query_one(f"SELECT {ARTIST_COMPOSER_ONLY} AS x FROM artists a "
+                                 "WHERE a.id = %(id)s::uuid", {"id": artist_id})["x"]
+    artist["discography_pending"] = not composer_only and not _mb_source_covers(artist["name"])
 
     # Namesake split metadata for the screen: the selected namesake's caption +
     # flags (dominant landing? owns the external photo/similar block?), plus the
