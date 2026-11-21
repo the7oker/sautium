@@ -2,7 +2,8 @@
 traces waits for their own decision on the request sheet, against a real
 PostgreSQL built from the migrations (desktop/p2p/diag_events): nothing of it
 is collected or leaves before they decide; their decision keeps what support
-asked for and they ticked, and wakes the launcher's worker and the notices;
+asked for and they ticked, and wakes the node's support worker
+(desktop/p2p/diag_worker.py, both runtimes') and the notices;
 the bundle carries only that, naming what was left out; a request the switch
 withdrew or that expired cannot be sent; a request for facts about the node
 alone is answered as before. Skipped without a cluster."""
@@ -14,7 +15,6 @@ import select
 import sys
 import tarfile
 import time
-import types
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -194,7 +194,8 @@ def test_the_bundle_carries_only_the_content_the_person_ticked(conn, scratch_dsn
     diag_events.record(conn, "backend.crashed", {"rc": 1, "log_tail": "the crash's tail"})
     w = _warrant(["events", "logs", "chat"])
 
-    members = _members(diag_bundle.collect(db_dsn=scratch_dsn, data_dir=tmp_path, config={},
+    sources = diag_bundle.launcher_sources({}, tmp_path, probe_backend=False)
+    members = _members(diag_bundle.collect(db_dsn=scratch_dsn, sources=sources,
                                            warrant=w, granted=granted, node_pubkey="ab" * 32))
 
     manifest = json.loads(members["manifest.json"])
@@ -207,20 +208,20 @@ def test_the_bundle_carries_only_the_content_the_person_ticked(conn, scratch_dsn
 
 
 def _node(scratch_dsn, tmp_path, monkeypatch, master_addr=None):
-    """P2PManager's support worker on a namespace of its own: the warrant's signature,
-    the account and the box are the protocol's own tests'; the bundle a
-    recorder; the upload what it was handed."""
-    from desktop import config_manager, node_identity
+    """The support worker both runtimes run (desktop/p2p/diag_worker.py): the
+    warrant's signature is the protocol's own tests'; the box a marker; the
+    bundle a recorder; the upload what it was handed. `node.handle(w, addr)`
+    and `node.decided()` run its two entries."""
     from desktop.p2p import diag_protocol
-    from desktop.p2p.p2p_manager import P2PManager
+    from desktop.p2p.diag_worker import DiagIdentity, DiagWorker
 
     collected, uploaded = [], []
 
-    def collect(**kw):
-        collected.append((kw["warrant"]["id"], kw["granted"]))
+    async def collect(warrant, granted, node_pubkey):
+        collected.append((warrant["id"], granted))
         return b"tar"
 
-    async def upload(warrant_id, stage, addr):
+    async def upload(ident, warrant_id, stage, addr):
         uploaded.append((warrant_id, stage.read_bytes(), addr))
         conn = psycopg2.connect(scratch_dsn)
         conn.autocommit = True
@@ -230,19 +231,19 @@ def _node(scratch_dsn, tmp_path, monkeypatch, master_addr=None):
             conn.close()
         return True
 
-    monkeypatch.setattr(diag_protocol, "verify_warrant", lambda warrant, own: (True, None))
-    monkeypatch.setattr(diag_protocol, "encrypt_to", lambda seed, to, data: b"boxed:" + data)
-    monkeypatch.setattr(diag_bundle, "collect", collect)
-    monkeypatch.setattr(node_identity, "get_account_info", lambda: {"public_key_hex": "cd" * 32})
-    monkeypatch.setattr(node_identity, "get_private_key_raw", lambda: b"\0" * 32)
-    monkeypatch.setattr(config_manager, "get_data_dir", lambda: tmp_path)
-    node = types.SimpleNamespace(db_dsn=scratch_dsn, config={}, _reachability_status=None,
-                                 _master_addr=master_addr, get_status=lambda: {})
-    for name in ("_diag_db", "_notify_blocking", "_diag_handle_warrant", "_diag_collect",
-                 "_diag_decided"):
-        setattr(node, name, types.MethodType(getattr(P2PManager, name), node))
-    node._diag_upload = upload
-    return node, collected, uploaded
+    async def find_master(master):
+        return []
+
+    monkeypatch.setattr(diag_protocol, "verify_warrant", lambda warrant, own, **kw: (True, None))
+    ident = DiagIdentity("cd" * 32, lambda message: b"sig", lambda data: b"boxed:" + data)
+    worker = DiagWorker(scratch_dsn, identity=lambda: ident, stage_dir=tmp_path / "diag",
+                        find_master=find_master, collect=collect)
+    worker._master_addr = master_addr
+    worker._upload = upload
+    worker.handle = lambda w, addr: worker._handle_warrant(ident, w, addr)
+    worker.decided = lambda: worker._decided(ident)
+    worker.stage = worker._stage
+    return worker, collected, uploaded
 
 
 def test_the_worker_waits_for_the_person_then_sends_what_they_ticked(
@@ -250,27 +251,27 @@ def test_the_worker_waits_for_the_person_then_sends_what_they_ticked(
     addr = ("192.0.2.1", 20000)
     node, collected, uploaded = _node(scratch_dsn, tmp_path, monkeypatch, master_addr=addr)
     w = _warrant(CONTENT)
-    stage = diag_events.diag_dir(tmp_path) / f"{w['id']}.box"
+    stage = node.stage(w["id"])
     stage.write_bytes(b"an earlier release's bundle")
     listener = psycopg2.connect(scratch_dsn)
     listener.autocommit = True
     with listener.cursor() as cur:
         cur.execute("LISTEN sautium_notices")
     try:
-        asyncio.run(node._diag_handle_warrant(w, addr))
+        asyncio.run(node.handle(w, addr))
         assert select.select([listener], [], [], 5)[0], "the notices were not woken"
     finally:
         listener.close()
     assert collected == [] and uploaded == [] and not stage.exists()
-    asyncio.run(node._diag_handle_warrant(w, addr))           # re-delivered: still waits
+    asyncio.run(node.handle(w, addr))           # re-delivered: still waits
     assert collected == [] and uploaded == []
 
     assert diag_events.decide(conn, w["id"], ["logs"])
-    asyncio.run(node._diag_decided())
+    asyncio.run(node.decided())
 
     assert collected == [(w["id"], ["logs"])]
     assert uploaded == [(w["id"], b"boxed:tar", addr)]
-    asyncio.run(node._diag_handle_warrant(w, addr))           # re-delivered: sent, not collected again
+    asyncio.run(node.handle(w, addr))           # re-delivered: sent, not collected again
     assert len(collected) == 1
 
 
@@ -283,8 +284,8 @@ def test_a_decision_the_switch_withdrew_is_closed_without_collecting(
     assert diag_events.decide(conn, w["id"], ["chat", "logs"])
     _switch(conn, False)
     _switch(conn, True)
-    asyncio.run(node._diag_decided())
-    asyncio.run(node._diag_handle_warrant(w, addr))           # re-delivered
+    asyncio.run(node.decided())
+    asyncio.run(node.handle(w, addr))           # re-delivered
     assert collected == [] and uploaded == []
     assert diag_events.receive_warrant(conn, w)["error"] == diag_events.WITHDRAWN
 
@@ -293,29 +294,27 @@ def test_the_masters_reconnect_collects_a_decision_whose_wake_was_missed(
         conn, scratch_dsn, tmp_path, monkeypatch):
     """The decision's NOTIFY reached no LISTEN (the connection was down):
     the master's reconnect looks for decisions too, before it resumes."""
-    from desktop.p2p.p2p_manager import P2PManager
-
     addr = ("192.0.2.1", 20000)
-    node, collected, uploaded = _node(scratch_dsn, tmp_path, monkeypatch, master_addr=addr)
+    node, collected, uploaded = _node(scratch_dsn, tmp_path, monkeypatch)
     w = _warrant(CONTENT)
     diag_events.receive_warrant(conn, w)
     assert diag_events.decide(conn, w["id"], ["chat"])
 
     async def run():
-        done = asyncio.Event()
+        reported = asyncio.Event()
 
-        async def report():
-            done.set()
-        node._running = True
-        node._diag_queue = asyncio.Queue()
-        node._diag_allowed = lambda: True
-        node._diag_resume = types.MethodType(P2PManager._diag_resume, node)
-        node._diag_report = report
-        node._diag_queue.put_nowait(("resume", addr))
-        worker = asyncio.create_task(P2PManager._diag_worker(node))
-        await asyncio.wait_for(done.wait(), 10)
-        node._running = False
-        worker.cancel()
+        async def allowed():
+            return node._identity()
+
+        async def report(ident):
+            if collected:              # the start's own report comes before the reconnect
+                reported.set()
+        node._allowed = allowed
+        node._report = report
+        await node.start()
+        node.master_reachable(addr)
+        await asyncio.wait_for(reported.wait(), 10)
+        await node.stop()
     asyncio.run(run())
     assert collected == [(w["id"], ["chat"])]
     assert [u[0] for u in uploaded] == [w["id"]]
@@ -327,7 +326,7 @@ def test_a_decision_without_the_masters_address_waits_staged_for_its_reconnect(
     w = _warrant(CONTENT)
     diag_events.receive_warrant(conn, w)
     assert diag_events.decide(conn, w["id"], [])
-    asyncio.run(node._diag_decided())
+    asyncio.run(node.decided())
     assert collected == [(w["id"], [])] and uploaded == []
     assert diag_events.resumable_warrants(conn) == [w["id"]]
 
@@ -337,7 +336,7 @@ def test_a_request_for_facts_alone_is_collected_and_sent_at_once(
     addr = ("192.0.2.1", 20000)
     node, collected, uploaded = _node(scratch_dsn, tmp_path, monkeypatch, master_addr=addr)
     w = _warrant(["system", "events"])
-    asyncio.run(node._diag_handle_warrant(w, addr))
+    asyncio.run(node.handle(w, addr))
     assert collected == [(w["id"], [])] and [u[0] for u in uploaded] == [w["id"]]
 
 

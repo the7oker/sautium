@@ -221,10 +221,12 @@ def _load_secret() -> Optional[bytes]:
     return None
 
 
-def _sign_headers(method: str, path_and_query: str, body: bytes) -> dict:
+def _sign_headers(method: str, path_and_query: str, body: bytes,
+                  secret: Optional[bytes] = None) -> dict:
     """The signature headers for the request (backend/auth_hmac.py), or {}
-    if the secret isn't available yet."""
-    secret = _load_secret()
+    if the secret isn't available yet. `secret`: a backend's own, held by the
+    caller (a Docker node reading its own API) — else the identity folder's."""
+    secret = secret or _load_secret()
     if not secret:
         return {}
     ts = str(int(time.time()))
@@ -312,8 +314,10 @@ class BackendAPIClient:
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000",
                  peer: Optional[peer_auth.PeerIdentity] = None,
-                 expected_pubkey: Optional[str] = None):
+                 expected_pubkey: Optional[str] = None,
+                 secret: Optional[bytes] = None):
         self.base_url = base_url.rstrip("/")
+        self._secret = secret               # the local backend's, when the caller holds it
         # A peer channel must authenticate as a node: the pinning context
         # refuses certs without a valid node-key binding, and locks onto the
         # first verified key when the caller has no expectation
@@ -341,7 +345,7 @@ class BackendAPIClient:
 
     def _auth_headers(self, method: str, path: str, data: bytes) -> dict:
         if self.peer is None:
-            return _sign_headers(method, path, data)
+            return _sign_headers(method, path, data, self._secret)
         if not self._server_pubkey and path != "/health":
             self.get_health()            # learn the recipient before signing
         if not self._server_pubkey:
@@ -682,7 +686,7 @@ class BackendAPIClient:
                 url = f"{self.base_url}{path}"
                 req = urllib.request.Request(url, method="GET")
                 req.add_header("Accept", "text/event-stream")
-                for k, v in _sign_headers("GET", path, b"").items():
+                for k, v in _sign_headers("GET", path, b"", self._secret).items():
                     req.add_header(k, v)
                 # No read timeout: an idle channel is normal, and the server
                 # sends a keepalive comment every 20s to prove it is alive.

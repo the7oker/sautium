@@ -440,7 +440,7 @@ class LauncherApp(ctk.CTk):
         try:
             conn.autocommit = True
             spooled = diag_events.drain_spool(conn, data_dir)
-            detail = diag_bundle.system_facts(self.config, conn)
+            detail = diag_bundle.system_facts(diag_bundle.launcher_sources(self.config, data_dir), conn)
             detail["unclean_shutdown"] = previous_session is not None
             detail["previous_session"] = previous_session
             detail["spooled_events"] = spooled

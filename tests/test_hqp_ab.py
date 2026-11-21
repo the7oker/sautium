@@ -1031,7 +1031,8 @@ def test_no_path_that_leaves_the_node_names_the_record():
     paths = ["backend/share.py", "backend/seed_export.py", "backend/seed_import.py",
              "backend/routers/sync.py", "backend/routers/peer_diag.py", "backend/routers/support.py",
              "desktop/p2p/sync_queries.py", "desktop/p2p/sync_server.py", "desktop/p2p/sync_walk.py",
-             "desktop/sync_client.py", "desktop/p2p/diag_events.py", "desktop/p2p/diag_protocol.py"]
+             "desktop/sync_client.py", "desktop/p2p/diag_events.py", "desktop/p2p/diag_protocol.py",
+             "desktop/p2p/diag_worker.py", "desktop/diag_bundle.py", "backend/diag_node.py"]
     for rel in paths:
         assert "hqp_ab_" not in (root / rel).read_text(encoding="utf-8"), rel
 

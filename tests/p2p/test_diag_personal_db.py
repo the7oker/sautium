@@ -84,10 +84,14 @@ def test_what_was_kept_before_is_scrubbed_once_at_startup(conn):
     assert _details(conn, "support_reports") == [CLEAN]
 
 
-class _Backend:
+class _Backend(diag_bundle.BackendReads):
     """The node's own backend API, answering what system_facts asks."""
 
-    def _get_json(self, path, timeout=None):
+    def __init__(self):
+        pass
+
+    def get(self, path, timeout=5):
+        assert path in self.routes, path
         return {
             "/health": {"status": "degraded", "checks": {
                 "database": "error: could not open '/home/someone/pgdata/postmaster.pid' at 192.0.2.20",
@@ -99,12 +103,13 @@ class _Backend:
 
 
 def test_the_facts_sent_at_every_start_carry_states_not_paths_or_addresses(conn, monkeypatch):
-    monkeypatch.setattr(diag_bundle, "_backend_client", lambda config: _Backend())
     with conn.cursor() as cur:
         cur.execute("INSERT INTO user_settings (key, value) VALUES ('p2p.reachability', %s), "
                     "('p2p.reachability_detail', %s)",
                     (json.dumps("reachable"), json.dumps("wan 8.8.8.8:24001 via router 192.0.2.1")))
-    facts = diag_bundle.system_facts({"ports": {"web": 18000}}, conn)
+    sources = diag_bundle.launcher_sources({"ports": {"web": 18000}}, Path("/nonexistent"))
+    sources.backend = _Backend()
+    facts = diag_bundle.system_facts(sources, conn)
     text = json.dumps(facts)
     for gone in ("someone", "/Music", "192.0.2", "8.8.8.8", "reachability_detail"):
         assert gone not in text, gone

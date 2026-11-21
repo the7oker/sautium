@@ -56,8 +56,8 @@ def test_tail_cuts_at_a_line_boundary(tmp_path):
 
 
 def test_report_carries_scrubbed_log_tails_and_the_failure(tmp_path, monkeypatch):
-    monkeypatch.setattr(diag_bundle, "system_facts",
-                        lambda config, **kw: {"commit": "abc1234", **kw})
+    monkeypatch.setattr(diag_bundle, "system_facts", lambda sources, conn=None: {
+        "commit": "abc1234", "asks_the_backend": sources.backend is not None})
     (tmp_path / "launcher.log").write_text(
         "INFO: Backend started\n"
         "ERROR: connect postgresql://sautium:hunter2@127.0.0.1:15432/sautium refused\n"
@@ -73,7 +73,7 @@ def test_report_carries_scrubbed_log_tails_and_the_failure(tmp_path, monkeypatch
     assert "State: Failed to start services" in text
     assert "Detail: Waiting for backend to be ready..." in text
     assert '"commit": "abc1234"' in text
-    assert '"probe_backend": false' in text              # the report never asks a dead port
+    assert '"asks_the_backend": false' in text           # the report never asks a dead port
     assert "== launcher.log ==" in text
     assert f"== backend.log (last {diag_bundle.REPORT_LOG_TAIL_BYTES // 1024} KB) ==" in text
     assert text.endswith(lines[-1] + "\n") and "line 00000 " not in text

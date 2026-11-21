@@ -20,30 +20,28 @@ from desktop import diag_bundle  # noqa: E402
 PERSONAL = ("someone", "Someone", "8.8.8.8", "192.0.2", "example.com", "pixel.lan")
 
 
-class _NodeApi:
-    """The node's own backend API, answering what the facts ask."""
+class _NodeApi(diag_bundle.BackendReads):
+    """The node's own backend API, answering what the facts ask — through
+    the collectors' one list of routes."""
 
-    def _get_json(self, path, timeout=None):
+    def __init__(self):
+        pass
+
+    def get(self, path, timeout=5):
+        assert path in self.routes, path
         return {
             "/api/settings/sync": {"reachability_detail": "wan 8.8.8.8:24001 via 192.0.2.1"},
             "/api/settings/library": {"music_path": "/home/someone/Music", "total_tracks": 3},
             "/api/settings/musicbrainz/status": {"state": "none"},
             "/health": {"status": "healthy", "checks": {
                 "music_library": {"path": "/home/someone/Music", "exists": True}}},
+            "/stats": {"tracks": 3},
+            "/scan/status": {"current_file": "/home/someone/Music/A Band/x.flac"},
+            "/enrich/status": {"state": "idle"},
         }.get(path)
-
-    def get_stats(self):
-        return {"tracks": 3}
-
-    def scan_status(self):
-        return {"current_file": "/home/someone/Music/A Band/x.flac"}
-
-    def enrich_status(self):
-        return {"state": "idle"}
 
 
 def test_the_structural_scopes_name_no_path_address_or_person(scratch_dsn, tmp_path, monkeypatch):
-    monkeypatch.setattr(diag_bundle, "_backend_client", lambda config: _NodeApi())
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     with conn.cursor() as cur:
@@ -71,9 +69,11 @@ def test_the_structural_scopes_name_no_path_address_or_person(scratch_dsn, tmp_p
     warrant = {"id": str(uuid.uuid4()), "scopes": ["system", "settings", "p2p", "jobs", "events"],
                "since": None}
 
-    data = diag_bundle.collect(db_dsn=scratch_dsn, data_dir=tmp_path, config=config,
-                               warrant=warrant, granted=[], node_pubkey="ab" * 32,
-                               extra={"reachability": {"wan": "8.8.8.8", "lan": "192.0.2.3"}})
+    sources = diag_bundle.launcher_sources(
+        config, tmp_path, extra={"reachability": {"wan": "8.8.8.8", "lan": "192.0.2.3"}})
+    sources.backend = _NodeApi()
+    data = diag_bundle.collect(db_dsn=scratch_dsn, sources=sources,
+                               warrant=warrant, granted=[], node_pubkey="ab" * 32)
 
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
         members = {m.name: tar.extractfile(m).read().decode("utf-8") for m in tar.getmembers()}
