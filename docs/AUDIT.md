@@ -91,7 +91,10 @@ A. Outbound destinations. List every host the software can connect to, with
      desktop/p2p/dht_service.py (DHT bootstrap routers), desktop/p2p/ and
        backend/p2p_app.py (connections to other nodes: sync, relay, chat),
      backend/routers/peer_diag.py, desktop/p2p/diag_events.py,
-       desktop/diag_bundle.py (support diagnostics to the master node),
+       desktop/p2p/diag_worker.py (the warrant's check, the POSTs to the
+       master), desktop/diag_bundle.py, backend/diag_node.py (a Docker
+       node's sources: its own API on loopback, the host agent's report)
+       (support diagnostics to the master node),
      backend/providers/, backend/claude_code_runner.py,
        backend/codex_runner.py (assistant providers — only with the user's
        sign-in or key),

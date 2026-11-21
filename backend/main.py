@@ -827,6 +827,11 @@ async def lifespan(app: FastAPI):
     # Everything a peer is told about this node points here — never at the
     # Web UI port, whose page carries the API secret.
     global _p2p_server_task, _peer_ready, _lan_discovery
+    if settings.serves_peer_surface:
+        # Support diagnostics' start-of-life note where this backend ships
+        # them (diag_node; a launcher-mode backend's launcher records its own)
+        import diag_node
+        diag_node.begin_session()
     announce_port = _peer_port()
     _peer_ready = asyncio.Event()
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
@@ -1022,6 +1027,7 @@ async def lifespan(app: FastAPI):
             _dht_online_task = asyncio.create_task(_dht_online())
         except Exception as e:
             logger.error(f"DHT startup failed: {e}")
+            _diag_record("p2p.start_failed", {"step": "dht", "error": str(e)[:500]})
             _dht_service = None
     # The client half of chat (desktop/p2p/chat_client.py): the Support
     # contact, the handshakes, the outbox, the history, the wake streams it
@@ -1037,6 +1043,7 @@ async def lifespan(app: FastAPI):
             await p2p_chat.start_client()
         except Exception as e:
             logger.error(f"chat client start failed: {e}", exc_info=True)
+            _diag_record("p2p.start_failed", {"step": "chat client", "error": str(e)[:500]})
         if _upnp is not None:
             _host_tasks.append(asyncio.create_task(_map_peer_port()))
 
@@ -1272,6 +1279,10 @@ async def lifespan(app: FastAPI):
     # Cleanup resources
     import model_cache
     model_cache.shutdown()
+
+    if settings.serves_peer_surface:
+        import diag_node
+        await diag_node.end_session()
 
     from db_pool import close_pool
     close_pool()

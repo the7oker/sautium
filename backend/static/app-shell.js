@@ -16314,7 +16314,7 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
-            Versions, the power supply's flag, the disk, the last lines of Sautium's logs. Nothing is sent anywhere: the report is shown here.
+            Versions, the power supply's flag, the disk, the last lines of Sautium's logs. Collect shows the report here and sends nothing. A request from Sautium support takes the machine's facts too, and its logs only if you tick them.
           </p>
           <button class="profile-btn primary" data-collect>Collect</button>
           <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>

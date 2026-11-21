@@ -501,8 +501,11 @@ See:
   strangers' requests in 64 MiB tasks; arming is a release decision, see
   P2P-SYNC-INTEGRITY.md § "Pricing formula v1"), `support.diagnostics_enabled`
   (default on: answer the master's signed diagnostic warrants and send
-  content-free event reports — the LAUNCHER does both; a Docker node records
-  the events and sends nothing — silent for facts about the node alone, the
+  content-free event reports — every node's one shipper does both, the
+  launcher's and, since 2026-11-21 (B-99), a Docker node's that owns its peer
+  surface, the same worker (`desktop/p2p/diag_worker.py`); on a Linux Docker
+  node the machine's facts and the containers' logs come from the host
+  agent's `diagnostics` — silent for facts about the node alone, the
   switch and the "Support" row are the disclosure; a warrant that also names
   conversations, logs or playback traces waits, whole, for the person's own
   ticks on the request sheet, since 2026-11-04; P2P_NETWORK.md § "Support
@@ -565,7 +568,10 @@ See:
   — after any failure past the node's stop, and at the next start for an
   update a run did not finish; a release that did not start is not tried
   again for a day),
-  `diagnostics` — asked by the NAME of an empty file in `./run/requests`,
+  `diagnostics` (its report JSON by section since 2026-11-21: the machine's
+  facts apart from the containers' logs by name, so a support bundle takes
+  the facts without a tick and the logs only with one) — asked by the NAME
+  of an empty file in `./run/requests`,
   the one folder of the agent's a container writes. **The host's side never
   opens a path a container can write**: the folder is emptied by handles
   (links unlinked, FIFOs never opened), its own files live in `./host/`
@@ -585,8 +591,10 @@ See:
   that only the launcher asked for MB slices), the client half of chat,
   `desktop.p2p.chat_client` (since 2026-11-17 — before that a Docker node
   seeded no Support contact, made no handshake, delivered nothing and took
-  itself for reachable) and the DHT, `desktop.p2p.dht_service`, instead of
-  mirroring them.
+  itself for reachable), the support diagnostics worker,
+  `desktop.p2p.diag_worker` (since 2026-11-21 — before that a Docker node
+  answered no warrant and sent no report) and the DHT,
+  `desktop.p2p.dht_service`, instead of mirroring them.
   Anything the two surfaces must agree on *exactly* — the
   seal-verification gate, the carry SQL, the DHT announce query, the walk —
   lives there and is imported, not copied.
@@ -899,6 +907,7 @@ toast takes no pointer events and never blocks the user (see
 | `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, comparisons by ear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place. Also the one "same listen" rule (`same_listen`, `LISTENS_LOCK_KEY`) and the repair of pre-2026-09-24 naive listen starts |
 | `backend/lastfm_history.py` + `backend/canon/scrobbles.py` | The Last.fm history import: the walk into the waiting room (single flight, resumable, event-triggered) and the canon that places waiting scrobbles on canonical tracks (stages A–E, one consumer thread woken by events; `python -m canon.scrobbles --eval / --report` measure it read-only) |
+| `desktop/p2p/diag_worker.py` + `backend/diag_node.py` | Support diagnostics on a node: the one worker both runtimes run (warrants verified, the person's decision awaited, bundles collected over the runtime's `diag_bundle.Sources`, boxed and uploaded, event reports shipped; one connection of its own), and a Docker node's side of it — built beside its chat client, its LISTEN, its sources (a config view, its own API on loopback through `diag_bundle.BACKEND_READS`, the host agent's report asked and awaited as an event), `node.started` once the Web UI's server listens |
 | `desktop/p2p/chat_client.py` | The client half of chat, one implementation for the launcher's P2PManager and the Docker backend (`p2p_chat.start_client`): the friends' addresses, the Support contact and the handshakes, the outbox (direct push, relay forward with the recipient's receipt, the master's Worker mailbox — "kept", not delivered, until a proof), the history pull, the wake streams it holds, the reachability verdict; the master runs none, a launcher-mode backend builds none (one deliverer per database) |
 | `desktop/p2p/mb_slice_cycle.py` + `desktop/p2p/slice_sources.py` | The MB slice requester shared by the launcher's P2PManager and the Docker backend (one pool of every reason canon waits on, drawn at random in one form and asked at one pace — imported-scrobble names once their import session stops —, `mb.search_sources`, `mb_slice.status`) and the source finder both slice families share (every DHT holder; the directory and the master hint whenever no primary source is usable; the verified set kept between runs) |
 | `backend/track_similarity.py` | The ONE "similar tracks" scorer — recall by mean-KNN plus a kin arm, rank by segment chamfer minus a Last.fm tag bonus — behind radio, the Now Playing Similar shelf, `play-similar` and Discovery's seed (`_SEED_SCORE` imports its weights). Radio itself (the drifting batch fill, the refill observer on the status tick, `manager.radio_mode`) is `backend/routers/player.py` § "Radio mode"; the decisions are in PROGRESS.md § "Radio and track similarity" |

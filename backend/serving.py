@@ -266,6 +266,16 @@ class Server(uvicorn.Server):
         await super().shutdown(sockets=sockets)
 
 
+# The Web UI's server as the Docker entrypoint starts it: where it listens,
+# and the moment it does. What the node reads of itself over its own API
+# (backend/diag_node.py: node.started, a support bundle) waits for that
+# moment, never a probe of its port. A reload supervisor's server (a
+# development opt-in) says no moment.
+WEB_HOST = os.getenv("UVICORN_HOST", "0.0.0.0")
+WEB_PORT = int(os.getenv("UVICORN_PORT", "8000"))
+WEB_LISTENING = asyncio.Event()
+
+
 class _Census:
     """The connections a surface holds, in all and from each address — on
     the loop, so no lock. A `shared` address (the Docker gateway, which an

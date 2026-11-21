@@ -8,7 +8,9 @@ handling and history export — the peer surface's store. The CLIENT half
 holds, reachability) is not mirrored: since 2026-11-17 (B-91) this node runs
 the launcher's own, desktop/p2p/chat_client.py, on the launcher's
 ChatService (`start_client` below) — except on the master, which runs none,
-and in launcher mode, where the launcher's client owns the database.
+and in launcher mode, where the launcher's client owns the database. Beside
+the client, and with it, the support diagnostics worker (backend/diag_node.py,
+since 2026-11-21): the client hands it the master's warrants.
 
 Keep in step with desktop/p2p/chat_service.py for the mirrored parts.
 """
@@ -456,8 +458,10 @@ async def start_client():
     an account exists (routers/auth.create_account). Only where this backend
     owns the peer surface: in launcher mode (P2P_SYNC_PORT=0) the launcher's
     client owns this database, and one database has one deliverer. Never on
-    the master (chat_client.master_runs_none)."""
+    the master (chat_client.master_runs_none). The support worker comes up
+    with it and goes down with it (diag_node): one shipper per database."""
     global _client
+    import diag_node
     from config import settings
     from desktop.p2p.chat_client import ChatClient, master_runs_none
     from desktop.p2p.chat_service import ChatService
@@ -468,10 +472,13 @@ async def start_client():
         if keys is None or master_runs_none(keys[0]["public_key_hex"]):
             return None
         identity, seed, previous = keys
+        diag = diag_node.worker(find_master=lambda master: client.find_friend_peers(master))
         client = ChatClient(ChatService(settings.database_url, seed, identity["public_key_hex"],
                                         previous),
-                            identity=client_identity, **_client_deps)
+                            identity=client_identity, on_warrant=diag.warrant,
+                            on_master_reachable=diag.master_reachable, **_client_deps)
         await client.start()
+        await diag_node.start(diag)
         _client = client
         lan = _client_deps.get("lan")
         if lan is not None:
@@ -484,9 +491,11 @@ async def start_client():
 
 async def stop_client() -> None:
     global _client
+    import diag_node
     async with _client_lock:
         client, _client = _client, None
         if client is not None:
+            await diag_node.stop()
             await client.stop()
 
 

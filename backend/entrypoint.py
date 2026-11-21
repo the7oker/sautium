@@ -20,10 +20,9 @@ import uvicorn
 from uvicorn.main import STARTUP_FAILURE
 
 from config import LOGGING_CONFIG, settings
-from serving import Server, heard_until_served, served, undumpable
+from serving import (WEB_HOST as HOST, WEB_LISTENING, WEB_PORT as PORT, Server,
+                     heard_until_served, served, undumpable)
 
-HOST = os.getenv("UVICORN_HOST", "0.0.0.0")
-PORT = int(os.getenv("UVICORN_PORT", "8000"))
 # Reload is a development opt-in: its server is a process of its own, spawned
 # with the credentials in its environment and readable by the agents' user
 # until its lifespan begins (serving.hold_secrets)
@@ -104,7 +103,8 @@ def main() -> int:
     # port authenticates by address (CLAUDE.md rule 5), and a TLS front
     # before it is a client like any other.
     server = Server(uvicorn.Config("main:app", host=HOST, port=PORT, timeout_graceful_shutdown=2,
-                                   log_config=LOGGING_CONFIG, proxy_headers=False))
+                                   log_config=LOGGING_CONFIG, proxy_headers=False),
+                    ready=WEB_LISTENING)
     try:
         server.run()
     except KeyboardInterrupt:

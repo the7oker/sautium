@@ -1457,14 +1457,15 @@ sig}`, Ed25519-signed by the master node key over
 `sautium-diag-warrant:v1:{id}:{issuer}:{target}:{issued_at}:{expires_at}:{scopes}:{since}`
 (`desktop/p2p/diag_protocol.py`). It travels as a `diag_warrant` frame
 down the node's OWN wake stream to the master (relay #0 —
-`_master_wake_loop`), which every launcher node holds anyway: no
+`_master_wake_loop`), which every node holds anyway: no
 discovery, no relay hop, works behind CGNAT. A node that is offline gets
 it parked (`support_warrants.dispatched_at IS NULL`) and pushed the moment
 it subscribes (`peer_chat.set_subscribe_hook` →
 `peer_diag.on_wake_subscribed`), re-pushed on every subscribe until the
 bundle lands — down every stream of the key when the account runs on several
 machines: each node deduplicates it by id, and the first bundle fulfils it
-(the others get 409 and close it). The node (`P2PManager._diag_worker`) accepts the frame only
+(the others get 409 and close it). The node (`desktop/p2p/diag_worker.py`, one worker for
+the launcher's P2PManager and a Docker backend's chat client since 2026-11-21) accepts the frame only
 on the master subscription, then `verify_warrant`: issuer is the pinned
 master, target is itself, not expired, scopes ⊆ the fixed enum, signature
 good. `diag_warrants.id` (PRIMARY KEY, `INSERT … ON CONFLICT DO NOTHING
@@ -1513,7 +1514,7 @@ waiting" — opens the request sheet: what support asked for, the structural
 part that goes either way, one tick per content scope asked, all unticked.
 Send (`POST /api/settings/support/requests/{id}`, `diag_events.decide`)
 stores the decision — `decided_at`, `granted` = asked ∩ ticked — and in the
-same statement NOTIFYs `sautium_diag_consent`, which wakes the launcher's
+same statement NOTIFYs `sautium_diag_consent`, which wakes the node's
 worker to collect and send it, and `sautium_notices`; nothing ticked sends
 the structural part alone. Not now leaves the request waiting until it
 expires. The bundle's manifest names what was left out (`withheld`), so the
@@ -1525,7 +1526,7 @@ an older events scope carried its log tails unasked (the `diag_consent_v1`
 startup step clears the collection; the next delivery collects it anew, a
 content warrant once the person decided — and one the toggle moved after
 is closed instead); a decision the toggle moved after is never collected,
-and is closed on its next delivery. A decision made while the launcher was not
+and is closed on its next delivery. A decision made while the worker was not
 listening is picked up on its LISTEN's every (re)connect and on the master's
 reconnect. The
 master is unchanged: it re-pushes the warrant on every subscribe, and the
@@ -1562,7 +1563,7 @@ a node one release ahead is never refused a whole report over a new kind.
 Before a database exists (wizard, a PostgreSQL that did not start) events
 wait in `<data_dir>/diag/spool.jsonl`, scrubbed as they are written, and are
 drained at the next start.
-The insert trigger NOTIFYs `sautium_diag`; the launcher's worker boxes
+The insert trigger NOTIFYs `sautium_diag`; the node's worker boxes
 the unreported rows — content-free: `LOCAL_ONLY_FIELDS` (log tails) never
 leave the node — and POSTs `/api/diag/report` (256 KiB, 30/h per node,
 friend-only). Since 2026-11-03 an event's detail is stored scrubbed
@@ -1609,11 +1610,38 @@ warrant row the master then signs and sends — so the desk belongs in a
 folder of its own whose sessions load the two servers and nothing that
 acts beside them, `support-act` asking before each call.
 
-**Limits, on purpose.** A non-master Docker node records `diag_events`
-but neither answers warrants nor reports (v1 is for the launcher, where
-the users are): since 2026-11-17 it holds the master's wake stream
-(`desktop/p2p/chat_client.py`), registers no warrant handler and drops a
-warrant that arrives on it. A node with the
+**A Docker node** (since 2026-11-21, B-99; before it a Docker node recorded
+`diag_events` and neither answered warrants nor reported). The worker comes
+up beside the chat client (`backend/diag_node.py`, the client's gate: this
+backend owns its peer surface, an account, not the master — one shipper per
+database, so a launcher-mode backend builds none), LISTENs on
+`sautium_diag`/`sautium_diag_consent` (`db_pool.Listener`, the sweep on every
+connect), and collects over its own `diag_bundle.Sources`: its settings as a
+config view, its own API on loopback signed with its own `.api_secret`
+through the collectors' one list of routes (`diag_bundle.BACKEND_READS`, the
+launcher's), the build from `config.build_identity()`. What only the machine
+knows comes from the host agent's `diagnostics` (`scripts/host_agent.py`),
+asked only for a bundle that carries `system` or a ticked `logs` — so after
+the person's decision for a warrant that waits for one — and awaited as an
+event (the answer route wakes it, `host_channel.expect`), at most 120 s:
+its report is JSON by section (format 2, with `made_at`), the machine's facts
+— versions, the board, the power (`vcgencmd get_throttled`), the disk, the
+containers and their restarts and OOM kills — into `system.json`'s `host`
+through `scrub_detail`, the containers' and the agent's log tails (2 000
+lines each) into `logs/` only when ticked, through `scrub_personal`; a line a
+container logged cannot move into the facts. The container gains no Docker
+socket, journal or host path. The manifest carries `runtime` (launcher or
+docker, with its host networking and its agent) and `unavailable` — what this
+kind of node cannot give and why: no host agent (a hand-run compose, a
+bridge-mode node), an agent that did not answer, a floor's answer whose kept
+report is older than the floor — beside `withheld`, so a missing scope never
+reads as a refusal. `node.started` (with `runtime`, which the desk's
+`support_nodes` shows) is recorded once the Web UI's server listens, its
+`unclean_shutdown` from a session marker in `/app/data/diag/` that a clean
+stop removes; a DHT or chat-client start failure records `p2p.start_failed`,
+an update the host agent answered `failed` or `undone` `update.failed`.
+
+**Limits, on purpose.** A node with the
 toggle off is silent — no "declined" signal, because that would disclose
 the toggle; nor does a request the person has not decided on, or sent
 without a content scope, answer anything but its bundle (the manifest's
