@@ -852,7 +852,7 @@ _REREAD_ROWS_SQL = text("""
     SELECT mf.id, mf.track_id::text AS track_id, mf.album_variant_id, mf.file_path,
            mf.cue_start_seconds, mf.raw_track_name, mf.raw_artist, mf.raw_album_artist,
            mf.raw_album, mf.raw_genre, mf.raw_composers, mf.duration_seconds, mf.sample_rate,
-           mf.bit_depth, mf.stat_mtime_ns, mf.file_size_bytes, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
+           mf.bit_depth, mf.is_lossless, mf.stat_mtime_ns, mf.file_size_bytes, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
       FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
      WHERE mf.file_path = ANY(CAST(:paths AS text[]))
 """)
@@ -1063,9 +1063,12 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         moves.setdefault(row.album_variant_id, []).append((row.id, title, credit, disc))
                     if (row.raw_genre or None) != (md.get("genre") or None):
                         touched_albums.add(row.album_id)
-                # the file's composers changed, or it moved (a re-home): both
-                # tracks name what their files say now
-                if track != row.track_id or row.raw_composers != md.get("composers"):
+                # the file's composers changed, it moved (a re-home: both tracks
+                # name what their files say now), or its rank among the
+                # track's copies did (the best copy's order leads)
+                if (track != row.track_id or row.raw_composers != md.get("composers")
+                        or (row.is_lossless, row.sample_rate, row.bit_depth)
+                        != (md.get("is_lossless", True), md.get("sample_rate"), md.get("bit_depth"))):
                     derive_due.update({row.track_id, track})
                 stats["reread"] += 1
                 if stats["reread"] % 100 == 0:

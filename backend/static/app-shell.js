@@ -5360,8 +5360,8 @@
         : '';
       return gap + ownedAlbumTileHtml(a);
     }).join('');
-    // The owned albums this artist wrote for and neither heads nor performs
-    // on (routers/artists.py composed), in the page's album sort.
+    // The owned albums this artist wrote for and performs on nowhere
+    // (routers/artists.py composed), in the page's album sort.
     const composedHtml = (d.composed || []).map(ownedAlbumTileHtml).join('');
 
     const similarHtml = (d.similar_artists || []).map(s => {
@@ -5521,7 +5521,8 @@
         let fresh = null;
         try {
           const r = await fetch('/api/artists/' + encodeURIComponent(artistId)
-                                + '?sort=' + encodeURIComponent(sort));
+                                + '?sort=' + encodeURIComponent(sort)
+                                + (selectedMbid ? '&mbid=' + encodeURIComponent(selectedMbid) : ''));
           if (r.ok) fresh = await r.json();
         } catch (_) {}
         if (!fresh || !document.contains(screen)) return;
@@ -5544,6 +5545,9 @@
       };
       window.addEventListener('sautium:artist-changed', onBio);
       window.addEventListener('sautium:route', onBioRoute);
+      // the fetch began with this page's own read and may have ended before
+      // the listener above: one read now, subscribed, misses no end
+      onBio();
     }
 
     // This artist's ListenBrainz slice is on its way (the on-demand lane):

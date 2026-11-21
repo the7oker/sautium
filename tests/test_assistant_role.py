@@ -29,6 +29,7 @@ from tests.conftest import PG  # noqa: E402
 # table is a decision.
 PRIVATE = {
     "_schema_migrations", "analysis_pace", "analysis_sources", "chat_messages", "chat_sessions", "covers",
+    "credits_due",
     "diag_events", "diag_warrants", "external_api_cooldown",
     "friend_grant_rights", "friend_grants", "friend_requests", "friend_rights", "friends",
     "host_requests", "hqp_ab_duels", "hqp_ab_sittings", "library_roots",

@@ -613,24 +613,37 @@ def test_an_opened_composer_page_asks_once_whatever_came_of_it(cur, library, tem
     assert calls == [BACH]
 
 
-def test_a_failed_derive_keeps_the_batch_and_queues_its_files(cur, library, templates, monkeypatch):
+def test_a_failed_derive_keeps_the_batch_and_its_tracks_wait_for_the_next(cur, library, templates,
+                                                                           monkeypatch):
     import credits
+    from database import get_db_context
+    hqp_library = pytest.importorskip("hqp_library")
     _clean(cur)
+    cur.execute("DELETE FROM credits_due")
     _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G", [BACH], 1)
-    _flac(templates, library / "G" / "G" / "02.flac", "Var. 1", "Glenn Gould", "G", [BACH], 2)
     real = credits._derive
 
     def failing(db, tids, sweep):
-        raise RuntimeError("a race no lock covers")
+        db.execute(credits.text("SELECT 1/0"))          # a real SQL error, in the savepoint
     monkeypatch.setattr(credits, "_derive", failing)
     stats = _scan()
-    assert (stats["added"], stats["errors"]) == (2, 0)              # the files stay
-    cur.execute("SELECT DISTINCT tags_read_rev, raw_composers FROM media_files")
-    assert cur.fetchall() == [(0, None)]                            # queued to be read again
-    assert _credits(cur) == {}
+    assert (stats["added"], stats["errors"]) == (1, 0)              # the file stays
+    cur.execute("SELECT tags_read_rev, raw_composers FROM media_files")
+    assert cur.fetchall() == [(scanner.TAGS_READ_REV, [BACH])]      # as it was read
+    # an HQPlayer sync's failure waits the same way, whatever its tail writes
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h1")
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: _library(BACH))
+    assert hqp_library.sync(*PI)["added"] == 2
+    cur.execute("SELECT count(*) FROM credits_due")
+    assert cur.fetchone()[0] == 2 and _credits(cur) == {}
     monkeypatch.setattr(credits, "_derive", real)
-    assert _scan()["reread"] == 2
-    assert _credits(cur) == {"Aria": [BACH], "Var. 1": [BACH]}
+    with get_db_context() as db:                    # the next derive, of anything, takes them
+        credits.derive_composers(db, [])
+        db.commit()
+    assert _credits(cur) == {"Aria": [BACH], "Spring": ["Antonio Vivaldi"]}
+    cur.execute("SELECT count(*) FROM credits_due")
+    assert cur.fetchone()[0] == 0
 
 
 def test_a_rescan_of_the_hqplayer_library_leaves_no_composer_behind(cur, library, templates, monkeypatch):

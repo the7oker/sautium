@@ -107,40 +107,29 @@ def derive_composers(db: Session, track_ids: Iterable, *, sweep: bool = True) ->
     corrected tag leaves no orphan) — a caller that sweeps them itself (a
     confirmed prune, counting what it removes) passes False.
 
-    A derive that fails (a race no lock covers, a value the schema refuses)
-    rolls back alone — the batch it rides keeps its files — and its tracks'
-    files are queued to be read again (`_requeue`), so the next scan or sync
-    derives them; the failure is logged with them."""
-    tids = sorted({str(t) for t in track_ids})
+    A derive that fails (a race no lock covers) rolls back alone — the batch
+    it rides keeps its files, and the files keep what they read — and its
+    tracks wait in credits_due, which the next derive takes with its own;
+    the failure is logged with them."""
+    lock_credits(db)
+    tids = sorted({str(t) for t in track_ids}
+                  | set(db.execute(text("SELECT track_id::text FROM credits_due")).scalars()))
     if not tids:
         return set()
-    lock_credits(db)
     try:
         with db.begin_nested():
+            db.execute(text("DELETE FROM credits_due WHERE track_id = ANY(CAST(:t AS uuid[]))"),
+                       {"t": tids})
             return _derive(db, tids, sweep)
     except Exception:
-        logger.error("composer credits: the derive of %d track(s) failed; their files are read "
-                     "again by the next scan or sync: %s", len(tids), tids[:20], exc_info=True)
-        _requeue(db, tids)
+        logger.error("composer credits: the derive of %d track(s) failed; the next derive takes "
+                     "them again: %s", len(tids), tids[:20], exc_info=True)
+        db.execute(text("""
+            INSERT INTO credits_due (track_id)
+            SELECT t FROM unnest(CAST(:t AS uuid[])) t
+             WHERE EXISTS (SELECT 1 FROM tracks WHERE id = t)
+            ON CONFLICT (track_id) DO UPDATE SET failed_at = now()"""), {"t": tids})
         return set()
-
-
-def _requeue(db: Session, tids: List[str]) -> None:
-    """The files of tracks whose derive failed, read again: a local file as
-    one under an older reader, an HQPlayer library as one under an older
-    revision of its read — their names cleared, so the read that comes
-    finds them changed and derives (unread meanwhile, they contribute
-    nothing and remove nothing)."""
-    db.execute(text("UPDATE media_files SET tags_read_rev = 0, raw_composers = NULL "
-                    "WHERE track_id = ANY(CAST(:t AS uuid[]))"), {"t": tids})
-    db.execute(text("UPDATE hqp_library_files SET raw_composers = NULL "
-                    "WHERE track_id = ANY(CAST(:t AS uuid[]))"), {"t": tids})
-    db.execute(text("""
-        UPDATE hqp_endpoints e SET library_read_rev = 0
-         WHERE EXISTS (SELECT 1 FROM hqp_library_files hf
-                         JOIN album_variants av ON av.id = hf.album_variant_id
-                        WHERE av.hqp_endpoint_id = e.id
-                          AND hf.track_id = ANY(CAST(:t AS uuid[])))"""), {"t": tids})
 
 
 def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:

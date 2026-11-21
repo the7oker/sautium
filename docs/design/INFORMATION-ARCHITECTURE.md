@@ -893,7 +893,7 @@ or is a thin query over existing data.
 | Bio prose | `artist_bios.bio` (Last.fm imported); an artist who only composes here engages nothing, so his is fetched once when the page opens (`bio_pending`, the `artist` event patches it in place; since 2026-11-21) | — |
 | Tag chips | `artist_tags` (Last.fm) ranked by weight, top 4 | — |
 | Albums | albums where this artist appears in `track_artists`, sorted by year | — |
-| Composed | owned albums he wrote a held track of (`track_credits`) and neither heads (`album_artists` primary) nor performs on, in the Albums sort; hidden when empty (since 2026-11-21) | conductor, performer shelves on the same shape |
+| Composed | owned albums he wrote a held track of (`track_credits`) and performs on nowhere (an album he heads as its ALBUMARTIST included — Albums is built from performing credits), in the Albums sort, one tile per release group; hidden when empty (since 2026-11-21) | conductor, performer shelves on the same shape |
 | Popular tracks | ListenBrainz listen counts (`track_mbids ⋈ lb_recording`, owned and phantom tracks alike) first, then `local_play_stats` for tracks ListenBrainz does not know; a phantom artist's slice is asked of the network when the page opens and the block fills in place | — |
 | Similar artists | `similar_artists` (Last.fm imported) | + BGE-M3 vector similarity on bios |
 | Credit end-cap | `artist_bios.url` — `data from Last.fm` linking to this artist's Last.fm page (required by clause 2.7 of the Last.fm API terms wherever their data is displayed; hidden when the artist has no Last.fm row) · `listening statistics from ListenBrainz` whenever its counts ranked something on the page | — |

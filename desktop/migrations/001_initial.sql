@@ -273,6 +273,14 @@ CREATE TABLE IF NOT EXISTS track_credits (
     PRIMARY KEY (track_id, role, artist_id, source)
 );
 
+-- The tracks whose composer derive failed (credits._derive rolled back alone:
+-- a race no lock covers): the next transaction that derives takes them with
+-- its own, so no file row is touched to make them come again.
+CREATE TABLE IF NOT EXISTS credits_due (
+    track_id UUID PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+    failed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- MB entities a name-derived Sautium artist maps to (1:N — the name-UUID
 -- conflates namesakes/case-variants). mbid PK = one MB entity → one artist;
 -- the inverse (one artist → many MBIDs) is the 1:N. Mostly MB-content-verified;
