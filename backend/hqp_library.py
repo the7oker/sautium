@@ -34,6 +34,7 @@ the directory's (compilations, classical).
 
 import argparse
 import functools
+import json
 import logging
 import os
 import re
@@ -48,10 +49,12 @@ from sqlalchemy import text
 
 from caa import fill_held_album_covers
 from canon.identity import ORPHAN_TRACK_SQL
+from credits import derive_composers, split_names
 from database import get_db_context
 from db_pool import db_execute, db_query
 from hqplayer_client import connect_address
-from scanner import AUDIO_EXTENSIONS, FileSink, import_metadata
+from scanner import AUDIO_EXTENSIONS, FileSink, import_metadata, without_rights_societies
+from sql_queries import ARTIST_UNCREDITED
 from uuid_utils import is_lossless
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,12 @@ _DISC_FOLDER = re.compile(r"^(?:cd|disc|disk)\s*[-_ .]?\s*0*(\d{1,2})(?!\d)", re
 _LEADING_DIGITS = re.compile(r"^\s*(\d{1,3})(?!\d)")
 
 Entry = Tuple[str, Dict[str, Any]]
+
+# The revision of what a sync reads of each file (hqp_endpoints.
+# library_read_rev): a library last read under an older one is read whole by
+# its next sync, its known files included, whatever its hash says. Rev 1,
+# 2026-11-21: the composer (CREDITS-1-DESIGN §3.5).
+LIBRARY_READ_REV = 1
 
 
 def _command(host: str, port: int, xml: str, timeout: float,
@@ -251,6 +260,9 @@ def parse_library(xml_text: str) -> Tuple[List[Entry], Dict[str, int]]:
                 "duration_seconds": _float(f.get("length")),
                 "file_format": ext[1:].upper(),
                 "is_lossless": is_lossless(ext),
+                # the attribute's values split as a tag's (credits.split_names)
+                "composers": split_names(
+                    [c for c in [without_rights_societies(f.get("composer") or None)] if c]),
                 "hqp_file_hash": f.get("hash"),
                 "hqp_dir_hash": d.get("hash"),
                 **specs,
@@ -259,7 +271,7 @@ def parse_library(xml_text: str) -> Tuple[List[Entry], Dict[str, int]]:
     return entries, counts
 
 
-_ENDPOINT_COLS = ("id, name, host, port, product, hqp_name, library_hash, last_synced_at, "
+_ENDPOINT_COLS = ("id, name, host, port, product, hqp_name, library_hash, library_read_rev, last_synced_at, "
                   "hqp_version, hqp_engine, hqp_platform, cuda, host_cpu, host_cores, "
                   "host_gpu, host_ram_gb")
 
@@ -540,7 +552,7 @@ def sync(host: str, port: int, *, force: bool = False,
     """Bring this endpoint's library into the catalogue: files already known
     are touched (last_seen_at), new ones imported; nothing is removed. A
     library whose hash matches the last complete sync is skipped unless
-    `force`. A cancelled run leaves the old hash, so the next sync resumes
+    `force`, or unless that sync read it under an older LIBRARY_READ_REV. A cancelled run leaves the old hash, so the next sync resumes
     (known paths cost one query). Returns per-step counts."""
     stats: Dict[str, Any] = {"unchanged": False, "refused": None, "library_files": 0,
                              "unsupported": 0, "known": 0, "added": 0, "errors": 0,
@@ -559,7 +571,7 @@ def sync(host: str, port: int, *, force: bool = False,
         return stats
     ep = ensure_endpoint(host, port, resolved)
     current = ep["current_hash"]
-    if not force and current == ep["library_hash"]:
+    if not force and current == ep["library_hash"] and ep["library_read_rev"] >= LIBRARY_READ_REV:
         stats["unchanged"] = True
         return stats
     if progress_cb:
@@ -584,6 +596,22 @@ def sync(host: str, port: int, *, force: bool = False,
               JOIN hqp_library_files hf ON hf.id = x.id
              WHERE av.id = hf.album_variant_id AND av.raw_title IS NULL
         """, {"ids": [i for i, _ in tagged], "titles": [t for _, t in tagged]})
+        # A known file's composers as the library names them now: a tag
+        # changed under HQPlayer, or a file read before the sync kept them.
+        # The tracks whose files changed derive their credits again.
+        with get_db_context() as db:
+            moved = db.execute(text("""
+                UPDATE hqp_library_files hf
+                   SET raw_composers = ARRAY(SELECT jsonb_array_elements_text(x.value -> 'c'))
+                  FROM jsonb_array_elements(CAST(:rows AS jsonb)) x
+                 WHERE hf.id = CAST(x.value ->> 'id' AS int)
+                   AND hf.raw_composers IS DISTINCT FROM
+                       ARRAY(SELECT jsonb_array_elements_text(x.value -> 'c'))
+                RETURNING hf.track_id::text"""),
+                {"rows": json.dumps([{"id": known[md["file_path"]], "c": md["composers"]}
+                                     for _, md in entries if md["file_path"] in known])}).scalars()
+            derive_composers(db, set(moved))
+            db.commit()
     if new:
         import_metadata(new, sink=FileSink("hqplayer", ep["id"]), stats=stats,
                         progress_cb=progress_cb, cancel_check=cancel_check)
@@ -601,8 +629,9 @@ def sync(host: str, port: int, *, force: bool = False,
     if cancel_check and cancel_check():
         stats["cancelled"] = True
         return stats
-    db_execute("UPDATE hqp_endpoints SET library_hash = %(h)s, last_synced_at = CURRENT_TIMESTAMP "
-               "WHERE id = %(e)s", {"h": current, "e": ep["id"]})
+    db_execute("UPDATE hqp_endpoints SET library_hash = %(h)s, library_read_rev = %(r)s, "
+               "last_synced_at = CURRENT_TIMESTAMP WHERE id = %(e)s",
+               {"h": current, "r": LIBRARY_READ_REV, "e": ep["id"]})
     logger.info("HQPlayer library %r (%s:%s) synced: %s", ep["name"], host, port, stats)
     return stats
 
@@ -653,13 +682,14 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
         DELETE FROM tracks t
         WHERE t.id = ANY(CAST(:tids AS uuid[])) AND {ORPHAN_TRACK_SQL.format(t='t')}
     """), {"tids": track_ids}).rowcount
+    # what this library's copies named is no longer theirs to name: the
+    # tracks left keep the composers their other copies' tags give
+    derive_composers(db, track_ids, sweep=False)
     if since is not None and credited:
-        stats["orphan_artists"] = db.execute(text("""
+        stats["orphan_artists"] = db.execute(text(f"""
             DELETE FROM artists a
             WHERE a.id = ANY(CAST(:aids AS uuid[])) AND a.created_at >= :since
-              AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = a.id)
-              AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = a.id)
-              AND NOT EXISTS (SELECT 1 FROM track_credits tc WHERE tc.artist_id = a.id)
+              AND {ARTIST_UNCREDITED.format(a='a')}
         """), {"aids": sorted(set(credited)), "since": since}).rowcount
     return stats
 
@@ -760,7 +790,8 @@ def request_sync(host: str, port: int) -> None:
     """Event-driven entry for the HQPlayer output: on attach and on every
     return of a restarted HQPlayer, the endpoint is registered if it was
     chosen while off, then the library's hash is compared with the last
-    complete sync and a sync runs only when it moved. Only an endpoint the
+    complete sync and a sync runs only when it moved, or when that sync
+    read it under an older LIBRARY_READ_REV. Only an endpoint the
     owner has synced once is followed — the first import of a library is
     always the explicit button, never a side effect of choosing an output
     (an HQPlayer Desktop on this very library would otherwise import its
@@ -772,7 +803,8 @@ def request_sync(host: str, port: int) -> None:
         if ep is None or ep["library_hash"] is None:
             return
         try:
-            if library_hash(host, port) != ep["library_hash"]:
+            if (ep["library_read_rev"] < LIBRARY_READ_REV
+                    or library_hash(host, port) != ep["library_hash"]):
                 start_job(host, port)
         except OSError as e:
             logger.warning("HQPlayer library check at %s:%s skipped: %s", host, port, e)

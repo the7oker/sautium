@@ -33,10 +33,12 @@ from models import (
 )
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one
+from sql_queries import ARTIST_UNCREDITED
 from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, normalize, is_lossless as check_lossless
 import file_stat
 from album_identity import assign_dir_albums, dir_disc, group_key
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
+from credits import derive_composers, split_names
 from provenance import ANALYSIS_KINDS, relink_returned_files
 import cue_sheet
 
@@ -507,6 +509,9 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     assoc_ta: set = set()   # (track_id, artist_id, role)
     assoc_aa: set = set()   # (album_id, artist_id, role)
     seen_track_ids = set()
+    # the tracks whose credits derive from the files of the batch committed
+    # next: with the file rows, so no commit leaves a read file underived
+    derive_due: Set[str] = set()
     local_albums: Dict[Any, bool] = {}   # album_id -> has a local variant (HQP sink only)
     # The folder → albums pre-pass over each whole folder (box sets,
     # singles, mixes); the moves it asks of rows already held are the
@@ -522,6 +527,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
         for dir_path, metadata in tqdm(entries, desc="Importing", unit="file"):
             if cancel_check and cancel_check():
                 logger.info("Import cancelled by user")
+                derive_composers(db, derive_due)
                 db.commit()
                 break
             file_path = metadata.get("file_path")
@@ -722,6 +728,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             raw_album=metadata.get("album"),
                             raw_year=metadata.get("date"),
                             raw_genre=metadata.get("genre"),
+                            raw_composers=metadata.get("composers"),
                         )
                         if metadata.get("arrived_at") is not None:
                             row.arrived_at = metadata["arrived_at"]
@@ -750,6 +757,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             raw_album_artist=metadata.get("album_artist"),
                             raw_album=metadata.get("album"),
                             raw_year=metadata.get("date"),
+                            raw_composers=metadata.get("composers"),
                         ))
                         db.flush()
                     savepoint.commit()
@@ -760,16 +768,20 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                 for cache_name, key, obj in pending_cache:
                     caches[cache_name][key] = obj
                 stats["added"] += 1
+                derive_due.add(str(track.id))
                 if track.id not in seen_track_ids:
                     seen_track_ids.add(track.id)
                     stats["unique_tracks"] += 1
                 if stats["added"] % 100 == 0:
+                    derive_composers(db, derive_due)
+                    derive_due.clear()
                     db.commit()
                     _report(f"Importing: {stats['added']}/{len(entries)}")
                     logger.info(f"Progress: {stats['added']} files added")
             except Exception as e:
                 logger.error(f"Error processing {file_path}: {e}")
                 stats["errors"] += 1
+        derive_composers(db, derive_due)
         db.commit()
 
 
@@ -859,7 +871,15 @@ _REREAD_SQL = text("""
         isrc = :isrc, barcode = :barcode, tags_read_rev = :tags_read_rev,
         raw_track_name = :raw_track_name, raw_artist = :raw_artist,
         raw_album_artist = :raw_album_artist, raw_album = :raw_album, raw_year = :raw_year,
-        raw_genre = :raw_genre, decode_refused = false, cover_processed_at = NULL,
+        raw_genre = :raw_genre, raw_composers = CAST(:raw_composers AS text[]),
+        decode_refused = false,
+        -- the art is read again from a file that changed; a file read again
+        -- only because the reader sees more (tags_read_rev) keeps its cover
+        cover_processed_at = CASE
+            WHEN stat_mtime_ns IS NOT DISTINCT FROM CAST(:stat_mtime_ns AS bigint)
+             AND stat_ctime_ns IS NOT DISTINCT FROM CAST(:stat_ctime_ns AS bigint)
+             AND file_size_bytes IS NOT DISTINCT FROM CAST(:file_size_bytes AS bigint)
+            THEN cover_processed_at END,
         -- the canon reads the file again when what it decides on moved: a
         -- name, a number, a total (the right-hand columns are the old row's)
         content_at = CASE WHEN stat_mtime_ns IS NOT NULL AND (
@@ -931,6 +951,7 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
     tags minted — so whatever the canon renamed since is no change."""
     from canon.identity import rehome_file_track
     stats.setdefault("reread", 0)
+    derive_due: Set[str] = set()
     with get_db_context() as db:
         splits = _split_tracks(db, entries)
         if splits:
@@ -986,7 +1007,8 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         "barcode": md.get("barcode"), "tags_read_rev": TAGS_READ_REV,
                         "raw_track_name": md.get("title"), "raw_artist": md.get("artist"),
                         "raw_album_artist": md.get("album_artist"), "raw_album": md.get("album"),
-                        "raw_year": md.get("date"), "raw_genre": md.get("genre")})
+                        "raw_year": md.get("date"), "raw_genre": md.get("genre"),
+                        "raw_composers": md.get("composers")})
                     track_artist = md.get("artist") or md.get("album_artist")
                     old_key = (track_uuid(row.raw_track_name, row.raw_artist or row.raw_album_artist)
                                if row.raw_track_name else None)
@@ -1039,12 +1061,18 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         moves.setdefault(row.album_variant_id, []).append((row.id, title, credit, disc))
                     if (row.raw_genre or None) != (md.get("genre") or None):
                         touched_albums.add(row.album_id)
+                # the file's composers, and the track it left (a re-home): both
+                # tracks name what their files say now
+                derive_due.update({row.track_id, track})
                 stats["reread"] += 1
                 if stats["reread"] % 100 == 0:
+                    derive_composers(db, derive_due)
+                    derive_due.clear()
                     db.commit()         # the rows read so far: their locks go
             except Exception as e:
                 logger.error(f"Error reading {md['file_path']} again: {e}", exc_info=True)
                 stats["errors"] += 1
+        derive_composers(db, derive_due)
         db.commit()
 
 
@@ -1207,8 +1235,9 @@ def _int_or_none(value) -> Optional[int]:
 # The revision of what the reader takes from a file's tags. A file read
 # under an older one is read again by the next scan, in place, as a changed
 # file is: a reader that sees more (TITLE's values joined, the barcode)
-# reaches every file once (CANON-CLASSICAL-DESIGN §1). Rev 1: 2026-11-18.
-TAGS_READ_REV = 1
+# reaches every file once (CANON-CLASSICAL-DESIGN §1). Rev 1: 2026-11-18;
+# rev 2, 2026-11-21: the composers (CREDITS-1-DESIGN §5).
+TAGS_READ_REV = 2
 # The revision the last whole walk read the library under (user_settings).
 TAGS_READ_KEY = "scanner.tags_read_rev"
 
@@ -1251,6 +1280,20 @@ def tag_values(audio, vorbis_key: str, id3_key: str = None, mp4_key: str = None)
         if out:
             return out
     return []
+
+
+def composer_names(audio) -> List[str]:
+    """The composers a file's tags name (CREDITS-1-DESIGN §2.1–§2.3): every
+    COMPOSER field (Vorbis, APE), every TCOM value (ID3v2.4's list — v2.3
+    has none, and its spec separates the composers of one string with `/`),
+    every ©wrt; a publishing credit read away as from an artist
+    (without_rights_societies); split on `;` and a spaced ` / `."""
+    values = [v for v in map(without_rights_societies,
+                             tag_values(audio, "composer", "TCOM", "\xa9wrt")) if v]
+    version = getattr(audio.tags, "version", None)
+    if isinstance(version, tuple) and version[:2] < (2, 4):
+        values = [part for v in values for part in v.split("/")]
+    return split_names(values)
 
 
 def joined_title(values: List[str]) -> Optional[str]:
@@ -1423,6 +1466,7 @@ class LibraryScanner:
                 "catalog_number": get_tag("catalognumber"),
                 "isrc": get_tag("isrc", "TSRC"),
                 "barcode": _barcode(get_tag("barcode") or get_tag("upc") or get_tag("ean")),
+                "composers": composer_names(audio),
             }
 
             metadata["track_total"], metadata["disc_total"] = _declared_totals(audio, get_tag)
@@ -2014,6 +2058,9 @@ class LibraryScanner:
                     SELECT id FROM tracks WHERE id = ANY(CAST(:tids AS uuid[]))
                 """), {"tids": tids}).scalars():
                     elect_analysis_source(db, tid)
+                # a track a slice of the image still holds names its composers
+                # from what is left; one left with no file keeps them
+                derive_composers(db, tids)
 
                 vids = list(superseded_variants)
                 affected_albums = list(db.execute(text("""
@@ -2518,11 +2565,13 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         stats["copies"] = len(copies)
         stats["copy_files"] = sum(files_of.get(v, 0) for v in copies)
 
-        r = db.execute(text("""
+        # the files left of these tracks name their composers again (a copy
+        # gone takes its tags' names with it); the sweep below counts the
+        # composers that leaves uncredited
+        derive_composers(db, track_ids, sweep=False)
+        r = db.execute(text(f"""
             DELETE FROM artists ar WHERE ar.id = ANY(CAST(:ids AS uuid[]))
-              AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = ar.id)
-              AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = ar.id)
-              AND NOT EXISTS (SELECT 1 FROM track_credits tc WHERE tc.artist_id = ar.id)
+              AND {ARTIST_UNCREDITED.format(a='ar')}
         """), {"ids": [str(a) for a in artist_ids]})
         stats["orphan_artists"] = r.rowcount
 

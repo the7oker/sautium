@@ -18,7 +18,7 @@ silently dropped (logged at debug level by the caller if needed).
 
 from db_pool import db_query
 from playback.manager import active_hqp_endpoint
-from sql_queries import TRACK_FILES, best_rip_order, owned_rank
+from sql_queries import ARTIST_COMPOSER_ONLY, ARTIST_OWNED, TRACK_FILES, best_rip_order, owned_rank
 
 
 def hydrate_artists(artist_ids: list[str]) -> list[dict]:
@@ -28,7 +28,7 @@ def hydrate_artists(artist_ids: list[str]) -> list[dict]:
     """
     if not artist_ids:
         return []
-    rows = db_query("""
+    rows = db_query(f"""
         SELECT a.id::text AS artist_id,
                a.name AS artist,
                a.gender,
@@ -48,9 +48,8 @@ def hydrate_artists(artist_ids: list[str]) -> list[dict]:
                                        AND ta2.role = 'primary'
                 WHERE ta2.artist_id = a.id
                 LIMIT 1) AS media_file_id,
-               EXISTS (SELECT 1 FROM owned_files f3
-                       JOIN track_artists ta3 ON ta3.track_id = f3.track_id
-                       WHERE ta3.artist_id = a.id) AS is_owned
+               {ARTIST_OWNED} AS is_owned,
+               {ARTIST_COMPOSER_ONLY} AS composer_only
         FROM artists a
         WHERE a.id::text = ANY(%(ids)s)
     """, {"ids": list(artist_ids)})

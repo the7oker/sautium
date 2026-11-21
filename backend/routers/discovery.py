@@ -257,6 +257,8 @@ def _artist_results(rows) -> list:
         "gender": r.gender,
         "is_vocalist": r.is_vocalist,
         "is_owned": bool(r.is_owned),
+        # owned through a composer credit alone: the tile says "Composer"
+        "composer_only": bool(r.composer_only),
         "cover_id": r.cover_id,
         "media_file_id": r.media_file_id,
     } for r in rows]
@@ -477,7 +479,8 @@ def run_search(
     own — two search implementations is how one of them goes stale (the API-
     provider tools spent months calling /search/* endpoints that no longer
     existed)."""
-    from discovery_engine import WORD_ARM_MIN, build
+    from discovery_engine import build
+    from sql_queries import WORD_ARM_MIN
 
     instruments = list(instruments or [])
     genres = list(genres or [])

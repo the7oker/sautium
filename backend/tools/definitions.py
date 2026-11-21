@@ -93,12 +93,13 @@ def _h_execute_query(sql: str) -> str:
 
 
 def _h_search_tracks(query: str = "", artist: str = "", album: str = "",
-                     genre: str = "", limit: int = 20, corpus: str = "owned") -> str:
+                     genre: str = "", limit: int = 20, corpus: str = "owned",
+                     composer: str = "") -> str:
     try:
-        if not any([query, artist, album, genre]):
-            return "Provide at least one of query / artist / album / genre."
-        rows = aq.search_tracks(_db_query, query=query, artist=artist, album=album,
-                                genre=genre, limit=limit, corpus=corpus)
+        if not any([query, artist, composer, album, genre]):
+            return "Provide at least one of query / artist / composer / album / genre."
+        rows = aq.search_tracks(_db_query, query=query, artist=artist, composer=composer,
+                                album=album, genre=genre, limit=limit, corpus=corpus)
         scope = "" if corpus == "all" else " in the library"
         return aq.format_track_list(rows, f"Search results{scope} ({len(rows)} tracks):")
     except Exception as e:
@@ -627,13 +628,15 @@ def register_all():
 
     REGISTRY.register(ToolDef(
         name="search_tracks",
-        description="Search the catalog by metadata (artist, album, genre, or free text query). "
+        description="Search the catalog by metadata (artist, composer, album, genre, or free text query). "
                     "All parameters are optional. Tolerant to typos (fuzzy trigram matching) "
-                    "and to script (a Latin query finds Cyrillic/CJK names). "
+                    "and to script (a Latin query finds Cyrillic/CJK names); a whole word of a "
+                    "name is enough ('Mozart' finds Wolfgang Amadeus Mozart). "
                     "Returns each track's canonical UUID — the id every other tool takes.",
         parameters=[
             ToolParam("query", "string", "Free text search across artist, album, and track title", required=False, default=""),
-            ToolParam("artist", "string", "Filter by artist name (fuzzy match)", required=False, default=""),
+            ToolParam("artist", "string", "Filter by the PERFORMING artist's name (fuzzy match)", required=False, default=""),
+            ToolParam("composer", "string", "Filter by who WROTE the music, as the files' composer tags name them (fuzzy match). In classical music 'music by Bach' means composer='Bach' — the performer is the orchestra or the soloist", required=False, default=""),
             ToolParam("album", "string", "Filter by album name (fuzzy match)", required=False, default=""),
             ToolParam("genre", "string", "Filter by genre (partial match)", required=False, default=""),
             ToolParam("limit", "integer", "Maximum number of results (default 20)", required=False, default=20),

@@ -157,6 +157,10 @@
           // Payload-free: a ListenBrainz statistics slice landed — the
           // open artist page re-fetches its own snapshot.
           window.dispatchEvent(new CustomEvent('sautium:lb-changed'));
+        } else if (msg.t === 'artist') {
+          // Payload-free: an opened composer's bio fetch ended — the open
+          // artist page re-fetches its own snapshot.
+          window.dispatchEvent(new CustomEvent('sautium:artist-changed'));
         } else if (msg.t === 'notice') {
           // The active-conditions snapshot (cooldowns, deferred catalog
           // data) — the shell diffs it into toasts and rows.

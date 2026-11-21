@@ -8,6 +8,8 @@ representative cover for each. Photo URL is reserved for future
 Last.fm artist-image enrichment — returned as null until Step 1.7.
 """
 
+import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -20,10 +22,97 @@ from discography import (ALBUM_SORT_EXPR, fetch_new_albums, phantom_sort,
 from genre_queries import artist_genres
 from release_groups import collapse_to_groups
 from playback.manager import active_hqp_endpoint
-from sql_queries import best_rip_order, owned_rank
+from sql_queries import ARTIST_COMPOSER_ONLY, best_rip_order, owned_rank
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/artists", tags=["artists"])
+
+
+# --- An opened composer's page: his bio, once (CREDITS-1-DESIGN §12 Q8) -----
+# A composer engages nothing, so no background step ever fetches his Last.fm
+# bio and tags: the page a person opens is that one human act, linear in
+# behaviour, as an opened page's discography sync is. One fetch per artist
+# at a time, through the one Last.fm pace; never similars (enrich_artist asks
+# for them only for a performer of an owned file) and never a slice. The page
+# says it is on its way (`bio_pending`) and the fetch's end reaches it over
+# /api/events ('artist'), which re-reads its own snapshot.
+_bio_lock = threading.Lock()
+_bio_inflight: set = set()
+_artist_sse_clients: list = []
+
+
+def artist_sse_register(evt, loop) -> None:
+    with _bio_lock:
+        _artist_sse_clients.append((evt, loop))
+
+
+def artist_sse_unregister(evt, loop) -> None:
+    with _bio_lock:
+        try:
+            _artist_sse_clients.remove((evt, loop))
+        except ValueError:
+            pass
+
+
+def _wake_artist_clients() -> None:
+    with _bio_lock:
+        clients = list(_artist_sse_clients)
+    for evt, loop in clients:
+        loop.call_soon_threadsafe(evt.set)
+
+
+def _composer_bio_due(artist_id: str) -> bool:
+    """Whether an opened page fetches this artist's bio: one who only
+    composes here, with no Last.fm bio and no recent not-found or error —
+    the background step's own preconditions — and Last.fm not cooling down."""
+    from api_cooldown import cooling_down
+    from background_enrichment import _NEGATIVE_CACHE_WINDOW
+    if cooling_down("lastfm"):
+        return False
+    return db_query_one(f"""
+        SELECT 1 AS x FROM artists a
+         WHERE a.id = %(id)s::uuid AND {ARTIST_COMPOSER_ONLY}
+           AND NOT EXISTS (SELECT 1 FROM artist_bios ab
+                            WHERE ab.artist_id = a.id AND ab.source = 'lastfm')
+           AND NOT EXISTS (SELECT 1 FROM external_metadata em
+                            WHERE em.entity_type = 'artist' AND em.entity_id = a.id::text
+                              AND em.source = 'lastfm' AND em.metadata_type = 'bio'
+                              AND em.fetch_status IN ('not_found', 'error')
+                              {_NEGATIVE_CACHE_WINDOW})
+    """, {"id": artist_id}) is not None
+
+
+def _fetch_composer_bio(artist_id: str, name: str) -> None:
+    from database import get_db_context
+    from lastfm import LastFmService
+    try:
+        with get_db_context() as db:
+            result = LastFmService().enrich_artist(db, artist_id, name)
+        logger.info("Opened composer page %r: Last.fm bio %s", name, result["status"])
+    except Exception:
+        logger.error("Opened composer page %r: the bio fetch failed", name, exc_info=True)
+    finally:
+        with _bio_lock:
+            _bio_inflight.discard(artist_id)
+        _wake_artist_clients()
+
+
+def _composer_bio(artist_id: str, name: str) -> bool:
+    """Start the fetch an opened composer page asks for; True while one is
+    on its way."""
+    with _bio_lock:
+        if artist_id in _bio_inflight:
+            return True
+    if not _composer_bio_due(artist_id):
+        return False
+    with _bio_lock:
+        if artist_id in _bio_inflight:
+            return True
+        _bio_inflight.add(artist_id)
+    threading.Thread(target=_fetch_composer_bio, args=(artist_id, name), daemon=True,
+                     name="composer-bio").start()
+    return True
 
 # Fetch-on-view gate: the artist screen triggers a missing-album reconcile
 # (local MB dump) at most once a day per artist; the monthly background
@@ -180,6 +269,7 @@ def get_artist(
     artist["lb_pending"] = db_query_one(
         "SELECT 1 AS x FROM lb_slice_requests WHERE artist_id = %(id)s::uuid",
         {"id": artist_id}) is not None
+    artist["bio_pending"] = _composer_bio(artist_id, artist["name"])
 
     # --- Namesake disambiguation ------------------------------------------
     # One display name can map to several real MB artists (e.g. two bands
@@ -437,6 +527,68 @@ def get_artist(
     # release-group screen and a single album straight to the album.
     artist["albums"] = collapse_to_groups(rows, artist_id=str(artist_id))
     artist["albums_sort"] = sort
+
+    # Composed (CREDITS-1-DESIGN §3.3): the owned albums this artist wrote a
+    # held track of and neither heads nor performs on — a singer-songwriter's
+    # own records are his Albums already, and no album stands on both
+    # shelves. A credit has no namesake (no MBID), so the shelf is the
+    # dominant's.
+    artist["composed"] = [] if split and not is_dominant else _format_album_tiles(db_query(f"""
+        WITH comp AS (
+            SELECT DISTINCT av.album_id
+              FROM track_credits tc
+              JOIN owned_files f ON f.track_id = tc.track_id
+              JOIN album_variants av ON av.id = f.album_variant_id
+             WHERE tc.artist_id = %(id)s::uuid AND tc.role = 'composer'
+            EXCEPT
+            SELECT aa.album_id FROM album_artists aa
+             WHERE aa.artist_id = %(id)s::uuid AND aa.role = 'primary'
+            EXCEPT
+            SELECT av.album_id
+              FROM track_artists ta
+              JOIN owned_files f ON f.track_id = ta.track_id
+              JOIN album_variants av ON av.id = f.album_variant_id
+             WHERE ta.artist_id = %(id)s::uuid),
+        held AS (
+            SELECT DISTINCT av.album_id, f.track_id
+              FROM comp JOIN album_variants av ON av.album_id = comp.album_id
+              JOIN owned_files f ON f.album_variant_id = av.id),
+        listened AS (
+            SELECT held.album_id, SUM(lh.duration_listened)::bigint AS seconds
+              FROM held JOIN listening_history lh ON lh.track_id = held.track_id
+             GROUP BY held.album_id),
+        pop AS (
+            SELECT held.album_id, SUM(lr.listen_count)::bigint AS listens
+              FROM held JOIN track_mbids tm ON tm.track_id = held.track_id
+              JOIN lb_recording lr ON lr.recording_mbid = tm.recording_mbid
+             GROUP BY held.album_id)
+        SELECT al.id::text AS id,
+               al.title,
+               al.musicbrainz_id::text AS musicbrainz_id,
+               al.release_year AS year,
+               al.created_at AS added_at,
+               CASE WHEN EXISTS (SELECT 1 FROM album_variants v
+                                  WHERE v.album_id = al.id AND v.location = 'local')
+                    THEN 'local' ELSE 'hqplayer' END AS location,
+               CASE WHEN NOT EXISTS (SELECT 1 FROM media_files mfc
+                                     JOIN album_variants avc ON avc.id = mfc.album_variant_id
+                                     WHERE avc.album_id = al.id AND mfc.cover_id IS NOT NULL)
+                    THEN al.cover_url END AS cover_url,
+               (SELECT mf.cover_id::text FROM media_files mf
+                  JOIN album_variants av ON av.id = mf.album_variant_id
+                 WHERE av.album_id = al.id AND mf.cover_id IS NOT NULL LIMIT 1) AS cover_id,
+               (SELECT mf2.id FROM media_files mf2
+                  JOIN album_variants av2 ON av2.id = mf2.album_variant_id
+                 WHERE av2.album_id = al.id
+                 ORDER BY mf2.disc_number, mf2.track_number LIMIT 1) AS media_file_id,
+               COALESCE(listened.seconds, 0) AS time_listened_seconds,
+               COALESCE(pop.listens, 0) AS popularity
+          FROM comp
+          JOIN albums al ON al.id = comp.album_id
+          LEFT JOIN listened ON listened.album_id = al.id
+          LEFT JOIN pop ON pop.album_id = al.id
+         ORDER BY {sort_expr}
+    """, {"id": artist_id}), sort)
 
     # Popular tracks — hybrid rank:
     #   1. Tracks ListenBrainz knows come first, ordered by their

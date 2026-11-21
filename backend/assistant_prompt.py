@@ -146,6 +146,9 @@ _DB_SCHEMA = """\
 ## Associations
 
 **track_artists** (track_id UUID, artist_id UUID, role [primary/featured]) - many-to-many
+**track_credits** (track_id UUID, role ['composer'], artist_id UUID, source ['tag'/'mb'], position) - \
+who WROTE the music, apart from who performs it (track_artists); from the files' composer tags. \
+"Music by Bach" in classical is a composer, not a track_artists row (search_tracks composer=)
 **album_genres** (album_id UUID, genre_id UUID, source, count) - genre is album-grain, not track
 **album_artists** (album_id UUID, artist_id UUID, role) - many-to-many
 

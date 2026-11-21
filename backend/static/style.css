@@ -2554,6 +2554,23 @@ body.sautium-base {
   font-weight: 500;
   color: var(--color-text);
 }
+/* "Composer: …" under the artist line — the names every shown track has,
+   each a link to his page; muted beside the artist it follows. */
+.album-composer-line {
+  margin-top: calc(4 * var(--px));
+  font-size: calc(13 * var(--px));
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+.album-composer-line .acl-name {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--color-text);
+  cursor: pointer;
+}
 /* Compact pill that opens the variant picker sheet; only rendered when
    the album has more than one rip. Mono+blue label matches the visual
    language used for other technical readouts (BPM, sample rate). */

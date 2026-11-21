@@ -890,9 +890,10 @@ or is a thin query over existing data.
 | Block | MVP source | Evolution |
 |-------|------------|-----------|
 | Hero photo | uploaded artist photo (manual curation step), or fallback gradient | + auto-fetch from Last.fm `artist.getInfo` images |
-| Bio prose | `artist_bios.bio` (Last.fm imported) | — |
+| Bio prose | `artist_bios.bio` (Last.fm imported); an artist who only composes here engages nothing, so his is fetched once when the page opens (`bio_pending`, the `artist` event patches it in place; since 2026-11-21) | — |
 | Tag chips | `artist_tags` (Last.fm) ranked by weight, top 4 | — |
 | Albums | albums where this artist appears in `track_artists`, sorted by year | — |
+| Composed | owned albums he wrote a held track of (`track_credits`) and neither heads (`album_artists` primary) nor performs on, in the Albums sort; hidden when empty (since 2026-11-21) | conductor, performer shelves on the same shape |
 | Popular tracks | ListenBrainz listen counts (`track_mbids ⋈ lb_recording`, owned and phantom tracks alike) first, then `local_play_stats` for tracks ListenBrainz does not know; a phantom artist's slice is asked of the network when the page opens and the block fills in place | — |
 | Similar artists | `similar_artists` (Last.fm imported) | + BGE-M3 vector similarity on bios |
 | Credit end-cap | `artist_bios.url` — `data from Last.fm` linking to this artist's Last.fm page (required by clause 2.7 of the Last.fm API terms wherever their data is displayed; hidden when the artist has no Last.fm row) · `listening statistics from ListenBrainz` whenever its counts ranked something on the page | — |
@@ -904,7 +905,8 @@ or is a thin query over existing data.
 | Cover hero | `media_files` cover, embedded or via `cover_id` | — |
 | Metadata row | `albums.release_year`, sum of `media_files.duration_seconds`, `media_files.is_lossless` + `bit_depth` for badge; a phantom album: `[demo]` always, the streamed mix (`/phantom-availability` `quality`) for the badge, its `excerpt` list for the row tags | — |
 | Genre chips | `album_genres` + `genres.name`, top 3 by count; none → the primary artist's genres (`genre_queries.album_genre_chips`) | — |
-| Tracklist | `tracks` ordered by `track_number` | — |
+| Composer line | `track_credits` (the files' composer tags): "Composer: …" / "Composers: …" under the artist line, the ones every shown track has, each a link to his page; none when no file names one (since 2026-11-21) | MusicBrainz's work relations (CREDITS-MB) |
+| Tracklist | `tracks` ordered by `track_number`; a track's composers beyond the album line under its title | — |
 | Play all / + Queue | the transport calls in `app-shell.js` (`/api/player/play-tracks`, `/api/player/queue-tracks`) | + queue history snapshot before replace |
 
 ### Genre

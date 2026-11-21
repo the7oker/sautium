@@ -585,6 +585,16 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
 
     with _load_lock() as hold:
         _full_load(version, progress_cb, hold)
+    # A composer written "Last, First" takes the name the dump's sort name
+    # says it stands for (credits._named_by_dump): only on a node with the
+    # dump, so a dump that arrives after the scan renames its credits now.
+    from credits import rename_inverted
+    from database import get_db_context
+    with get_db_context() as db:
+        renamed = rename_inverted(db)
+        db.commit()
+    if renamed:
+        logger.info("composer credits derived again for %d track(s) under the dump's names", renamed)
     # What the node learned while it asked MusicBrainz no longer binds a node
     # that holds its database: a pairing its answers refuted is the dump's to
     # judge now, and a cooldown on asking it would only keep the "waits for

@@ -599,11 +599,25 @@ def resolve_artist_photo(db: Session, artist_id: str) -> Optional[uuid.UUID]:
     # top six are French and Italian soundtracks: the right candidate goes
     # 2 -> 3 -> 9 -> 15 matches at 6/12/25/40 titles, and both impostors stay
     # at zero throughout. Wider evidence, same cost, no extra noise.
+    #
+    # A composer's albums are his evidence too (track_credits): an artist who
+    # only composes here has no performing credit, and Deezer files a
+    # recording of his work under him — reached through the copies held
+    # here, which a node that signs nothing never materialises as a
+    # tracklist (sign_audio._materialize_owned_tracklists).
     album_titles = [r[0] for r in db.execute(text("""
         SELECT (array_agg(al.title ORDER BY length(al.title), al.title))[1] AS title
         FROM albums al
-        JOIN album_tracks att ON att.album_id = al.id
-        JOIN track_artists ta ON ta.track_id = att.track_id AND ta.artist_id = :id
+        JOIN (SELECT att.album_id, att.track_id FROM album_tracks att
+                JOIN track_artists ta ON ta.track_id = att.track_id AND ta.artist_id = :id
+              UNION
+              SELECT att.album_id, att.track_id FROM album_tracks att
+                JOIN track_credits tc ON tc.track_id = att.track_id AND tc.artist_id = :id
+              UNION
+              SELECT av.album_id, f.track_id FROM track_credits tc
+                JOIN owned_files f ON f.track_id = tc.track_id
+                JOIN album_variants av ON av.id = f.album_variant_id
+               WHERE tc.artist_id = :id) att ON att.album_id = al.id
         GROUP BY COALESCE(al.musicbrainz_id::text, al.id::text)
         ORDER BY bool_or(al.musicbrainz_id IS NOT NULL) DESC, count(*) DESC
         LIMIT 40

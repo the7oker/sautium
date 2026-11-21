@@ -343,6 +343,41 @@ def _phantom_album(album_id: str) -> dict:
     return album
 
 
+def _composer_lines(album: dict) -> None:
+    """Who wrote the shown tracks (track_credits, CREDITS-1-DESIGN §3.2):
+    `composers` on the album, the ones every shown track has, in the order
+    their files name them; `composers` on a track, its own others. Nothing
+    for an album none of whose files names a composer."""
+    tids = sorted({t["track_id"] for t in album["tracks"]})
+    if not tids:
+        album["composers"] = []
+        return
+    rows = db_query("""
+        WITH c AS (
+            SELECT tc.track_id, tc.artist_id, min(tc.position) AS position
+              FROM track_credits tc
+             WHERE tc.track_id = ANY(%(t)s::uuid[]) AND tc.role = 'composer'
+             GROUP BY tc.track_id, tc.artist_id),
+        every AS (
+            SELECT artist_id, min(position) AS position FROM c
+             GROUP BY artist_id HAVING count(*) = cardinality(%(t)s::uuid[]))
+        SELECT NULL AS track_id, a.id::text AS id, a.name, every.position
+          FROM every JOIN artists a ON a.id = every.artist_id
+        UNION ALL
+        SELECT c.track_id::text, a.id::text, a.name, c.position
+          FROM c JOIN artists a ON a.id = c.artist_id
+         WHERE c.artist_id NOT IN (SELECT artist_id FROM every)
+        ORDER BY track_id NULLS FIRST, position, name
+    """, {"t": tids})
+    album["composers"] = [{"id": r["id"], "name": r["name"]} for r in rows if r["track_id"] is None]
+    own: dict = {}
+    for r in rows:
+        if r["track_id"] is not None:
+            own.setdefault(r["track_id"], []).append({"id": r["id"], "name": r["name"]})
+    for t in album["tracks"]:
+        t["composers"] = own.get(t["track_id"], [])
+
+
 @router.get("/{album_id}")
 def get_album(
     album_id: str,
@@ -461,6 +496,7 @@ def get_album(
         LEFT JOIN audio_features af ON af.track_id = t.id
         ORDER BY p.disc_number NULLS LAST, p.track_number NULLS LAST, t.title
     """, params)
+    _composer_lines(album)
 
     # Full variant list, always returned (UI hides the selector when
     # len == 1), best first — the rank the default pick uses per track.

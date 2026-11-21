@@ -309,6 +309,41 @@ VALIDATE_TRACKS_FROM = """\
     JOIN albums al ON av.album_id = al.id"""
 
 # ---------------------------------------------------------------------------
+# The names search's whole-word arm
+# ---------------------------------------------------------------------------
+# The strict word similarity a name's word must reach and the weight its
+# score takes — a prefix's 0.85, so a whole word and a prefix tie and
+# ownership breaks the tie (at 0.8 an owned "Johann Sebastian Bach" ranked
+# 33rd behind phantom names that start with "bach"; CREDITS-1 Q13). The
+# score and the retrieve both compare with WORD_ARM_MIN themselves: `<<%`
+# alone reads the session's pg_trgm.strict_word_similarity_threshold
+# (default 0.5), and a fragment it let in scores 0 — which the dominance cut
+# keeps when nothing scores more. Discovery's run_search sets the threshold
+# to WORD_ARM_MIN only so that the GIN index hands over no more rows than
+# the predicate keeps. Shared by Discovery's names source and the
+# assistant's name matcher (assistant_queries), so "Mozart" finds Wolfgang
+# Amadeus Mozart on both.
+WORD_ARM_MIN = 0.6
+WORD_ARM_WEIGHT = 0.85
+
+
+def word_arm(q: str, col: str) -> str:
+    """The arm's score for query placeholder `q` against `col`: zero below
+    WORD_ARM_MIN, so a word fragment another branch retrieved is not lifted
+    by it either."""
+    return (f"CASE WHEN strict_word_similarity({q}, {col}) >= {WORD_ARM_MIN} "
+            f"THEN {WORD_ARM_WEIGHT} * strict_word_similarity({q}, {col}) ELSE 0 END")
+
+
+def word_retrieve(q: str, col: str, style: str = "sqlalchemy") -> str:
+    """The arm's retrieve: `<<%` for the GIN index, the comparison for the
+    threshold whatever the session's setting. `style` 'psycopg' doubles the
+    operator's percent sign for a string psycopg2 formats."""
+    op = "<<%%" if style == "psycopg" else "<<%"
+    return f"({q} {op} {col} AND strict_word_similarity({q}, {col}) >= {WORD_ARM_MIN})"
+
+
+# ---------------------------------------------------------------------------
 # Human engagement gate
 # ---------------------------------------------------------------------------
 # Anything that fans out per artist — one Last.fm call each — must be gated on
@@ -340,11 +375,34 @@ ARTIST_ENGAGED = f"""a.id IN (
 # ---------------------------------------------------------------------------
 # Owned vs phantom (correlates against an `artists` row aliased `a`)
 # ---------------------------------------------------------------------------
-# The product's definition of a phantom artist, mirroring the `is_owned`
-# expression the artist/discovery surfaces already ship: any owned file —
-# here or at the HQPlayer (owned_files) — crediting them in ANY role. A featured artist on a track you own is owned —
-# the UI shows them undimmed — so `role = 'primary'` is the wrong line here.
+# The product's definition of a phantom artist, and the `is_owned` of the
+# artist/discovery surfaces: any owned file — here or at the HQPlayer
+# (owned_files) — crediting them in ANY role, or naming them as its composer.
+# A featured artist on a track you own is owned — the UI shows them undimmed
+# — so `role = 'primary'` is the wrong line here.
 
-ARTIST_OWNED = """EXISTS (SELECT 1 FROM track_artists ta
-                    JOIN owned_files f ON f.track_id = ta.track_id
-                   WHERE ta.artist_id = a.id)"""
+ARTIST_OWNED = """(EXISTS (SELECT 1 FROM track_artists ta
+                     JOIN owned_files f ON f.track_id = ta.track_id
+                    WHERE ta.artist_id = a.id)
+     OR EXISTS (SELECT 1 FROM track_credits tc
+                  JOIN owned_files f ON f.track_id = tc.track_id
+                 WHERE tc.artist_id = a.id))"""
+
+# A credit (track_credits) is no performing credit: the composer of an owned
+# file is owned — no phantom (ARTIST_OWNED) — while every engagement gate
+# above reads track_artists alone, so he engages nothing. The tiles and the
+# page name him by what he did here: an owned credit and no owned
+# performance.
+ARTIST_COMPOSER_ONLY = """(NOT EXISTS (SELECT 1 FROM track_artists ta
+                          JOIN owned_files f ON f.track_id = ta.track_id
+                         WHERE ta.artist_id = a.id)
+     AND EXISTS (SELECT 1 FROM track_credits tc
+                   JOIN owned_files f ON f.track_id = tc.track_id
+                  WHERE tc.artist_id = a.id))"""
+
+# An artist nothing credits — no track, no album, no credit — correlated
+# against an `artists` row aliased {a}: the clause every sweep of artists
+# carries (track_credits.artist_id RESTRICTs, so one without it fails).
+ARTIST_UNCREDITED = """NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.artist_id = {a}.id)
+              AND NOT EXISTS (SELECT 1 FROM album_artists aa WHERE aa.artist_id = {a}.id)
+              AND NOT EXISTS (SELECT 1 FROM track_credits tc WHERE tc.artist_id = {a}.id)"""

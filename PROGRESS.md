@@ -38,6 +38,26 @@ implementation details live in the code, DB and git history.
   `artist_id` RESTRICTs rather than cascades — every `DELETE FROM artists`
   is a sweep or a merge written against `track_artists`, and one that forgot
   the new table now fails in its test instead of losing a credit quietly.
+- **A composer credit is derived from the files, like a genre count
+  (2026-11-21, CREDITS-1 step 2b).** Each file row keeps the composers its
+  tags name (`raw_composers`, split before naming), and a track's tag
+  credits are rewritten from its owned files' rows, best copy first,
+  whenever one of them is written — an import, a re-read, a re-home, a
+  confirmed prune, the HQPlayer sync. Written once at import, as
+  `track_artists` is, a second copy with other tags, a corrected tag and a
+  file moved to another track would each need a rule of its own; derived,
+  they are one, and a second scan is a no-op by construction. A file not yet
+  read by this reader contributes nothing, and a track whose files are all
+  unread (or gone) keeps its rows: the credit is of the music. The split is
+  deliberately narrow — `;` and a spaced ` / ` — because nothing in "Lennon,
+  McCartney" or "Bach, Johann Sebastian" tells two names from one inverted
+  name; a wrong split mints two false artists, a kept value one unsplit
+  name. "Last, First" is turned only where the MusicBrainz dump's sort name
+  says it is that artist's sort form. A composer owned this way is owned
+  (no phantom), never engaged; his page fetches his Last.fm bio once when a
+  person opens it — the one per-artist call he ever causes. Nothing travels:
+  a credit is an unsealed string from someone's tags, and MusicBrainz's work
+  relations (CREDITS-MB) are what would give a peer the same thing properly.
 - **A classical album is read as MusicBrainz writes it and bound by its
   positions (2026-11-20, CANON-CLASSICAL).** The owner's library showed the
   canon damaging classical albums. 138 files carried TITLE as two values

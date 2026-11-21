@@ -449,6 +449,7 @@ class HqpEndpoint(Base):
     product = Column(Text)
     hqp_name = Column(Text)
     library_hash = Column(Text)
+    library_read_rev = Column(SmallInteger, nullable=False, default=0, server_default="0")
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_synced_at = Column(DateTime(timezone=True))
     hqp_version = Column(Text)
@@ -586,6 +587,7 @@ class MediaFile(Base):
     raw_album = Column(Text)
     raw_year = Column(Text)
     raw_genre = Column(Text)   # the genre tag as read; album_genres' filetag counts derive from it
+    raw_composers = Column(ARRAY(Text))   # split, before naming; NULL = read before CREDITS-1
     recording_mbid = Column(UUID(as_uuid=False))  # materialized MB recording for THIS file's performance
 
     # Cover art (resolved by background worker)
@@ -1319,6 +1321,7 @@ class HqpLibraryFile(Base):
     raw_album_artist = Column(Text)
     raw_album = Column(Text)
     raw_year = Column(Text)
+    raw_composers = Column(ARRAY(Text))   # LibraryFile composer, split; NULL = read before CREDITS-1
     recording_mbid = Column(UUID(as_uuid=False))  # materialised MB recording for THIS file, stamped by the canon
     first_seen_at = Column(DateTime(timezone=True), server_default=func.now())
     last_seen_at = Column(DateTime(timezone=True), server_default=func.now())

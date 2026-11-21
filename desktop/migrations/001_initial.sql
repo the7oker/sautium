@@ -411,6 +411,9 @@ CREATE TABLE IF NOT EXISTS hqp_endpoints (
     product TEXT,                           -- <GetInfo product="…"/>
     hqp_name TEXT,                          -- <GetInfo name="…"/>
     library_hash TEXT,                      -- <LibraryGetHash/> the last COMPLETE sync saw; NULL = never imported
+    -- the revision of what the sync reads of each file (hqp_library.LIBRARY_READ_REV):
+    -- a library last read under an older one is read whole by its next sync
+    library_read_rev SMALLINT NOT NULL DEFAULT 0,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_synced_at TIMESTAMPTZ,
     hqp_version TEXT,                       -- <GetInfo version="…"/>: the product generation ("6")
@@ -814,6 +817,7 @@ CREATE TABLE IF NOT EXISTS hqp_library_files (
     raw_album_artist TEXT,
     raw_album TEXT,
     raw_year TEXT,
+    raw_composers TEXT[],                   -- LibraryFile composer, split; NULL = read before CREDITS-1
     recording_mbid UUID,                    -- materialised MB recording for THIS file, stamped by the canon like media_files'
     first_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -922,6 +926,9 @@ CREATE TABLE IF NOT EXISTS media_files (
     raw_album TEXT,
     raw_year TEXT,
     raw_genre TEXT,                                 -- the genre tag as read; album_genres' filetag counts derive from it
+    -- the composers the tags name, split, before naming (credits.split_names);
+    -- NULL = read by a reader before CREDITS-1. track_credits' tag rows derive from it
+    raw_composers TEXT[],
     recording_mbid UUID,                            -- materialized MB recording for THIS file (its concrete performance)
     cover_id UUID REFERENCES covers(id) ON DELETE SET NULL,
     cover_processed_at TIMESTAMPTZ,                  -- NULL = pending cover resolution
