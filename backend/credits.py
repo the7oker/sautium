@@ -109,27 +109,47 @@ def derive_composers(db: Session, track_ids: Iterable, *, sweep: bool = True) ->
 
     A derive that fails (a race no lock covers) rolls back alone — the batch
     it rides keeps its files, and the files keep what they read — and its
-    tracks wait in credits_due, which the next derive takes with its own;
-    the failure is logged with them."""
+    tracks wait in credits_due, logged with them. Each derive then also takes
+    a few tracks that waited (DUE_RETRY_AFTER at least), each in a
+    savepoint of its own and swept: one that keeps failing stays alone and
+    is tried again at that pace, never failing another's derive."""
     lock_credits(db)
-    tids = sorted({str(t) for t in track_ids}
-                  | set(db.execute(text("SELECT track_id::text FROM credits_due")).scalars()))
-    if not tids:
-        return set()
+    tids = sorted({str(t) for t in track_ids})
+    dropped = _derive_alone(db, tids, sweep) if tids else set()
+    for (due,) in db.execute(text("""
+            SELECT track_id::text FROM credits_due
+             WHERE failed_at < now() - CAST(:after AS interval) AND track_id <> ALL(CAST(:t AS uuid[]))
+             ORDER BY failed_at LIMIT :n"""),
+            {"after": DUE_RETRY_AFTER, "t": tids, "n": DUE_PER_DERIVE}).fetchall():
+        _derive_alone(db, [due], True)
+    return dropped
+
+
+# A track whose derive failed is taken again by a later derive once this
+# long has passed, a few at a time: a failure that persists costs one
+# derive and one logged error per track at this pace, never a batch.
+DUE_RETRY_AFTER = "10 minutes"
+DUE_PER_DERIVE = 20
+
+
+def _derive_alone(db: Session, tids: List[str], sweep: bool) -> Set[str]:
     try:
         with db.begin_nested():
             db.execute(text("DELETE FROM credits_due WHERE track_id = ANY(CAST(:t AS uuid[]))"),
                        {"t": tids})
             return _derive(db, tids, sweep)
     except Exception:
-        logger.error("composer credits: the derive of %d track(s) failed; the next derive takes "
+        logger.error("composer credits: the derive of %d track(s) failed; a later derive takes "
                      "them again: %s", len(tids), tids[:20], exc_info=True)
+    # its own savepoint, the tracks key-locked: one a writer that takes no
+    # credits lock deleted meanwhile is skipped, and nothing here can fail
+    # the transaction the derive rides
+    with db.begin_nested():
         db.execute(text("""
             INSERT INTO credits_due (track_id)
-            SELECT t FROM unnest(CAST(:t AS uuid[])) t
-             WHERE EXISTS (SELECT 1 FROM tracks WHERE id = t)
+            SELECT id FROM tracks WHERE id = ANY(CAST(:t AS uuid[])) FOR KEY SHARE
             ON CONFLICT (track_id) DO UPDATE SET failed_at = now()"""), {"t": tids})
-        return set()
+    return set()
 
 
 def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:

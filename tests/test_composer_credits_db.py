@@ -638,12 +638,88 @@ def test_a_failed_derive_keeps_the_batch_and_its_tracks_wait_for_the_next(cur, l
     cur.execute("SELECT count(*) FROM credits_due")
     assert cur.fetchone()[0] == 2 and _credits(cur) == {}
     monkeypatch.setattr(credits, "_derive", real)
-    with get_db_context() as db:                    # the next derive, of anything, takes them
+    with get_db_context() as db:                    # not before their retry is due
+        credits.derive_composers(db, [])
+        db.commit()
+    assert _credits(cur) == {}
+    cur.execute("UPDATE credits_due SET failed_at = now() - interval '1 hour'")
+    with get_db_context() as db:                    # then the next derive, of anything, takes them
         credits.derive_composers(db, [])
         db.commit()
     assert _credits(cur) == {"Aria": [BACH], "Spring": ["Antonio Vivaldi"]}
     cur.execute("SELECT count(*) FROM credits_due")
     assert cur.fetchone()[0] == 0
+
+
+def test_a_track_whose_derive_keeps_failing_stays_alone(cur, library, templates, monkeypatch):
+    import credits
+    _clean(cur)
+    cur.execute("DELETE FROM credits_due")
+    _flac(templates, library / "P" / "P" / "01.flac", "Poison", "Glenn Gould", "P", ["Old Composer"], 1)
+    _scan()
+    cur.execute("SELECT track_id::text FROM media_files")
+    (poison,), = cur.fetchall()
+    real = credits._derive
+
+    def failing_for_poison(db, tids, sweep):
+        if poison in tids:
+            db.execute(credits.text("SELECT 1/0"))
+        return real(db, tids, sweep)
+    monkeypatch.setattr(credits, "_derive", failing_for_poison)
+    _retag(library / "P" / "P" / "01.flac", composer="New Composer")
+    _scan()
+    cur.execute("UPDATE credits_due SET failed_at = now() - interval '1 hour'")
+    for i in range(3):                              # three unrelated scans, the retry due each time
+        _flac(templates, library / "Q" / f"Q{i}" / "01.flac", f"Song {i}", "Glenn Gould", f"Q{i}",
+              [f"Composer {i}"], 1)
+        _scan()
+        cur.execute("UPDATE credits_due SET failed_at = now() - interval '1 hour'")
+    credited = _credits(cur)
+    assert all(credited[f"Song {i}"] == [f"Composer {i}"] for i in range(3))
+    cur.execute("SELECT track_id::text FROM credits_due")
+    assert cur.fetchall() == [(poison,)]
+    # once it derives, it is swept as any derive sweeps: no orphan of the old tag
+    monkeypatch.setattr(credits, "_derive", real)
+    from database import get_db_context
+    with get_db_context() as db:
+        credits.derive_composers(db, [], sweep=False)        # a caller that sweeps its own only
+        db.commit()
+    assert _credits(cur)["Poison"] == ["New Composer"]
+    assert _artist_id(cur, "Old Composer") is None
+
+
+def test_a_track_merge_carries_a_waiting_derive(cur, library, templates):
+    from canon.identity import _update_track_uuid
+    from database import get_db_context
+    _clean(cur)
+    cur.execute("DELETE FROM credits_due")
+    _flac(templates, library / "M" / "A" / "01.flac", "Aria", "Glenn Gould", "A", [BACH], 1)
+    _flac(templates, library / "M" / "B" / "01.flac", "Aria (2)", "Glenn Gould", "B", [BACH], 1)
+    _scan()
+    cur.execute("SELECT t.title, t.id::text FROM tracks t")
+    ids = dict(cur.fetchall())
+    cur.execute("INSERT INTO credits_due (track_id) VALUES (%s)", (ids["Aria (2)"],))
+    with get_db_context() as db:
+        _update_track_uuid(db, ids["Aria (2)"], ids["Aria"])
+        db.commit()
+    cur.execute("SELECT track_id::text FROM credits_due")
+    assert cur.fetchall() == [(ids["Aria"],)]
+
+
+def test_a_reread_that_changes_a_copys_rank_derives(cur, library, templates, monkeypatch):
+    import credits
+    _clean(cur)
+    _flac(templates, library / "R" / "LP" / "01.flac", "Aria", "Glenn Gould", "LP", [BACH], 1)
+    _scan()
+    cur.execute("UPDATE media_files SET sample_rate = 22050, tags_read_rev = 1")   # read as another rip
+    derived = []
+    real = credits.derive_composers
+    monkeypatch.setattr(scanner, "derive_composers",
+                        lambda db, tids, **kw: derived.append(sorted(tids)) or real(db, tids, **kw))
+    _scan()
+    cur.execute("SELECT track_id::text FROM media_files")
+    (track,), = cur.fetchall()
+    assert [track] in derived
 
 
 def test_a_rescan_of_the_hqplayer_library_leaves_no_composer_behind(cur, library, templates, monkeypatch):
