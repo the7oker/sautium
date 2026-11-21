@@ -20,17 +20,34 @@ import uuid as _uuid
 import outside_text
 from ensemble_instruments import present_instruments
 from hqplayer_client import format_time
-from sql_queries import best_rip_order, owned_rank
+from sql_queries import ARTIST_OWNED, best_rip_order, owned_rank, word_arm, word_retrieve
 
 # Lexical candidate sources, each behind its trigram GIN index (`%` — a bare
 # `similarity(col, q) > x` cannot use one and seq-scans 3M rows).
-_ART_MATCH = """
-    SELECT a.id, GREATEST(similarity(a.name_latin, %(a_ql)s),
-                          CASE WHEN a.name_latin LIKE %(a_pfx)s THEN 0.85 ELSE 0 END,
-                          similarity(a.name, %(a_q)s)) AS s
+#
+# A name matches as Discovery's names source does: trigrams, a prefix, and
+# the whole-word arm (sql_queries.word_arm — "Mozart" finds Wolfgang
+# Amadeus Mozart, whose many trigrams dilute the query's under the floor).
+# A whole word ties a prefix, and what the person owns breaks the tie: the
+# cut at 25 must not keep phantom names that merely start with the query
+# over the owned artist (CREDITS-1 Q13).
+def _name_match(p: str) -> str:
+    """The artists a name matches, under the params `{p}_q` (the name),
+    `{p}_ql` (its latin form) and `{p}_pfx` (that form and '%')."""
+    q, ql, pfx = f"%({p}_q)s", f"%({p}_ql)s", f"%({p}_pfx)s"
+    return f"""
+    SELECT a.id, GREATEST(similarity(a.name_latin, {ql}),
+                          CASE WHEN a.name_latin LIKE {pfx} THEN 0.85 ELSE 0 END,
+                          {word_arm(ql, 'a.name_latin')},
+                          similarity(a.name, {q})) AS s
     FROM artists a
-    WHERE a.name_latin %% %(a_ql)s OR a.name_latin LIKE %(a_pfx)s OR a.name %% %(a_q)s
-    ORDER BY s DESC LIMIT 25"""
+    WHERE a.name_latin %% {ql} OR a.name_latin LIKE {pfx}
+       OR {word_retrieve(ql, 'a.name_latin', style='psycopg')} OR a.name %% {q}
+    ORDER BY s DESC, {ARTIST_OWNED} DESC, a.name LIMIT 25"""
+
+
+_ART_MATCH = _name_match("a")
+_CMP_MATCH = _name_match("c")
 
 _ALB_MATCH = """
     SELECT al.id, GREATEST(similarity(al.title_latin, %(b_ql)s),
@@ -320,10 +337,23 @@ def entity_kinds(q, ids: list[str]) -> dict:
     return {r["id"]: r["kind"] for r in rows}
 
 
+# Who wrote track `t`'s music, in the order its files name them (each
+# artist once whatever the credit's source) — the track line's "Composer";
+# "; " between names, as a name may hold a comma of its own.
+_COMPOSERS = """(SELECT string_agg(c.name, '; ' ORDER BY c.position, c.name)
+                  FROM (SELECT a.name, min(tc.position) AS position
+                          FROM track_credits tc JOIN artists a ON a.id = tc.artist_id
+                         WHERE tc.track_id = t.id AND tc.role = 'composer'
+                         GROUP BY a.id, a.name) c)"""
+
+
 def search_tracks(q, query: str = "", artist: str = "", album: str = "",
-                  genre: str = "", limit: int = 20, corpus: str = "owned") -> list[dict]:
+                  genre: str = "", limit: int = 20, corpus: str = "owned",
+                  composer: str = "") -> list[dict]:
     """Metadata search over the catalog. The first term given IS the candidate
-    source (query > artist > album > genre); the rest narrow it. corpus='owned'
+    source (query > artist > composer > album > genre); the rest narrow it.
+    `artist` is who performs, `composer` who wrote the music (track_credits —
+    one name, one meaning per parameter: CREDITS-1 Q9). corpus='owned'
     keeps only tracks with a file, 'all' includes the streamable ones."""
     hqp_id = active_hqp_endpoint(q)
     params: dict = {"limit": min(limit, 50), "pool": max(limit * 4, 40),
@@ -331,7 +361,8 @@ def search_tracks(q, query: str = "", artist: str = "", album: str = "",
     ctes: list[str] = []
     cand: list[str] = []
     filters: list[str] = []
-    seed = "query" if query else "artist" if artist else "album" if album else "genre"
+    seed = ("query" if query else "artist" if artist else "composer" if composer
+            else "album" if album else "genre")
 
     if query:
         params["a_q"] = params["t_q"] = query[:255]
@@ -353,10 +384,23 @@ def search_tracks(q, query: str = "", artist: str = "", album: str = "",
             cand.append("SELECT ta.track_id, art.s FROM art "
                         "JOIN track_artists ta ON ta.artist_id = art.id AND ta.role = 'primary'")
         else:
-            filters.append("""EXISTS (SELECT 1 FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+            filters.append(f"""EXISTS (SELECT 1 FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
                 WHERE ta.track_id = best.track_id AND ta.role = 'primary'
                   AND (a.name_latin %% %(a_ql)s OR a.name_latin LIKE %(a_pfx)s
+                       OR {word_retrieve('%(a_ql)s', 'a.name_latin', style='psycopg')}
                        OR a.name %% %(a_q)s))""")
+
+    if composer:
+        params["c_q"], params["c_ql"] = composer[:255], _latin(composer)
+        params["c_pfx"] = params["c_ql"] + "%"
+        if seed == "composer":
+            ctes.append(f"cmp AS ({_CMP_MATCH})")
+            cand.append("SELECT tc.track_id, cmp.s FROM cmp "
+                        "JOIN track_credits tc ON tc.artist_id = cmp.id AND tc.role = 'composer'")
+        else:
+            filters.append(f"""EXISTS (SELECT 1 FROM track_credits tc
+                WHERE tc.track_id = best.track_id AND tc.role = 'composer'
+                  AND tc.artist_id IN (SELECT id FROM ({_CMP_MATCH}) cm))""")
 
     if album:
         params["b_ql"] = _latin(album)
@@ -413,7 +457,8 @@ def search_tracks(q, query: str = "", artist: str = "", album: str = "",
                own.is_lossless,
                (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
                 WHERE ag.album_id = COALESCE(own.album_id, ph.album_id)
-                ORDER BY ag.count DESC NULLS LAST LIMIT 1) AS genre
+                ORDER BY ag.count DESC NULLS LAST LIMIT 1) AS genre,
+               {_COMPOSERS} AS composers
         FROM top
         JOIN tracks t ON t.id = top.track_id
         {_OWN_LATERAL}
@@ -440,7 +485,8 @@ def track_info(q, track_uuid: str):
                art.name AS artist, art.is_vocalist AS artist_is_vocalist,
                (SELECT g.name FROM album_genres ag JOIN genres g ON g.id = ag.genre_id
                 WHERE ag.album_id = COALESCE(own.album_id, ph.album_id)
-                ORDER BY ag.count DESC NULLS LAST LIMIT 1) AS genre
+                ORDER BY ag.count DESC NULLS LAST LIMIT 1) AS genre,
+               {_COMPOSERS} AS composers
         FROM tracks t
         {_OWN_LATERAL}
         {_PH_LATERAL}
@@ -502,6 +548,8 @@ def format_track(row: dict) -> str:
     extras = []
     if row.get("album"):
         extras.append(f"Album: {row['album']}")
+    if row.get("composers"):
+        extras.append(f"Composer: {row['composers']}")
     if row.get("genre"):
         extras.append(f"Genre: {row['genre']}")
     if row.get("duration_seconds"):
@@ -581,6 +629,8 @@ def format_genre_list(rows: list[dict], header: str) -> str:
 def format_track_info(row: dict, features: dict | None) -> str:
     """The get_track_info answer."""
     lines = [f"{row['artist']} - {row['title']}", f"Album: {row['album']}"]
+    if row.get("composers"):
+        lines.append(f"Composer: {row['composers']}")
     sings = {"vocal": "yes", "instrumental": "no"}.get(row.get("artist_is_vocalist"))
     if sings:
         lines.append(f"Artist sings: {sings} (from the artist's bio)")

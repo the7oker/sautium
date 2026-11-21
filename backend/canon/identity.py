@@ -314,6 +314,12 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
                                              AND x.source = o.source), 0)
             FROM track_credits o WHERE o.track_id = :old
             ON CONFLICT DO NOTHING"""), p)
+        # a derive the old track still waited for is the survivor's to do:
+        # its files move there (credits.derive_composers)
+        db.execute(text("""
+            INSERT INTO credits_due (track_id) SELECT :new
+             WHERE EXISTS (SELECT 1 FROM credits_due WHERE track_id = :old)
+            ON CONFLICT (track_id) DO NOTHING"""), p)
         # One-per-(track, key) tables: move what the target lacks.
         db.execute(text("""
             UPDATE track_lyrics tl SET track_id = :new

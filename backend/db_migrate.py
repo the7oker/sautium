@@ -101,7 +101,13 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      needs no step: a row under scanner.TAGS_READ_REV is a changed file to
      the next scan, and on a mount that sends no events the watcher's start
      queues one until a whole walk has read the library under it
-     (library_watch.start, scanner.TAGS_READ_KEY).
+     (library_watch.start, scanner.TAGS_READ_KEY). The composer read
+     (CREDITS-1 step 2b, 2026-11-21: TAGS_READ_REV 2) reaches every node
+     the same way, and an HQPlayer's library by its own revision
+     (hqp_endpoints.library_read_rev under hqp_library.LIBRARY_READ_REV: its
+     next sync reads it whole, the attach's check included) — no step
+     either, and no library hash is cleared: the hash is how a library that
+     moved to a new address is known.
 
 Right after the schema deltas, once per database, the birth preset
 (`birth_preset_v1`, _apply_birth_preset): the switches a node's setup chose

@@ -1312,6 +1312,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
     is bound to the stream the page holds, and a reconnect of the same page
     takes it over (playback.hqp_meter)."""
     import mb_discovery
+    from routers.artists import artist_sse_register, artist_sse_unregister
     from routers.discovery import (lb_sse_register, lb_sse_unregister,
                                    mb_sse_register, mb_sse_unregister)
     from routers.gear_models import (research_sse_register,
@@ -1327,6 +1328,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
     research_evt = asyncio.Event()
     mb_evt = asyncio.Event()
     lb_evt = asyncio.Event()
+    artist_evt = asyncio.Event()
     chat_evt = asyncio.Event()
     notice_evt = asyncio.Event()
     identity_evt = asyncio.Event()
@@ -1339,6 +1341,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
         research_sse_register(research_evt, loop)
         mb_sse_register(mb_evt, loop)
         lb_sse_register(lb_evt, loop)
+        artist_sse_register(artist_evt, loop)
         chat_sse_register(chat_evt, loop)
         notices_sse_register(notice_evt, loop)
         identity_sse_register(identity_evt, loop)
@@ -1381,6 +1384,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                     asyncio.create_task(research_evt.wait()): "research",
                     asyncio.create_task(mb_evt.wait()): "mb",
                     asyncio.create_task(lb_evt.wait()): "lb",
+                    asyncio.create_task(artist_evt.wait()): "artist",
                     asyncio.create_task(chat_evt.wait()): "chat",
                     asyncio.create_task(notice_evt.wait()): "notice",
                     asyncio.create_task(identity_evt.wait()): "identity",
@@ -1434,6 +1438,11 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                     # artist page re-fetches its own snapshot.
                     lb_evt.clear()
                     yield 'data: {"t": "lb"}\n\n'
+                if "artist" in kinds:
+                    # Payload-free: an opened composer's bio fetch ended — the
+                    # open artist page re-fetches its own snapshot.
+                    artist_evt.clear()
+                    yield 'data: {"t": "artist"}\n\n'
                 if "notice" in kinds:
                     notice_evt.clear()
                     notices = await asyncio.to_thread(_notices_state)
@@ -1460,6 +1469,7 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
             research_sse_unregister(research_evt, loop)
             mb_sse_unregister(mb_evt, loop)
             lb_sse_unregister(lb_evt, loop)
+            artist_sse_unregister(artist_evt, loop)
             chat_sse_unregister(chat_evt, loop)
             notices_sse_unregister(notice_evt, loop)
             identity_sse_unregister(identity_evt, loop)

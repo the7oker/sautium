@@ -2554,6 +2554,31 @@ body.sautium-base {
   font-weight: 500;
   color: var(--color-text);
 }
+/* The artist page's tags + bio and its source credit sit in wrappers a late
+   bio patches in place; they take no box, so the screen lays their children
+   out as its own (a child selector still needs the wrapper named: the wide
+   layout's bio width below). */
+[data-artist-about],
+[data-source-credit] {
+  display: contents;
+}
+/* "Composer: …" under the artist line — the names every shown track has,
+   each a link to his page; muted beside the artist it follows. */
+.album-composer-line {
+  margin-top: calc(4 * var(--px));
+  font-size: calc(13 * var(--px));
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+.album-composer-line .acl-name {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--color-text);
+  cursor: pointer;
+}
 /* Compact pill that opens the variant picker sheet; only rendered when
    the album has more than one rip. Mono+blue label matches the visual
    language used for other technical readouts (BPM, sample rate). */
@@ -7958,7 +7983,8 @@ html { -webkit-tap-highlight-color: transparent; }
   /* The description spans both columns right under the cover, and the
      grid has no row gap to part them. */
   .album-side > .bio { padding-top: var(--space-4); }
-  .detail-screen > .bio { max-width: calc(640 * var(--px)); }
+  .detail-screen > .bio,
+  .detail-screen > [data-artist-about] > .bio { max-width: calc(640 * var(--px)); }
   /* The photo band: at 688–944px wide the phone's 200px strip keeps a
      sliver of the portrait, so the band grows with its width (2.4:1,
      capped) and the name with it. The genre banner is the same band. */

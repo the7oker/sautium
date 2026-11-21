@@ -115,7 +115,7 @@ def test_an_owned_whole_word_ranks_above_a_phantom_prefix(search):
 
 
 def test_a_word_fragment_is_not_lifted(search, scratch_dsn):
-    from discovery_engine import WORD_ARM_MIN, _word_arm
+    from sql_queries import WORD_ARM_MIN, word_arm
     hits = search("bach")
     # "offenbach": trigram 0.25, strict word 0.25 — found by neither
     assert "Jacques Offenbach" not in hits and "Burt Bacharach" not in hits
@@ -128,7 +128,7 @@ def test_a_word_fragment_is_not_lifted(search, scratch_dsn):
         cur.execute("SELECT strict_word_similarity('a', 'a')")     # loads pg_trgm's settings
         cur.execute("SHOW pg_trgm.strict_word_similarity_threshold")
         assert float(cur.fetchone()[0]) < 0.56 < WORD_ARM_MIN
-        arm = _word_arm("n").replace("%", "%%").replace(":ql", "%(ql)s")
+        arm = word_arm("%(ql)s", "n")
         cur.execute(f"SELECT n, {arm} FROM (VALUES ('burt bacharach'), "
                     "('johann sebastian bach')) v(n)", {"ql": "bach"})
         assert dict(cur.fetchall()) == pytest.approx({"burt bacharach": 0, "johann sebastian bach": 0.85})
@@ -139,13 +139,13 @@ def test_the_arms_retrieve_holds_its_threshold_in_any_session(scratch_dsn):
     # An executor without run_search's SET LOCAL reads pg_trgm's default 0.5,
     # where `<<%` alone lets "bacharach" (0.56) in at a score of 0 — and the
     # dominance cut keeps zeros when nothing scores more
-    from discovery_engine import _word_retrieve
+    from sql_queries import word_retrieve
     conn = psycopg2.connect(scratch_dsn)
     with conn, conn.cursor() as cur:
         cur.execute("SELECT strict_word_similarity('a', 'a')")     # loads pg_trgm's settings
         cur.execute("SHOW pg_trgm.strict_word_similarity_threshold")
         assert float(cur.fetchone()[0]) < 0.56
-        pred = _word_retrieve("n").replace("%", "%%").replace(":ql", "%(ql)s")
+        pred = word_retrieve("%(ql)s", "n", style="psycopg")
         cur.execute(f"SELECT n FROM (VALUES ('burt bacharach'), ('johann sebastian bach')) v(n) "
                     f"WHERE {pred}", {"ql": "bach"})
         assert [r[0] for r in cur.fetchall()] == ["johann sebastian bach"]

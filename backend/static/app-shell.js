@@ -4354,10 +4354,12 @@
       screen._filters.artists = cur;
     });
 
+    // The filter narrows by who PERFORMS (the engine's artist filter walks
+    // track_artists): an artist who only composes here would filter to nothing.
     wireSuggestInput(input, list,
       q => fetch('/api/discovery/search?' + new URLSearchParams({ target: 'artist', q, limit: '8' }))
         .then(r => r.ok ? r.json() : Promise.reject(r.status))
-        .then(data => data.results || []),
+        .then(data => (data.results || []).filter(a => !a.composer_only)),
       a => `
         <button type="button" class="genre-suggest-item"
                 data-id="${escapeHtml(a.artist_id)}"
@@ -4860,6 +4862,7 @@
             <div class="d-artist-avatar"
                  style="background: ${ph.bg};">${inner}</div>
             <div class="d-artist-name">${escapeHtml(a.artist || a.name || '')}</div>
+            ${a.composer_only ? '<div class="d-artist-sub">Composer</div>' : ''}
           </button>`;
       }).join('')
     }</div>`;
@@ -5134,6 +5137,21 @@
   /* Prose block shared by the artist bio and the album description: the
      summary up front, the full text behind "See more". Callers pass text
      already run through stripHtml + trimLastFmTail. */
+  function artistTagsHtml(tags) {
+    return (tags || [])
+      .map(t => t.genre_id
+        ? `<button class="tag-chip" type="button"
+                   data-genre-id="${escapeHtml(t.genre_id)}">${
+                     escapeHtml(t.name)}</button>`
+        : `<span class="tag-chip">${escapeHtml(t.name)}</span>`)
+      .join('');
+  }
+
+  // The artist page's tags and bio, one block a late bio patches in place.
+  function aboutHtml(tagsHtml, bioHtml) {
+    return `${tagsHtml ? `<div class="tag-row">${tagsHtml}</div>` : ''}${bioHtml}`;
+  }
+
   function proseBlockHtml(summary, full) {
     const initial = summary || full;
     if (!initial) return '';
@@ -5290,13 +5308,7 @@
           encodeURIComponent(d.id)}" alt="" onerror="this.remove()">`
       : heroFallback;
 
-    const tagsHtml = (d.tags || [])
-      .map(t => t.genre_id
-        ? `<button class="tag-chip" type="button"
-                   data-genre-id="${escapeHtml(t.genre_id)}">${
-                     escapeHtml(t.name)}</button>`
-        : `<span class="tag-chip">${escapeHtml(t.name)}</span>`)
-      .join('');
+    const tagsHtml = artistTagsHtml(d.tags);
 
     const sortSpec = ALBUMS_SORT_BY_ID[d.albums_sort] || ALBUMS_SORT_BY_ID.release_year;
     const glyphSvg = sortSpec.glyph ? ALBUMS_SORT_GLYPHS[sortSpec.glyph] || '' : '';
@@ -5306,7 +5318,7 @@
     // is_primary tile and the first feat. tile. Keeps the visual
     // grouping signal that role_priority drives on the server side.
     const albumsList = d.albums || [];
-    const albumsHtml = albumsList.map((a, i) => {
+    function ownedAlbumTileHtml(a) {
       const c = coverPlaceholderColors(a.title || a.id);
       const url = coverUrl(a);
       const inner = url
@@ -5326,17 +5338,12 @@
       // Multi-edition release group — one tile, tapping opens the editions screen.
       const editionsBadge = (a.edition_count > 1)
         ? `<span class="album-tile-editions">${a.edition_count}</span>` : '';
-      const prev = i > 0 ? albumsList[i - 1] : null;
-      const gap = prev && prev.is_primary !== false && a.is_primary === false
-        ? '<span class="group-gap" aria-hidden="true"></span>'
-        : '';
       const metricRaw = (a.metric || '').toString();
       const hasMetric = !!metricRaw;
       const metricLine = hasMetric
         ? `${glyphHtml}${escapeHtml(metricRaw)}`
         : `${glyphHtml}—`;
       return `
-        ${gap}
         <button class="album-tile" type="button" data-album-id="${escapeHtml(a.id)}"
                 data-group-id="${escapeHtml(a.group_id || a.id)}"
                 data-edition-count="${a.edition_count || 1}">
@@ -5345,7 +5352,17 @@
           <div class="album-tile-title">${escapeHtml(a.title || '')}</div>
           <div class="album-tile-year${hasMetric ? '' : ' unavailable'}">${metricLine}</div>
         </button>`;
+    }
+    const albumsHtml = albumsList.map((a, i) => {
+      const prev = i > 0 ? albumsList[i - 1] : null;
+      const gap = prev && prev.is_primary !== false && a.is_primary === false
+        ? '<span class="group-gap" aria-hidden="true"></span>'
+        : '';
+      return gap + ownedAlbumTileHtml(a);
     }).join('');
+    // The owned albums this artist wrote for and performs on nowhere
+    // (routers/artists.py composed), in the page's album sort.
+    const composedHtml = (d.composed || []).map(ownedAlbumTileHtml).join('');
 
     const similarHtml = (d.similar_artists || []).map(s => {
       const sph = avatarPlaceholder(s.name || '?');
@@ -5427,6 +5444,9 @@
     // empties similar off any non-external namesake).
     const sectionsHtml = `
       ${albumsHtml ? `<div class="section-sep"></div>${albumsHeader}<div class="h-scroll">${albumsHtml}</div>` : ''}
+      ${composedHtml ? `<div class="section-sep"></div>
+        <div class="section-head"><h3>Composed</h3></div>
+        <div class="h-scroll">${composedHtml}</div>` : ''}
       <div class="new-albums-section" data-new-albums
            style="${newAlbumsHtml ? '' : 'display:none'}">
         <div class="section-sep"></div>
@@ -5477,16 +5497,58 @@
           <h1 class="artist-hero-name">${escapeHtml(d.name || '')}</h1>
         </div>
         <div style="height: calc(14 * var(--px));"></div>
-        ${tagsHtml ? `<div class="tag-row">${tagsHtml}</div>` : ''}
-        ${bioHtml}
+        <div data-artist-about>${aboutHtml(tagsHtml, bioHtml)}</div>
         ${pointerHtml}
         ${pendingHtml}
         ${sectionsHtml}
-        ${sourceCreditHtml({ lastfm: d.lastfm_url, listenbrainz: d.listenbrainz_used })}
+        <div data-source-credit>${sourceCreditHtml({ lastfm: d.lastfm_url, listenbrainz: d.listenbrainz_used })}</div>
         <div style="height: calc(24 * var(--px));"></div>`;
     }
 
     wireProseBlock(screen, bioSummary, bioFull);
+
+    // An opened composer's Last.fm bio is on its way (routers/artists.py
+    // bio_pending): when the fetch ends, 'sautium:artist-changed' arrives
+    // over the ONE /api/events stream — re-fetch this page's snapshot and
+    // patch the tags and the bio in place.
+    if (d.bio_pending) {
+      const detachBio = () => {
+        window.removeEventListener('sautium:artist-changed', onBio);
+        window.removeEventListener('sautium:route', onBioRoute);
+      };
+      const onBio = async () => {
+        if (!document.contains(screen)) return detachBio();
+        let fresh = null;
+        try {
+          const r = await fetch('/api/artists/' + encodeURIComponent(artistId)
+                                + '?sort=' + encodeURIComponent(sort)
+                                + (selectedMbid ? '&mbid=' + encodeURIComponent(selectedMbid) : ''));
+          if (r.ok) fresh = await r.json();
+        } catch (_) {}
+        if (!fresh || !document.contains(screen)) return;
+        if (fresh.bio_pending) return;
+        detachBio();
+        const about = screen.querySelector('[data-artist-about]');
+        if (!about) return;
+        const summary = trimLastFmTail(stripHtml(fresh.bio_summary || ''));
+        const full = trimLastFmTail(stripHtml(fresh.bio || ''));
+        about.innerHTML = aboutHtml(artistTagsHtml(fresh.tags), proseBlockHtml(summary, full));
+        wireProseBlock(about, summary, full);
+        wireDetailHandlers(about);
+        // the Last.fm credit goes wherever its data is shown (clause 2.7)
+        const credit = screen.querySelector('[data-source-credit]');
+        if (credit) credit.innerHTML = sourceCreditHtml(
+          { lastfm: fresh.lastfm_url, listenbrainz: fresh.listenbrainz_used });
+      };
+      const onBioRoute = () => {
+        if (!document.contains(screen)) detachBio();
+      };
+      window.addEventListener('sautium:artist-changed', onBio);
+      window.addEventListener('sautium:route', onBioRoute);
+      // the fetch began with this page's own read and may have ended before
+      // the listener above: one read now, subscribed, misses no end
+      onBio();
+    }
 
     // This artist's ListenBrainz slice is on its way (the on-demand lane):
     // when it lands, the cycle's NOTIFY reaches this tab as
@@ -5829,6 +5891,12 @@
           t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
           t.bpm ? Math.round(t.bpm) + ' bpm' : null,
         ].filter(Boolean).join(' · ');
+        // the track's own composers, beyond the album line's (albums.py
+        // _composer_lines); names only — the row is the play control
+        // " · " between names: a name keeps its own comma ("Lennon, McCartney")
+        const composers = (t.composers || []).map(c => c.name).join(' · ');
+        const composersLine = composers
+          ? `<div class="track-artist-line track-composers">${escapeHtml(composers)}</div>` : '';
         if (t.location === 'hqplayer') {
           // Held in the HQPlayer's own library, no file here: the row plays
           // by track uuid (play-entities) — natively when that HQPlayer is
@@ -5839,6 +5907,7 @@
               <span class="track-rank">${t.track_number || ''}</span>
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${composersLine}
                 ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
               </div>
               <span class="track-dur"><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
@@ -5853,6 +5922,7 @@
             <span class="track-rank">${t.track_number || ''}</span>
             <div class="track-info">
               <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+              ${composersLine}
               ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
             </div>
             <span class="track-dur">${fmtDuration(t.duration)}</span>
@@ -5865,6 +5935,15 @@
       const artistName = d.primary_artist ? d.primary_artist.name : '';
       const artistId = d.primary_artist ? d.primary_artist.id : '';
       const totalDuration = fmtDurationLong(d.total_duration);
+      // The composers every shown track has (albums.py _composer_lines),
+      // each a link to his page.
+      const albumComposers = d.composers || [];
+      const composerHtml = albumComposers.length
+        ? `<div class="album-composer-line"><span class="acl-label">${
+            albumComposers.length > 1 ? 'Composers' : 'Composer'}:</span> ${
+            albumComposers.map(c => `<button class="acl-name" type="button"
+                data-artist-id="${escapeHtml(c.id)}">${escapeHtml(c.name)}</button>`).join(' · ')}</div>`
+        : '';
 
       // Album prose sits where the artist page puts the bio: straight after
       // the genre chips, above the actions — the pitch is what decides whether
@@ -5904,6 +5983,7 @@
           ${artistName ? `<button class="album-artist-line"
                                   style="background:none;border:0;padding:0;cursor:pointer;text-align:left;"
                                   data-artist-id="${escapeHtml(artistId)}">${escapeHtml(artistName)}</button>` : ''}
+          ${composerHtml}
           ${variantHtml}
           <div class="album-meta-row">
             ${d.year ? `<span class="am-year">${d.year}</span><span class="am-dot"></span>` : ''}

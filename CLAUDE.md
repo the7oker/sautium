@@ -246,9 +246,16 @@ See:
   RESTRICT`: every sweep and merge of artists names the table (the scanner's
   prune, the HQPlayer forget, the phantom discard, the un-split GC, the artist
   merges) or fails. A track merge is not guarded so: `track_id` cascades, so
-  `_update_track_uuid`, the one track merge, copies the credits itself. On
-  2026-11-18 nothing writes the table yet: the composer read is CREDITS-1's
-  step 2b.
+  `_update_track_uuid`, the one track merge, copies the credits itself. The
+  tag rows are DERIVED (since 2026-11-21, step 2b; `backend/credits.py`):
+  each file keeps the composers its tags name (`raw_composers` on
+  `media_files` and `hqp_library_files` — COMPOSER, TCOM, ©wrt, a cue's
+  SONGWRITER, HQPlayer's `composer`; split on `;` and a spaced ` / ` only),
+  and `derive_composers` rewrites a track's rows from its owned files, best
+  copy first, at every write of them; the name is the artist's by the
+  UUID v5 rule (a composer who performs is one row), "Last, First" turned
+  only by the dump's sort name. Owned through a credit is owned
+  (`sql_queries.ARTIST_OWNED`), never engaged. Nothing of it travels.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.
 - **Genre is album-grain** (`album_genres`, since 2026-06-17): the filetag

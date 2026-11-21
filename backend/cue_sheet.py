@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from credits import split_names
+
 logger = logging.getLogger(__name__)
 
 _QUOTED = re.compile(r'^"(.*)"$')
@@ -41,6 +43,7 @@ class CueTrack:
     isrc: Optional[str]
     start_seconds: float
     end_seconds: Optional[float]  # None = to EOF (last track)
+    songwriter: Optional[str] = None   # SONGWRITER, else REM COMPOSER
 
 
 @dataclass
@@ -53,6 +56,7 @@ class CueSheet:
     genre: Optional[str]
     catalog: Optional[str]
     tracks: List[CueTrack]
+    songwriter: Optional[str] = None   # the sheet's SONGWRITER (else REM COMPOSER)
 
 
 def read_cue_text(path: Path) -> str:
@@ -85,14 +89,16 @@ def _msf_to_seconds(mm: str, ss: str, ff: str) -> float:
 def parse_cue(text: str) -> Optional[Dict[str, Any]]:
     """Parse cue text into sheet fields + per-FILE track blocks.
 
-    Returns ``{title, performer, genre, date, catalog,
+    Returns ``{title, performer, songwriter, genre, date, catalog,
     files: [(filename, [track dicts])]}`` preserving the multi-FILE structure,
     or None when the sheet yields no audio tracks. Track dicts carry
-    ``{number, title, performer, isrc, indexes: {nn: seconds}}``. Non-AUDIO
-    (data) tracks are dropped. TITLE/PERFORMER/ISRC bind to the current TRACK
-    when inside one, else to the sheet.
+    ``{number, title, performer, songwriter, isrc, indexes: {nn: seconds}}``.
+    Non-AUDIO (data) tracks are dropped. TITLE/PERFORMER/SONGWRITER/ISRC bind
+    to the current TRACK when inside one, else to the sheet; `REM COMPOSER`,
+    which some rippers write, stands in for a SONGWRITER the same block lacks.
     """
-    sheet: Dict[str, Any] = {"title": None, "performer": None, "genre": None,
+    sheet: Dict[str, Any] = {"title": None, "performer": None, "songwriter": None,
+                             "rem_composer": None, "genre": None,
                              "date": None, "catalog": None, "files": []}
     cur_file: Optional[Tuple[str, List[dict]]] = None
     cur_track: Optional[dict] = None
@@ -110,6 +116,9 @@ def parse_cue(text: str) -> Optional[Dict[str, Any]]:
                 sheet["genre"] = _unquote(rest[6:].strip()) or None
             elif rest_u.startswith("DATE "):
                 sheet["date"] = _unquote(rest[5:].strip()) or None
+            elif rest_u.startswith("COMPOSER "):
+                (cur_track if cur_track is not None else sheet)["rem_composer"] = \
+                    _unquote(rest[9:].strip()) or None
             continue
 
         if upper.startswith("CATALOG "):
@@ -129,7 +138,8 @@ def parse_cue(text: str) -> Optional[Dict[str, Any]]:
                 return None  # TRACK before any FILE — malformed
             if m.group(2).upper() == "AUDIO":
                 cur_track = {"number": int(m.group(1)), "title": None,
-                             "performer": None, "isrc": None, "indexes": {}}
+                             "performer": None, "songwriter": None, "rem_composer": None,
+                             "isrc": None, "indexes": {}}
                 cur_file[1].append(cur_track)
             else:
                 cur_track = None  # data track: swallow its lines
@@ -158,10 +168,15 @@ def parse_cue(text: str) -> Optional[Dict[str, Any]]:
                 sheet["performer"] = value
             continue
 
+        if upper.startswith("SONGWRITER "):
+            value = _unquote(line[11:].strip()) or None
+            (cur_track if cur_track is not None else sheet)["songwriter"] = value
+            continue
+
         if upper.startswith("ISRC ") and cur_track is not None:
             cur_track["isrc"] = _unquote(line[5:].strip()) or None
             continue
-        # FLAGS / PREGAP / POSTGAP / SONGWRITER / unknown lines: ignored
+        # FLAGS / PREGAP / POSTGAP / unknown lines: ignored
 
     sheet["files"] = [f for f in sheet["files"] if f[1]]
     if not sheet["files"]:
@@ -246,12 +261,14 @@ def resolve_cue(cue_path: Path, audio_extensions: Set[str]) -> Optional[CueSheet
 
     tracks = [
         CueTrack(number=t["number"], title=t["title"], performer=t["performer"],
+                 songwriter=t["songwriter"] or t["rem_composer"],
                  isrc=t["isrc"], start_seconds=start,
                  end_seconds=starts[i + 1] if i + 1 < len(starts) else None)
         for i, (t, start) in enumerate(zip(raw_tracks, starts))
     ]
     return CueSheet(cue_path=cue_path, audio_path=audio_path,
                     title=parsed["title"], performer=parsed["performer"],
+                    songwriter=parsed["songwriter"] or parsed["rem_composer"],
                     date=parsed["date"], genre=parsed["genre"],
                     catalog=parsed["catalog"], tracks=tracks)
 
@@ -289,6 +306,11 @@ def synthesize_metadata(image_md: Dict[str, Any], sheet: CueSheet,
     md["artist"] = artist
     md["album"] = sheet.title or image_md.get("album")
     md["album_artist"] = sheet.performer or image_md.get("album_artist") or artist
+    # the same precedence as the performer's: the track's, the sheet's, the
+    # image's own tags (CREDITS-1-DESIGN §2.1)
+    songwriter = track.songwriter or sheet.songwriter
+    md["composers"] = (split_names([songwriter]) if songwriter
+                       else image_md.get("composers"))
     md["genre"] = sheet.genre or image_md.get("genre")
     date = sheet.date or image_md.get("date")
     md["date"] = date

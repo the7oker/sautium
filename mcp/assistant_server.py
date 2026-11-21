@@ -382,20 +382,25 @@ def hqplayer_set_volume(level: float) -> str:
 def search_tracks(
     query: str = "",
     artist: str = "",
+    composer: str = "",
     album: str = "",
     genre: str = "",
     limit: int = 20,
     corpus: str = "owned",
 ) -> str:
-    """Search the catalog by metadata (artist, album, genre, or free text query).
+    """Search the catalog by metadata (artist, composer, album, genre, or free text query).
 
     All parameters are optional. The query field searches across artist, album, and title.
     Tolerant to typos and misspellings (uses fuzzy trigram matching), and to script:
-    a Latin query finds Cyrillic/CJK names.
+    a Latin query finds Cyrillic/CJK names. A whole word of a name is enough
+    ("Mozart" finds Wolfgang Amadeus Mozart).
 
     Args:
         query: Free text search across artist, album, and track title
-        artist: Filter by artist name (fuzzy match, typo-tolerant)
+        artist: Filter by the PERFORMING artist's name (fuzzy match, typo-tolerant)
+        composer: Filter by who WROTE the music, as the files' composer tags name
+            them (fuzzy match). In classical music "music by Bach" means
+            composer='Bach' — the performer is the orchestra or the soloist
         album: Filter by album name (fuzzy match, typo-tolerant)
         genre: Filter by genre (partial match)
         limit: Maximum number of results (default 20)
@@ -403,10 +408,10 @@ def search_tracks(
             which play by streaming — same tools, same IDs)
     """
     try:
-        if not any([query, artist, album, genre]):
-            return "Provide at least one of query / artist / album / genre."
-        rows = aq.search_tracks(_db_query, query=query, artist=artist, album=album,
-                                genre=genre, limit=limit, corpus=corpus)
+        if not any([query, artist, composer, album, genre]):
+            return "Provide at least one of query / artist / composer / album / genre."
+        rows = aq.search_tracks(_db_query, query=query, artist=artist, composer=composer,
+                                album=album, genre=genre, limit=limit, corpus=corpus)
         scope = "" if corpus == "all" else " in the library"
         return _format_track_list(rows, f"Search results{scope} ({len(rows)} tracks):")
     except Exception as e:

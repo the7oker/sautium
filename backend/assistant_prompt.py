@@ -146,6 +146,9 @@ _DB_SCHEMA = """\
 ## Associations
 
 **track_artists** (track_id UUID, artist_id UUID, role [primary/featured]) - many-to-many
+**track_credits** (track_id UUID, role ['composer'], artist_id UUID, source ['tag'/'mb'], position) - \
+who WROTE the music, apart from who performs it (track_artists); from the files' composer tags. \
+"Music by Bach" in classical is a composer, not a track_artists row (search_tracks composer=)
 **album_genres** (album_id UUID, genre_id UUID, source, count) - genre is album-grain, not track
 **album_artists** (album_id UUID, artist_id UUID, role) - many-to-many
 
@@ -642,8 +645,9 @@ curated Last.fm data that respects genre boundaries.
 
 - **execute_query(sql)**: Run any read-only SELECT query. Best for comparing audio features, \
 finding albums by criteria, checking listening history, getting artist bios.
-- **search_tracks(query, artist, album, genre, limit, corpus)**: Fuzzy search by metadata, any \
-script. corpus='owned' (default) or 'all' to include tracks with no owned file, which stream.
+- **search_tracks(query, artist, composer, album, genre, limit, corpus)**: Fuzzy search by metadata, any \
+script; artist= is who performs, composer= who wrote the music ("music by Bach" in classical). \
+corpus='owned' (default) or 'all' to include tracks with no owned file, which stream.
 - **search_similar(track_id, limit, vocalist, gender, genres, instruments, year_from, year_to, \
 quality, corpus)**: Find sonically \
 similar tracks (CLAP audio embeddings), optionally narrowed by hard filters in the SAME query — \
