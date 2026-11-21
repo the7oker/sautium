@@ -26,6 +26,7 @@ from sqlalchemy import text
 import claude_code
 import codex_cli
 import device_auth
+import diag_node
 import gear_research_worker
 import host_channel
 import library_watch
@@ -1044,9 +1045,10 @@ def _support_state() -> Dict[str, Any]:
         requests = diag_events.waiting_warrants(conn)
     return {
         "enabled":        bool(_read("support.diagnostics_enabled")),
-        # Only a launcher sends its event reports on its own; a Docker node
-        # keeps them until Support asks (P2P_NETWORK.md § Support diagnostics)
-        "sends_reports":  claude_code.is_launcher_mode(),
+        # Whether this database has a shipper: a launcher's, or since
+        # 2026-11-21 a Docker node's worker beside its chat client (diag_node);
+        # without one (the master, no account yet) the reports stay here
+        "sends_reports":  claude_code.is_launcher_mode() or diag_node.ships(),
         "last_report_at": _read("support.last_report_at"),
         "last_bundle_at": _read("support.last_bundle_at"),
         "pending_events": pending,
@@ -1075,7 +1077,7 @@ def decide_support_request(warrant_id: uuid.UUID, req: SupportDecision) -> Dict[
     """The person's answer to a support request (the request sheet): `send`
     names the content scopes they ticked — none sends the structural part
     alone. 409 when the request no longer waits (decided on another tab,
-    expired, or withdrawn by the switch). The launcher's worker collects and
+    expired, or withdrawn by the switch). The node's support worker collects and
     sends it on the decision's own wake (diag_events.decide)."""
     from desktop.p2p import diag_events
     from desktop.p2p.diag_protocol import CONTENT_SCOPES

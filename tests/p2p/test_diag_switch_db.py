@@ -9,7 +9,6 @@ Skipped without a cluster."""
 import asyncio
 import json
 import time
-import types
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -112,7 +111,7 @@ def test_a_withdrawn_bundle_is_deleted_and_closed_with_no_request_made(
         conn, scratch_dsn, tmp_path, monkeypatch):
     import aiohttp
 
-    from desktop.p2p.p2p_manager import P2PManager
+    from desktop.p2p.diag_worker import DiagIdentity, DiagWorker
 
     def no_request(*args, **kwargs):
         raise AssertionError("a withdrawn bundle opened a connection")
@@ -124,10 +123,11 @@ def test_a_withdrawn_bundle_is_deleted_and_closed_with_no_request_made(
     _switch(conn, False)
     stage = tmp_path / f"{wid}.box"
     stage.write_bytes(b"boxed")
-    node = types.SimpleNamespace(db_dsn=scratch_dsn)
-    node._diag_db = types.MethodType(P2PManager._diag_db, node)
+    ident = DiagIdentity("cd" * 32, lambda message: b"sig", lambda data: data)
+    node = DiagWorker(scratch_dsn, identity=lambda: ident, stage_dir=tmp_path,
+                      find_master=None, collect=None)
 
-    sent = asyncio.run(P2PManager._diag_upload(node, wid, stage, ("192.0.2.1", 20000)))
+    sent = asyncio.run(node._upload(ident, wid, stage, ("192.0.2.1", 20000)))
 
     assert sent is False and not stage.exists()
     with conn.cursor() as cur:

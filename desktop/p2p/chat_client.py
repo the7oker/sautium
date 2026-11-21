@@ -270,7 +270,8 @@ class ChatClient:
             on_incoming: a message stored from a relay, or a history pull
                 that imported (`history_sync`).
             on_warrant: a support warrant from the master's stream, with
-                the master's address; None drops it (a Docker node).
+                the master's address (desktop/p2p/diag_worker.py); None
+                drops it.
             on_master_reachable: the master's stream connected, at (ip, port).
         """
         self.store = store
@@ -1511,9 +1512,8 @@ class ChatClient:
             # A support warrant rides ONLY the master's own stream; a peer
             # relay carrying one is ignored. Handed over, not handled
             # inline — collecting a bundle must not stall the stream that
-            # delivers chat. A runtime without a handler collects nothing
-            # and sends nothing (a Docker node: CLAUDE.md, support
-            # diagnostics).
+            # delivers chat (desktop/p2p/diag_worker.py, both runtimes since
+            # 2026-11-21). A client built without a handler drops it.
             if relay_pubkey == master_node.MASTER_PUBKEY_HEX:
                 if self._on_warrant:
                     self._on_warrant(frame.get("warrant") or {}, (ip, port))

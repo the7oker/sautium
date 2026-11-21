@@ -1,12 +1,14 @@
 """Node-local diagnostic event log — the durable record behind support
 reports and the `events` bundle scope (desktop/p2p/diag_protocol.py).
 
-Every node records; only a launcher node ships (P2PManager's diag
-worker). Writers hand in an open psycopg2 connection; the insert trigger
-(004_support_diagnostics.sql) NOTIFYs `sautium_diag`, which wakes the
+Every node records; the node's one shipper ships (desktop/p2p/diag_worker.py
+— the launcher's P2PManager, or a Docker backend that owns its peer surface,
+since 2026-11-21). Writers hand in an open psycopg2 connection; the insert
+trigger (004_support_diagnostics.sql) NOTIFYs `sautium_diag`, which wakes the
 shipper. Before the database exists — the first-run wizard, a PostgreSQL
 start failure — events go to a spool file under <data_dir>/diag/ that the
-launcher drains at its next successful start.
+launcher drains at its next successful start (a Docker backend starts after
+its database: it spools nothing).
 
 Also here: the per-warrant state machine on the receiving node
 (receive_warrant → [decide] → mark_collected → mark_uploaded), whose PRIMARY
@@ -268,8 +270,9 @@ def drain_spool(conn, data_dir: Path) -> int:
 
 
 def write_session_marker(data_dir: Path, **extra) -> Optional[dict]:
-    """Stamp this launcher session; returns the PREVIOUS marker when one was
-    left behind — the definition of an unclean shutdown."""
+    """Stamp this session (a launcher's, a Docker backend's); returns the
+    PREVIOUS marker when one was left behind — the definition of an unclean
+    shutdown."""
     path = diag_dir(data_dir) / SESSION_FILENAME
     previous = None
     if path.exists():
@@ -346,7 +349,7 @@ def decide(conn, warrant_id: str, send: Iterable[str]) -> bool:
     scopes they ticked (what the warrant did not ask for is not kept);
     nothing ticked sends the structural part alone. False when the request
     no longer waits — decided already, closed, expired, or withdrawn by the
-    switch. One statement: the decision and the wakes of the launcher's
+    switch. One statement: the decision and the wakes of the node's support
     worker (sautium_diag_consent) and the notices commit together."""
     with conn.cursor() as cur:
         cur.execute(f"""
@@ -370,7 +373,7 @@ def decide(conn, warrant_id: str, send: Iterable[str]) -> bool:
 
 def decided_uncollected(conn) -> list:
     """Requests the person decided on whose bundle is still to collect —
-    what the launcher's worker does on sautium_diag_consent: each as the
+    what the support worker does on sautium_diag_consent: each as the
     warrant it was received as, with the content scopes granted. A decision
     the switch withdrew is not among them."""
     with conn.cursor() as cur:

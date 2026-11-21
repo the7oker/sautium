@@ -172,6 +172,10 @@ def _started_summary(detail: Optional[dict]) -> Optional[dict]:
         "agents": detail.get("agents"),
         "unclean_shutdown": detail.get("unclean_shutdown"),
         "reachability": (detail.get("settings") or {}).get("p2p.reachability"),
+        # A launcher, or a Docker node with or without its host agent: what a
+        # bundle can carry. A node a release behind sends none — before
+        # 2026-11-21 (B-99) only launchers reported at all.
+        "runtime": detail.get("runtime") or {"kind": "launcher"},
     }
 
 

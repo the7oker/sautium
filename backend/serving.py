@@ -263,7 +263,28 @@ class Server(uvicorn.Server):
 
     async def shutdown(self, sockets=None) -> None:
         _end_streams()
+        if self.ready is WEB_LISTENING:
+            # What reads the node over this server ends while it still answers
+            for stopping in _web_stopping:
+                await stopping()
         await super().shutdown(sockets=sockets)
+
+
+# The Web UI's server as the Docker entrypoint starts it: where it listens,
+# and the moment it does. What the node reads of itself over its own API
+# (backend/diag_node.py: node.started, a support bundle) waits for that
+# moment, never a probe of its port. A reload supervisor's server (a
+# development opt-in) says no moment.
+WEB_HOST = os.getenv("UVICORN_HOST", "0.0.0.0")
+WEB_PORT = int(os.getenv("UVICORN_PORT", "8000"))
+WEB_LISTENING = asyncio.Event()
+_web_stopping: list = []
+
+
+def on_web_stopping(stop) -> None:
+    """`await stop()` as the Web UI's server begins to stop, before it closes
+    its listener: what reads the node over it (diag_node) ends first."""
+    _web_stopping.append(stop)
 
 
 class _Census:

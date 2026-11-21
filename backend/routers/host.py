@@ -7,10 +7,14 @@
   megabytes (PI-NODE-1 F2).
 - POST /api/host/answer — the agent alone: the middleware admits the
   channel's key on this path and nowhere else, and this route takes no other
-  signer. The answer is kept per verb and the page woken (the library
-  stream's pattern).
+  signer. The answer is kept per verb, the page woken (the library stream's
+  pattern) and whoever waits on this process woken (host_channel.answered:
+  the support worker); an update that failed or was taken back is recorded
+  for support as `update.failed`, the launcher's kind.
 - GET /api/host — whether this node has an agent, and every verb's last
   request and answer.
+- GET /api/host/diagnostics/report — the last report as text for the page,
+  and when it was made.
 """
 
 import logging
@@ -37,6 +41,8 @@ class Answer(BaseModel):
     detail: str = Field("", max_length=host_channel.DETAIL_MAX)
     release: Optional[str] = Field(None, max_length=host_channel.RELEASE_MAX)
     report: Optional[str] = Field(None, max_length=host_channel.REPORT_MAX)
+    # An earlier run's answer the node missed, said again (scripts/host_agent.py)
+    replayed: bool = False
 
 
 @router.get("")
@@ -98,15 +104,13 @@ def check_if_due() -> bool:
     if row:
         return False
     try:
-        host_channel.ask("check")
+        leave_request("check")
     except (host_channel.NoChannel, OSError) as e:
         # The request's own name unusable (a folder there, a link, a
         # read-only mount): this check is not asked, and neither the node's
         # start nor the background pass that calls this is the worse for it
         logger.warning("the daily check for updates was not asked: %s", e)
         return False
-    db_execute("INSERT INTO host_requests (verb, asked_at) VALUES ('check', now()) "
-               "ON CONFLICT (verb) DO UPDATE SET asked_at = EXCLUDED.asked_at")
     return True
 
 
@@ -115,7 +119,19 @@ async def diagnostics_report() -> dict:
     row = db_query("SELECT report, answered_at FROM host_requests WHERE verb = 'diagnostics'")
     if not row or row[0]["report"] is None:
         raise HTTPException(status_code=404, detail="no diagnostics from the host yet")
-    return row[0]
+    page = host_channel.report_page(row[0]["report"])
+    # A floor's answer moves answered_at and keeps the report: its age is its own
+    return {"report": page["report"], "answered_at": page["made_at"] or row[0]["answered_at"]}
+
+
+def leave_request(verb: str) -> None:
+    """The request left for the agent and on record, the page woken — a
+    page's ask and the support worker's (backend/diag_node.py)."""
+    host_channel.ask(verb)
+    db_execute("INSERT INTO host_requests (verb, asked_at) VALUES (%s, now()) "
+               "ON CONFLICT (verb) DO UPDATE SET asked_at = EXCLUDED.asked_at", (verb,))
+    from routers.settings import notify_library_subscribers
+    notify_library_subscribers()
 
 
 @router.post("/answer")
@@ -129,12 +145,22 @@ async def answer(body: Answer, request: Request) -> dict:
         "VALUES (%(verb)s, %(outcome)s, %(detail)s, %(release)s, %(report)s, now()) "
         "ON CONFLICT (verb) DO UPDATE SET outcome = EXCLUDED.outcome, detail = EXCLUDED.detail, "
         "release = EXCLUDED.release, answered_at = EXCLUDED.answered_at, "
+        # An answer the agent sends again after the node missed it carries no
+        # report: the one kept stays
         "report = CASE WHEN EXCLUDED.verb = 'diagnostics' AND EXCLUDED.outcome = 'done' "
-        "THEN EXCLUDED.report ELSE host_requests.report END",
-        body.model_dump())
+        "AND EXCLUDED.report IS NOT NULL THEN EXCLUDED.report ELSE host_requests.report END",
+        body.model_dump(exclude={"replayed"}))
     logger.info("the host agent answered %s: %s", body.verb, body.outcome)
+    if body.verb == "update" and body.outcome in ("failed", "undone"):
+        from db_pool import get_conn
+        from desktop.p2p import diag_events
+        with get_conn() as conn:
+            diag_events.record(conn, "update.failed", {
+                "step": "host agent", "outcome": body.outcome, "error": body.detail[:500]})
     from routers.settings import notify_library_subscribers
     notify_library_subscribers()
+    if not body.replayed:
+        host_channel.answered(body.verb, body.outcome)
     if body.verb in ("check", "update"):
         # A release offered, or no longer; an update's end: the notices
         # update.available and update.result
@@ -147,11 +173,7 @@ async def ask(verb: str) -> dict:
     if verb not in host_channel.VERBS:
         raise HTTPException(status_code=404, detail="no such request")
     try:
-        host_channel.ask(verb)
+        leave_request(verb)
     except host_channel.NoChannel as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    db_execute("INSERT INTO host_requests (verb, asked_at) VALUES (%s, now()) "
-               "ON CONFLICT (verb) DO UPDATE SET asked_at = EXCLUDED.asked_at", (verb,))
-    from routers.settings import notify_library_subscribers
-    notify_library_subscribers()
     return {"asked": verb}

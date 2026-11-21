@@ -1,9 +1,14 @@
-"""Support diagnostics — the launcher's bundle collector
+"""Support diagnostics — the bundle collector both runtimes use
 (desktop/p2p/diag_protocol.py, P2P_NETWORK.md § "Support diagnostics").
 
 A warrant names scopes; every scope below is a fixed collector over fixed
-sources, and settings / config.json pass through ALLOWLISTS. Nothing here
-takes a path, a table or a query from the wire.
+sources, and settings / the config view pass through ALLOWLISTS. Nothing
+here takes a path, a table or a query from the wire. What a collector reads
+FROM is the runtime's `Sources` (since 2026-11-21, B-99): the launcher's
+(`launcher_sources`: config.json, its backend, the data folder's logs) or a
+Docker node's (backend/diag_node.py: its settings as a config view, its own
+API on loopback, the host agent's report). Both read the node's API through
+`BackendReads`, over the one list of routes BACKEND_READS.
 
 Never in a bundle: p2p_messages (friends' private E2E chat — the master
 already has its own thread with this node), credentials of any kind
@@ -24,9 +29,10 @@ import json
 import logging
 import platform
 import tarfile
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, List, Optional, Tuple
 
 import psycopg2
 
@@ -51,6 +57,12 @@ CONFIG_KEYS = ("version", "music_path", "provider", "hqplayer", "ports",
 CONFIG_P2P_KEYS = ("listen_port", "docker_ports", "chat_enabled")
 LOG_FILES = ("launcher.log", "backend.log", "backend.log.1", "pgdata/server.log",
              "bootstrap.log")
+# Every route of the node's own API a collector reads, on either runtime —
+# and nothing else: BackendReads refuses any other.
+BACKEND_READS = ("/config", "/health", "/stats", "/api/settings/ai", "/api/settings/hardware",
+                 "/api/settings/ai/claude/state", "/api/settings/ai/codex/state",
+                 "/api/settings/sync", "/api/settings/library", "/scan/status", "/enrich/status",
+                 "/api/settings/musicbrainz/status", "/api/player/diagnostics/hqplayer/bundle")
 REPORT_LOG_TAIL_BYTES = 256 * 1024     # per log in a report sent by hand
 CHAT_MAX_MESSAGES = 5000
 SYSTEM_SETTINGS_KEYS = ("p2p.reachability", "p2p.identity",
@@ -65,10 +77,66 @@ def _iso(value) -> Optional[str]:
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
-def _backend_client(config: dict) -> BackendAPIClient:
-    client = BackendAPIClient()
-    client.set_port(config.get("ports", {}).get("web", 18000))
-    return client
+class BackendReads:
+    """The node's own API as the collectors read it: BACKEND_READS alone,
+    GETs, None for a route that did not answer."""
+
+    routes = BACKEND_READS
+
+    def __init__(self, client: BackendAPIClient):
+        self._client = client
+
+    def get(self, path: str, timeout: int = 5) -> Optional[dict]:
+        if path not in self.routes:
+            raise ValueError(f"not a route the collectors read: {path}")
+        return self._client._get_json(path, timeout=timeout)
+
+
+@dataclass
+class Sources:
+    """What a runtime's collectors read from.
+
+    `config` is the config view (config.json on a launcher); `backend` the
+    node's API, None where it is not asked (a launcher that knows its
+    backend is down); `build` {"commit", "build"}; `runtime` the node's kind;
+    `logs` the log tails, raw — scrubbed here; `host` the machine's facts by
+    section (a Docker node's host agent), None where there is none;
+    `unavailable` what this kind of node cannot give, and why — the
+    manifest's, never a refusal; `extra` the p2p scope's runtime facts."""
+    config: dict
+    backend: Optional[BackendReads]
+    build: dict
+    runtime: dict
+    logs: Callable[[], List[Tuple[str, str, bool]]] = lambda: []
+    host: Optional[dict] = None
+    unavailable: dict = field(default_factory=dict)
+    extra: dict = field(default_factory=dict)
+
+
+def launcher_logs(data_dir: Path) -> Callable[[], List[Tuple[str, str, bool]]]:
+    def read() -> List[Tuple[str, str, bool]]:
+        out = []
+        for name in LOG_FILES:
+            path = Path(data_dir) / name
+            if path.exists():
+                text, truncated = tail(path)
+                out.append((Path(name).name, text, truncated))
+        return out
+    return read
+
+
+def launcher_sources(config: dict, data_dir: Path, probe_backend: bool = True,
+                     extra: Optional[dict] = None) -> Sources:
+    """The launcher's: config.json, its backend on config.json's port with
+    the identity folder's .api_secret, the data folder's logs."""
+    from desktop import updater
+    backend = None
+    if probe_backend:
+        backend = BackendReads(BackendAPIClient(
+            f"http://127.0.0.1:{config.get('ports', {}).get('web', 18000)}"))
+    return Sources(config=config, backend=backend,
+                   build={"commit": updater.current_commit(), "build": updater.installed_build()},
+                   runtime={"kind": "launcher"}, logs=launcher_logs(data_dir), extra=extra or {})
 
 
 def _settings_values(conn, keys) -> dict:
@@ -88,26 +156,25 @@ def _schema_head(conn) -> Optional[str]:
 # system — also node.started's detail
 # ---------------------------------------------------------------------------
 
-def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
-    """Build, machine, tools and agent states. Backend-owned facts come over
-    the signed local API and read None while the backend is not answering —
-    or without asking, when the caller knows it is down: six probes at a dead
-    port cost ~2 s each on Windows, at a hung one 5 s each.
+def system_facts(sources: Sources, conn=None) -> dict:
+    """Build, machine, tools and agent states, and the node's kind.
+    Backend-owned facts come over the signed local API and read None while
+    the backend is not answering — or without asking, when the caller knows
+    it is down (`sources.backend` None): six probes at a dead port cost ~2 s
+    each on Windows, at a hung one 5 s each.
 
     An allow-list, field by field, because node.started sends these at every
     start without a warrant: of the backend's health checks only their states
     — the music folder as there or not, never its path; the reachability as
     its kind, never the addresses behind it."""
-    from desktop import updater
     from desktop.utils import (detect_claude_cli, detect_codex_cli, detect_gpu,
                                detect_node_version)
 
     gpu_ok, gpu_name, vram_gb = detect_gpu()
     node_ver = detect_node_version()
-    client = _backend_client(config) if probe_backend else None
 
     def backend(path: str) -> Optional[dict]:
-        return client._get_json(path) if client else None
+        return sources.backend.get(path) if sources.backend else None
 
     cfg = backend("/config") or {}
     ai = backend("/api/settings/ai") or {}
@@ -115,8 +182,9 @@ def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
     checks = health.get("checks") or {}
     database = checks.get("database")
     facts = {
-        "commit": updater.current_commit(),
-        "build": updater.installed_build(),
+        "commit": sources.build.get("commit"),
+        "build": sources.build.get("build"),
+        "runtime": sources.runtime,
         "app_version": cfg.get("app_version"),
         "os": platform.platform(),
         "machine": platform.machine(),
@@ -141,7 +209,7 @@ def system_facts(config: dict, conn=None, probe_backend: bool = True) -> dict:
             "music_library_exists": (checks.get("music_library") or {}).get("exists"),
             "dht": checks.get("dht"),
         },
-        "ports": config.get("ports"),
+        "ports": sources.config.get("ports"),
     }
     if conn is not None:
         facts["settings"] = _settings_values(conn, SYSTEM_SETTINGS_KEYS)
@@ -204,9 +272,11 @@ def config_allowlisted(config: dict) -> dict:
         out["hqplayer"] = {**out["hqplayer"], "host": _host_kind(out["hqplayer"].get("host"))}
     p2p = config.get("p2p") or {}
     out["p2p"] = {k: p2p.get(k) for k in CONFIG_P2P_KEYS if k in p2p}
-    compat = config.get("openai_compat") or {}
-    out["openai_compat"] = {k: compat.get(k) for k in ("base_url", "model", "name") if k in compat}
-    out["lastfm"] = {"authorized": bool((config.get("lastfm") or {}).get("username"))}
+    if "openai_compat" in config:
+        compat = config["openai_compat"] or {}
+        out["openai_compat"] = {k: compat.get(k) for k in ("base_url", "model", "name") if k in compat}
+    if "lastfm" in config:
+        out["lastfm"] = {"authorized": bool((config["lastfm"] or {}).get("username"))}
     return out
 
 
@@ -214,8 +284,7 @@ def config_allowlisted(config: dict) -> dict:
 # p2p / jobs / chat / logs
 # ---------------------------------------------------------------------------
 
-def p2p_facts(conn, config: dict, extra: Optional[dict] = None) -> dict:
-    client = _backend_client(config)
+def p2p_facts(conn, sources: Sources) -> dict:
     with conn.cursor() as cur:
         cur.execute("""
             SELECT count(*),
@@ -253,13 +322,15 @@ def p2p_facts(conn, config: dict, extra: Optional[dict] = None) -> dict:
             "p2p.gate_mode", "p2p.relay_enabled",
             "p2p.relay_pubkeys", "p2p.master_removed", "sync.last_at",
             "sync.last_items_received", "sync.announce_limit", "sync.carry_limit")),
-        "sync": client._get_json("/api/settings/sync"),
-        **(extra or {}),
+        "sync": sources.backend.get("/api/settings/sync") if sources.backend else None,
+        **sources.extra,
     }
 
 
-def jobs_facts(conn, config: dict) -> dict:
-    client = _backend_client(config)
+def jobs_facts(conn, sources: Sources) -> dict:
+    def backend(path: str) -> Optional[dict]:
+        return sources.backend.get(path) if sources.backend else None
+
     with conn.cursor() as cur:
         cur.execute("SELECT fetch_status::text, count(*) FROM external_metadata GROUP BY 1")
         fetch_status = dict(cur.fetchall())
@@ -271,11 +342,11 @@ def jobs_facts(conn, config: dict) -> dict:
         cur.execute("SELECT filename, applied_at FROM _schema_migrations ORDER BY id")
         migrations = [{"filename": f, "applied_at": _iso(a)} for f, a in cur.fetchall()]
     return {
-        "stats": client.get_stats(),
-        "library": client._get_json("/api/settings/library"),
-        "scan": client.scan_status(),
-        "enrich": client.enrich_status(),
-        "musicbrainz": client._get_json("/api/settings/musicbrainz/status"),
+        "stats": backend("/stats"),
+        "library": backend("/api/settings/library"),
+        "scan": backend("/scan/status"),
+        "enrich": backend("/enrich/status"),
+        "musicbrainz": backend("/api/settings/musicbrainz/status"),
         "external_metadata": {"by_status": fetch_status, "top_errors": errors},
         "migrations": migrations,
     }
@@ -326,16 +397,18 @@ def tail(path: Path, limit: int = LOG_TAIL_BYTES) -> Tuple[str, bool]:
 # The bundle
 # ---------------------------------------------------------------------------
 
-def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
-            granted: Iterable[str], node_pubkey: str, extra: Optional[dict] = None) -> bytes:
+def collect(*, db_dsn: str, sources: Sources, warrant: dict, granted: Iterable[str],
+            node_pubkey: str) -> bytes:
     """A tar.gz (in memory, bounded by BUNDLE_MAX_BYTES) with one entry per
     scope it carries plus manifest.json. Of the content scopes the warrant
     asked for it carries only those the person `granted` on the request
     sheet; the manifest names the ones they left out (`withheld`), so the
-    desk knows to ask in the support chat. The events' log tails ride with
-    `logs`. A scope that fails to collect is reported in the manifest and the
-    rest still ships — a broken collector must not void the bundle the
-    maintainer is waiting for."""
+    desk knows to ask in the support chat, and what this kind of node cannot
+    give (`unavailable`, the sources' — no host agent, an agent that did not
+    answer), so a missing part never reads as a refusal. The events' log
+    tails ride with `logs`. A scope that fails to collect is reported in the
+    manifest and the rest still ships — a broken collector must not void the
+    bundle the maintainer is waiting for."""
     asked = set(warrant["scopes"])
     scopes = {s for s in asked if s not in CONTENT_SCOPES or s in set(granted)}
     now = datetime.now(timezone.utc)
@@ -343,6 +416,10 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
              if warrant.get("since") else now - timedelta(days=CHAT_DEFAULT_DAYS))
     manifest = {"v": PROTOCOL_VERSION, "warrant_id": warrant["id"], "node": node_pubkey,
                 "scopes": sorted(scopes), "withheld": sorted(asked - scopes),
+                "runtime": sources.runtime,
+                # A reason may quote the host agent's error, a path in it
+                "unavailable": {part: scrub_personal(why) for part, why in sources.unavailable.items()
+                                if part.split(".", 1)[0] in scopes},
                 "since": _iso(since), "collected_at": _iso(now),
                 "entries": [], "errors": {}}
     buf = io.BytesIO()
@@ -371,17 +448,21 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
             # The structural scopes are facts about the node, never where its
             # files are or whom it talks to: every string in them is scrubbed
             # (scrub_detail) — a folder becomes "[path]", an address its kind.
-            scope("system", lambda: add("system.json", _json(scrub_detail(
-                system_facts(config, conn)))))
+            def _system() -> None:
+                facts = system_facts(sources, conn)
+                if sources.host is not None:
+                    facts["host"] = sources.host
+                add("system.json", _json(scrub_detail(facts)))
+            scope("system", _system)
             scope("settings", lambda: add("settings.json", _json(scrub_detail({
                 "user_settings": settings_allowlisted(conn),
-                "config": config_allowlisted(config)}))))
+                "config": config_allowlisted(sources.config)}))))
 
             def _p2p() -> None:
-                add("p2p.json", _json(scrub_detail(p2p_facts(conn, config, extra))))
+                add("p2p.json", _json(scrub_detail(p2p_facts(conn, sources))))
                 add("p2p_contact_log.txt", scrub_personal(contact_log.report(conn, 7)))
             scope("p2p", _p2p)
-            scope("jobs", lambda: add("jobs.json", _json(scrub_detail(jobs_facts(conn, config)))))
+            scope("jobs", lambda: add("jobs.json", _json(scrub_detail(jobs_facts(conn, sources)))))
             def _events() -> None:
                 rows = diag_events.recent(conn, EVENTS_MAX_ROWS)
                 if "logs" not in scopes:
@@ -390,20 +471,16 @@ def collect(*, db_dsn: str, data_dir: Path, config: dict, warrant: dict,
             scope("events", _events)
 
             def _logs() -> None:
-                for name in LOG_FILES:
-                    path = Path(data_dir) / name
-                    if not path.exists():
-                        continue
-                    text, truncated = tail(path)
-                    add(f"logs/{Path(name).name}", scrub_personal(text), truncated)
+                for name, text, truncated in sources.logs():
+                    add(f"logs/{name}", scrub_personal(text), truncated)
             scope("logs", _logs)
             scope("chat", lambda: add("chat/sessions.json", _json(chat_export(conn, since))))
 
             def _playback() -> None:
                 # The traces live in the backend process's memory only. A fresh
                 # tail of an Embedded box's log rides along: give it time.
-                data = _backend_client(config)._get_json(
-                    "/api/player/diagnostics/hqplayer/bundle", timeout=30)
+                data = (sources.backend.get("/api/player/diagnostics/hqplayer/bundle", timeout=30)
+                        if sources.backend else None)
                 if data is None:
                     raise RuntimeError("the backend did not return its playback traces")
                 add("playback/hqplayer.json", _json(scrub_detail(data)))
@@ -431,7 +508,7 @@ def save_report(*, data_dir: Path, config: dict, state: str, detail: str) -> Pat
     caller reveals it in the file manager."""
     now = datetime.now().astimezone()
     try:
-        system = _json(system_facts(config, probe_backend=False))
+        system = _json(system_facts(launcher_sources(config, data_dir, probe_backend=False)))
     except Exception as e:
         # The logs are what the report is for; a fact collector that broke
         # must not take them down with it — the report says what is missing.

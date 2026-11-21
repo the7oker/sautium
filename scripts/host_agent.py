@@ -112,7 +112,16 @@ STARTER_TRIES = 3
 # Answers, as the node bounds them (backend/host_channel.py)
 DETAIL_MAX = 2000
 REPORT_MAX = 4 * 1024 * 1024
-LOG_TAIL = 400
+LOG_TAIL = 2000
+# The diagnostics report (format 2, since 2026-11-21, B-99): JSON, one text
+# per section by NAME — the node takes the machine's facts and the logs
+# apart by key (backend/host_channel.py names the same sections; a test holds
+# them together), so no line a container logged can move into the facts.
+REPORT_FORMAT = 2
+MACHINE_SECTIONS = ("versions", "board", "power", "disk", "containers", "restarts")
+LOG_SECTIONS = ("log: backend", "log: postgres", "log: the host agent")
+SECTION_MAX = 1024 * 1024                # one log's tail at most, before the whole is bounded
+BOARD_MODEL = Path("/proc/device-tree/model")
 LOG_MAX = 1024 * 1024                    # host/agent.log, one previous kept
 STATE_MAX = 64 * 1024
 VERIFY_MAX = 1024 * 1024
@@ -850,39 +859,66 @@ def _scrub(text: str) -> str:
     return SETUP_CODE.sub("XXXX-XXXX", text)
 
 
+def _tail_cut(text: str, limit: int) -> str:
+    """The last `limit` bytes of a text, from a line's start."""
+    data = text.encode()
+    if len(data) <= limit:
+        return text
+    return data[-limit:].split(b"\n", 1)[-1].decode("utf-8", "ignore")
+
+
+def report_json(sections: Dict[str, str], made_at: float) -> str:
+    """The report as it is answered: every log section cut to its tail until
+    the whole fits REPORT_MAX — never the JSON itself cut."""
+    limit = SECTION_MAX
+    while True:
+        cut = {name: (_tail_cut(text, limit) if name in LOG_SECTIONS else text)
+               for name, text in sections.items()}
+        report = json.dumps({"v": REPORT_FORMAT, "made_at": int(made_at), "sections": cut},
+                            ensure_ascii=False)
+        if len(report.encode()) <= REPORT_MAX or limit < 1024:
+            return report
+        limit //= 2
+
+
 def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:
     """F2's table: what the two containers logged, the power, the disk, the
-    versions — no journal, no kernel log, no file listing."""
+    versions, the board, the containers' restarts — no journal, no kernel log,
+    no file listing. The report is JSON by section (REPORT_FORMAT)."""
     root = root or ROOT
     last = state.get("diagnostics_at")
     if last is not None and now - last < DIAGNOSTICS_FLOOR:
         return "floor", f"made {int(now - last)} s ago; at most once in ten minutes", None, None
     state["diagnostics_at"] = now
-    parts = []
+    sections: Dict[str, str] = {}
 
     def section(title: str, args: List[str], timeout: int = 60) -> None:
         try:
             r = _run(args, cwd=root, timeout=timeout, check=False)
             body = (r.stdout or b"") + (r.stderr or b"")
-            parts.append(f"== {title}\n{body.decode('utf-8', 'replace').rstrip()}\n")
+            sections[title] = _scrub(body.decode("utf-8", "replace").rstrip())
         except (OSError, subprocess.TimeoutExpired) as e:
-            parts.append(f"== {title}\n(not read: {e})\n")
+            sections[title] = f"(not read: {e})"
 
     section("versions", ["sh", "-c", "uname -srm; docker version --format "
                                      "'docker {{.Server.Version}}'; docker compose version --short; "
                                      ". /etc/os-release && echo \"$PRETTY_NAME\""])
+    try:
+        sections["board"] = BOARD_MODEL.read_bytes()[:256].rstrip(b"\0\n").decode("utf-8", "replace")
+    except OSError:
+        sections["board"] = "(no device tree here)"
     section("power", ["sh", "-c", "command -v vcgencmd >/dev/null && vcgencmd get_throttled "
                                   "|| echo 'no vcgencmd here'"])
     section("disk", ["sh", "-c", f"df -h {shlex.quote(str(root))} \"$(docker info --format "
                                  "'{{.DockerRootDir}}')\""])
     section("containers", [*compose_cmd(root), "ps", "--all"])
+    section("restarts", ["docker", "inspect", "--format",
+                         "{{.Name}} restarts={{.RestartCount}} oom_killed={{.State.OOMKilled}} "
+                         "exit={{.State.ExitCode}} started={{.State.StartedAt}}", BACKEND, POSTGRES])
     for service in ("backend", "postgres"):
         section(f"log: {service}", [*compose_cmd(root), "logs", "--no-color", "--tail", str(LOG_TAIL), service])
     section("log: the host agent", ["tail", "-n", str(LOG_TAIL), str(host_dir(root) / "agent.log")])
-    report = _scrub("".join(parts))
-    if len(report.encode()) > REPORT_MAX:
-        report = report.encode()[-REPORT_MAX:].decode("utf-8", "ignore")
-    return "done", "diagnostics made on the machine", None, report
+    return "done", "diagnostics made on the machine", None, report_json(sections, now)
 
 
 VERB = {"check": verb_check, "update": verb_update, "diagnostics": verb_diagnostics}
@@ -896,13 +932,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def answer(verb: str, outcome: str, detail: str, release: Optional[str], report: Optional[str],
-           key: bytes, api: str = NODE_API) -> bool:
+           key: bytes, api: str = NODE_API, replayed: bool = False) -> bool:
     """The answer through the node's API, signed as auth_hmac's canonical
     string has it with the channel's key: False when the node did not take it
     (logged). The node may be hostile: no redirect, ten seconds, its body
-    unread."""
+    unread. `replayed`: an earlier run's answer the node missed, said again
+    — no answer to what the node asks now."""
     body = json.dumps({"verb": verb, "outcome": outcome, "detail": detail[:DETAIL_MAX],
-                       "release": release, "report": report}).encode()
+                       "release": release, "report": report, "replayed": replayed}).encode()
     ts, nonce = str(int(time.time())), secrets.token_hex(16)
     digest = hashlib.sha256(body).hexdigest()
     sig = hmac.new(key, f"POST\n{ANSWER_PATH}\n{ts}\n{nonce}\n{digest}".encode(), hashlib.sha256).hexdigest()
@@ -1003,12 +1040,13 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
         state = load_state(root)
         failed = False
 
-        def said(verb: str, outcome: str, detail: str, release: Optional[str], report: Optional[str]) -> None:
+        def said(verb: str, outcome: str, detail: str, release: Optional[str], report: Optional[str],
+                 replayed: bool = False) -> None:
             nonlocal failed
             failed = failed or outcome == "failed"
             log(f"{verb}: {outcome} — {detail}")
             unsent = state.setdefault("unsent", {})
-            if answer(verb, outcome, detail, release, report, key, api):
+            if answer(verb, outcome, detail, release, report, key, api, replayed):
                 unsent.pop(verb, None)
             else:
                 # The node was down (an update that could not start it): the
@@ -1020,7 +1058,7 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
             save_state(state, root)
 
         for verb, (outcome, detail, release) in list((state.get("unsent") or {}).items()):
-            said(verb, outcome, detail, release, None)
+            said(verb, outcome, detail, release, None, replayed=True)
         asked, _left = drain(root)
         try:
             resumed = resume(state, time.time() if now is None else now, root)

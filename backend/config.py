@@ -196,6 +196,11 @@ class Settings(BaseSettings):
     # data/atlas/, outside the image's build context; <data_dir>/hqp_atlas.json
     # under the launcher.
     hqp_atlas_overlay: str = "/app/data/atlas/hqp_atlas.json"
+    # The node's own writable folder on Docker (./backend/data): support
+    # diagnostics keep their session marker and staged bundles in its diag/
+    # (backend/diag_node.py). A launcher-run backend ships none: its
+    # launcher's are under the launcher's data folder.
+    data_dir: str = "/app/data"
 
     model_config = SettingsConfigDict(
         env_file=".env",

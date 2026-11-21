@@ -16035,7 +16035,7 @@
   function supportDetail(s) {
     if (!s) return '';
     const parts = [s.enabled && !s.sends_reports
-      ? 'This node keeps its event reports; they are sent when Support asks'
+      ? 'This node sends nothing to Sautium support yet: it has no account, or its link to the network did not start'
       : s.enabled
       ? 'Event reports are sent on their own, and so is a request from Sautium support for facts about this node; a request that also asks for your conversations, logs or playback traces waits — all of it — until you review it, and those go only if you tick them'
       : 'Nothing is sent to Sautium support'];
@@ -16314,7 +16314,7 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
-            Versions, the power supply's flag, the disk, the last lines of Sautium's logs. Nothing is sent anywhere: the report is shown here.
+            Versions, the power supply's flag, the disk, the last lines of Sautium's logs. Collect shows the report here and sends nothing. A request from Sautium support takes the machine's facts too, and its logs only if you tick them.
           </p>
           <button class="profile-btn primary" data-collect>Collect</button>
           <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>

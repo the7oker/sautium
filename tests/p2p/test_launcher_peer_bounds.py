@@ -201,11 +201,14 @@ def test_notices_a_query_collected_are_handled_before_the_next_wait(monkeypatch)
     manager._on_identity_rotated_cb = None
     manager.db_dsn = "postgresql://unused"
 
-    class _Queue:
-        def put_nowait(self, item):
-            handled.append(item)
+    class _Diag:
+        def listening(self):
+            handled.append("listening")
 
-    manager._diag_queue = _Queue()
+        def notes(self, channels):
+            handled.append(set(channels))
+
+    manager._diag = _Diag()
 
     class _Conn:
         notifies = [SimpleNamespace(channel="sautium_diag", payload="")]
@@ -241,7 +244,7 @@ def test_notices_a_query_collected_are_handled_before_the_next_wait(monkeypatch)
     asyncio.run(manager._listen_for_db_notifications())
     # the connect's look for decided support requests, then the notice
     # handled first, then the wait
-    assert handled == [("decided",), ("report",)] and waits == [0]
+    assert handled == ["listening", {"sautium_diag"}] and waits == [0]
 
 
 def test_the_relay_off_notice_ends_the_slots_and_the_capability(monkeypatch):
@@ -252,7 +255,7 @@ def test_the_relay_off_notice_ends_the_slots_and_the_capability(monkeypatch):
     manager.db_dsn = "postgresql://unused"
     manager._sync_server = SimpleNamespace(close_relay_clients=lambda: closed.append(True))
     manager._dht_service = SimpleNamespace(withdraw_capability=withdrawn.append)
-    manager._diag_queue = SimpleNamespace(put_nowait=lambda job: None)
+    manager._diag = SimpleNamespace(listening=lambda: None, notes=lambda channels: None)
 
     class _Conn:
         notifies = [SimpleNamespace(channel="sautium_relay_off", payload="")]
@@ -312,3 +315,34 @@ def test_the_relay_cap_step_ends_the_slots_while_the_switch_is_off(monkeypatch):
     monkeypatch.setattr(dht_service, "REANNOUNCE_INTERVAL", 0)
     asyncio.run(asyncio.wait_for(manager._relay_cap_loop(), 5))
     assert closed == [True] and looked == []
+
+
+def test_the_launcher_composes_the_one_diag_worker(monkeypatch, tmp_path):
+    """P2PManager's side of the support worker (desktop/p2p/diag_worker.py):
+    the node's key from its identity folder, a bundle over the launcher's
+    sources — config.json, its backend on config.json's port, the data
+    folder's logs — with its P2P status and verdict."""
+    from desktop import config_manager, diag_bundle, node_identity
+    from desktop.p2p import diag_worker
+    collected = {}
+
+    def collect(**kw):
+        collected.update(kw)
+        return b"tar"
+    monkeypatch.setattr(diag_bundle, "collect", collect)
+    monkeypatch.setattr(config_manager, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(node_identity, "get_account_info", lambda: {"public_key_hex": "cd" * 32})
+    monkeypatch.setattr(node_identity, "get_private_key_raw", lambda: b"\1" * 32)
+    monkeypatch.setattr(node_identity, "sign_message", lambda message: b"sig")
+    manager = p2p_manager.P2PManager("postgresql://unused", {"ports": {"web": 18123}})
+    manager._chat_client = SimpleNamespace(reachability="cgnat")
+
+    ident = manager._diag_identity()
+    assert isinstance(ident, diag_worker.DiagIdentity) and ident.public_key_hex == "cd" * 32
+    assert asyncio.run(manager._diag_collect({"id": "w"}, ["logs"], "cd" * 32)) == b"tar"
+    sources = collected["sources"]
+    assert sources.runtime == {"kind": "launcher"}
+    assert sources.backend.routes is diag_bundle.BACKEND_READS
+    assert sources.backend._client.base_url == "http://127.0.0.1:18123"
+    assert sources.extra["reachability"] == "cgnat" and sources.extra["p2p_status"]["running"] is False
+    assert (collected["granted"], collected["node_pubkey"]) == (["logs"], "cd" * 32)
