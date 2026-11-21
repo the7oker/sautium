@@ -4354,10 +4354,12 @@
       screen._filters.artists = cur;
     });
 
+    // The filter narrows by who PERFORMS (the engine's artist filter walks
+    // track_artists): an artist who only composes here would filter to nothing.
     wireSuggestInput(input, list,
       q => fetch('/api/discovery/search?' + new URLSearchParams({ target: 'artist', q, limit: '8' }))
         .then(r => r.ok ? r.json() : Promise.reject(r.status))
-        .then(data => data.results || []),
+        .then(data => (data.results || []).filter(a => !a.composer_only)),
       a => `
         <button type="button" class="genre-suggest-item"
                 data-id="${escapeHtml(a.artist_id)}"
@@ -5499,7 +5501,7 @@
         ${pointerHtml}
         ${pendingHtml}
         ${sectionsHtml}
-        ${sourceCreditHtml({ lastfm: d.lastfm_url, listenbrainz: d.listenbrainz_used })}
+        <div data-source-credit>${sourceCreditHtml({ lastfm: d.lastfm_url, listenbrainz: d.listenbrainz_used })}</div>
         <div style="height: calc(24 * var(--px));"></div>`;
     }
 
@@ -5532,6 +5534,10 @@
         about.innerHTML = aboutHtml(artistTagsHtml(fresh.tags), proseBlockHtml(summary, full));
         wireProseBlock(about, summary, full);
         wireDetailHandlers(about);
+        // the Last.fm credit goes wherever its data is shown (clause 2.7)
+        const credit = screen.querySelector('[data-source-credit]');
+        if (credit) credit.innerHTML = sourceCreditHtml(
+          { lastfm: fresh.lastfm_url, listenbrainz: fresh.listenbrainz_used });
       };
       const onBioRoute = () => {
         if (!document.contains(screen)) detachBio();
@@ -5883,7 +5889,8 @@
         ].filter(Boolean).join(' · ');
         // the track's own composers, beyond the album line's (albums.py
         // _composer_lines); names only — the row is the play control
-        const composers = (t.composers || []).map(c => c.name).join(', ');
+        // " · " between names: a name keeps its own comma ("Lennon, McCartney")
+        const composers = (t.composers || []).map(c => c.name).join(' · ');
         const composersLine = composers
           ? `<div class="track-artist-line track-composers">${escapeHtml(composers)}</div>` : '';
         if (t.location === 'hqplayer') {
@@ -5931,7 +5938,7 @@
         ? `<div class="album-composer-line"><span class="acl-label">${
             albumComposers.length > 1 ? 'Composers' : 'Composer'}:</span> ${
             albumComposers.map(c => `<button class="acl-name" type="button"
-                data-artist-id="${escapeHtml(c.id)}">${escapeHtml(c.name)}</button>`).join(', ')}</div>`
+                data-artist-id="${escapeHtml(c.id)}">${escapeHtml(c.name)}</button>`).join(' · ')}</div>`
         : '';
 
       // Album prose sits where the artist page puts the bio: straight after

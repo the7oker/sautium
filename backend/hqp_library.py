@@ -49,7 +49,7 @@ from sqlalchemy import text
 
 from caa import fill_held_album_covers
 from canon.identity import ORPHAN_TRACK_SQL
-from credits import derive_composers, split_names
+from credits import derive_composers, lock_credits, split_names
 from database import get_db_context
 from db_pool import db_execute, db_query
 from hqplayer_client import connect_address
@@ -600,6 +600,7 @@ def sync(host: str, port: int, *, force: bool = False,
         # changed under HQPlayer, or a file read before the sync kept them.
         # The tracks whose files changed derive their credits again.
         with get_db_context() as db:
+            lock_credits(db)
             moved = db.execute(text("""
                 UPDATE hqp_library_files hf
                    SET raw_composers = ARRAY(SELECT jsonb_array_elements_text(x.value -> 'c'))
@@ -646,6 +647,7 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
     credits; an artist that existed before keeps its bio and similars)."""
     stats = {"forgotten": 0, "orphan_variants": 0, "orphan_albums": 0,
              "orphan_tracks": 0, "orphan_artists": 0}
+    lock_credits(db)
     rows = db.execute(text("""
         DELETE FROM hqp_library_files WHERE id = ANY(CAST(:ids AS int[]))
         RETURNING track_id, album_variant_id
@@ -683,8 +685,10 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
         WHERE t.id = ANY(CAST(:tids AS uuid[])) AND {ORPHAN_TRACK_SQL.format(t='t')}
     """), {"tids": track_ids}).rowcount
     # what this library's copies named is no longer theirs to name: the
-    # tracks left keep the composers their other copies' tags give
-    derive_composers(db, track_ids, sweep=False)
+    # tracks left keep the composers their other copies' tags give; a
+    # composer that leaves uncredited goes here, or — for an import being
+    # undone — with the artists it minted, below
+    derive_composers(db, track_ids, sweep=since is None)
     if since is not None and credited:
         stats["orphan_artists"] = db.execute(text(f"""
             DELETE FROM artists a

@@ -17,7 +17,7 @@ from typing import Dict, Iterable, List, Set
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from sql_queries import ARTIST_UNCREDITED, best_rip_order
+from sql_queries import ARTIST_UNCREDITED
 from transliterate import latinize
 from uuid_utils import artist_uuid
 
@@ -32,8 +32,24 @@ _JOINERS = re.compile(r"\s*;\s*|\s+/\s+")
 
 # Derives serialise: two writers (a scan, an HQPlayer sync) deriving one
 # track from their own snapshots would each delete what it saw and insert
-# its rows — the second's insert meeting the first's.
+# its rows — the second's insert meeting the first's. A transaction that
+# derives takes the lock FIRST (lock_credits), before any row it writes:
+# taken at the derive, after a batch's inserts, it closes a cycle with a
+# writer that holds it and waits on one of those rows.
 CREDITS_LOCK_KEY = 0x636D7073  # "cmps"
+
+
+def lock_credits(db: Session) -> None:
+    """Take the derives' lock for the rest of this transaction (re-entrant
+    in a session); call it at the start of every transaction that will
+    derive."""
+    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": CREDITS_LOCK_KEY})
+
+
+# artists.name is VARCHAR(500): a longer "name" is no artist's (a tag that
+# pasted liner notes), and minting it would fail the derive of every track
+# its batch holds.
+NAME_MAX = 500
 
 
 def split_names(values: Iterable[str]) -> List[str]:
@@ -42,7 +58,7 @@ def split_names(values: Iterable[str]) -> List[str]:
     for value in values:
         for name in _JOINERS.split(value):
             name = name.strip()
-            if name and name not in out:
+            if name and len(name) <= NAME_MAX and name not in out:
                 out.append(name)
     return out
 
@@ -89,12 +105,48 @@ def derive_composers(db: Session, track_ids: Iterable, *, sweep: bool = True) ->
     Returns the artists a credit of these tracks named before and names no
     longer; with `sweep`, those no other row names are deleted (Q3: a
     corrected tag leaves no orphan) — a caller that sweeps them itself (a
-    confirmed prune, counting what it removes) passes False."""
+    confirmed prune, counting what it removes) passes False.
+
+    A derive that fails (a race no lock covers, a value the schema refuses)
+    rolls back alone — the batch it rides keeps its files — and its tracks'
+    files are queued to be read again (`_requeue`), so the next scan or sync
+    derives them; the failure is logged with them."""
     tids = sorted({str(t) for t in track_ids})
     if not tids:
         return set()
-    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": CREDITS_LOCK_KEY})
-    files = db.execute(text(f"""
+    lock_credits(db)
+    try:
+        with db.begin_nested():
+            return _derive(db, tids, sweep)
+    except Exception:
+        logger.error("composer credits: the derive of %d track(s) failed; their files are read "
+                     "again by the next scan or sync: %s", len(tids), tids[:20], exc_info=True)
+        _requeue(db, tids)
+        return set()
+
+
+def _requeue(db: Session, tids: List[str]) -> None:
+    """The files of tracks whose derive failed, read again: a local file as
+    one under an older reader, an HQPlayer library as one under an older
+    revision of its read — their names cleared, so the read that comes
+    finds them changed and derives (unread meanwhile, they contribute
+    nothing and remove nothing)."""
+    db.execute(text("UPDATE media_files SET tags_read_rev = 0, raw_composers = NULL "
+                    "WHERE track_id = ANY(CAST(:t AS uuid[]))"), {"t": tids})
+    db.execute(text("UPDATE hqp_library_files SET raw_composers = NULL "
+                    "WHERE track_id = ANY(CAST(:t AS uuid[]))"), {"t": tids})
+    db.execute(text("""
+        UPDATE hqp_endpoints e SET library_read_rev = 0
+         WHERE EXISTS (SELECT 1 FROM hqp_library_files hf
+                         JOIN album_variants av ON av.id = hf.album_variant_id
+                        WHERE av.hqp_endpoint_id = e.id
+                          AND hf.track_id = ANY(CAST(:t AS uuid[])))"""), {"t": tids})
+
+
+def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:
+    # the best copy first, as best_rip_order ranks rips; a copy here before
+    # the HQPlayer's of the same quality, ids last (two tables' serials)
+    files = db.execute(text("""
         SELECT f.track_id::text AS track_id, f.raw_composers
           FROM (SELECT track_id, raw_composers, is_lossless, sample_rate, bit_depth, id, 0 AS at_hqp
                   FROM media_files
@@ -103,7 +155,8 @@ def derive_composers(db: Session, track_ids: Iterable, *, sweep: bool = True) ->
                 SELECT track_id, raw_composers, is_lossless, sample_rate, bit_depth, id, 1
                   FROM hqp_library_files
                  WHERE track_id = ANY(CAST(:t AS uuid[])) AND raw_composers IS NOT NULL) f
-         ORDER BY f.track_id, {best_rip_order('f')}, f.at_hqp"""), {"t": tids}).fetchall()
+         ORDER BY f.track_id, f.is_lossless DESC NULLS LAST, f.sample_rate DESC NULLS LAST,
+                  f.bit_depth DESC NULLS LAST, f.at_hqp, f.id"""), {"t": tids}).fetchall()
     if not files:
         return set()
     written = {w for f in files for w in f.raw_composers}

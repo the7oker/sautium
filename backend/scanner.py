@@ -38,7 +38,7 @@ from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, normaliz
 import file_stat
 from album_identity import assign_dir_albums, dir_disc, group_key
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
-from credits import derive_composers, split_names
+from credits import derive_composers, lock_credits, split_names
 from provenance import ANALYSIS_KINDS, relink_returned_files
 import cue_sheet
 
@@ -523,12 +523,11 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
         batch_discs[dir_path].add(ov if ov is not None else (md.get("disc_number") or 1))
 
     with get_db_context() as db:
+        lock_credits(db)
         albums = _Albums(db, sink)
         for dir_path, metadata in tqdm(entries, desc="Importing", unit="file"):
             if cancel_check and cancel_check():
                 logger.info("Import cancelled by user")
-                derive_composers(db, derive_due)
-                db.commit()
                 break
             file_path = metadata.get("file_path")
             try:
@@ -776,6 +775,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                     derive_composers(db, derive_due)
                     derive_due.clear()
                     db.commit()
+                    lock_credits(db)
                     _report(f"Importing: {stats['added']}/{len(entries)}")
                     logger.info(f"Progress: {stats['added']} files added")
             except Exception as e:
@@ -851,13 +851,18 @@ _HELD_SQL = text("""
 _REREAD_ROWS_SQL = text("""
     SELECT mf.id, mf.track_id::text AS track_id, mf.album_variant_id, mf.file_path,
            mf.cue_start_seconds, mf.raw_track_name, mf.raw_artist, mf.raw_album_artist,
-           mf.raw_album, mf.raw_genre, mf.duration_seconds, mf.sample_rate, mf.bit_depth,
-           mf.stat_mtime_ns, mf.file_size_bytes, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
+           mf.raw_album, mf.raw_genre, mf.raw_composers, mf.duration_seconds, mf.sample_rate,
+           mf.bit_depth, mf.stat_mtime_ns, mf.file_size_bytes, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
       FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
      WHERE mf.file_path = ANY(CAST(:paths AS text[]))
 """)
 
-_REREAD_SQL = text("""
+# the old row's stat (the right-hand columns) is the one this read took
+_SAME_STAT = """stat_mtime_ns IS NOT DISTINCT FROM CAST(:stat_mtime_ns AS bigint)
+             AND stat_ctime_ns IS NOT DISTINCT FROM CAST(:stat_ctime_ns AS bigint)
+             AND file_size_bytes IS NOT DISTINCT FROM CAST(:file_size_bytes AS bigint)"""
+
+_REREAD_SQL = text(f"""
     UPDATE media_files SET
         file_format = :file_format, is_lossless = :is_lossless,
         file_size_bytes = :file_size_bytes, file_modified_at = :file_modified_at,
@@ -872,14 +877,10 @@ _REREAD_SQL = text("""
         raw_track_name = :raw_track_name, raw_artist = :raw_artist,
         raw_album_artist = :raw_album_artist, raw_album = :raw_album, raw_year = :raw_year,
         raw_genre = :raw_genre, raw_composers = CAST(:raw_composers AS text[]),
-        decode_refused = false,
-        -- the art is read again from a file that changed; a file read again
-        -- only because the reader sees more (tags_read_rev) keeps its cover
-        cover_processed_at = CASE
-            WHEN stat_mtime_ns IS NOT DISTINCT FROM CAST(:stat_mtime_ns AS bigint)
-             AND stat_ctime_ns IS NOT DISTINCT FROM CAST(:stat_ctime_ns AS bigint)
-             AND file_size_bytes IS NOT DISTINCT FROM CAST(:file_size_bytes AS bigint)
-            THEN cover_processed_at END,
+        -- a file that changed is decoded and read for art again; a file read
+        -- again only because the reader sees more (tags_read_rev) keeps both
+        decode_refused = CASE WHEN {_SAME_STAT} THEN decode_refused ELSE false END,
+        cover_processed_at = CASE WHEN {_SAME_STAT} THEN cover_processed_at END,
         -- the canon reads the file again when what it decides on moved: a
         -- name, a number, a total (the right-hand columns are the old row's)
         content_at = CASE WHEN stat_mtime_ns IS NOT NULL AND (
@@ -953,6 +954,7 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
     stats.setdefault("reread", 0)
     derive_due: Set[str] = set()
     with get_db_context() as db:
+        lock_credits(db)
         splits = _split_tracks(db, entries)
         if splits:
             # one recording for every movement of a work, signed: wrong for
@@ -1061,14 +1063,16 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         moves.setdefault(row.album_variant_id, []).append((row.id, title, credit, disc))
                     if (row.raw_genre or None) != (md.get("genre") or None):
                         touched_albums.add(row.album_id)
-                # the file's composers, and the track it left (a re-home): both
+                # the file's composers changed, or it moved (a re-home): both
                 # tracks name what their files say now
-                derive_due.update({row.track_id, track})
+                if track != row.track_id or row.raw_composers != md.get("composers"):
+                    derive_due.update({row.track_id, track})
                 stats["reread"] += 1
                 if stats["reread"] % 100 == 0:
                     derive_composers(db, derive_due)
                     derive_due.clear()
                     db.commit()         # the rows read so far: their locks go
+                    lock_credits(db)
             except Exception as e:
                 logger.error(f"Error reading {md['file_path']} again: {e}", exc_info=True)
                 stats["errors"] += 1
@@ -2041,6 +2045,7 @@ class LibraryScanner:
         # LEFT JOIN sweeps prune uses would take phantom albums with them.
         if superseded_tracks:
             with get_db_context() as db:
+                lock_credits(db)
                 tids = list(superseded_tracks)
                 for table in (*ANALYSIS_KINDS, "analysis_sources"):
                     db.execute(text(f"""
@@ -2491,6 +2496,7 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
 
     stats["pruned"] = len(missing_ids)
     with get_db_context() as db:
+        lock_credits(db)
         logger.info(f"{'Planning the removal of' if dry_run else 'Pruning'} "
                     f"{len(missing_ids)} missing media files")
 

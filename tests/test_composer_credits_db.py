@@ -154,6 +154,8 @@ def test_a_value_splits_on_semicolons_and_a_spaced_slash_only(templates, tmp_pat
     assert scanner.composer_names(mutagen.File(flac)) == [
         "Steve Reich", "Philip Glass", "AC/DC", "Lennon, McCartney", "Rodgers & Hammerstein",
         "John Adams", "Terry Riley"]        # each once; a publishing credit is nobody
+    from credits import NAME_MAX, split_names
+    assert split_names(["x" * (NAME_MAX + 1), "Real Name"]) == ["Real Name"]
 
 
 def test_a_cue_sheet_names_a_slices_composer_as_its_performer():
@@ -246,7 +248,8 @@ def test_a_composer_is_no_engaged_artist_even_after_his_page_fetched_his_bio(
     # analysis held on the track: the announce tail's own test
     cur.execute("SELECT track_id FROM media_files")
     track = cur.fetchone()[0]
-    cur.execute("INSERT INTO audio_features (track_id, bpm) VALUES (%s, 120)", (track,))
+    cur.execute("INSERT INTO audio_features (track_id, bpm, signature) VALUES (%s, 120, %s)",
+                (track, "s" * 128))       # a sealed record: HELD_RECORD
     cur.execute("INSERT INTO listening_history (track_id, started_at, completed) VALUES (%s, now(), true)",
                 (track,))
 
@@ -261,6 +264,7 @@ def test_a_composer_is_no_engaged_artist_even_after_his_page_fetched_his_bio(
     monkeypatch.setattr(lastfm.LastFmService, "get_artist_info", info)
     done = threading.Event()
     monkeypatch.setattr(artists_router, "_wake_artist_clients", done.set)
+    monkeypatch.setattr(artists_router, "_bio_asked", set())
     assert artists_router._composer_bio(bach, BACH) is True
     assert done.wait(30)
     assert asked == [(BACH, False)]                      # a bio, never similars
@@ -275,9 +279,12 @@ def test_a_composer_is_no_engaged_artist_even_after_his_page_fetched_his_bio(
     conn = psycopg2.connect(scratch_dsn)
     try:
         assert sync_queries.split_engaged(conn, [bach, akamus])[0] == [akamus]
-        assert bach not in sync_queries.get_announce_tail_uuids(conn, 100)
+        # each set holds the performer of the same track (it can fail) and not the composer
+        tail = sync_queries.get_announce_tail_uuids(conn, 100)
+        assert akamus in tail and bach not in tail
         assert bach not in sync_queries.get_rare_search_uuids(conn)
-        assert BACH.lower() not in [str(n).lower() for n in mb_slice_queries.pending_slice_names(conn)]
+        pending = [str(n).lower() for n in mb_slice_queries.pending_slice_names(conn)]
+        assert AKAMUS.lower() in pending and BACH.lower() not in pending
         cur.execute("INSERT INTO artist_mbids (mbid, artist_id, confidence) VALUES (%s, %s, 'name_exact')",
                     (str(uuid.uuid4()), bach))
         assert all(m[0] not in _mbids(cur, bach) for m in lb_slice_queries.pending_slice_mbids(conn))
@@ -462,15 +469,16 @@ def test_a_row_read_by_the_older_reader_is_read_again_in_place(cur, library, tem
     _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G", [BACH], 1)
     _scan()
     cur.execute("DELETE FROM track_credits")
-    cur.execute("UPDATE media_files SET tags_read_rev = 1, raw_composers = NULL, "
+    cur.execute("UPDATE media_files SET tags_read_rev = 1, raw_composers = NULL, decode_refused = true, "
                 "content_at = '2020-01-01', cover_processed_at = '2020-01-01' RETURNING id")
     (mf,), = cur.fetchall()
     stats = _scan()
     assert (stats["added"], stats["reread"]) == (0, 1)
     cur.execute("SELECT id, tags_read_rev, raw_composers, content_at::date::text, "
-                "cover_processed_at::date::text FROM media_files")
-    # the same row, no canon wake, the cover kept (the file did not change)
-    assert cur.fetchall() == [(mf, scanner.TAGS_READ_REV, [BACH], "2020-01-01", "2020-01-01")]
+                "cover_processed_at::date::text, decode_refused FROM media_files")
+    # the same row, no canon wake, the cover and the decode's verdict kept
+    # (the file did not change)
+    assert cur.fetchall() == [(mf, scanner.TAGS_READ_REV, [BACH], "2020-01-01", "2020-01-01", True)]
     assert _credits(cur) == {"Aria": [BACH]}
     assert _scan()["reread"] == 0
 
@@ -517,11 +525,11 @@ def test_the_hqplayer_librarys_composer_lands_on_the_same_artist(cur, library, t
     assert _credits(cur) == {"Aria": [BACH], "Spring": ["Antonio Vivaldi", "Johann Georg Pisendel"]}
     cur.execute("SELECT library_read_rev FROM hqp_endpoints")
     assert cur.fetchone()[0] == hqp_library.LIBRARY_READ_REV
-    # a forget of the HQPlayer's copies: the track held here keeps its
-    # local file's composer, the HQP-only one keeps its credit (no file left)
+    # a forget of the HQPlayer's copies: the track held here keeps its local
+    # file's composer; the HQP-only track goes as an orphan, its credits with it
     gone = hqp_library.forget_endpoint(*PI)
-    assert gone["forgotten"] == 2
-    assert _credits(cur)["Aria"] == [BACH]
+    assert (gone["forgotten"], gone["orphan_tracks"]) == (2, 1)
+    assert _credits(cur) == {"Aria": [BACH]}
 
 
 # -- T12: the assistant ----------------------------------------------------------
@@ -565,3 +573,79 @@ def test_the_assistant_finds_music_by_its_composer_on_both_surfaces(cur, library
         assert {r["title"] for r in aq.search_tracks(q, artist="Musik")} == {"Air", "Spring"}
     finally:
         conn.close()
+
+
+def test_a_composer_who_heads_the_album_has_it_on_his_composed_shelf(cur, library, templates,
+                                                                      monkeypatch):
+    # the classical convention: ALBUMARTIST is the composer, ARTIST the performer
+    from routers import artists as artists_router
+    from routers.artists import get_artist
+    monkeypatch.setattr(artists_router, "_composer_bio", lambda artist_id, name: False)   # no Last.fm
+    _clean(cur)
+    _flac(templates, library / "Gould" / "Goldberg" / "01.flac", "Aria", "Glenn Gould",
+          "Goldberg Variations", [BACH], 1, albumartist=BACH)
+    _scan()
+    page = get_artist(_artist_id(cur, BACH), sort="release_year", mbid=None)
+    assert page["albums"] == [] and [a["title"] for a in page["composed"]] == ["Goldberg Variations"]
+
+
+def test_an_opened_composer_page_asks_once_whatever_came_of_it(cur, library, templates, monkeypatch):
+    import lastfm
+    from routers import artists as artists_router
+    _clean(cur)
+    _flac(templates, library / "A" / "B" / "01.flac", "Air", AKAMUS, "B", [BACH])
+    _scan()
+    bach = _artist_id(cur, BACH)
+    monkeypatch.setattr(artists_router, "_bio_asked", set())
+    calls = []
+
+    def broken(self, name, fetch_similar=True):
+        calls.append(name)
+        raise RuntimeError("our own bug")
+    monkeypatch.setattr(lastfm.LastFmService, "get_artist_info", broken)
+    done = threading.Event()
+    monkeypatch.setattr(artists_router, "_wake_artist_clients", done.set)
+    assert artists_router._composer_bio(bach, BACH) is True
+    assert done.wait(30)
+    # no marker was written, and the page's re-read of the fetch's end starts nothing
+    for _ in range(3):
+        assert artists_router._composer_bio(bach, BACH) is False
+    assert calls == [BACH]
+
+
+def test_a_failed_derive_keeps_the_batch_and_queues_its_files(cur, library, templates, monkeypatch):
+    import credits
+    _clean(cur)
+    _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G", [BACH], 1)
+    _flac(templates, library / "G" / "G" / "02.flac", "Var. 1", "Glenn Gould", "G", [BACH], 2)
+    real = credits._derive
+
+    def failing(db, tids, sweep):
+        raise RuntimeError("a race no lock covers")
+    monkeypatch.setattr(credits, "_derive", failing)
+    stats = _scan()
+    assert (stats["added"], stats["errors"]) == (2, 0)              # the files stay
+    cur.execute("SELECT DISTINCT tags_read_rev, raw_composers FROM media_files")
+    assert cur.fetchall() == [(0, None)]                            # queued to be read again
+    assert _credits(cur) == {}
+    monkeypatch.setattr(credits, "_derive", real)
+    assert _scan()["reread"] == 2
+    assert _credits(cur) == {"Aria": [BACH], "Var. 1": [BACH]}
+
+
+def test_a_rescan_of_the_hqplayer_library_leaves_no_composer_behind(cur, library, templates, monkeypatch):
+    hqp_library = pytest.importorskip("hqp_library")
+    _clean(cur)
+    _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G", [BACH], 1)
+    _scan()
+    monkeypatch.setattr(hqp_library, "library_hash", lambda h, p: "h1")
+    monkeypatch.setattr(hqp_library, "get_info", lambda h, p: PI_INFO)
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: _library("Only At The Box"))
+    hqp_library.sync(*PI)
+    assert _credits(cur)["Aria"] == [BACH, "Only At The Box"]
+    # the box no longer lists its copy of the Aria: the track keeps its own file's
+    one = _library("x").replace('<LibraryFile composer="x" hash="f1" length="2" name="01.flac" number="1" song="Aria"/>', "")
+    monkeypatch.setattr(hqp_library, "fetch_library", lambda h, p: one)
+    hqp_library.forget_missing(*PI)
+    assert _credits(cur)["Aria"] == [BACH]
+    assert _artist_id(cur, "Only At The Box") is None

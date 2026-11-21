@@ -39,6 +39,10 @@ router = APIRouter(prefix="/api/artists", tags=["artists"])
 # /api/events ('artist'), which re-reads its own snapshot.
 _bio_lock = threading.Lock()
 _bio_inflight: set = set()
+# Asked once per process whatever came of it: a failure that leaves no
+# marker (our own code's, an unavailable Last.fm) would otherwise start the
+# fetch again at the page's own re-read of its end — for as long as it is open.
+_bio_asked: set = set()
 _artist_sse_clients: list = []
 
 
@@ -99,16 +103,21 @@ def _fetch_composer_bio(artist_id: str, name: str) -> None:
 
 
 def _composer_bio(artist_id: str, name: str) -> bool:
-    """Start the fetch an opened composer page asks for; True while one is
-    on its way."""
+    """Start the fetch an opened composer page asks for, once per process;
+    True while one is on its way."""
     with _bio_lock:
         if artist_id in _bio_inflight:
             return True
+        if artist_id in _bio_asked:
+            return False
     if not _composer_bio_due(artist_id):
         return False
     with _bio_lock:
         if artist_id in _bio_inflight:
             return True
+        if artist_id in _bio_asked:
+            return False
+        _bio_asked.add(artist_id)
         _bio_inflight.add(artist_id)
     threading.Thread(target=_fetch_composer_bio, args=(artist_id, name), daemon=True,
                      name="composer-bio").start()
@@ -529,20 +538,19 @@ def get_artist(
     artist["albums_sort"] = sort
 
     # Composed (CREDITS-1-DESIGN §3.3): the owned albums this artist wrote a
-    # held track of and neither heads nor performs on — a singer-songwriter's
-    # own records are his Albums already, and no album stands on both
-    # shelves. A credit has no namesake (no MBID), so the shelf is the
+    # held track of and performs on nowhere — a singer-songwriter's own
+    # records are his Albums already, and no album stands on both shelves.
+    # Heading one is no exclusion: Albums is built from performing credits,
+    # so a classical album whose ALBUMARTIST is its composer would stand on
+    # neither. A credit has no namesake (no MBID), so the shelf is the
     # dominant's.
-    artist["composed"] = [] if split and not is_dominant else _format_album_tiles(db_query(f"""
+    composed = [] if split and not is_dominant else db_query(f"""
         WITH comp AS (
             SELECT DISTINCT av.album_id
               FROM track_credits tc
               JOIN owned_files f ON f.track_id = tc.track_id
               JOIN album_variants av ON av.id = f.album_variant_id
              WHERE tc.artist_id = %(id)s::uuid AND tc.role = 'composer'
-            EXCEPT
-            SELECT aa.album_id FROM album_artists aa
-             WHERE aa.artist_id = %(id)s::uuid AND aa.role = 'primary'
             EXCEPT
             SELECT av.album_id
               FROM track_artists ta
@@ -588,7 +596,9 @@ def get_artist(
           LEFT JOIN listened ON listened.album_id = al.id
           LEFT JOIN pop ON pop.album_id = al.id
          ORDER BY {sort_expr}
-    """, {"id": artist_id}), sort)
+    """, {"id": artist_id})
+    _format_album_tiles(composed, sort)
+    artist["composed"] = collapse_to_groups(composed)
 
     # Popular tracks — hybrid rank:
     #   1. Tracks ListenBrainz knows come first, ordered by their

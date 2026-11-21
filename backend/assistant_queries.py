@@ -338,8 +338,9 @@ def entity_kinds(q, ids: list[str]) -> dict:
 
 
 # Who wrote track `t`'s music, in the order its files name them (each
-# artist once whatever the credit's source) — the track line's "Composer".
-_COMPOSERS = """(SELECT string_agg(c.name, ', ' ORDER BY c.position, c.name)
+# artist once whatever the credit's source) — the track line's "Composer";
+# "; " between names, as a name may hold a comma of its own.
+_COMPOSERS = """(SELECT string_agg(c.name, '; ' ORDER BY c.position, c.name)
                   FROM (SELECT a.name, min(tc.position) AS position
                           FROM track_credits tc JOIN artists a ON a.id = tc.artist_id
                          WHERE tc.track_id = t.id AND tc.role = 'composer'
