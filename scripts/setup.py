@@ -1272,8 +1272,10 @@ def mounts_under(roots: List[str], findmnt_rn: str) -> List[str]:
     automount's folder never is.)"""
     found = []
     for line in findmnt_rn.splitlines():
-        # findmnt -r writes a space in a path as \x20; a root is its own letters
-        target = re.sub(r"\\x([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), line.split(" ", 1)[0])
+        # findmnt -r writes a space in a path as \x20, and may write a letter
+        # outside ASCII a byte at a time; a root is its own letters
+        target = re.sub(rb"\\x([0-9A-Fa-f]{2})", lambda m: bytes([int(m.group(1), 16)]),
+                        line.split(" ", 1)[0].encode("utf-8", "surrogateescape")).decode("utf-8", "replace")
         if any(target == root or target.startswith(root.rstrip("/") + "/") for root in roots):
             found.append(line)
     return found

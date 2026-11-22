@@ -985,6 +985,10 @@ def test_status_names_the_disks_mounted_under_the_roots():
     # a root with a space in its name: findmnt -r writes it \\x20
     assert setup.mounts_under(["/srv/My Music"], "/srv/My\\x20Music/disk ext4 ro\n/srv/My ext4 rw\n") == [
         "/srv/My\\x20Music/disk ext4 ro"]
+    # … and a name outside ASCII written a byte at a time
+    escaped = "".join(f"\\x{b:02x}" for b in "Музика".encode())
+    assert setup.mounts_under(["/srv/Музика"], f"/srv/{escaped}/disk ext4 ro\n") == [f"/srv/{escaped}/disk ext4 ro"]
+    assert setup.mounts_under(["/srv/Музика"], "/srv/Музика/disk ext4 ro\n") == ["/srv/Музика/disk ext4 ro"]
 
 
 def test_the_machine_line_says_an_asked_preset_as_asked():
