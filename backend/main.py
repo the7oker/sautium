@@ -4,7 +4,14 @@ Main entry point for the API server.
 """
 
 import faulthandler
+import signal
 faulthandler.enable()   # native crashes (PortAudio/ASIO AVs) leave a traceback in the log
+if hasattr(signal, "SIGUSR1"):
+    # Every thread's stack to the log on a signal, the process left running
+    # (`docker kill -s USR1 sautium-backend`): what names a backend that
+    # spins with nothing asked of it. Only the host's root or the node's own
+    # user can send it — whoever can already stop the node.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 import asyncio
 import logging
