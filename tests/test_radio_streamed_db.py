@@ -31,6 +31,9 @@ from playback.base import Capabilities, PlayerBackend  # noqa: E402
 from streaming.base import (FetchedAudio, ProviderError, ProviderManifest,  # noqa: E402
                             ResolvedSource, StreamProvider)
 from streaming.proxy import MediaProxy  # noqa: E402
+import track_similarity  # noqa: E402
+
+_SCORER = track_similarity.similar_tracks        # the real one, before a fixture stands in
 
 
 class _Output(PlayerBackend):
@@ -62,7 +65,10 @@ class _Provider(StreamProvider):
         self.downloads: list = []
 
     def fetch(self, query):
-        return self._download(self._resolve(query).source_id)
+        found = self._resolve(query)
+        if found is None:
+            raise ProviderError(f"{self.manifest.id}: no match")      # as a real miss says
+        return self._download(found.source_id)
 
     def _resolve(self, query):
         self.resolved.append(query.track_id)
@@ -137,7 +143,7 @@ def node(scratch_dsn, monkeypatch):
         streamed.append({"track_id": t, "artist": artist, "is_owned": False, "playable": False,
                          "file_id": None, "location": None})
     full, demo_ch, clip = _Provider("full"), _Provider("demo", demo=True), _Provider("clip", excerpt=True)
-    provs = [full, demo_ch, clip]
+    provs = [full, demo_ch, clip]           # a test may narrow the offer in place
     proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k")
     proxy.link_refused = player.note_refusal
     monkeypatch.setattr(streaming_service, "_proxy", proxy)
@@ -146,14 +152,22 @@ def node(scratch_dsn, monkeypatch):
     monkeypatch.setattr(streaming_service, "note_provider_health", lambda silent, answered: False)
     monkeypatch.setattr(player, "_chain_cache", {})
     monkeypatch.setattr(player, "_refusals", {})
+    # The scorer's stand-in keeps its contract: `served` filters BEFORE the
+    # limit (track_similarity.similar_tracks)
     pool_rows: list = []
-    monkeypatch.setattr(player, "_radio_similar",
-                        lambda seed, exclude, limit: [dict(r) for r in pool_rows
-                                                      if r["track_id"] not in exclude][:limit])
-    monkeypatch.setattr(player.track_similarity, "similar_tracks",
-                        lambda seed, limit=20, **kw: [dict(r, title="t", album="a", similarity=0.5,
-                                                           media_file_id=r["file_id"])
-                                                      for r in pool_rows][:limit])
+    asked: list = []
+
+    def scorer(seed, exclude=(), limit=20, served=None, **kw):
+        asked.append(served)
+        rows = [dict(r, title="t", album="a", similarity=0.5, media_file_id=r["file_id"])
+                for r in pool_rows if r["track_id"] not in set(exclude)]
+        if served is not None:
+            rows = [r for r in rows if (r["is_owned"] and r["playable"]) is served]
+        return rows[:limit]
+    monkeypatch.setattr(player.track_similarity, "similar_tracks", scorer)
+    from canon import scrobbles
+    monkeypatch.setattr(streaming_service, "follow_switch", lambda settings: None)
+    monkeypatch.setattr(scrobbles, "wake", lambda: None)
     mgr = PlaybackManager()
     monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
     monkeypatch.setattr(player, "manager", mgr)
@@ -163,7 +177,7 @@ def node(scratch_dsn, monkeypatch):
     mgr._active = out
     monkeypatch.setattr(mgr, "ensure_active", lambda: out)
     yield {"mgr": mgr, "player": player, "cur": cur, "owned": owned, "streamed": streamed,
-           "pool": pool_rows, "full": full, "demo": demo_ch, "clip": clip, "proxy": proxy}
+           "pool": pool_rows, "asked": asked, "providers": provs, "full": full, "demo": demo_ch, "clip": clip, "proxy": proxy}
     conn.close()
     pool.closeall()
 
@@ -175,7 +189,7 @@ def _switch(node, on: bool):
 
 def _batch(node):
     player = node["player"]
-    return player._radio_build_batch("seed", set(), None)
+    return player._radio_build_batch("seed", set(), None)[0]
 
 
 def test_the_switch_is_off_by_default_and_the_streaming_library_screen_carries_it(node):
@@ -235,13 +249,74 @@ def test_a_track_whose_demo_listen_is_spent_does_not_qualify(node):
 
 
 def test_at_most_four_qualify_a_batch_from_the_resolved_candidates(node):
+    """Eight streamed candidates all whole, two owned tracks: four streamed
+    (the cap), the owned two first."""
     _switch(node, True)
     s = node["streamed"]
-    node["pool"][:] = s + node["owned"]
+    node["pool"][:] = s + node["owned"][:2]
     node["full"].has.update(r["track_id"] for r in s)
     batch = _batch(node)
-    assert len(batch) == 10
-    assert sum(1 for item, _r in batch if item.source["kind"] == "track") <= 4
+    kinds = [item.source["kind"] for item, _r in batch]
+    assert kinds == ["file", "file"] + ["track"] * 4
+
+
+def test_the_owners_tracks_are_a_top_n_of_their_own_never_what_a_mixed_top_n_left(node):
+    """Streamed rows nearer the seed than every owned one: switch off, the
+    batch is still ten of the owner's own (the scorer is asked for them
+    alone), and streamed ones are never asked for."""
+    node["pool"][:] = node["streamed"] * 4 + node["owned"]
+    batch = _batch(node)
+    assert len(batch) == 10 and all(item.source["kind"] == "file" for item, _r in batch)
+    assert node["asked"] == [True]
+
+
+def test_the_switch_is_moot_while_the_streaming_library_is_off(node, monkeypatch):
+    from streaming import service as streaming_service
+    _switch(node, True)
+    monkeypatch.setattr(streaming_service, "is_enabled", lambda: False)
+    s = node["streamed"]
+    node["pool"][:] = s[:4] + node["owned"]
+    node["full"].has.update(r["track_id"] for r in s)
+    assert all(item.source["kind"] == "file" for item, _r in _batch(node))
+    assert node["full"].resolved == []
+
+
+def test_candidates_passed_over_are_not_asked_about_again_in_the_station(node):
+    _switch(node, True)
+    player = node["player"]
+    s = node["streamed"]
+    node["pool"][:] = s[:3] + node["owned"]
+    node["clip"].has.update(r["track_id"] for r in s[:3])       # excerpts only
+    batch, passed = player._radio_build_batch("seed", set(), None)
+    assert passed == {r["track_id"] for r in s[:3]}
+    assert all(item.source["kind"] == "file" for item, _r in batch)
+
+
+def test_a_lazy_head_vouches_for_nothing(node):
+    player = node["player"]
+    assert not player._plays_whole([(node["full"], None)])
+    assert player._plays_whole([(node["full"], "sid"), (node["clip"], None)])
+    assert not player._plays_whole([(node["clip"], "sid")])
+
+
+def test_a_seed_that_gives_nothing_is_not_asked_again_at_every_tick(node, monkeypatch):
+    mgr, player = node["mgr"], node["player"]
+    node["pool"][:] = []
+    mgr.set_radio_mode(True)
+    monkeypatch.setattr(player, "_radio_dry_seed", None)
+    player._radio_fill("seed", mgr.queue.generation)
+    assert player._radio_dry_seed == "seed"
+    fills = []
+    monkeypatch.setattr(player, "_radio_fill", lambda *a: fills.append(a))
+    monkeypatch.setattr(player, "_radio_refilling", False)
+    mgr.replace_queue(player.queue_mod.items_for_owned_rows(
+        [{"id": node["owned"][0]["file_id"], "location": "local"}]), play=False)
+    seed_item = mgr.queue.item_at(1)
+    player._radio_refill_observer({"track_index": 1}, type("I", (), {"track_id": "seed"})())
+    assert fills == []
+    player._radio_refill_observer({"track_index": 1}, seed_item)
+    assert _wait(lambda: len(fills) == 1)
+    mgr.set_radio_mode(False)
 
 
 def test_a_radio_slot_whose_full_link_fails_is_failed_never_an_excerpt(node):
@@ -280,9 +355,10 @@ def test_a_radio_slot_whose_demo_listen_was_spent_since_the_batch_fails_as_excer
     assert mgr.queue.item_at(1).excerpt is True
 
 
-def test_a_whole_slot_does_not_adopt_an_excerpt_already_in_ram(node):
-    """The same track streamed as an excerpt for a tap, then queued by
-    radio: the excerpt's bytes are not the radio slot's."""
+def test_a_whole_slot_does_not_adopt_an_excerpt_already_in_ram(node, monkeypatch):
+    """The same track streamed as an excerpt for a tap (the full provider had
+    it not then), then queued by radio once the full provider has it: the
+    excerpt in RAM is not the radio slot's — it is fetched whole."""
     _switch(node, True)
     mgr, player = node["mgr"], node["player"]
     t = node["streamed"][0]["track_id"]
@@ -290,9 +366,15 @@ def test_a_whole_slot_does_not_adopt_an_excerpt_already_in_ram(node):
     q = player._phantom_track_queries([t])[t]
     mgr.replace_queue(player.queue_mod.items_for_streamed([q]), play=False)
     assert _wait(lambda: mgr.queue.item_at(1).opener()["kind"] == "proxy")
+    assert mgr.queue.item_at(1).excerpt is True
+    node["full"].has.add(t)
+    monkeypatch.setattr(player, "_chain_cache", {})
     mgr.append(player.queue_mod.items_for_streamed([q], whole=True))
-    assert _wait(lambda: mgr.queue.item_at(2).opener()["kind"] == "unplayable")
-    assert mgr.queue.item_at(2).opener()["code"] == "excerpt_only"
+    assert _wait(lambda: mgr.queue.item_at(2).opener()["kind"] == "proxy")
+    assert node["full"].downloads == [t]
+    tok = mgr.queue.item_at(2).opener()["token"]
+    assert node["proxy"]._peek(tok).provider is node["full"]
+    assert node["proxy"]._peek(tok).audio.excerpt is False
 
 
 def test_radio_appends_its_batch_whole_and_takes_the_switch_at_each_batch(node):
@@ -303,6 +385,7 @@ def test_radio_appends_its_batch_whole_and_takes_the_switch_at_each_batch(node):
     node["full"].has.update(r["track_id"] for r in s[:2])
     mgr.set_radio_mode(True)
     gen = mgr.queue.generation
+    player._radio_played.clear()
     player._radio_fill("seed", gen)
     assert len(mgr.queue) == 10
     assert sum(1 for it in mgr.queue.snapshot() if it.whole) == 2
@@ -363,6 +446,22 @@ def test_play_similar_follows_the_switch(node):
     assert e.value.status_code == 404 and "Radio plays tracks you don't own" in e.value.detail
 
 
+def test_play_similar_leaves_out_what_the_node_knows_plays_only_as_an_excerpt(node):
+    """A track whose demo listen is spent, with no full provider in its
+    order: Play similar does not commit a slot that could only fail."""
+    _switch(node, True)
+    mgr, player, cur = node["mgr"], node["player"], node["cur"]
+    s = node["streamed"]
+    node["providers"][:] = [node["demo"], node["clip"]]
+    node["demo"].has.update(r["track_id"] for r in s[:2])
+    cur.execute("INSERT INTO demo_plays (track_id, provider) VALUES (%s, 'demo')", (s[0]["track_id"],))
+    node["pool"][:] = s[:2] + node["owned"][:2]
+    answer = player.play_similar(player.PlaySimilarRequest(track_id=s[7]["track_id"], limit=4))
+    assert [m["reason"] for m in answer["not_streamable"]] == ["excerpt_only"]
+    assert answer["count"] == 3
+    assert [it.track_id for it in mgr.queue.snapshot() if it.whole] == [s[1]["track_id"]]
+
+
 def test_a_radio_slot_keeps_its_rule_across_a_restart(node):
     from playback.manager import PlaybackManager
     mgr, player = node["mgr"], node["player"]
@@ -373,3 +472,34 @@ def test_a_radio_slot_keeps_its_rule_across_a_restart(node):
     again = PlaybackManager()
     again._restore_persisted_queue()
     assert [(it.track_id, it.whole) for it in again.queue.snapshot()] == [(t, True)]
+
+
+def test_the_real_scorer_filters_the_served_rows_before_its_limit(node):
+    """Against the real statement: eight streamed tracks nearer the seed than
+    four owned ones — `served=True` is a top-3 of the owned ones, `False`
+    of the streamed, and the mixed top-3 holds no owned track at all."""
+    import math
+    cur = node["cur"]
+    model = str(uuid.uuid4())
+    cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)", (model,))
+
+    def embed(track, angle):
+        v = "[" + ",".join(map(str, (math.cos(angle), math.sin(angle)) + (0.0,) * 510)) + "]"
+        cur.execute("INSERT INTO embeddings (vector, model_id, track_id) VALUES (%s::vector, %s, %s) "
+                    "RETURNING id", (v, model, track))
+        cur.execute("INSERT INTO embedding_segments (embedding_id, segment_index, vector) "
+                    "VALUES (%s, 0, %s::vector)", (cur.fetchone()[0], v))
+    seed = node["streamed"][7]["track_id"]
+    embed(seed, 0.0)
+    streamed = [r["track_id"] for r in node["streamed"][:7]]
+    owned = [r["track_id"] for r in node["owned"][:4]]
+    for i, t in enumerate(streamed):
+        embed(t, 0.05 * (i + 1))
+    for i, t in enumerate(owned):
+        embed(t, 0.6 + 0.05 * i)
+    mine = _SCORER(seed, limit=3, served=True)
+    assert [r["track_id"] for r in mine] == owned[:3]
+    assert all(r["is_owned"] and r["playable"] for r in mine)
+    theirs = _SCORER(seed, limit=3, served=False)
+    assert [r["track_id"] for r in theirs] == streamed[:3]
+    assert not any(r["is_owned"] for r in _SCORER(seed, limit=3))

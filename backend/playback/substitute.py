@@ -532,7 +532,8 @@ class Lane:
 
     def slots(self) -> list:
         """Every streamed slot's state, in queue order: {index, track_id,
-        album_id (the album it was queued from), state, progress?, reason?} — `waiting` (its fetch not begun: beyond the
+        album_id (the album it was queued from), whole? (radio's: never an excerpt),
+        state, progress?, reason?} — `waiting` (its fetch not begun: beyond the
         window, behind another in the lane, unresolved, its bytes dropped by
         the budget), `buffering` (its fetch runs; progress where the provider
         gives it), `ready`, `failed` (reason: the code). "Found in the
@@ -544,6 +545,8 @@ class Lane:
                 continue
             src = it.opener()
             row = {"index": index, "track_id": it.track_id, "album_id": it.album_id}
+            if it.whole:
+                row["whole"] = True
             if src.get("kind") == "unplayable":
                 row.update(state="failed", reason=src.get("code") or "unknown")
             else:

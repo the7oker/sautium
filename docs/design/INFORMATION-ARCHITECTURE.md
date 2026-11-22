@@ -150,7 +150,9 @@ A **bottom-up sheet** with a vertical list of entries:
   functions — `BACKUP.md`; the Web UI has no backup surface.)
 - Streaming library (`#more/phantoms`) — the catalog the node knows but
   does not own; its own screen because it is its own catalog, with the
-  owner's `discovery.phantom_layer` switch and the one explicit removal.
+  owner's `discovery.phantom_layer` switch ("Discover new"), under it — since
+  2026-11-22 — radio's `radio.streamed` ("Radio plays tracks you don't own",
+  disabled while Discover new is off), and the one explicit removal.
   **"Streaming library" is the user-facing name only** — "phantom" stays
   the internal term in the route, the API, the settings key and the CSS,
   and everywhere else in the docs

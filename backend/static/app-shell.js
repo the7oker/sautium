@@ -6985,6 +6985,9 @@
     const albumId = screen.dataset.phantomAlbumId;
     const byTrack = new Map();
     for (const st of ((window.streamSlots && window.streamSlots.slots) || [])) {
+      // a radio slot (played whole or not at all) says nothing of how a tap
+      // on this album streams the track — it may well play as its excerpt
+      if (st.whole) continue;
       if (st.album_id === albumId && !byTrack.has(st.track_id)) byTrack.set(st.track_id, st);
     }
     const unavailable = screen._unavailable || new Map();

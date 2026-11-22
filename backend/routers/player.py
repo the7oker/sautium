@@ -2860,12 +2860,15 @@ def _ensure_streaming_ready() -> None:
                              "see the backend log")
 
 
-def _known_unstreamable(queries: list) -> dict:
+def _known_unstreamable(queries: list, whole: bool = False) -> dict:
     """track_id -> why, for the queries the node ALREADY knows nothing streams
     here: a resolve's empty chain still cached, or every provider having
     refused the track (_refusals). Never resolves — a tap that asked the
     providers before it committed would let a later tap commit first, the
-    queue's order the resolve's timing (B-124)."""
+    queue's order the resolve's timing (B-124). `whole` (a slot played whole
+    or not at all): also what the node knows streams only as an excerpt —
+    no full-length provider left in its order (its demo listen spent), or a
+    cached chain headed by the excerpt."""
     from streaming import demo
     from streaming import service as streaming_service
     provs = streaming_service.providers_preferred()
@@ -2878,9 +2881,13 @@ def _known_unstreamable(queries: list) -> dict:
         order = tuple(p.manifest.id for p in provs
                       if demo.admits(p, tid, spent) and p.manifest.id not in refused)
         hit = _chain_cache.get((tid, order))
-        if (provs and not order) or (hit is not None and now - hit[0] < _CHAIN_TTL_S
-                                     and not hit[1]):
+        fresh = hit is not None and now - hit[0] < _CHAIN_TTL_S
+        if (provs and not order) or (fresh and not hit[1]):
             out[tid] = _refused_code(tid) or "nowhere"
+        elif whole and (
+                (provs and all(p.manifest.excerpt for p in provs if p.manifest.id in order))
+                or (fresh and hit[1][0][0].manifest.excerpt)):
+            out[tid] = "excerpt_only"
     return out
 
 
@@ -2888,7 +2895,7 @@ def _streamed_items(queries: list, whole: bool = False) -> tuple[list, list]:
     """The slots a tap commits for streamed tracks (playback.queue.
     items_for_streamed), in order, and what it leaves out — only what the
     node already knows does not stream here, each with why."""
-    known = _known_unstreamable(queries)
+    known = _known_unstreamable(queries, whole=whole)
     left = [{"track_id": q.track_id, "title": q.title, "reason": known[q.track_id]}
             for q in queries if q.track_id in known]
     return queue_mod.items_for_streamed([q for q in queries if q.track_id not in known],
@@ -3376,21 +3383,25 @@ def queue_session(req: QueueSessionRequest):
 def play_similar(req: PlaySimilarRequest):
     """Replace the queue with tracks similar to the seed and play.
 
-    Seed and results are both source-agnostic: the two-tier scorer (the one
-    radio and the Now Playing shelf drift on) takes a track UUID, so a streamed
-    phantom seeds a station as well as an owned file does, and its results mix
-    owned files with streamable phantoms."""
-    rows = track_similarity.similar_tracks(req.track_id, limit=req.limit)
-    if not rows:
+    The seed is source-agnostic: the two-tier scorer (the one radio and the
+    Now Playing shelf drift on) takes a track UUID, so a streamed phantom
+    seeds a station as well as an owned file does. The results are the
+    owner's own files, mixed — while his switch "Radio plays tracks you don't
+    own" is on (radio.streamed, since 2026-11-22) — with streamed tracks,
+    each played whole, never as a 30 s excerpt (radio's rule)."""
+    # a copy the ACTIVE output opens itself (a local file, or one held at the
+    # HQPlayer that is the output) queues as owned; anything else streams —
+    # radio's rule, its switch and never an excerpt: a static station. Owned
+    # only, the scorer's top-N is of the owner's own (never what a mixed
+    # top-N left of them)
+    streams = _radio_streams()
+    rows = track_similarity.similar_tracks(req.track_id, limit=req.limit,
+                                           served=None if streams else True)
+    if not rows and streams:
         raise HTTPException(
             status_code=404,
             detail="No similar tracks found — the seed may not be analysed yet.")
-
-    # a copy the ACTIVE output opens itself (a local file, or one held at the
-    # HQPlayer that is the output) queues as owned; anything else streams —
-    # radio's rule, its switch and never an excerpt: a static station
     native = [bool(r["is_owned"] and r["playable"]) for r in rows]
-    streams = _radio_streams()
     queries = (_phantom_track_queries([r["track_id"] for r, n in zip(rows, native) if not n])
                if streams else {})
     segments: list[tuple[str, list]] = []
@@ -3580,6 +3591,7 @@ _radio_played: set = set()      # track UUIDs added this session — never repea
 _radio_refilling = False        # one fill thread at a time
 _radio_last_artist: Optional[str] = None   # artist of the last queued track — the
                                 # next batch avoids opening with the same artist
+_radio_dry_seed: Optional[str] = None      # the seed whose fill gave nothing
 
 
 def _radio_streams() -> bool:
@@ -3594,35 +3606,44 @@ def _radio_owned_only_words(what: str) -> str:
     """What radio's start (or Play similar) says when nothing of the owner's
     is like the seed and streamed tracks are not radio's (QUEUE-STREAM §7;
     drafts for the words sitting): it names the switch that would mix others
-    in — and Discover new too, while the streaming library is off."""
+    in — the ones of the two that are off (Discover new, while the
+    streaming library is off)."""
     from routers.settings import _read as read_setting
     from streaming import service as streaming_service
     head = f"{what} found nothing of yours like this track."
-    if streaming_service.is_enabled():
-        return (f"{head} Turn on “Radio plays tracks you don't own” in Streaming library "
-                "to mix others in.")
-    if not bool(read_setting("discovery.phantom_layer")):
+    radio_off = not bool(read_setting("radio.streamed"))
+    layer_off = not streaming_service.is_enabled() and not bool(
+        read_setting("discovery.phantom_layer"))
+    if layer_off and radio_off:
         return (f"{head} Turn on Discover new and “Radio plays tracks you don't own” "
                 "in Streaming library to mix others in.")
+    if layer_off:
+        return f"{head} Turn on Discover new in Streaming library to mix others in."
+    if radio_off and streaming_service.is_enabled():
+        return (f"{head} Turn on “Radio plays tracks you don't own” in Streaming library "
+                "to mix others in.")
     return head
 
 
 def _plays_whole(chain: list) -> bool:
     """A streamed radio candidate's chain plays it whole: its head is a
-    full-length link — the demo channel's only while the track's one listen
-    is unspent, which the waterfall already says by leaving it out."""
-    return bool(chain) and not chain[0][0].manifest.excerpt
+    full-length link a provider RESOLVED — the demo channel's only while the
+    track's one listen is unspent, which the waterfall already says by
+    leaving it out. A lazy head (a provider that cannot pre-resolve, asked
+    only at fetch) vouches for nothing: no place in a batch on a guess."""
+    return bool(chain) and chain[0][1] is not None and not chain[0][0].manifest.excerpt
 
 
-def _radio_similar(seed_uuid: str, exclude: set, limit: int) -> list:
-    """Mixed (owned + phantom) audio-similar to the seed — the shared two-tier
-    scorer (track_similarity.similar_tracks: mean-KNN recall pool, pure
-    segment-chamfer rerank) with radio's artist cap and
-    jitter. Rows carry what the batch builder needs: identity + file fields
-    (owned) or the MB tracklist fields (phantom)."""
+def _radio_similar(seed_uuid: str, exclude: set, limit: int, served: bool) -> list:
+    """Audio-similar to the seed — the shared two-tier scorer
+    (track_similarity.similar_tracks: mean-KNN recall pool, pure
+    segment-chamfer rerank) with radio's artist cap and jitter — the rows the
+    active output opens itself (`served`, the owner's own) or the ones that
+    stream, each a top-N of its own. Rows carry what the batch builder
+    needs: identity + file fields (owned) or the MB tracklist fields."""
     return track_similarity.similar_tracks(
         seed_uuid, exclude=exclude, limit=limit,
-        artist_cap=_RADIO_ARTIST_CAP, jitter=_RADIO_JITTER)
+        artist_cap=_RADIO_ARTIST_CAP, jitter=_RADIO_JITTER, served=served)
 
 
 def _radio_interleave(owned: list, phantom: list, prev_artist: Optional[str]) -> list:
@@ -3645,31 +3666,37 @@ def _radio_interleave(owned: list, phantom: list, prev_artist: Optional[str]) ->
     return batch
 
 
-def _radio_build_batch(seed_uuid: str, played: set, prev_artist: Optional[str]) -> list:
-    """Pick a batch from the seed. With the owner's switch on, the pool's
-    streamed candidates are resolved first (one waterfall pass — the lane's
-    later resolve reads the cache) and only those whose chain plays them
-    whole qualify; then up to _RADIO_MAX_PHANTOM of them are spaced out
-    between owned tracks (which give the single fetch lane its time), owned
-    ones filling the batch where few qualify. Returns the batch's slots in
-    order — owned files as files, a streamed track as the track itself, its
-    stream the lane's, never an excerpt — with the rows they came from."""
-    rows = _radio_similar(seed_uuid, played, _RADIO_BATCH_SIZE * 3)
-    # "owned" here means the ACTIVE output opens the copy itself (a local
-    # file, or one held at the HQPlayer that is the output); a track whose
-    # only copy sits at another HQPlayer streams like a phantom
-    for r in rows:
-        r["is_owned"] = bool(r["is_owned"] and r["playable"])
-    owned = [r for r in rows if r["is_owned"]]
-    phantom, queries = [], {}
+def _radio_build_batch(seed_uuid: str, played: set,
+                       prev_artist: Optional[str]) -> tuple[list, set]:
+    """Pick a batch from the seed: the owner's own nearest tracks (a top 30
+    of their own), and — with his switch on — the nearest streamed ones (a
+    top _RADIO_PHANTOM_POOL of their own), resolved first (one waterfall
+    pass — the lane's later resolve reads the cache), of which only those
+    whose chain plays them whole qualify; up to _RADIO_MAX_PHANTOM of them
+    are spaced out between owned tracks (which give the single fetch lane
+    its time), owned ones filling the batch where few qualify. Returns the
+    batch's slots in order — owned files as files, a streamed track as the
+    track itself, its stream the lane's, never an excerpt — with the rows
+    they came from; and the streamed candidates passed over, which the
+    station does not ask about again. "Owned" means the ACTIVE output opens
+    the copy itself (a local file, or one held at the HQPlayer that is the
+    output); a track whose only copy sits at another HQPlayer streams."""
+    owned = _radio_similar(seed_uuid, played, _RADIO_BATCH_SIZE * 3, served=True)
+    phantom, queries, passed = [], {}, set()
     if _radio_streams():
-        candidates = [r for r in rows if not r["is_owned"]][:_RADIO_PHANTOM_POOL]
+        candidates = _radio_similar(seed_uuid, played, _RADIO_PHANTOM_POOL, served=False)
         queries = _phantom_track_queries([r["track_id"] for r in candidates])
+        passed = {r["track_id"] for r in candidates if r["track_id"] not in queries}
         candidates = [r for r in candidates if r["track_id"] in queries]
         chains = (_resolve_waterfall([queries[r["track_id"]] for r in candidates])
                   if candidates else [])
         phantom = [r for r, ch in zip(candidates, chains) if _plays_whole(ch)]
+        passed |= {r["track_id"] for r in candidates} - {r["track_id"] for r in phantom}
         phantom = phantom[:_RADIO_MAX_PHANTOM]
+    for r in owned:
+        r["is_owned"] = True
+    for r in phantom:
+        r["is_owned"] = False
 
     batch = []
     for r in _radio_interleave(owned, phantom, prev_artist):
@@ -3680,7 +3707,7 @@ def _radio_build_batch(seed_uuid: str, played: set, prev_artist: Optional[str]) 
             item = queue_mod.items_for_streamed([queries[r["track_id"]]], whole=True)[0]
         if item is not None:
             batch.append((item, r))
-    return batch
+    return batch, passed
 
 
 def _radio_append_batch(batch: list, gen: int) -> None:
@@ -3703,15 +3730,21 @@ def _radio_append_batch(batch: list, gen: int) -> None:
     _radio_last_artist = batch[-1][1]["artist"]
 
 
-def _radio_fill(seed_uuid: str, gen: int, batch: Optional[list] = None) -> None:
+def _radio_fill(seed_uuid: str, gen: int, built: Optional[tuple] = None) -> None:
     """Pick + append one radio batch from the seed — or append the one radio's
     start built already. Background thread (the streamed candidates' resolve
-    is slow); clears the one-at-a-time guard on exit."""
-    global _radio_refilling
+    is slow); clears the one-at-a-time guard on exit. A seed that gives
+    nothing is not asked again (_radio_dry_seed): the next track playing is
+    the next seed — never a fill at every status tick."""
+    global _radio_refilling, _radio_dry_seed
     try:
         if manager.radio_mode and manager.queue.generation == gen:
-            if batch is None:
-                batch = _radio_build_batch(seed_uuid, _radio_played, _radio_last_artist)
+            batch, passed = built if built is not None else _radio_build_batch(
+                seed_uuid, _radio_played, _radio_last_artist)
+            _radio_played.update(passed)
+            if not batch:
+                _radio_dry_seed = seed_uuid
+                logger.info("radio: nothing more like %s — the next seed asks again", seed_uuid)
             _radio_append_batch(batch, gen)
     except Exception:
         logger.exception("radio fill failed")
@@ -3735,7 +3768,7 @@ def _radio_refill_observer(new_data: dict, item) -> None:
     qlen = len(manager.queue)
     if isinstance(idx, int) and qlen > 0 and idx >= qlen - _RADIO_REFILL_AT:
         seed = item.track_id if item else None
-        if seed:
+        if seed and seed != _radio_dry_seed:
             _radio_refilling = True
             threading.Thread(
                 target=_radio_fill, args=(seed, manager.queue.generation),
@@ -3780,7 +3813,7 @@ def radio_start(req: RadioStartRequest):
     fetch lane's. Owned only, the first batch is built here (no provider is
     asked): nothing of the owner's like the seed is said at once, with the
     switch that would mix others in, before the queue is touched."""
-    global _radio_played, _radio_refilling, _radio_last_artist
+    global _radio_played, _radio_refilling, _radio_last_artist, _radio_dry_seed
 
     if not _radio_start_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Radio is already starting.")
@@ -3791,7 +3824,7 @@ def radio_start(req: RadioStartRequest):
 
 
 def _radio_start(req: RadioStartRequest):
-    global _radio_played, _radio_refilling, _radio_last_artist
+    global _radio_played, _radio_refilling, _radio_last_artist, _radio_dry_seed
 
     # Seed by track UUID (a streamed phantom row has no media_file) or by
     # media_file_id (owned). Either way radio keys on the track's CLAP embedding.
@@ -3833,7 +3866,7 @@ def _radio_start(req: RadioStartRequest):
     first = None
     if not _radio_streams():
         first = _radio_build_batch(seed_uuid, {seed_uuid}, seed_row["artist"])
-        if not first:
+        if not first[0]:
             raise HTTPException(status_code=409, detail=_radio_owned_only_words("Radio"))
 
     # Clear everything around the reading slot — the seed plays on while the
@@ -3852,6 +3885,7 @@ def _radio_start(req: RadioStartRequest):
 
     _radio_played = {seed_uuid}
     _radio_last_artist = seed_row["artist"]
+    _radio_dry_seed = None
     _radio_refilling = True                 # hold the refill until the first batch lands
     manager.set_radio_mode(True)            # flips the UI toggle via SSE at once
 
