@@ -548,6 +548,8 @@ def test_a_chain_plays_every_fragment_after_the_same_silence(ab):
     # a slip the sitting caught (the lab's load can make one) is played
     # again and counted, P grown for it; none was heard
     assert row[0][0] == "done"
+    # P grows with a slip that landed late, not with one whose sound came
+    # early or late (`r` replaced): never shrinks
     assert row[0][2] == pytest.approx(p, abs=0.01) if row[0][1] == 0 else row[0][2] >= p
 
 
@@ -617,7 +619,6 @@ def test_a_slow_build_falls_inside_the_silence_and_the_pair_hears_it_equal(ab):
     gaps = _silences(ab, t0)
     assert len(gaps) >= 6, _said(gaps)
     assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
-
 
 
 def test_the_app_stopping_mid_sitting_puts_hqplayer_back(ab):

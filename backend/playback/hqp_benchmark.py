@@ -934,12 +934,12 @@ class _Hung(_Lost):
 
 
 class _Restarted(_Hung):
-    """HQPlayer came back on a new connection after a long silence
-    (LONG_BUILD_S) in a point: the person restarted what they took for hung."""
+    """HQPlayer came back stopped on a new connection after LONG_BUILD_S of
+    silence in a point: the person restarted what they took for hung."""
 
 
 class _BuildCancelled(_Lost):
-    """A cancel in a long silence (LONG_BUILD_S): HQPlayer may be hung and
+    """A cancel past LONG_BUILD_S of silence: HQPlayer may be hung and
     restarted next — what it shows then is no one's change."""
 
 
@@ -1514,8 +1514,7 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
     source (`grid.probes`), the rest is planned again at the rates it
     played (`replan`). Three points of one source in a row that do not
     play end that source's points; the run goes on with the others, and
-    ends only once its control's source — the owner's setting's — goes, or
-    none is left."""
+    ends only once its control's source — the owner's setting's — goes."""
     points = list(grid.points)
     known = dict(grid.known)
     passed = set(grid.covered)          # and what this run has asked so far
@@ -1645,7 +1644,7 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                 if again.get("hung"):
                     # silent, starting the control again: HQPlayer stopped
                     # answering — no mark on either point
-                    raise _HungRun(_hung_head(c, "started"))
+                    raise _HungRun(_hung_head(c, "started", restarted=again.get("restarted", False)))
                 if not again.get("started"):
                     raise _Abort(f"HQPlayer stopped starting anything: {c.label} started "
                                  f"earlier in this run and did not start again within "
@@ -1675,8 +1674,8 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                 # failed, asked again next run
                 marked = missed == "unstarted" and not result.get("restarted")
                 _ledger(run_id, p, "hung" if marked else "failed", result[missed])
-                raise _HungRun(_hung_head(p, "restarted" if result.get("restarted")
-                                          else "prepared" if marked else "played"), marked=marked)
+                raise _HungRun(_hung_head(p, "played" if missed == "failed" else "prepared",
+                                          restarted=result.get("restarted", False)), marked=marked)
             _ledger(run_id, p, missed, result[missed])
             stats[missed] += 1
             if not result.get("outran"):            # that one played
@@ -1762,18 +1761,15 @@ SOURCE_WORDS = {"pcm44": "The 44.1 kHz signal", "pcm96": "The 96 kHz signal", "d
 _HUNG_NOTES = ("HQPlayer stopped responding while", "HQPlayer was restarted while")
 
 
-def _hung_head(p: Point, how: str) -> str:
-    """What happened in a point HQPlayer stopped answering in (`how`:
-    'prepared', 'played', 'started' — the control started again — or
-    'restarted', the person restarting it out of a long silence)."""
+def _hung_head(p: Point, verb: str, *, restarted: bool = False) -> str:
+    """What happened in a point HQPlayer stopped answering in, or was
+    restarted out of (`restarted`) while it `verb`: 'prepared' it, 'played'
+    it, or 'started' it again (the control)."""
     rate_hz, filt, _, src_rate, _ = p.key
     rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
-    what = f"{filt} at {rate} from a {rate_name(src_rate)} source"
-    if how == "restarted":
-        return f"HQPlayer was restarted while it prepared {what}."
-    if how == "started":
-        return f"HQPlayer stopped responding while it started {what} again."
-    return f"HQPlayer stopped responding while it {how} {what}."
+    what = f"{filt} at {rate} from a {rate_name(src_rate)} source" + (" again" if verb == "started" else "")
+    return (f"HQPlayer was restarted while it {verb} {what}." if restarted
+            else f"HQPlayer stopped responding while it {verb} {what}.")
 
 
 def _verdict(r: dict) -> str:
@@ -1983,22 +1979,27 @@ def _outlast(link: _Link, settle: Settle,
     the next answer cannot come before LONG_BUILD_S, `building` is told
     (True) — the person reads that it is a long build — and again (False)
     once HQPlayer answers. A cancel ends the wait at the next ask; past
-    BUILD_LIMIT_S, _Hung. Once told, a cancel is _BuildCancelled, and an
-    HQPlayer that closed or reset the connection under the wait — restarted
-    by the person who took it for hung — _Restarted: the point is not made
-    again on the HQPlayer that hung in it."""
+    BUILD_LIMIT_S, _Hung. Past LONG_BUILD_S of silence a cancel is
+    _BuildCancelled, and a connection HQPlayer closed, reset or refused
+    under the wait is read by what HQPlayer answers on the next one: stopped
+    — restarted by the person who took it for hung — is _Restarted, and the
+    point is not made again on the HQPlayer that hung in it; silent, or
+    playing, it was the hop flapping (the WSL2 one does, for seconds), and
+    the wait goes on."""
     began = time.monotonic() - ANSWER_WAIT_S          # the ask that met the silence
     said = False
-    # A connection HQPlayer closed or reset under the wait (a silence alone is
-    # no loss): a restart, once the answer comes on the next one
-    losses = link.c.losses
+    losses = link.c.losses              # a silence alone is no loss: a close, reset or refusal is
+    dropped = False
+
+    def long() -> bool:
+        return time.monotonic() - began >= LONG_BUILD_S
 
     def unsay() -> None:
         if said and building is not None:
             building(False)
     while True:
         if _cancel.is_set():
-            raise (_BuildCancelled if said else _Lost)(
+            raise (_BuildCancelled if long() else _Lost)(
                 "cancelled while HQPlayer was still building a setting")
         if time.monotonic() - began >= settle.build_limit:
             raise _Hung(f"HQPlayer stayed silent {settle.build_limit / 60:.0f} min building it — "
@@ -2013,19 +2014,20 @@ def _outlast(link: _Link, settle: Settle,
             status = link("get_status")
         except _Silent:
             continue
-        except _Reopened as e:
-            if not _cancel.is_set():
-                unsay()
-                if said:
-                    raise _Restarted(f"HQPlayer was restarted after {time.monotonic() - began:.0f} s "
-                                     f"of silence building it ({e})") from e
-                raise
-            continue                # the cancel woke the read (interrupt)
+        except _Reopened:
+            if _cancel.is_set():
+                continue            # the cancel woke the read (interrupt)
+            if long():
+                dropped = True      # what HQPlayer answers on the new one says what it was
+                continue
+            unsay()
+            raise
         silent = time.monotonic() - began
         unsay()
-        if said and link.c.losses > losses:
+        stopped = status is not None and status.state in (PlaybackState.STOPPED, PlaybackState.STOPREQ)
+        if stopped and long() and (dropped or link.c.losses > losses):
             raise _Restarted(f"HQPlayer was restarted after {silent:.0f} s of silence building it")
-        if status is not None and status.state in (PlaybackState.STOPPED, PlaybackState.STOPREQ):
+        if stopped:
             # Built and stopped, or restarted — a box reset mid-point goes
             # silent the same way, and its stop read as a dropout: made
             # again (a design it built starts in a second the next time)

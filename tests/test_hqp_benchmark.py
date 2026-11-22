@@ -1507,6 +1507,7 @@ def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run
     bench.start()
     assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
                  .startswith("HQPlayer is preparing"), 30)
+    time.sleep(0.5)                     # the silence past LONG_BUILD_S, as the person waited it
     fake.builds.clear()
     fake.restart()
     assert _wait(lambda: not bench.running(), 60)
@@ -1532,11 +1533,54 @@ def test_a_cancel_in_a_long_silent_build_marks_hqplayer_lost(run, monkeypatch):
     bench.start()
     assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
                  .startswith("HQPlayer is preparing"), 30)
+    time.sleep(0.5)                     # the silence past LONG_BUILD_S, as the person waited it
     bench.cancel()
     assert _wait(lambda: not bench.running(), 60)
     assert bench.state()["outcome"] == "cancelled"
     assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
         [(True, True)]
+
+
+def test_a_connection_flapping_in_a_long_build_is_waited_through(run, monkeypatch):
+    """Round 2 M-A: the hop drops the run's connection past LONG_BUILD_S of a
+    build HQPlayer goes on with (the WSL2 hop flaps for seconds) — at the
+    production ratio of the answer wait to LONG_BUILD_S (45 : 60). What
+    HQPlayer answers on the new connection says what it was: still silent,
+    then playing — the point is measured, the run goes on."""
+    fake = run.fake
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.4)
+    fake.builds[("sinc-L", 11289600)] = 3.0
+    bench.start()
+    assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
+                 .startswith("HQPlayer is preparing"), 30)
+    time.sleep(0.5)
+    with fake._lock:
+        conns = list(fake._conns)
+    for c in conns:                     # the hop drops them; HQPlayer builds on
+        try:
+            c.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "done", bench.state()["note"]
+    assert run.q("""SELECT result::text FROM hqp_benchmark_points
+                     WHERE filter = 'sinc-L' AND rate_hz = 11289600""")[0][0] in ("measured", "unsettled")
+
+
+def test_a_rung_answered_for_alike_again_is_not_written_twice(run):
+    """Round 2: a later run writes an implied rung's row again only when what
+    answers for it changed."""
+    fake = run.fake
+    fake.RATES = {1: DspFake.RATES[1], 2: [0, 2822400, 5644800, 11289600]}
+    fake.sel[2][0] = 3
+    for _ in range(2):
+        bench.start()
+        assert _wait(lambda: not bench.running(), 60)
+        assert bench.state()["outcome"] == "done", bench.state()["note"]
+    rows = run.q("""SELECT rate_hz, shaper, count(*) FROM hqp_benchmark_points WHERE result = 'implied'
+                     GROUP BY rate_hz, shaper""")
+    assert rows and all(n == 1 for _, _, n in rows), rows
 
 
 def test_a_long_silent_build_says_hqplayer_is_still_preparing_it(run, monkeypatch):

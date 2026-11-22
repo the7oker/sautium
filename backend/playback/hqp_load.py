@@ -404,23 +404,36 @@ _CLASS = "CASE WHEN speed_p10 < %(no)s THEN 'no' WHEN speed_p10 < %(ok)s THEN 't
 
 
 # An implied row (`p`, of run `r`) stands while the neighbour that answered
-# for it still says so: that neighbour's newest benchmark answer in the run's
-# context at today's line (`%(ok)s`) — a dropout, a point that never started
-# or stopped HQPlayer is "does not keep up". A neighbour measured again, or a
-# line a dropout moved, takes the implication back: never a stale class.
-_IMPLIED_HOLDS = """(p.result <> 'implied' OR p.implied_ok = (
-        SELECT CASE WHEN q.result IN ('unstarted', 'hung') THEN FALSE
-                    ELSE s.process_speed >= %(ok)s AND NOT s.dropout END
-          FROM hqp_benchmark_points q JOIN hqp_benchmark_runs x ON x.id = q.run_id
-          LEFT JOIN hqp_dsp_samples s ON s.id = q.sample_id
-         WHERE x.hqp_endpoint_id = r.hqp_endpoint_id AND x.hqp_engine = r.hqp_engine
-           AND x.mode = r.mode AND x.cuda IS NOT DISTINCT FROM r.cuda
-           AND x.matrix_profile IS NOT DISTINCT FROM r.matrix_profile
-           AND x.convolution = r.convolution
-           AND q.rate_hz = p.implied_from AND q.filter = p.filter AND q.shaper = p.shaper
-           AND q.src_rate = p.src_rate AND q.src_channels = p.src_channels
-           AND (s.id IS NOT NULL OR q.result IN ('unstarted', 'hung'))
-         ORDER BY q.at DESC, q.id DESC LIMIT 1))"""
+# for it still says so, read as keeps_up reads a key — what HQPlayer played
+# there (the rollup, a benchmark point and every listen after it), else its
+# newest benchmark answer (a dropout, a point that never started or stopped
+# HQPlayer: "does not keep up") — at today's line (`%(ok)s`), within the
+# retention. A neighbour measured again, listens since, or a line a dropout
+# moved take the implication back: never a stale class.
+_IMPLIED_HOLDS = f"""(p.result <> 'implied' OR p.implied_ok = COALESCE(
+        (SELECT n.speed_p10 >= %(ok)s AND NOT coalesce(n.dropout, FALSE)
+           FROM hqp_dsp_speed n
+          WHERE n.hqp_endpoint_id = r.hqp_endpoint_id AND n.hqp_engine = r.hqp_engine
+            AND n.mode = r.mode AND n.cuda IS NOT DISTINCT FROM r.cuda
+            AND n.matrix_profile IS NOT DISTINCT FROM r.matrix_profile
+            AND n.convolution = r.convolution
+            AND n.rate_out = p.implied_from AND n.filter = p.filter AND n.shaper = p.shaper
+            AND n.src_rate = p.src_rate AND n.src_channels = p.src_channels
+            AND n.last_seen >= now() - make_interval(days => {RETENTION_DAYS})
+            AND (n.bench_at IS NOT NULL OR n.n >= {PASSIVE_COVER})),
+        (SELECT CASE WHEN q.result IN ('unstarted', 'hung') THEN FALSE
+                     ELSE s.process_speed >= %(ok)s AND NOT s.dropout END
+           FROM hqp_benchmark_points q JOIN hqp_benchmark_runs x ON x.id = q.run_id
+           LEFT JOIN hqp_dsp_samples s ON s.id = q.sample_id
+          WHERE x.hqp_endpoint_id = r.hqp_endpoint_id AND x.hqp_engine = r.hqp_engine
+            AND x.mode = r.mode AND x.cuda IS NOT DISTINCT FROM r.cuda
+            AND x.matrix_profile IS NOT DISTINCT FROM r.matrix_profile
+            AND x.convolution = r.convolution
+            AND q.rate_hz = p.implied_from AND q.filter = p.filter AND q.shaper = p.shaper
+            AND q.src_rate = p.src_rate AND q.src_channels = p.src_channels
+            AND (s.id IS NOT NULL OR q.result IN ('unstarted', 'hung'))
+            AND q.at >= now() - make_interval(days => {RETENTION_DAYS})
+          ORDER BY q.at DESC, q.id DESC LIMIT 1)))"""
 
 
 def implied(ctx: Dict[str, Any]) -> Dict[tuple, Tuple[int, bool]]:
