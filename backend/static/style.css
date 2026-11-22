@@ -7631,6 +7631,18 @@ html { -webkit-tap-highlight-color: transparent; }
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
+/* Beside the folder button the path gives way, never the button or the
+   label: what still does not fit is cut at its head, where the JS put the
+   ellipsis, so the folder's own name stays in sight. */
+[data-music-path-row] .row-stack-label { white-space: nowrap; }
+[data-music-path-row] .path-value {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  justify-content: flex-end;
+}
+[data-music-path-row] .profile-btn { flex: none; }
 
 /* A start in flight on a slow output (DLNA: SOAP round-trips + the
    renderer buffering the new file; HQPlayer: a filter built before any

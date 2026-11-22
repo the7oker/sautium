@@ -1401,6 +1401,12 @@ class LibraryScanner:
         self.library_path = Path(library_path or settings.music_library_path)
 
         if not self.library_path.exists():
+            if library_path is None:
+                # The library's own folder gone under a catalogue that knows
+                # files — a disk pulled, its mount point removed with it — is
+                # the unreachable library every scan refuses (an expected
+                # condition, said in the Library row), not a failed scan.
+                refuse_if_unreachable()
             raise ValueError(f"Library path does not exist: {self.library_path}")
 
         logger.info(f"Initialized scanner for: {self.library_path}")

@@ -18158,7 +18158,9 @@
     const isPathSet     = !!(lib.music_path && (lib.music_path !== '/music' || lib.music_folder === 'setup'));
     const pathFull      = !isPathSet ? ''
       : lib.music_path === '/music' ? 'The folder named at setup' : fmtPathForDisplay(lib.music_path);
-    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull)
+    // Beside the folder button (Change / Choose) the row has room for fewer
+    // characters: the button is never the part that gives way.
+    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull, picksFolder ? 16 : 27)
       : picksFolder ? 'Not chosen' : 'Not set';
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
@@ -18254,7 +18256,10 @@
         <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments, lib.total_tracks))}</div></div>
       </div>`;
 
-    const emptyState = !isEmpty ? '' : !isPathSet ? `
+    // A scan that runs over an empty library — the first one, started by a
+    // tap, by the folder's choice or by the folder watcher — shows under
+    // either message, with its Cancel.
+    const emptyState = !isEmpty ? '' : (!isPathSet ? `
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
@@ -18268,10 +18273,12 @@
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
-          No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.
+          ${scanRunning
+            ? 'Reading your music folder — tracks appear here as they are indexed. It usually takes a few minutes per 10k tracks.'
+            : 'No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.'}
         </p>
-        <button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>
-      </div>`;
+        ${scanRunning ? '' : `<button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>`}
+      </div>`) + (scanRunning ? scanActions : '');
 
     // Action button rows now live inside libraryStats — under their
     // respective sections (scan under Library, enrich under
@@ -18399,6 +18406,19 @@
      same in-place targets that the old poll used. */
   let _libraryStreamCtrl = null;
 
+  // Whether the Library screen as drawn (`root`) shows another structure
+  // than `lib` asks for. Pure: the DOM is read, nothing is written.
+  function _libraryStructureStale(root, lib, scanRunning, enrichRunning) {
+    const shownScan   = !!root.querySelector('[data-cancel-scan]');
+    const shownEnrich = !!root.querySelector('[data-cancel-enrich]');
+    const shownEmpty  = !!root.querySelector('.empty-library');
+    const isEmpty     = (lib.total_tracks || 0) === 0;
+    return shownScan !== scanRunning
+        || (shownEnrich && !enrichRunning)
+        || (!shownEnrich && enrichRunning && !!lib.analysis_available && !isEmpty)
+        || shownEmpty !== isEmpty;
+  }
+
   function _subscribeLibraryStream(root) {
     if (_libraryStreamCtrl) { _libraryStreamCtrl.abort(); _libraryStreamCtrl = null; }
 
@@ -18444,9 +18464,12 @@
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
       _askPrunePlan(lib.scan && lib.scan.prune_plan);
 
-      // A worker finishing → full re-render, which flips its Cancel row back.
-      const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
-      if (scanEnrichWasRunning && !scanRunning && !enrichRunning) {
+      // The screen is drawn again only where its structure no longer says
+      // what the library is: a worker finished (its Cancel row flips back);
+      // a scan runs that the screen does not show — one the folder's choice
+      // or the folder watcher started, not a tap here; the library stopped
+      // being empty, or became so. Everything else is updated in place above.
+      if (_libraryStructureStale(root, lib, scanRunning, enrichRunning)) {
         if (parseHash().startsWith('more/library')) render();
       }
     }

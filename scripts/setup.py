@@ -178,9 +178,14 @@ def machine() -> dict:
 
 
 def machine_line(m: dict, preset: Optional[str]) -> str:
+    """The machine as read, and what the node is. The arrow is the machine's
+    own verdict; a node that is something else — asked for with --preset, or
+    born before the machine changed — is said as that, not as read."""
     disk = "a card or removable disk" if m["docker_root_removable"] else "a fixed disk"
-    return (f"{round(m['ram_gib'])} GB RAM, {m['cores']} cores, Docker's data on {disk} → "
-            f"{'Nano' if preset == 'nano' else 'the full node'}")
+    read = machine_tier.birth_preset(m["ram_gib"], m["docker_root_removable"], m["docker_root_free_gb"])[0]
+    name = "Nano" if preset == "nano" else "the full node"
+    said = f" → {name}" if read == preset else f"; set up as {name}"
+    return f"{round(m['ram_gib'])} GB RAM, {m['cores']} cores, Docker's data on {disk}{said}"
 
 
 def pg_settings(ram_gib: float) -> Dict[str, str]:
@@ -429,21 +434,30 @@ def automount_installed() -> bool:
             and os.path.exists("/usr/local/lib/sautium/automount") and os.path.isdir(AUTOMOUNT_BASE))
 
 
+# What takes the automount back: one list, printed beside the block and by `remove`
+AUTOMOUNT_UNDO = ["sudo rm -f /etc/udev/rules.d/99-sautium-automount.rules",
+                  "sudo rm -f /etc/systemd/system/sautium-automount@.service",
+                  "sudo rm -f /usr/local/lib/sautium/automount",
+                  "sudo systemctl daemon-reload",
+                  "sudo udevadm control --reload"]
+
+
 def automount_block(files: Dict[str, Path]) -> None:
-    q = shlex.quote
+    # Short lines: a line a terminal or a chat wrapped arrives as two commands
+    # (seen: `install` without its destination). The folder goes in a variable.
     block("Plugged disks (optional)",
           "So that a USB disk or a card with music appears in Sautium when it is plugged in, three small\n"
           "files go into the system. They mount a plugged disk read-only and never write to it.\n"
           f"Read them first: {files['rule'].parent}/",
-          [f"sudo install -d -m 0755 {AUTOMOUNT_BASE} {AUTOMOUNT_BASE}/.names /usr/local/lib/sautium",
-           f"sudo install -m 0755 {q(str(files['script']))} /usr/local/lib/sautium/automount",
-           f"sudo install -m 0644 {q(str(files['rule']))} /etc/udev/rules.d/99-sautium-automount.rules",
-           f"sudo install -m 0644 {q(str(files['unit']))} /etc/systemd/system/sautium-automount@.service",
+          [f"A={shlex.quote(str(files['rule'].parent))}",
+           f"sudo install -d -m 0755 {AUTOMOUNT_BASE} {AUTOMOUNT_BASE}/.names",
+           "sudo install -d -m 0755 /usr/local/lib/sautium",
+           f'sudo install -m 0755 "$A/{files["script"].name}" /usr/local/lib/sautium/',
+           f'sudo install -m 0644 "$A/{files["rule"].name}" /etc/udev/rules.d/',
+           f'sudo install -m 0644 "$A/{files["unit"].name}" /etc/systemd/system/',
            "sudo systemctl daemon-reload",
            "sudo udevadm control --reload"],
-          ["sudo rm -f /etc/udev/rules.d/99-sautium-automount.rules /etc/systemd/system/sautium-automount@.service /usr/local/lib/sautium/automount",
-           "sudo systemctl daemon-reload",
-           "sudo udevadm control --reload"])
+          AUTOMOUNT_UNDO)
 
 
 # -- the roots -------------------------------------------------------------------------
@@ -969,6 +983,23 @@ def boot_mount(real: str, findmnt_json: str, uid: int, gid: int, disk_type=disk_
     return {"point": point, "line": line, "folder": point + real[len(target.rstrip("/")):], "device": device}
 
 
+def in_pieces(line: str, width: int = 68) -> List[str]:
+    """A long line of /etc/fstab as shell lines that build it in the variable
+    L, each short enough that nothing wraps it: cut at the commas of its
+    options. The line holds no quote and no `$` (a UUID, numbers, option
+    names), so the pieces are quoted as they are."""
+    parts, pieces = line.split(","), []
+    piece = parts[0]
+    for part in parts[1:]:
+        if len(piece) + 1 + len(part) > width:
+            pieces.append(piece)
+            piece = part
+        else:
+            piece += "," + part
+    pieces.append(piece)
+    return [f"L='{pieces[0]}'"] + [f'L="$L,{piece}"' for piece in pieces[1:]]
+
+
 def boot_mount_undo(point: str) -> List[str]:
     its_line = shlex.quote("\\|^UUID=[^ ]* " + point + " |d")              # sed's address for that one line
     return [f"sudo umount {point}", f"sudo sed -i {its_line} /etc/fstab", f"sudo rmdir {point}",
@@ -992,8 +1023,9 @@ def boot_mount_block(music: str, found: dict) -> None:
           "Close anything that has a file of the disk open first: the desktop's hold is let go here.",
           [f"sudo umount {found['device']}",
            f"sudo mkdir -p {found['point']}",
+           *in_pieces(found["line"]),
            # its own line whatever the file's last one ends with
-           f"printf '\\n%s\\n' {shlex.quote(found['line'])} | sudo tee -a /etc/fstab",
+           "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab",
            "sudo systemctl daemon-reload",
            f"sudo mount {found['point']}"],
           boot_mount_undo(found["point"]))
@@ -1229,6 +1261,20 @@ def cmd_update(args) -> int:
     return 0
 
 
+def mounts_under(roots: List[str], findmnt_rn: str) -> List[str]:
+    """The lines of `findmnt -rn -o TARGET,FSTYPE,OPTIONS` whose mount point
+    is a root or lies under one: a plugged disk the automount mounted, a disk
+    mounted at a root when the machine started. (`findmnt -R <folder>` says
+    nothing of a folder that is not itself a mount point — which the
+    automount's folder never is.)"""
+    found = []
+    for line in findmnt_rn.splitlines():
+        target = line.split(" ", 1)[0]
+        if any(target == root or target.startswith(root.rstrip("/") + "/") for root in roots):
+            found.append(line)
+    return found
+
+
 def cmd_status(args) -> int:
     refuse_root()
     kind, sentence = docker_state()
@@ -1239,10 +1285,11 @@ def cmd_status(args) -> int:
         say("  " + line)
     say(f"Host agent: {'installed' if (agent.host_dir(ROOT) / 'bin' / 'sautium-host-agent').exists() else 'not installed'}"
         f" · lingering {'on' if lingering() else 'off (updates run only while you are signed in)'}")
-    for root in held_roots(ROOT / ROOTS_OVERRIDE):
+    roots = held_roots(ROOT / ROOTS_OVERRIDE)
+    for root in roots:
         say(f"Music root: {root}  {'there' if os.path.isdir(root) else 'NOT THERE'}")
-    for line in out(run(["findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS", "-R", AUTOMOUNT_BASE])).splitlines():
-        say("  mounted: " + line)
+    for line in mounts_under(roots, out(run(["findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"]))):
+        say("  mounted: " + printable(line))
     tailnet = tailnet_address()
     if tailnet:
         say(f"Tailscale: this machine is {tailnet} on a tailnet; Sautium answers there too.")
@@ -1332,9 +1379,8 @@ def cmd_remove(args) -> int:
     if lingering():
         say(f"    sudo loginctl disable-linger {shlex.quote(user)}")
     if automount_installed() or os.path.exists("/usr/local/lib/sautium/automount"):
-        say("    sudo rm -f /etc/udev/rules.d/99-sautium-automount.rules /etc/systemd/system/sautium-automount@.service /usr/local/lib/sautium/automount")
-        say("    sudo systemctl daemon-reload")
-        say("    sudo udevadm control --reload")
+        for line in AUTOMOUNT_UNDO:
+            say("    " + line)
     for point in boot_mounts(out(run(["findmnt", "--fstab", "-n", "-o", "TARGET"]))):
         for line in boot_mount_undo(point):
             say("    " + line)
