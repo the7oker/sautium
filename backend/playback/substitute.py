@@ -103,6 +103,8 @@ def _stream_play(item) -> dict:
     the way in (a mirroring, an output switch: a stream is every output's),
     else a stream to come."""
     play = item.play or {}
+    if play.get("code") == "off":
+        return {"kind": "pending"}      # streaming was off: a re-read asks again
     if play.get("lane") or (play.get("kind") == "pending" and not play.get("prepare")):
         return play
     return {"kind": "pending"}
@@ -136,6 +138,16 @@ def _prepared(item, play: Optional[dict]) -> Optional[dict]:
             return held
         if transcode.flac_slice_cached(settings.translate_to_local_path(src["path"]),
                                        src["cue_start"], src.get("cue_end")):
+            return play
+        # The cut is the lane's, which runs on the media proxy's worker: a
+        # node with streaming off, or HQPlayer on this machine, may have
+        # started no proxy yet
+        from streaming import service as streaming_service
+        try:
+            streaming_service.ensure_proxy()
+        except RuntimeError as e:
+            logger.warning("no media proxy to cut CUE slices in the lane (%s): HQPlayer is "
+                           "handed each cut as the mirror makes it", e)
             return play
         return {"kind": "pending", "prepare": "cut", "file": src}
     return play
@@ -211,12 +223,17 @@ class Lane:
     (slots). `notify(index)` reaches the active output (slot_ready);
     `anchor()` is the slot the output plays or Play would start; `changed()`
     says the rows' states moved; `failed(item, index, code)` hears a slot
-    that failed."""
+    that failed; `arriving(item)` is told just before a slot's stream (or
+    preparation) becomes its way in — an output that holds the queue only
+    as it was handed it (HQPlayer) marks one it does not hold before any
+    reader can count it."""
 
     def __init__(self, queue, notify: Callable[[int], None], anchor: Callable[[], int],
-                 changed: Callable[[], None], failed: Callable[[object, int, str], None]):
+                 changed: Callable[[], None], failed: Callable[[object, int, str], None],
+                 arriving: Callable[[object], None] = lambda item: None):
         self._queue = queue
         self._notify = notify
+        self._arriving = arriving
         self._anchor = anchor
         self._changed = changed
         self._on_failed = failed
@@ -251,11 +268,23 @@ class Lane:
         proxy = self._proxy
         if proxy is None:
             return
+        from streaming import service as streaming_service
+        up = streaming_service.is_enabled()
+        if up and not streaming_service.providers_preferred():
+            # every provider aside or cooling down for now: the window waits,
+            # asked again at the next look (the status tick)
+            proxy.wake()
+            return
         todo = []
         for _s, it in self._window(self._queue.snapshot()):
             play = it.play
             if (play is not None and play.get("kind") == "pending" and not play.get("prepare")
                     and not play.get("token") and not play.get("resolving")):
+                if not up:
+                    # Said on the row; never kept past a re-read of the way in,
+                    # nor past streaming coming up (revive)
+                    self._fail(it, play, "off")
+                    continue
                 marked = {"kind": "pending", "resolving": True}
                 if self._queue.swap_play(it, play, marked, bump=False):
                     todo.append((it, marked))
@@ -263,6 +292,16 @@ class Lane:
             threading.Thread(target=self._resolve, args=(todo,), daemon=True,
                              name="queue-resolve").start()
         proxy.wake()
+
+    def revive(self) -> None:
+        """Streaming came up (streaming.service): the slots it failed as off
+        are to come again, and the window looks anew."""
+        for it in self._queue.snapshot():
+            play = it.play
+            if play is not None and play.get("code") == "off":
+                self._queue.swap_play(it, play, {"kind": "pending"})
+        self._changed()
+        self.maintain()
 
     def pick(self):
         """The proxy worker's next job, in the queue's order from the playing
@@ -341,8 +380,9 @@ class Lane:
         # The resolve and the query builders live with the play endpoints.
         from routers.player import _phantom_track_query, _refused_code, _resolve_waterfall
         if not streaming_service.is_enabled() or not streaming_service.providers_preferred():
+            # gone off since the look that marked them: to come again
             for it, marked in todo:
-                self._fail(it, marked, "off")
+                self._queue.swap_play(it, marked, {"kind": "pending"}, bump=False)
             return
         proxy = self._proxy
         queries, slots = [], []
@@ -357,6 +397,7 @@ class Lane:
             return
         chains = _resolve_waterfall(queries)
         by_track: dict = {}
+        named: set = set()
         for (it, marked), q, chain in zip(slots, queries, chains):
             if not chain:
                 self._fail(it, marked, _refused_code(it.track_id) or "nowhere")
@@ -365,14 +406,20 @@ class Lane:
             tok = by_track.get(it.track_id)
             if tok is None:
                 tok = by_track[it.track_id] = proxy.mint(q, chain)
-                with self._lock:
-                    self._minted.add(tok)
-            new = {"kind": "pending", "token": tok}
-            if not self._queue.swap_play(it, marked, new, bump=False):
-                continue            # the slot left the queue, or its way in changed
-            if (proxy.state(tok) or ("",))[0] == "ready":
-                # In RAM already (a re-queued album): it lands now
-                self._settle(it, new, {"kind": "proxy", "token": tok, "lane": True})
+            if self._queue.swap_play(it, marked, {"kind": "pending", "token": tok}, bump=False):
+                named.add(tok)
+        with self._lock:
+            # Kept only once a slot names it: a prune meanwhile would cancel a
+            # token no slot named yet
+            self._minted |= named
+        for tok in set(by_track.values()) - named:
+            proxy.cancel(tok)       # every slot it was for left, or its way in changed
+        for tok in named:
+            e = proxy._peek(tok)
+            if e is not None and e.ready.is_set() and e.audio is not None:
+                # In RAM already (a re-queued album): it lands now, told as
+                # any landing is — its provider, an excerpt's own length
+                self._landed(e)
         self.prune()
         self._changed()
         proxy.wake()
@@ -385,10 +432,13 @@ class Lane:
         refetch may land on another provider, or as an excerpt: an output
         reads the item at load) — then every slot pending it streams it now,
         and an output parked on one goes."""
-        excerpt = bool(e.audio.excerpt)
-        self._queue.refresh_proxy_items(
-            e.token, provider=e.provider.manifest.id if e.provider else None, excerpt=excerpt,
-            duration_seconds=(e.audio.seconds if excerpt and e.audio.seconds else e.query.duration))
+        if not e.query.media_file_id:
+            # an owned file's transcode tells the slot nothing: it is the file
+            excerpt = bool(e.audio.excerpt)
+            self._queue.refresh_proxy_items(
+                e.token, provider=e.provider.manifest.id if e.provider else None, excerpt=excerpt,
+                duration_seconds=(e.audio.seconds if excerpt and e.audio.seconds
+                                  else e.query.duration))
         for it, play in self._pending_on(e.token):
             land = {"kind": "proxy", "token": e.token, "lane": True}
             if play.get("transcode"):
@@ -420,7 +470,11 @@ class Lane:
         """The slot's way in is `play` now — if it still was `expected`: the
         output that parked on it hears so (slot_ready). Its 1-based slot, or
         None when it left the queue or moved on meanwhile."""
-        if not self._queue.swap_play(item, expected, play):
+        if play["kind"] != "unplayable" and item.play is expected:
+            self._arriving(item)
+        # The row's state is the `slots` message's, never a queue version:
+        # a landing repaints no sheet
+        if not self._queue.swap_play(item, expected, play, bump=False):
             return None
         index = self._queue.index_of(item)
         if index is None:

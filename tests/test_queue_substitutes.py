@@ -295,3 +295,105 @@ def test_a_streamed_slot_survives_a_restart_as_its_identity(monkeypatch):
     monkeypatch.setattr(substitute, "db_query", lambda sql, params: [])
     after.queue.reresolve(lambda its: native_plays(its, "browser", None))
     assert [it.opener() for it in after.queue.snapshot()] == [{"kind": "pending"}] * 2
+
+
+def test_a_browser_start_waiting_on_its_stream_follows_its_slot_through_queue_edits(monkeypatch):
+    """Play of a streamed album on the browser output parks on slot 1 until
+    its stream lands; an append, or a removal before it, meanwhile keeps the
+    wait on that slot — and the landing still starts it."""
+    import routers.settings as settings_router
+    from playback.browser_backend import BrowserBackend
+    from playback.manager import PlaybackManager
+    monkeypatch.setattr(settings_router, "_read", lambda key: None)
+    mgr = PlaybackManager()
+    monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
+    b = BrowserBackend(emit=mgr._on_backend_status, queue=mgr.queue)
+    mgr._active = b
+    b._channel = object()                     # a tab holds the output
+    pushed = []
+    monkeypatch.setattr(b, "_push", pushed.append)
+    first = _track(1)
+    first.play = {"kind": "pending"}
+    mgr.queue.replace([_file(9), first])
+    assert b._start_at(2, play=True)
+    assert (b._state, b._pending_play_index) == ("loading", 2)
+    mgr.append([_file(10)])                   # "Add to end" while it waits
+    assert (b._state, b._pending_play_index) == ("loading", 2)
+    assert mgr.remove(1)                      # a removal before it
+    assert (b._index, b._pending_play_index) == (1, 1)
+    mgr.queue.swap_play(first, first.play, {"kind": "proxy", "token": "t", "lane": True})
+    b.slot_ready(1)
+    loads = [d for d in pushed if d.get("cmd") == "load"]
+    assert loads and loads[-1]["play"] is True and loads[-1]["queue_index"] == 1
+
+
+def test_with_streaming_off_a_streamed_slot_says_so_and_comes_back_when_it_is_up(lane, monkeypatch):
+    """M1: off is said on the row, never kept: a re-read of the way in, or
+    streaming coming up (revive), asks for the stream again."""
+    from playback import substitute
+    from streaming import service as streaming_service
+    monkeypatch.setattr(substitute, "db_query", lambda sql, params: [])
+    ln, q, prov, proxy, told, anchor, settle = lane
+    up = {"on": False}
+    monkeypatch.setattr(streaming_service, "is_enabled", lambda: up["on"])
+    q.replace([_track(1)])
+    _native(q)
+    settle()
+    assert q.item_at(1).opener()["code"] == "off" and told["failed"] == [(1, "off")]
+    _native(q)
+    assert q.item_at(1).opener() == {"kind": "pending"}       # a re-read asks again
+    settle()
+    up["on"] = True
+    ln.revive()
+    prov.release("t-1")
+    assert _wait(lambda: q.item_at(1).opener()["kind"] == "proxy")
+
+
+def test_bytes_adopted_from_ram_tell_the_slot_what_they_are(lane, monkeypatch):
+    """H1: a slot whose track is in RAM already (a re-queued album) lands at
+    once — told its provider and, for an excerpt, the clip's own length, as
+    any landing is: the demo ledger and the play tracker read them."""
+    from playback import substitute
+    import routers.player as player
+    monkeypatch.setattr(substitute, "db_query", lambda sql, params: [])
+    ln, q, prov, proxy, told, anchor, settle = lane
+
+    class _Clip(StreamProvider):
+        manifest = ProviderManifest(id="clip", name="Clip", kind="direct_url", lossless=False,
+                                    excerpt=True)
+
+        def fetch(self, query):
+            return FetchedAudio(data=b"ID3" + b"\x00" * 64, mime="audio/mpeg", excerpt=True, seconds=30.0)
+    clip = _Clip()
+    monkeypatch.setattr(player, "_resolve_waterfall", lambda queries: [[(clip, None)] for _ in queries])
+    q.replace([_track(1)])
+    _native(q)
+    settle()
+    assert _wait(lambda: q.item_at(1).opener()["kind"] == "proxy")
+    again = _track(1)
+    q.append([again])
+    _native(q)
+    settle()
+    assert _wait(lambda: again.opener()["kind"] == "proxy")
+    assert again.play["token"] != q.item_at(1).play["token"]
+    assert (again.provider, again.excerpt, again.duration_seconds) == ("clip", True, 30.0)
+
+
+def test_a_cue_slice_to_cut_for_hqplayer_starts_the_media_proxy_it_is_cut_on(monkeypatch):
+    """H3: the cut is the lane's, on the media proxy's worker — a node with
+    streaming off has none yet: the slot's way in starts it."""
+    from playback import substitute
+    from streaming import service as streaming_service
+    from streaming import transcode
+    started = []
+    monkeypatch.setattr(transcode, "flac_slice_cached", lambda path, start, end: False)
+    monkeypatch.setattr(streaming_service, "ensure_proxy", lambda: started.append(1))
+    cue = QueueItem(track_id="c", media_file_id=5,
+                    source={"kind": "file", "path": "E:/Music/disc.flac", "format": "FLAC",
+                            "cue_start": 0.0, "cue_end": 100.0}, title="C")
+    assert substitute._prepared(cue, None)["prepare"] == "cut" and started == [1]
+
+    def gone():
+        raise RuntimeError("media port in use")
+    monkeypatch.setattr(streaming_service, "ensure_proxy", gone)
+    assert substitute._prepared(cue, None) is None        # the mirror cuts it, as it can

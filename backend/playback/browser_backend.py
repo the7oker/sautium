@@ -67,6 +67,9 @@ class BrowserBackend(PlayerBackend):
         # (e.g. the previous renderer closed): honored the moment a tab
         # claims the output, instead of silently playing into the void.
         self._pending_play_index: Optional[int] = None
+        # The slot a start waits on for its stream (playback.substitute): a
+        # queue edit meanwhile moves the wait with it, by identity
+        self._waiting_on: Optional[QueueItem] = None
         # That intent is an output switch's (play_on): the tab that chose
         # this output claims it a moment later — no "no playback device".
         self._handover = False
@@ -421,6 +424,7 @@ class BrowserBackend(PlayerBackend):
                     # on the slot and say so; slot_ready starts it.
                     self._unplayable = None
                     self._index = index
+                    self._waiting_on = item
                     self._current_ident = None
                     self._position = position if index == first else 0.0
                     self._length = item.duration_seconds or 0.0
@@ -561,6 +565,23 @@ class BrowserBackend(PlayerBackend):
         # so a duplicate of the playing track elsewhere in the queue can't
         # drag the slot to the wrong copy.
         snapshot = self._queue.snapshot()
+        if self._current_ident is None and self._pending_play_index is not None:
+            # A start waiting on its slot's stream follows that slot — an
+            # append, a removal before it, a new order — and still plays
+            # when the stream lands; one whose slot left the queue goes on
+            # from its place
+            at = self._queue.index_of(self._waiting_on) if self._waiting_on is not None else None
+            if at is None:
+                if snapshot:
+                    self._start_at(min(self._index, len(snapshot)), play=True)
+                else:
+                    self.stop()
+                return
+            if at != self._index:
+                self._index = self._pending_play_index = at
+                self._emit_now()
+            self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})
+            return
         best = None
         if self._current_ident is not None:
             for i, it in enumerate(snapshot, start=1):
@@ -569,6 +590,8 @@ class BrowserBackend(PlayerBackend):
                         best = i
         if best is not None:
             if best != self._index:
+                if self._pending_play_index == self._index:
+                    self._pending_play_index = best      # a start parked for a tab moves too
                 self._index = best
                 self._emit_now()
             # Keep the renderer's local tail in step with mutations (its

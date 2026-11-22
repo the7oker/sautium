@@ -309,3 +309,54 @@ def test_an_owned_m4a_and_a_cue_slice_are_prepared_by_the_lane_in_the_queues_ord
         xcode.land("/music/A/02.m4a")
         made["cut"].set()
         b.shutdown()
+
+
+def _held_uris(b):
+    return len(b._layout().handed)
+
+
+def test_a_stream_landing_behind_the_playhead_is_no_slot_hqplayer_holds(fake, lane, monkeypatch):
+    """H2: a tap past a slot still on its way hands HQPlayer the queue from
+    the tapped slot; that slot's stream landing afterwards is never counted
+    as one HQPlayer holds — the layout stays its playlist — and a tap on it
+    hands HQPlayer the queue from it, which plays it."""
+    prov, _proxy = lane
+    mgr, b = _playing((lane, monkeypatch), fake, monkeypatch,
+                      [_item("E:/Music/A/01.flac", 1), _streamed(2), _item("E:/Music/A/03.flac", 3)])
+    try:
+        assert b.select(3, "track-3")
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+        prov.land("stream-2")
+        assert _wait(lambda: mgr.queue.item_at(2).opener()["kind"] == "proxy")
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 3)
+        assert _held_uris(b) == len(fake.playlist) == 2
+        assert b.gap(mgr.queue.item_at(2)) is None              # nothing wrong with it
+        assert b.select(2, "stream-2")
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                     and "/preview/" in (fake.playlist[fake.track - 1] if fake.track else "")), \
+            (fake.state, fake.track, fake.playlist)
+        assert _held_uris(b) == len(fake.playlist) == 3
+    finally:
+        prov.land("stream-2")
+        b.shutdown()
+
+
+def test_a_tap_on_a_slot_still_on_its_way_behind_the_playhead_waits_and_plays_it(fake, lane,
+                                                                               monkeypatch):
+    prov, _proxy = lane
+    mgr, b = _playing((lane, monkeypatch), fake, monkeypatch,
+                      [_item("E:/Music/A/01.flac", 1), _streamed(2), _item("E:/Music/A/03.flac", 3)])
+    try:
+        assert b.select(3, "track-3")
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 3)
+        assert b.select(2, "stream-2")
+        assert _wait(lambda: mgr._latest_status.get("state") == "loading"
+                     and mgr._latest_status.get("track_index") == 2), mgr._latest_status
+        prov.land("stream-2")
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING)
+                     and "/preview/" in (fake.playlist[fake.track - 1] if fake.track else "")), \
+            (fake.state, fake.track, fake.playlist)
+    finally:
+        prov.land("stream-2")
+        b.shutdown()

@@ -3639,7 +3639,13 @@ def _radio_append_batch(batch: list, gen: int) -> None:
     global _radio_last_artist
     if not manager.radio_mode or not batch:
         return
-    added = manager.append([item for item, _r in batch], generation=gen)
+    try:
+        added = manager.append([item for item, _r in batch], generation=gen)
+    except (Building, NotAnswering, Dropped) as e:
+        # HQPlayer busy (a build, a silence, the output changing): the next
+        # refill — the status tick near the queue's end — asks again
+        logger.info("radio: a batch not added, the output is busy (%s)", e)
+        return
     if not added:
         return
     for _item, r in batch:

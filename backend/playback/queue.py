@@ -212,7 +212,7 @@ class CanonicalQueue:
         with self._lock:
             plays = list(resolve(list(self._items)))
             for it, play in zip(self._items, plays):
-                it.play = play
+                _set_play(it, play)
             self._version += 1
             return sum(1 for p in plays if p and p.get("kind") == "pending")
 
@@ -238,7 +238,7 @@ class CanonicalQueue:
             if moved:
                 new_plays = plays(moved) if plays is not None else [None] * len(moved)
                 for it, play in zip(moved, new_plays):
-                    it.play = play
+                    _set_play(it, play)
                 self._version += 1
             return moved
 
@@ -252,10 +252,7 @@ class CanonicalQueue:
         with self._lock:
             if item.play is not expected or not any(it is item for it in self._items):
                 return False
-            item.play = play
-            if not item.preview and (play is None or play.get("kind") != "proxy"):
-                # what the stream told of itself is no more this slot's
-                item.provider, item.excerpt = None, False
+            _set_play(item, play)
             if bump:
                 self._version += 1
             return True
@@ -383,6 +380,16 @@ class CanonicalQueue:
             "index": idx,
             "play": play,
         }
+
+
+def _set_play(item: QueueItem, play: Optional[dict]) -> None:
+    """The slot's way in is `play` now; one that is no provider's stream any
+    more keeps nothing a stream told of itself (its provider, an excerpt's
+    flag: the play tracker would count no listen of the file it opens now).
+    Caller holds the queue's lock."""
+    item.play = play
+    if not item.preview and (play is None or play.get("kind") != "proxy" or play.get("transcode")):
+        item.provider, item.excerpt = None, False
 
 
 # -- item constructors -----------------------------------------------------

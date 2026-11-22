@@ -291,6 +291,13 @@ class PlayerBackend(ABC):
         unplayable here (playback.substitute). Default: nothing; an output
         that parked a play there starts it, or walks past it."""
 
+    def stream_arriving(self, item) -> None:
+        """The fetch lane is about to make a stream (or an owned file's
+        preparation) the way in of `item`, which was pending until now. An
+        output that holds the queue only as it was handed it marks one it
+        does not hold before any reader can count it (HQPlayer). Default:
+        nothing."""
+
     def stream_landed(self, token: str, reshaped: bool) -> None:
         """The bytes of the media proxy's stream `token` landed — `reshaped`:
         in another size or type than the proxy told its consumers before.

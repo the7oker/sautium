@@ -114,12 +114,14 @@ class PlaybackManager:
         # window counts from (playback.substitute.Lane): the item, so an edit
         # before it moves the window with it. None: slot 1, where Play starts.
         self._anchor_item: Optional[QueueItem] = None
+        self._anchor_slot = 1
         # The streams the queue's slots need, in the queue's order, a lead
         # window ahead of the playhead; what each streamed row shows
         # (`slots`, told on the event stream apart from the status)
         self.lane = Lane(self.queue, self._slot_ready, self._window_anchor,
-                         self._slots_changed, self._slot_failed)
+                         self._slots_changed, self._slot_failed, self._stream_arriving)
         self._slots: list = []
+        self._slots_at = 0          # the queue version they were read at
         self._slots_version = 0
         self._slots_lock = threading.Lock()
         # A Play of streamed slots: whether its first ones failed with nothing
@@ -592,7 +594,7 @@ class PlaybackManager:
             # The streams for what this output cannot open natively, from
             # the slot it resumes at — the play press finds them buffering.
             if prev_idx >= 1:
-                self._anchor_item = self.queue.item_at(prev_idx)
+                self._anchor_item, self._anchor_slot = self.queue.item_at(prev_idx), prev_idx
             self.lane.maintain()
             logger.info("playback backend activated: %s", backend.id)
             return told
@@ -636,11 +638,22 @@ class PlaybackManager:
         if b is not None:
             b.slot_ready(index)
 
+    def _stream_arriving(self, item: QueueItem) -> None:
+        b = self._active
+        if b is not None:
+            b.stream_arriving(item)
+
     def _window_anchor(self) -> int:
         """The slot the fetch lane's window counts from: the one the output
-        plays or stands on, else 1."""
+        plays or stands on — where it stood when that item left the queue
+        (a removal playing out) — else 1."""
         item = self._anchor_item
-        return (self.queue.index_of(item) if item is not None else None) or 1
+        at = self.queue.index_of(item) if item is not None else None
+        if at is None:
+            at = min(self._anchor_slot, len(self.queue))
+        else:
+            self._anchor_slot = at
+        return at or 1
 
     # -- what the streamed rows show ------------------------------------------
 
@@ -653,18 +666,21 @@ class PlaybackManager:
         state, whole, with the queue version it was read at — a page applies
         it to the rows of that version, never to another's."""
         with self._slots_lock:
-            return {"version": self.queue.version, "slots": list(self._slots)}
+            return {"version": self._slots_at, "slots": list(self._slots)}
 
     def _slots_changed(self) -> None:
         """What a streamed row shows may have moved (a fetch began, passed a
         tenth, ended; a slot landed or failed; the queue changed): read again,
         and told when it did — never a queue version, which repaints the
         sheet."""
+        version = self.queue.version
         slots = self.lane.slots()
+        if self.queue.version != version:
+            return              # an edit meanwhile: its own reading follows (_lane_follows)
         with self._slots_lock:
-            if slots == self._slots:
+            if (version, slots) == (self._slots_at, self._slots):
                 return
-            self._slots = slots
+            self._slots, self._slots_at = slots, version
             self._slots_version += 1
         self.wake_sse()
 
@@ -1096,7 +1112,7 @@ class PlaybackManager:
                                  corrected=bool(s.extra.get("corrected")),
                                  taken=bool(s.extra.get("taken")))
         if item is not None and idx:
-            self._anchor_item = item
+            self._anchor_item, self._anchor_slot = item, idx
         self._maintain_preview_window(idx, s.extra.get("start_slot"))
         self.lane.maintain()
         if new_data["state"] == "playing" and s.position > 0:
@@ -1212,7 +1228,7 @@ class PlaybackManager:
                     raise
             if added:
                 gen = self.queue.replace(accepted)
-                self._anchor_item = accepted[0]
+                self._anchor_item, self._anchor_slot = accepted[0], 1
                 if play:
                     self._play_started(accepted)
                 self._last_slot = 0   # fresh queue — no resume slot in it
@@ -1462,7 +1478,7 @@ class PlaybackManager:
             gen = self.queue.generation
             if cleared:
                 gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
-                self._anchor_item = self.queue.item_at(1)
+                self._anchor_item, self._anchor_slot = self.queue.item_at(1), 1
                 backend.queue_changed("clear")
                 self._schedule_persist()
         return gen
