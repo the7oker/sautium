@@ -118,8 +118,9 @@
 
   // --- SSE -------------------------------------------------------------
   // ONE stream per tab. /api/events multiplexes every push channel as
-  // typed messages {t, d}: 'status' (player state), 'preview' (phantom
-  // preview changed — the open screen re-fetches its own snapshot),
+  // typed messages {t, d}: 'status' (player state), 'slots' (what each
+  // streamed queue slot shows of its stream), 'preview' (phantom preview
+  // enrichment changed — the open screen re-fetches its own snapshot),
   // 'research' (gear research transition), 'chat' (a message arrived, a
   // thread was read, a friend came online). Browsers cap an HTTP/1.1
   // origin at 6 connections for the whole browser; the previous three
@@ -142,6 +143,13 @@
           // /api/albums/{id} for one consistent snapshot, so there's no
           // second source to keep in sync here.
           window.dispatchEvent(new CustomEvent('sautium:preview-changed'));
+        } else if (msg.t === 'slots') {
+          // What each streamed slot of the queue shows of its stream —
+          // waiting, buffering (its progress), ready, failed (why) — whole,
+          // with the queue version it was read at: the queue sheet and the
+          // album page update their rows in place, never a repaint
+          window.streamSlots = msg.d;
+          window.dispatchEvent(new CustomEvent('sautium:slots', { detail: msg.d }));
         } else if (msg.t === 'research') {
           window.dispatchEvent(new CustomEvent('sautium:research-changed'));
         } else if (msg.t === 'chat') {

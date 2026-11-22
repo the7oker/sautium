@@ -317,17 +317,6 @@ def _entity_items(ids: list):
     return items or "None of those IDs exist in the catalog."
 
 
-def _queue_outcome(r: dict, verb: str) -> str:
-    parts = []
-    if r.get("queued"):
-        parts.append(f"{r['queued']} track(s) from the library")
-    if r.get("streaming"):
-        parts.append(f"{r['streaming']} streaming in behind them")
-    missing = len(r.get("not_found") or [])
-    tail = f" ({missing} had nothing playable)" if missing else ""
-    return f"{verb}: " + (", ".join(parts) or "nothing") + tail
-
-
 def _h_build_playlist(ids: list) -> str:
     from routers.player import QueueEntitiesRequest, play_entities
     items = _entity_items(ids)
@@ -337,7 +326,7 @@ def _h_build_playlist(ids: list) -> str:
                           QueueEntitiesRequest(items=items, autoplay=False))
     if err:
         return f"Could not build the playlist: {err}"
-    return _queue_outcome(r, "New queue ready (not started)")
+    return aq.queue_outcome(r, "New queue ready (not started)")
 
 
 def _h_play_all(ids: list) -> str:
@@ -348,7 +337,7 @@ def _h_play_all(ids: list) -> str:
     r, err = _player_call(play_entities, QueueEntitiesRequest(items=items))
     if err:
         return f"Could not start playback: {err}"
-    return _queue_outcome(r, "Playing a new queue")
+    return aq.queue_outcome(r, "Playing a new queue")
 
 
 def _h_add_to_queue(ids: list) -> str:
@@ -359,7 +348,7 @@ def _h_add_to_queue(ids: list) -> str:
     r, err = _player_call(queue_entities, QueueEntitiesRequest(items=items))
     if err:
         return f"Could not queue: {err}"
-    return _queue_outcome(r, "Queued")
+    return aq.queue_outcome(r, "Queued")
 
 
 # -- HQPlayer control handlers -----------------------------------------------

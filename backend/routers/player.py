@@ -32,7 +32,7 @@ from playback import sessions
 from playback.base import OutputRefused, ReorderPlan, new_id
 from playback.dlna_backend import AnswerRefused, read_answer
 from playback import hqp_link
-from playback.hqp_link import Building, Dropped, GaveUp, NotAnswering, through
+from playback.hqp_link import Building, Dropped, NotAnswering
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, QueueChanged, active_hqp_endpoint, manager, said_with
 from playback.queue import resolved_artwork as _resolved_artwork
@@ -135,8 +135,8 @@ class QueueEntitiesRequest(BaseModel):
     # play-entities only: assembling a playlist is not the same act as putting
     # one on, and the user says which ("build me a set" vs "play these").
     autoplay: bool = True
-    # queue-entities only: 'next' | 'end' — next only for an all-owned list
-    # (the same rule as queue-tracks: a rolling list appends behind).
+    # queue-entities only: 'next' | 'end' — the whole list, owned and
+    # streamed slots alike, goes there at once
     position: str = "end"
 
 class PlaySessionRequest(BaseModel):
@@ -144,7 +144,7 @@ class PlaySessionRequest(BaseModel):
 
 class QueueSessionRequest(BaseModel):
     session_id: str
-    position: str = "end"   # 'next' | 'end' — next only for an all-owned snapshot
+    position: str = "end"   # 'next' | 'end'
 
 class JumpRequest(BaseModel):
     index: int  # the queue's 1-based slot, as the status's track_index names it
@@ -1360,6 +1360,10 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                                  "d": {**manager.latest_status, "event_floor": new_id()}})
                    + "\n\n")
             last_version = manager.status_version
+            # What each streamed row of the queue shows of its stream — whole,
+            # with the queue version it was read at; again whenever it moves
+            last_slots = manager.slots_version
+            yield "data: " + json.dumps({"t": "slots", "d": manager.slots_message()}) + "\n\n"
             # Notices travel as the whole active set, never as single
             # events: the client diffs it, so a tab that was asleep learns
             # what is true now rather than replaying what happened. The
@@ -1416,6 +1420,11 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                         yield ("data: "
                                + json.dumps({"t": "status",
                                              "d": manager.latest_status})
+                               + "\n\n")
+                    if manager.slots_version != last_slots:
+                        last_slots = manager.slots_version
+                        yield ("data: "
+                               + json.dumps({"t": "slots", "d": manager.slots_message()})
                                + "\n\n")
                 if "preview" in kinds:
                     # Drain coalesced pings so one re-fetch covers the burst.
@@ -2013,113 +2022,24 @@ def jump(req: JumpRequest):
     return _starting(b, answer)
 
 
-def _filler_append(item, gen: int, *, position: str = "end",
-                   after=None) -> Optional[bool]:
-    """Append one filler item through the manager, on the output there is.
-    A build HQPlayer is in — it answers nothing — is waited out
-    (hqp_link.through), off the queue lock. One it does not finish, or an
-    HQPlayer gone during it, loses nothing: the output's mirror is marked
-    lost and the item goes into the queue alone, as what follows does —
-    HQPlayer gets the queue back when it answers again. An add — or a wait —
-    the link did not send because the output changed meanwhile (another
-    HQPlayer chosen, the output lent) goes again once that change is over
-    (PlaybackManager.wait_for_output_change), on the output it left; the
-    node stopping ends the filler. A file the output refused is not offered
-    again. None = the queue moved on, or the node stops (the caller stops);
-    False = not added."""
-    def moved_on() -> Optional[str]:
-        return "the queue moved on" if manager.queue.generation != gen else None
-
-    def elsewhere() -> bool:
-        b = manager.active
-        return moved_on() is not None or b is None or b.id != "hqplayer"
-
-    for _ in range(4):
-        seen = manager.output_changes()
-        try:
-            added = through(
-                lambda: manager.append([item], position, generation=gen, after=after),
-                needed=moved_on, until=elsewhere)
-        except GaveUp as e:
-            if moved_on() is not None or hqp_link.stopping() is not None:
-                return None
-            active = manager.active
-            if e.failed and active is not None:
-                active.lose_mirror(f"filler: {e}; the item and what follows go into the "
-                                   "queue alone")
-            continue                # the queue, or the output it has now, takes it at once
-        except Dropped as e:
-            if hqp_link.stopping() is not None:
-                return None
-            logger.info("filler: an item not added (%s); again once the output change is over", e)
-            if not manager.wait_for_output_change(seen, hqp_link.BUILD_LIMIT_S):
-                break
-            continue
-        if added is None:
-            return None
-        return bool(added)          # 0: the output refused the file (one notice says so)
-    logger.warning("filler: an item dropped, the output did not settle")
-    return False
-
-
-def _owned_filler(items: list, gen: int, *, position: str = "end",
-                  after=None) -> None:
-    """Append the rest of an owned set as each item is ready — a plain file
-    instantly, an m4a after its in-memory transcode (inside the HQP mirror) — in order,
-    stopping if a new playback supersedes this one (generation). A 'next'
-    block extends its own run (`after` = the item the caller placed): each
-    track follows the one before it, or the album would play backwards."""
-    cursor = after
-    for item in items:
-        placed = _filler_append(item, gen, position=position, after=cursor)
-        if placed is None:
-            return
-        if placed:
-            cursor = item
-
-
 def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
                archive: Optional[Callable[[], None]] = None) -> int:
-    """THE single path for queueing owned tracks. Rows (id, ...) become
-    full-metadata QueueItems; the active backend mirrors them as needed
-    (HQPlayer: a file:// URI or a media-proxy URL by file-access mode, m4a via
-    in-memory FLAC transcode). When any
-    track needs transcoding the queue is rolled in — the first track is
-    added (and, for a replace, played) now, the rest fill in behind via a
-    background filler — so a slow transcode never blocks the add. A native-
-    only set takes the fast add-everything-at-once path. ``clear_first``
-    replaces the queue (and starts playback) — ``archive``, the session
-    rotation, once the output has taken it (PlaybackManager.replace_queue);
-    otherwise tracks append (``position`` next|end). Returns the count
-    queued (rolling appends finish async)."""
-    from streaming.local import TRANSCODE_FORMATS
+    """THE single path for queueing owned tracks: the rows (id, ...) become
+    full-metadata QueueItems, committed in ONE mutation — every slot in its
+    place at once, whatever the output makes of it: on HQPlayer an m4a or a
+    CUE slice it is not handed yet waits behind its horizon and the fetch
+    lane prepares it in the queue's order (playback.substitute), so a slow
+    transcode never blocks the add and nothing tapped after it lands inside
+    it. ``clear_first`` replaces the queue (and starts playback) —
+    ``archive``, the session rotation, once the output has taken it
+    (PlaybackManager.replace_queue); otherwise tracks append (``position``
+    next|end). Returns the count queued."""
     items = queue_mod.items_for_owned_rows(rows)
-    # CUE slices roll like m4a: each needs its FLAC cut encoded at
-    # _uri_for time, and a whole album of cuts must not block the add.
-    needs_roll = any((it.source.get("format") or "").upper() in TRANSCODE_FORMATS
-                     or it.source.get("cue_start") is not None
-                     for it in items)
-
-    if not needs_roll:
-        if clear_first:
-            added, _gen = manager.replace_queue(items, play=True, archive=archive)
-        else:
-            added = manager.append(items, position) or 0
-        return added
-
-    # Rolling: add/play the first now, background-fill the rest in order.
-    first, rest = items[0], items[1:]
     if clear_first:
-        added, gen = manager.replace_queue([first], play=True, archive=archive)
+        added, _gen = manager.replace_queue(items, play=True, archive=archive)
     else:
-        added = manager.append([first], position) or 0
-        gen = manager.queue.generation
-    if added and rest:
-        threading.Thread(target=_owned_filler, args=(rest, gen),
-                         kwargs={"position": "end" if clear_first else position,
-                                 "after": first},
-                         daemon=True, name="owned-fill").start()
-    return len(items) if added else 0
+        added = manager.append(items, position) or 0
+    return added
 
 
 @router.post("/play-track")
@@ -2254,82 +2174,6 @@ def _play_album_rows(best_album: dict):
         raise _output_error(e)
 
 
-# -- Phantom-album streaming buffer policy ------------------------------------
-_PHANTOM_LEAD_CAP_SECONDS = 240.0    # never pre-buffer more than ~4 min of audio
-_PHANTOM_LEAD_TRACK_TIMEOUT = 60.0   # cap the per-track wait while pre-buffering
-
-
-def _phantom_lead_seconds(rtf: float, queries) -> float:
-    """How much contiguous audio to buffer before starting playback, from the
-    measured real-time factor (wall-fetch seconds per audio second of track 0 —
-    the channel-speed signal). Fetching is now SEQUENTIAL (one stream), so a
-    single stream keeps up iff rtf <= 1:
-
-      rtf <= 1   one stream outruns playback → start at once (lead 0), ASAP.
-      rtf  > 1   a per-track deficit of (rtf-1)·duration accrues → pre-buffer
-                 proportional to the deficit (≈ one track at rtf≈2), capped so the
-                 user never waits more than the cap; a very slow channel still
-                 eventually drains, but the opening plays seamlessly.
-    """
-    if rtf <= 1.0:
-        return 0.0
-    durs = [q.duration for q in queries if q.duration]
-    d_avg = (sum(durs) / len(durs)) if durs else 60.0
-    return min(_PHANTOM_LEAD_CAP_SECONDS, d_avg * min(rtf - 1.0, 1.0))
-
-
-def _phantom_filler(proxy, tokens: list, start_index: int, gen: int) -> None:
-    """Rolling-append the rest of a phantom set as each track finishes
-    fetching, in order — the backend only ever receives a ready buffer.
-    Waits are UNBOUNDED: the fetch pipeline is globally sequential, so a
-    token's turn can be tens of minutes away behind other queued albums —
-    "not fetched yet" is not an error (a per-track timeout here silently
-    dropped every track whose turn hadn't come, so a queued album arrived
-    as just its last few tracks). A track is skipped only when its fetch
-    actually failed; moving to another queue retires these tokens, which
-    wakes every waiter and stops the filler at once."""
-    for j in range(start_index, len(tokens)):
-        try:
-            e = proxy.wait_ready(tokens[j], timeout=None)
-        except KeyError:
-            return   # set dropped: a new session replaced these tokens
-        if e.audio is None:
-            continue   # fetch failed on every provider (or superseded) — skip
-        item = queue_mod.item_for_proxy_token(tokens[j])
-        if item is None:
-            continue
-        if _filler_append(item, gen) is None:
-            return   # user moved to another queue → stop appending
-
-
-def _phantom_insert_next(proxy, tokens: list, gen: int) -> None:
-    """Roll a 'play next' block in as it buffers, in its own order. Waits are
-    unbounded (same rationale as the filler), and each pass inserts everything
-    that has landed so far — a slow mirror therefore coalesces bigger blocks on
-    its own, with no timer guessing at the rate. Each chunk goes after the
-    previous one: inserting every chunk after the PLAYING slot would play the
-    album backwards, and holding the whole block until its last track arrived
-    made 'next' land minutes later, wherever the playhead had drifted to."""
-    cursor = None      # last item inserted — the run each new chunk extends
-    i = 0
-    while i < len(tokens):
-        try:
-            proxy.wait_ready(tokens[i], timeout=None)
-        except KeyError:
-            return   # set dropped: the queue moved on, or a new session
-        playable, _secs, used = proxy.ready_run(tokens[i:])
-        i += used
-        for tok in playable:
-            item = queue_mod.item_for_proxy_token(tok)
-            if item is None:
-                continue
-            placed = _filler_append(item, gen, position="next", after=cursor)
-            if placed is None:
-                return   # user moved to another queue → stop inserting
-            if placed:
-                cursor = item   # a track the mirror dropped can't anchor the run
-
-
 def _parallel_resolve(provider, queries: list, wanted: list) -> list:
     """Resolve the `wanted` indices of `queries` on a provider (the fast
     availability pass, no downloads). Returns a list parallel to `wanted` of
@@ -2399,6 +2243,57 @@ def _album_context(queries: list, pending: list) -> list:
 _chain_cache: dict[tuple, tuple] = {}
 _CHAIN_TTL_S = 3600.0
 
+# What a provider said it cannot serve, and why: (track_id, provider id) ->
+# (timestamp, Refused code), written by the fetch lane when a link refuses
+# with a reason (streaming.base.Refused — not available in this region, no
+# recording of that length, no clip). A fact of the catalog, not of the
+# hour, so it outlives the chain cache: a day, in memory, a restart forgets.
+# The resolve leaves a refused provider out of THAT track's chain (never its
+# album's: a region's licence is per track), so availability says the track
+# does not stream here before anyone presses Play. A plain failure — a 403, a
+# cut connection — says nothing of the track and is not remembered.
+_refusals: dict[tuple, tuple] = {}
+_REFUSAL_TTL_S = 24 * 3600.0
+_refusals_lock = threading.Lock()
+
+
+def note_refusal(query, provider, code: str) -> None:
+    """The media proxy's hook (MediaProxy.link_refused): remembered, and the
+    track's cached chains dropped — the next resolve builds it without that
+    provider."""
+    if not query.track_id:
+        return
+    with _refusals_lock:
+        _refusals[(query.track_id, provider.manifest.id)] = (time.time(), code)
+    for key in [k for k in list(_chain_cache) if k[0] == query.track_id]:
+        _chain_cache.pop(key, None)
+
+
+def _refusals_of(track_id: Optional[str]) -> dict:
+    """provider id -> code of every refusal still remembered for the track."""
+    if not track_id:
+        return {}
+    now = time.time()
+    with _refusals_lock:
+        for key, (ts, _code) in list(_refusals.items()):
+            if now - ts >= _REFUSAL_TTL_S:
+                _refusals.pop(key, None)
+        return {pid: code for (tid, pid), (_ts, code) in _refusals.items() if tid == track_id}
+
+
+def _refused_code(track_id: Optional[str]) -> Optional[str]:
+    """Why the track does not stream here, by what was remembered: the code
+    of the best provider that refused it (the preferred order), else of any;
+    None when nothing refused it."""
+    refused = _refusals_of(track_id)
+    if not refused:
+        return None
+    from streaming import service as streaming_service
+    for p in streaming_service.providers_preferred():
+        if p.manifest.id in refused:
+            return refused[p.manifest.id]
+    return next(iter(refused.values()))
+
 
 def _resolve_waterfall(queries: list) -> list:
     """Per-track lossless-first fallback CHAIN ``[(provider, source_id), ...]``.
@@ -2425,9 +2320,15 @@ def _resolve_waterfall(queries: list) -> list:
     # streamable on a guess. The order is the cache key, so spending the
     # listen is a cache miss, not a stale chain.
     spent = demo.consumed(q.track_id for q in queries)
+    # A provider that refused the track with a reason is left out of ITS
+    # order the same way (_refusals), so its chain is the others' answer
+    refused = {q.track_id: _refusals_of(q.track_id) for q in queries if q.track_id}
+
+    def admits(p, q) -> bool:
+        return demo.admits(p, q.track_id, spent) and p.manifest.id not in refused.get(q.track_id, {})
 
     def order_for(q) -> tuple:
-        return tuple(p.manifest.id for p in provs if demo.admits(p, q.track_id, spent))
+        return tuple(p.manifest.id for p in provs if admits(p, q))
 
     now = time.time()
     for key, (ts, _chain) in list(_chain_cache.items()):
@@ -2457,7 +2358,7 @@ def _resolve_waterfall(queries: list) -> list:
             break
         if not prov.supports_resolve:
             continue                        # can't pre-resolve; appears only as a lazy fallback
-        wanted = [i for i in unresolved if demo.admits(prov, queries[i].track_id, spent)]
+        wanted = [i for i in unresolved if admits(prov, queries[i])]
         res = dict(zip(wanted, _parallel_resolve(prov, pool, wanted)))
         # Two providers on one API are one voice for the notices channel: a
         # silence is one notice, and either answering clears it.
@@ -2465,7 +2366,7 @@ def _resolve_waterfall(queries: list) -> list:
         still = []
         for i in unresolved:
             if i not in res:
-                still.append(i)             # not asked of this provider (demo spent)
+                still.append(i)             # not asked of this provider (demo spent, refused)
                 continue
             r = res[i]
             if isinstance(r, ProviderUnavailable):
@@ -2516,10 +2417,10 @@ def _resolve_waterfall(queries: list) -> list:
         if i in best:
             chain = [(provs[best[i]], sids[i])]
             chain += [(provs[pi], None) for pi in range(best[i] + 1, len(provs))
-                      if demo.admits(provs[pi], q.track_id, spent)]
+                      if admits(provs[pi], q)]
         else:
             chain = [(p, None) for p in provs
-                     if not p.supports_resolve and demo.admits(p, q.track_id, spent)]
+                     if not p.supports_resolve and admits(p, q)]
         chains[i] = chain
         if q.track_id and i not in unanswered:
             _chain_cache[(q.track_id, order_for(q))] = (now, chain)
@@ -2889,12 +2790,20 @@ def phantom_availability(album_id: str) -> dict:
     # (not persisted — see _resolved_durations).
     durations = {t: _resolved_durations[t] for t in all_ids
                  if t in _resolved_durations}
+    # Why each unavailable row does not stream here: what a provider said
+    # when it refused it (_refusals), else no source has it
+    reasons = {t: _refused_code(t) or "nowhere" for t in unavailable}
+    first = next((q.track_id for q in queries if q.track_id), None)
 
-    return {"unavailable": [{"track_id": t} for t in unavailable],
+    return {"unavailable": [{"track_id": t, "reason": reasons[t]} for t in unavailable],
             "quality": quality, "durations": durations,
             # Rows that will play as a 30 s excerpt (an excerpt head counts as
             # lossy in `quality` — it is).
-            "excerpt": _excerpt_ids(list(zip(queries, chains)))}
+            "excerpt": _excerpt_ids(list(zip(queries, chains))),
+            # Nothing on the album streams here: said before Play, with the
+            # reason of its first track
+            "not_streamable": ({"reason": reasons.get(first, "nowhere")}
+                               if all_ids and unavailable == all_ids else None)}
 
 
 class PlayPhantomAlbumRequest(BaseModel):
@@ -2931,17 +2840,6 @@ def _output_error(e: Exception, refusal: Optional[tuple[int, str]] = None) -> HT
     return HTTPException(status_code=status, detail=f"{why} — {said}" if said else why)
 
 
-def _ensure_output_ready() -> None:
-    """Fast offline pre-flight for the streaming paths: fail with a clear
-    503 BEFORE resolving/buffering a whole album, so a powered-off renderer
-    is reported after its probe and one Output scan (ensure_active) instead
-    of after the buffer + stacked SOAP timeouts."""
-    try:
-        manager.ensure_active()
-    except ConnectionError as e:
-        raise _output_error(e)
-
-
 def _streaming_503(msg: str) -> HTTPException:
     """Streaming-subsystem failure. The structured detail (`reason`) lets the
     UI route it to a plain error dialog — the audio output is fine, so the
@@ -2962,118 +2860,79 @@ def _ensure_streaming_ready() -> None:
                              "see the backend log")
 
 
+def _known_unstreamable(queries: list) -> dict:
+    """track_id -> why, for the queries the node ALREADY knows nothing streams
+    here: a resolve's empty chain still cached, or every provider having
+    refused the track (_refusals). Never resolves — a tap that asked the
+    providers before it committed would let a later tap commit first, the
+    queue's order the resolve's timing (B-124)."""
+    from streaming import demo
+    from streaming import service as streaming_service
+    provs = streaming_service.providers_preferred()
+    ids = [q.track_id for q in queries if q.track_id]
+    spent = demo.consumed(ids)
+    now = time.time()
+    out = {}
+    for tid in ids:
+        refused = _refusals_of(tid)
+        order = tuple(p.manifest.id for p in provs
+                      if demo.admits(p, tid, spent) and p.manifest.id not in refused)
+        hit = _chain_cache.get((tid, order))
+        if (provs and not order) or (hit is not None and now - hit[0] < _CHAIN_TTL_S
+                                     and not hit[1]):
+            out[tid] = _refused_code(tid) or "nowhere"
+    return out
+
+
+def _streamed_items(queries: list) -> tuple[list, list]:
+    """The slots a tap commits for streamed tracks (playback.queue.
+    items_for_streamed), in order, and what it leaves out — only what the
+    node already knows does not stream here, each with why."""
+    known = _known_unstreamable(queries)
+    left = [{"track_id": q.track_id, "title": q.title, "reason": known[q.track_id]}
+            for q in queries if q.track_id in known]
+    return queue_mod.items_for_streamed([q for q in queries if q.track_id not in known]), left
+
+
+def _tapped(queries: list, items: list, left: list, **extra) -> dict:
+    """What a tap on streamed tracks answers, at once: how many slots it
+    queued, and what it left out (`not_streamable`, each with its reason;
+    `missing` the same, for the pages that read it). Whether each one
+    streams is told by its row as the lane brings it."""
+    return {"ok": True, "track_count": len(items), "requested": len(queries),
+            "not_streamable": left, "missing": left, **extra}
+
+
 @router.post("/play-phantom-album")
 def play_phantom_album(req: PlayPhantomAlbumRequest):
-    """Stream a phantom (not-in-library) album onto HQPlayer.
-
-    Resolves the album's MusicBrainz tracklist to a streaming provider, serves
-    the audio through the in-memory media proxy as plain-http URLs, and feeds
-    those into HQPlayer's NATIVE playlist exactly like owned ``file://`` tracks
-    (proven: HQPlayer plays http FLAC sustained alongside local files).
-
-    Now-Playing shows HQPlayer's generic stream label for these tracks until
-    provider-sourced metadata is wired into the status poller (next step)."""
-    from streaming import service as streaming_service
-
+    """Play a phantom (not-in-library) album: every track the node does not
+    already know to be unstreamable takes its slot in a new queue at once, as
+    the track itself — its stream is the fetch lane's, in the queue's order
+    (playback.substitute), and the play starts on slot 1 when its stream
+    lands. A first slot that fails is walked past; a Play whose first slots
+    all fail is said at once (PlaybackManager._slot_failed)."""
     _ensure_streaming_ready()
-    _ensure_output_ready()
 
     queries = _phantom_album_queries(req.album_id)
     if not queries:
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
-
-    proxy = streaming_service.get_proxy()
-
-    # Per-track resolve waterfall → a lossless-first fallback CHAIN per track
-    # (lossless, then YouTube). The UI greys out only tracks NO provider can
-    # stream; the chain also covers download-time failures (a provider resolves but
-    # serves no FLAC) by falling through to YouTube during fetch.
-    chains = _resolve_waterfall(queries)
-    items = [(q, ch) for q, ch in zip(queries, chains) if ch]
-    missing = [q for q, ch in zip(queries, chains) if not ch]
-    missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
-
+    items, left = _streamed_items(queries)
     if not items:
-        # No provider has any track — leave HQPlayer untouched; the UI disables
-        # Stream all and greys out every row.
-        return {
-            "ok": True, "provider": None,
-            "album": queries[0].album, "artist": queries[0].artist,
-            "track_count": 0, "requested": len(queries), "missing": missing_payload,
-        }
-
-    avail_q = [q for q, _ch in items]
-    tokens = proxy.start_session(items)        # the whole set queued, track 0 first
-
-    # Adaptive rolling buffer. Track 0 lands first (the fetch pipe is sequential)
-    # for the fastest safe start; its measured real-time factor sizes how much
-    # audio we pre-buffer before playing so transitions don't gap on a slow
-    # channel; the tail then streams in via a background filler that appends
-    # each track as it lands. The UI shows a buffering state until this returns.
-    try:
-        proxy.wait_ready(tokens[0])
-    except (TimeoutError, KeyError):
-        pass
-    rtf = proxy.fetch_rtf(tokens[0]) or 1.0
-    lead_target = _phantom_lead_seconds(rtf, avail_q)
-
-    # Event-driven pre-buffer: block on each boundary track's ready event in
-    # order until the contiguous buffered audio covers the lead (or the album
-    # ends, or a track is too slow — then start with what we have).
-    prefix, buffered, next_index = proxy.ready_run(tokens)
-    while (not prefix or buffered < lead_target) and next_index < len(tokens):
-        try:
-            proxy.wait_ready(tokens[next_index], timeout=_PHANTOM_LEAD_TRACK_TIMEOUT)
-        except (TimeoutError, KeyError):
-            break
-        prefix, buffered, next_index = proxy.ready_run(tokens)
-
-    logger.info("phantom buffer: rtf=%.2f lead=%.0fs → start %d/%d (avail %d, missing %d)",
-                rtf, lead_target, len(prefix), len(queries), len(avail_q), len(missing))
-
-    if not prefix:
-        raise HTTPException(status_code=502, detail="No tracks could be fetched from the provider")
-
-    prefix_items = [it for it in (queue_mod.item_for_proxy_token(t) for t in prefix)
-                    if it is not None]
+        # Nothing on it streams here, as the node already knows: the queue
+        # as it was; the page says so before Play
+        return _tapped(queries, items, left, album=queries[0].album, artist=queries[0].artist)
     try:
         # The prior queue snapshotted into a session once the output took the
         # new one, then a phantom-album one opened — streamed albums land in
         # the Home shelf like owned albums (origin_album_id is the phantom
-        # album's UUID; the seed is its first available track).
-        added, gen = manager.replace_queue(prefix_items, play=True, archive=lambda: sessions.rotate_session(
+        # album's UUID; the seed is its first track).
+        added, _gen = manager.replace_queue(items, play=True, archive=lambda: sessions.rotate_session(
             manager.queue, 'album', origin_album_id=str(req.album_id),
-            seed_track_id=avail_q[0].track_id))
-        # The session belongs to this queue now — moving to another one cancels
-        # whatever of it is still downloading.
-        proxy.bind(tokens, gen)
+            seed_track_id=items[0].track_id))
         _exit_radio_mode()
-
-        if not added:
-            raise HTTPException(
-                status_code=503,
-                detail="The playback output did not accept the preview — try again.",
-            )
-        # Roll the remaining tracks in as they finish fetching (background).
-        if next_index < len(tokens):
-            threading.Thread(
-                target=_phantom_filler, args=(proxy, list(tokens), next_index, gen),
-                daemon=True, name="phantom-filler").start()
-        return {
-            "ok": True,
-            "album": avail_q[0].album,
-            "artist": avail_q[0].artist,
-            "provider": _provider_label(items),
-            "track_count": added,                        # streaming now
-            "buffering": max(0, len(avail_q) - added),   # rolling in via the filler
-            "requested": len(queries),                   # tracklist size
-            "missing": missing_payload,                  # not found on ANY provider
-            "excerpt": _excerpt_ids(items),              # streaming as 30 s excerpts
-        }
-    except HTTPException:
-        raise
     except Exception as e:
         raise _output_error(e)
+    return _tapped(queries, items[:added], left, album=queries[0].album, artist=queries[0].artist)
 
 
 class PlayPhantomTrackRequest(BaseModel):
@@ -3085,134 +2944,67 @@ class PlayPhantomTrackRequest(BaseModel):
 
 @router.post("/play-phantom-track")
 def play_phantom_track(req: PlayPhantomTrackRequest):
-    """Stream a single phantom track onto HQPlayer (replaces the queue), the
-    streaming counterpart of clicking an owned track. Resolves the track via the
-    preferred provider; returns track_count=0 + the track in `missing` when the
-    provider has no match (the UI greys the row)."""
-    from streaming import service as streaming_service
-
+    """Play a single phantom track (replaces the queue), the streaming
+    counterpart of clicking an owned track: its slot at once, its stream the
+    lane's. `track_count` 0 with the track in `not_streamable` when the node
+    already knows nothing streams it here."""
     _ensure_streaming_ready()
-    _ensure_output_ready()
 
     q = _phantom_track_query(req.track_id, req.album_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
-    missing = [{"track_id": req.track_id, "title": q.title}]
-    chain = _resolve_waterfall([q])[0]        # lossless first, YouTube fallback
-    if not chain:
-        return {"ok": True, "provider": None,
-                "track_count": 0, "requested": 1, "missing": missing}
-
-    proxy = streaming_service.get_proxy()
-    tokens = proxy.start_session([(q, chain)])
+    items, left = _streamed_items([q])
+    if not items:
+        return _tapped([q], items, left)
     try:
-        e = proxy.wait_ready(tokens[0])
-    except (TimeoutError, KeyError):
-        e = None
-    if e is None or e.audio is None:
-        raise HTTPException(status_code=502, detail="This track isn't available to stream right now.")
-
-    try:
-        item = queue_mod.item_for_proxy_token(tokens[0])
         # A single streamed track is a 'track'-origin session seeded by its
         # UUID; the album the row was clicked on is the session's origin
         # album, so the card wears that edition's cover.
-        added, gen = manager.replace_queue([item] if item else [], play=True,
-                                           archive=lambda: sessions.rotate_session(
-                                               manager.queue, 'track', seed_track_id=req.track_id,
-                                               origin_album_id=req.album_id))
-        proxy.bind(tokens, gen)
+        added, _gen = manager.replace_queue(items, play=True,
+                                            archive=lambda: sessions.rotate_session(
+                                                manager.queue, 'track', seed_track_id=req.track_id,
+                                                origin_album_id=req.album_id))
         _exit_radio_mode()
-        if not added:
-            raise HTTPException(
-                status_code=503,
-                detail="The playback output did not accept the preview — try again.")
-        return {"ok": True, "provider": e.provider.manifest.id, "track_count": 1,
-                "requested": 1, "missing": [], "title": q.title,
-                "artist": q.artist, "album": q.album,
-                "excerpt": [req.track_id] if e.audio.excerpt else []}
-    except HTTPException:
-        raise
     except Exception as e:
         raise _output_error(e)
+    return _tapped([q], items[:added], left, title=q.title, artist=q.artist, album=q.album)
+
+
+def _queue_streamed(queries: list, position: str) -> dict:
+    """Streamed tracks into the queue in ONE mutation — at the end, or right
+    after the playing slot ('next') — every slot in its place at the tap:
+    whatever is tapped after it goes after it, whatever the fetches' timing
+    (B-124). The canonical queue is the output's to follow, so this works
+    with no output attached."""
+    items, left = _streamed_items(queries)
+    if items:
+        try:
+            manager.append(items, "next" if position == "next" else "end")
+        except Exception as e:
+            raise _output_error(e)
+    return _tapped(queries, items, left)
 
 
 @router.post("/queue-phantom-track")
 def queue_phantom_track(req: PlayPhantomTrackRequest):
-    """Append one phantom track to the HQPlayer queue (streamed, no replace).
-    Same async model as the album endpoint: the response reports the resolve
-    outcome, and the track rolls into the queue when its (sequential, possibly
-    backlogged) fetch turn completes — an in-request wait here timed out and
-    502'd whenever other albums were still fetching ahead of it."""
-    from streaming import service as streaming_service
+    """Add one phantom track to the queue (at the end, or next): its slot at
+    once, its stream the lane's."""
     _ensure_streaming_ready()
-
     q = _phantom_track_query(req.track_id, req.album_id)
     if q is None:
         raise HTTPException(status_code=404, detail="Phantom track not found")
-    chain = _resolve_waterfall([q])[0]        # lossless first, YouTube fallback
-    if not chain:
-        return {"ok": True, "provider": None, "track_count": 0, "requested": 1,
-                "missing": [{"track_id": req.track_id, "title": q.title}]}
-
-    proxy = streaming_service.get_proxy()
-    tokens = proxy.add_tracks([(q, chain)], front=(req.position == "next"))
-    gen = manager.queue.generation
-    proxy.bind(tokens, gen)
-    if req.position == "next":
-        threading.Thread(target=_phantom_insert_next, args=(proxy, list(tokens), gen),
-                         daemon=True, name="phantom-queue-next").start()
-    else:
-        threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
-                         daemon=True, name="phantom-queue").start()
-    return {"ok": True, "provider": chain[0][0].manifest.id, "track_count": 1,
-            "requested": 1, "missing": [], "excerpt": _excerpt_ids([(q, chain)])}
+    return _queue_streamed([q], req.position)
 
 
 @router.post("/queue-phantom-album")
 def queue_phantom_album(req: PlayPhantomAlbumRequest):
-    """Append a phantom album to the HQPlayer queue (streamed, rolling-append)."""
-    from streaming import service as streaming_service
+    """Add a phantom album to the queue (at the end, or next): its slots at
+    once, in its order, their streams the lane's."""
     _ensure_streaming_ready()
-
     queries = _phantom_album_queries(req.album_id)
     if not queries:
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
-
-    proxy = streaming_service.get_proxy()
-
-    chains = _resolve_waterfall(queries)      # lossless first, YouTube fallback
-    items = [(q, ch) for q, ch in zip(queries, chains) if ch]
-    missing = [q for q, ch in zip(queries, chains) if not ch]
-    missing_payload = [{"track_id": q.track_id, "title": q.title} for q in missing]
-    if not items:
-        return {"ok": True, "provider": None, "track_count": 0,
-                "requested": len(queries), "missing": missing_payload}
-
-    avail_q = [q for q, _ch in items]
-    # Both positions roll in from a background worker: fetching is sequential,
-    # so at the END of the queue readiness can be far away (behind whatever is
-    # already pending), while a 'next' block jumps the fetch queue because it
-    # is wanted before the current track ends. The canonical queue is
-    # authoritative and independent of the output, so queueing works with no
-    # active/reachable device — the user plays once it's back (that press
-    # attaches/probes it).
-    tokens = proxy.add_tracks(items, front=(req.position == "next"))
-    # A queue-append doesn't start a new session, so bind to the CURRENT
-    # generation: replacing the queue then cancels these fetches at the source
-    # and the worker below stops on its generation guard.
-    gen = manager.queue.generation
-    proxy.bind(tokens, gen)
-    if req.position == "next":
-        threading.Thread(target=_phantom_insert_next, args=(proxy, list(tokens), gen),
-                         daemon=True, name="phantom-queue-next").start()
-    else:
-        # 'end' → roll each available track into the back of the queue as it lands.
-        threading.Thread(target=_phantom_filler, args=(proxy, list(tokens), 0, gen),
-                         daemon=True, name="phantom-queue").start()
-    return {"ok": True, "provider": _provider_label(items),
-            "track_count": len(avail_q), "requested": len(queries),
-            "missing": missing_payload, "excerpt": _excerpt_ids(items)}
+    return _queue_streamed(queries, req.position)
 
 
 # -- Mixed (owned + phantom) queueing -----------------------------------------
@@ -3222,11 +3014,11 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 # catalog rather than the filesystem needs: the AI assistant holds UUIDs and
 # has no business knowing which of them happen to have a file on disk.
 #
-# Owned rows append at once; a phantom segment has to resolve on a provider and
-# buffer first (minutes for a set of albums — never inside a request). So the
-# work runs in ONE background worker walking the segments IN ORDER, awaiting
-# each phantom filler inline: that inline await is what keeps a later segment
-# from overtaking an earlier one still fetching.
+# Every slot is committed at the tap, owned and streamed alike, in the
+# caller's order, in ONE mutation: a streamed one is the track itself, its
+# stream resolved and fetched later by the lane in the queue's order
+# (playback.substitute) — never inside the request, and never a slot
+# appended as its fetch lands, which let a later tap land in between.
 
 
 def _album_media_rows(album_id: str) -> list[dict]:
@@ -3301,95 +3093,61 @@ def _entity_segments(refs: list) -> tuple[list, list]:
     return segments, missing
 
 
-def _queue_segments_worker(segments: list, gen: int) -> None:
-    """Append segments to the queue in order: owned items go straight in, a
-    phantom segment resolves, buffers and rolls in through the same filler the
-    album endpoints use — awaited here so the next segment cannot overtake it.
-    Stops the moment the user starts another queue (generation)."""
-    from streaming import service as streaming_service
+def _segment_items(segments: list) -> tuple[list, list]:
+    """One list of slots for ('owned', [file rows]) / ('phantom',
+    [TrackQuery]) segments, in the caller's order — owned files as files,
+    streamed tracks as the tracks themselves (their streams the lane's) — and
+    what of the streamed ones the node already knows does not stream here,
+    left out with why. Committed in ONE mutation by the caller: nothing tapped
+    meanwhile lands between two segments."""
+    items, left = [], []
     for kind, payload in segments:
-        if manager.queue.generation != gen:
-            return
         if kind == "owned":
-            _owned_filler(queue_mod.items_for_owned_rows(payload), gen)
-            continue
-        chains = _resolve_waterfall(payload)
-        pairs = [(q, ch) for q, ch in zip(payload, chains) if ch]
-        if not pairs:
-            continue                    # nothing on any provider — on to the next
-        proxy = streaming_service.get_proxy()
-        tokens = proxy.add_tracks(pairs)
-        proxy.bind(tokens, gen)
-        _phantom_filler(proxy, tokens, 0, gen)
+            items.extend(queue_mod.items_for_owned_rows(payload))
+        else:
+            streamed, out = _streamed_items(payload)
+            items.extend(streamed)
+            left.extend(out)
+    return items, left
 
 
-def _play_segments(segments: list, worker_name: str, *, archive: Callable[[], None],
-                   play: bool = True) -> None:
-    """Replace the queue with these segments. The FIRST item goes in alone — a
-    transcode or a provider fetch must never hold up the answer — and everything
-    behind it rolls in through the ordered worker. `archive`, the caller's
-    session rotation, runs once the output has taken the first item, before
-    the commit (the old queue is archived intact; a refusal leaves it be).
+def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = True) -> list:
+    """Replace the queue with these segments, every slot at once (and start
+    it, once the queue lock is let go). `archive`, the caller's session
+    rotation, runs once the output has taken the queue, before the commit
+    (the old queue is archived intact; a refusal leaves it be). Returns what
+    it left out (_segment_items).
 
     `play=False` assembles the queue without starting it: "put together a
     playlist" is a curation act, not a play command, and the canonical queue is
     independent of the output, so it works with nothing attached."""
-    head_kind, head_items = segments[0]
-    if head_kind == "owned":
-        if play:
-            added = _add_owned([head_items[0]], clear_first=True, archive=archive)
-            gen = manager.queue.generation
-        else:
-            added, gen = manager.replace_queue(
-                queue_mod.items_for_owned_rows([head_items[0]]), play=False, archive=archive)
-        head_rest = head_items[1:]
-    else:
-        from streaming import service as streaming_service
-        if play:
-            _ensure_output_ready()  # a dead renderer costs 2s here, not a whole buffer
-        chains = _resolve_waterfall(head_items)
-        pairs = [(q, ch) for q, ch in zip(head_items, chains) if ch]
-        if not pairs:
-            raise HTTPException(status_code=503,
-                                detail="None of the opening tracks could be streamed.")
-        proxy = streaming_service.get_proxy()
-        tokens = proxy.start_session(pairs[:1])
-        try:
-            e = proxy.wait_ready(tokens[0])
-        except (TimeoutError, KeyError):
-            e = None
-        if e is None or e.audio is None:
-            raise HTTPException(status_code=502,
-                                detail="The opening track isn\u2019t available to stream right now.")
-        item = queue_mod.item_for_proxy_token(tokens[0])
-        added, gen = manager.replace_queue([item] if item else [], play=play, archive=archive)
-        proxy.bind(tokens, gen)
-        head_rest = [q for q, _ch in pairs[1:]]
+    items, left = _segment_items(segments)
+    if not items:
+        raise HTTPException(status_code=404, detail="Nothing in that list streams here")
+    added, _gen = manager.replace_queue(items, play=play, archive=archive)
     if not added:
         raise HTTPException(
             status_code=503,
             detail="The playback output did not accept the track — try again.")
     _exit_radio_mode()
-    _queue_segments_async([s for s in ([(head_kind, head_rest)] + segments[1:]) if s[1]],
-                          gen, worker_name)
+    return left
 
 
-def _queue_segments_async(segments: list, gen: int, name: str) -> None:
-    if segments:
-        threading.Thread(target=_queue_segments_worker, args=(segments, gen),
-                         daemon=True, name=name).start()
+def _queue_segments(segments: list, position: str) -> list:
+    """Append (or play next) these segments, every slot at once, in order.
+    Returns what it left out (_segment_items)."""
+    items, left = _segment_items(segments)
+    if items:
+        manager.append(items, "next" if position == "next" else "end")
+    return left
 
 
 @router.post("/queue-entities")
 def queue_entities(req: QueueEntitiesRequest):
     """Append canonical entities — tracks and/or albums, owned or phantom — to
-    the queue in the given order.
-
-    The answer reports what was SCHEDULED, not what is already audible: the
-    leading owned run is queued inside the request, everything behind it (and
-    every phantom, which must resolve on a provider first) rolls in from the
-    background worker. That is the same contract the phantom album endpoints
-    have, for the same reason — fetching is sequential and unbounded."""
+    the queue in the given order, every slot at once: a streamed one is the
+    track itself, its stream brought by the fetch lane in the queue's order
+    (playback.substitute)."""
     if not req.items:
         raise HTTPException(status_code=400, detail="No entities provided")
     bad = {i.kind for i in req.items} - {"track", "album"}
@@ -3403,23 +3161,14 @@ def queue_entities(req: QueueEntitiesRequest):
     phantom = sum(len(p) for k, p in segments if k == "phantom")
     if phantom:
         _ensure_streaming_ready()
-
-    gen = manager.queue.generation
-    # An all-owned call is instant — queue it in-request so it is done when it
-    # answers. With anything behind it the whole list goes to the worker: it
-    # appends strictly in order, and _add_owned's own rolling filler would race
-    # that ordering for a set that needs transcoding (m4a, CUE cuts).
-    if len(segments) == 1 and segments[0][0] == "owned":
-        try:
-            _add_owned(segments[0][1], clear_first=False,
-                       position="next" if req.position == "next" else "end")
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise _output_error(e)
-    else:
-        _queue_segments_async(segments, gen, "queue-entities")
-    return {"ok": True, "queued": owned, "streaming": phantom, "not_found": missing}
+    try:
+        left = _queue_segments(segments, req.position)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _output_error(e)
+    return {"ok": True, "queued": owned, "streaming": phantom - len(left),
+            "not_found": missing, "not_streamable": left}
 
 
 @router.post("/play-entities")
@@ -3463,13 +3212,13 @@ def play_entities(req: QueueEntitiesRequest):
             seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
 
     try:
-        _play_segments(segments, "play-entities", archive=archive, play=req.autoplay)
+        left = _play_segments(segments, archive=archive, play=req.autoplay)
     except HTTPException:
         raise
     except Exception as e:
         raise _output_error(e)
     return {"ok": True, "playing": req.autoplay, "queued": owned,
-            "streaming": phantom, "not_found": missing}
+            "streaming": phantom - len(left), "not_found": missing, "not_streamable": left}
 
 
 # -- Listening-history replay --------------------------------------------------
@@ -3588,19 +3337,19 @@ def play_session(req: PlaySessionRequest):
             title=(header["title"] if origin == "mix" else None))
 
     try:
-        _play_segments(segments, "play-session", archive=archive)
+        left = _play_segments(segments, archive=archive)
     except HTTPException:
         raise
     except Exception as e:
         raise _output_error(e)
-    return {"ok": True, "queued": owned, "streaming": phantom, "missing": missing}
+    return {"ok": True, "queued": owned, "streaming": phantom - len(left),
+            "missing": missing + len(left)}
 
 
 @router.post("/queue-session")
 def queue_session(req: QueueSessionRequest):
-    """Append a listening-history snapshot to the queue. An all-owned snapshot
-    takes either position; one with streamed slots rolls in from the ordered
-    worker, which only appends — the screen offers End alone for those."""
+    """Append a listening-history snapshot to the queue (at the end, or
+    next), every slot at once — owned files and streamed tracks alike."""
     if req.position not in ("next", "end"):
         raise HTTPException(status_code=400, detail="position must be 'next' or 'end'")
     segments, missing = _session_segments(req.session_id)
@@ -3611,19 +3360,14 @@ def queue_session(req: QueueSessionRequest):
     if phantom:
         _ensure_streaming_ready()
 
-    if len(segments) == 1 and segments[0][0] == "owned":
-        try:
-            _add_owned(segments[0][1], clear_first=False, position=req.position)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise _output_error(e)
-    else:
-        if req.position == "next":
-            raise HTTPException(status_code=400,
-                                detail="A snapshot with streamed tracks queues at the end only")
-        _queue_segments_async(segments, manager.queue.generation, "queue-session")
-    return {"ok": True, "queued": owned, "streaming": phantom, "missing": missing}
+    try:
+        left = _queue_segments(segments, req.position)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _output_error(e)
+    return {"ok": True, "queued": owned, "streaming": phantom - len(left),
+            "missing": missing + len(left)}
 
 
 @router.post("/play-similar")
@@ -3660,7 +3404,7 @@ def play_similar(req: PlaySimilarRequest):
         ORDER BY {best_rip_order('mf')} LIMIT 1
     """, {"tid": req.track_id})
     try:
-        _play_segments(segments, "play-similar", archive=lambda: sessions.rotate_session(
+        _play_segments(segments, archive=lambda: sessions.rotate_session(
             manager.queue, 'radio', seed_track_id=req.track_id,
             seed_media_file_id=(seed_mf or {}).get("id")))
     except HTTPException:
@@ -3848,14 +3592,14 @@ def _radio_interleave(owned: list, phantom: list, prev_artist: Optional[str]) ->
     return batch
 
 
-def _radio_build_batch(seed_uuid: str, gen: int) -> list:
+def _radio_build_batch(seed_uuid: str) -> list:
     """Pick a mixed batch from the seed, cap + space out the phantoms (owned tracks
-    between them buffer the next stream), resolve the phantom chains and submit them
-    to the proxy. Returns ordered items for the rolling appender (owned: file fields,
-    turned into a URI — and transcoded if m4a — at append time; phantom: a proxy
-    token). Phantoms that no provider resolves are simply dropped."""
+    between them give the single fetch lane its time), and resolve the phantoms'
+    chains (one waterfall pass — the lane's later resolve reads the cache).
+    Returns the batch's slots in order — owned files as files, a phantom as the
+    track itself, its stream the lane's — with the rows they came from.
+    Phantoms that no provider resolves are simply dropped."""
     from streaming import service as streaming_service
-    from streaming.base import TrackQuery
 
     rows = _radio_similar(seed_uuid, _radio_played, _RADIO_BATCH_SIZE * 3)
     # "owned" here means the ACTIVE output opens the copy itself (a local
@@ -3865,74 +3609,48 @@ def _radio_build_batch(seed_uuid: str, gen: int) -> list:
         r["is_owned"] = bool(r["is_owned"] and r["playable"])
     owned = [r for r in rows if r["is_owned"]]
     phantom = [r for r in rows if not r["is_owned"]]
-    proxy = streaming_service.get_proxy() if streaming_service.is_enabled() else None
-    if proxy is None:
+    if not streaming_service.is_enabled():
         phantom = []
     phantom = phantom[:_RADIO_MAX_PHANTOM]
 
     batch_rows = _radio_interleave(owned, phantom, _radio_last_artist)
-
-    # Resolve the batch's phantoms (one waterfall pass) and submit the resolvable
-    # ones to the proxy for sequential buffering; keep a token per batch position.
-    p_positions = [i for i, r in enumerate(batch_rows) if not r["is_owned"]]
-    p_queries = [TrackQuery(
-        artist=batch_rows[i]["artist"] or "", title=batch_rows[i]["title"],
-        album=batch_rows[i]["phantom_album"] or "",
-        artist_alts=_artist_alts(batch_rows[i]["artist"]),
-        duration=(float(batch_rows[i]["length_ms"]) / 1000.0
-                  if batch_rows[i]["length_ms"] else None),
-        track_id=batch_rows[i]["track_id"]) for i in p_positions]
-    chains = _resolve_waterfall(p_queries) if p_queries else []
-    avail = [(q, ch) for q, ch in zip(p_queries, chains) if ch]
-    avail_pos = [pos for pos, ch in zip(p_positions, chains) if ch]
-    tokens = proxy.add_tracks(avail) if avail else []
-    if tokens:
-        proxy.bind(tokens, gen)  # leaving radio cancels what it was still fetching
-    pos_token = dict(zip(avail_pos, tokens))
+    queries = _phantom_track_queries([r["track_id"] for r in batch_rows if not r["is_owned"]])
+    p_rows = [r for r in batch_rows if not r["is_owned"] and r["track_id"] in queries]
+    chains = _resolve_waterfall([queries[r["track_id"]] for r in p_rows]) if p_rows else []
+    streamable = {r["track_id"] for r, ch in zip(p_rows, chains) if ch}
 
     batch = []
-    for i, r in enumerate(batch_rows):
+    for r in batch_rows:
         if r["is_owned"]:
-            batch.append({"kind": "owned", "file_id": r["file_id"], "location": r["location"],
-                          "track_uuid": r["track_id"], "artist": r["artist"]})
-        elif i in pos_token:
-            batch.append({"kind": "phantom", "token": pos_token[i],
-                          "track_uuid": r["track_id"], "artist": r["artist"]})
-        # a phantom no provider resolved → dropped (radio keeps flowing)
+            item = next(iter(queue_mod.items_for_owned_rows(
+                [{"id": r["file_id"], "location": r["location"]}])), None)
+        elif r["track_id"] in streamable:
+            item = queue_mod.items_for_streamed([queries[r["track_id"]]])[0]
+        else:
+            item = None                 # a phantom no provider resolved: dropped
+        if item is not None:
+            batch.append((item, r))
     return batch
 
 
 def _radio_append_batch(batch: list, gen: int) -> None:
-    """Rolling-append a batch: owned rows go to the HQPlayer queue at once, a
-    phantom row waits for the proxy to buffer it then appends its http URI — in
-    batch order, so the playhead never reaches a not-yet-ready stream. A phantom
-    that never buffers is skipped. Stops if radio is turned off or a new playback
-    session supersedes this one (generation)."""
+    """Append a batch WHOLE, in one mutation — no tap lands inside it — unless
+    radio was turned off or another queue superseded this one (generation)."""
     global _radio_last_artist
-    from streaming import service as streaming_service
-    proxy = streaming_service.get_proxy()
-    for entry in batch:
-        if not manager.radio_mode or manager.queue.generation != gen:
-            return
-        if entry["kind"] == "phantom":
-            if proxy is None:
-                continue
-            try:
-                e = proxy.wait_ready(entry["token"])
-            except (TimeoutError, KeyError):
-                continue                       # never buffered → skip
-            if e is None or e.audio is None:
-                continue
-            item = queue_mod.item_for_proxy_token(entry["token"])
-        else:
-            owned = queue_mod.items_for_owned_rows([{"id": entry["file_id"], "location": entry["location"]}])
-            item = owned[0] if owned else None
-        if item is None:
-            continue
-        if _filler_append(item, gen) is None:
-            return
-        _radio_played.add(entry["track_uuid"])
-        _radio_last_artist = entry["artist"]
+    if not manager.radio_mode or not batch:
+        return
+    try:
+        added = manager.append([item for item, _r in batch], generation=gen)
+    except (Building, NotAnswering, Dropped) as e:
+        # HQPlayer busy (a build, a silence, the output changing): the next
+        # refill — the status tick near the queue's end — asks again
+        logger.info("radio: a batch not added, the output is busy (%s)", e)
+        return
+    if not added:
+        return
+    for _item, r in batch:
+        _radio_played.add(r["track_id"])
+    _radio_last_artist = batch[-1][1]["artist"]
 
 
 def _radio_fill(seed_uuid: str, gen: int) -> None:
@@ -3941,9 +3659,7 @@ def _radio_fill(seed_uuid: str, gen: int) -> None:
     global _radio_refilling
     try:
         if manager.radio_mode and manager.queue.generation == gen:
-            batch = _radio_build_batch(seed_uuid, gen)
-            if batch:
-                _radio_append_batch(batch, gen)
+            _radio_append_batch(_radio_build_batch(seed_uuid), gen)
     except Exception:
         logger.exception("radio fill failed")
     finally:
@@ -4004,8 +3720,9 @@ def radio_start(req: RadioStartRequest):
     """Start drifting radio from a seed: keep the current track playing, clear what
     follows, and fill the queue in the background with a mixed (owned + streamed
     phantom) CLAP-similar batch. The poller refills near the end so it runs on.
-    Async — the phantom resolve + buffer is slow; the toggle returns at once and the
-    queue grows behind the seed (owned instantly, phantoms as they buffer)."""
+    Async — the batch's resolve is slow; the toggle returns at once and the queue
+    grows behind the seed a whole batch at a time, each streamed slot's stream the
+    fetch lane's."""
     global _radio_played, _radio_refilling, _radio_last_artist
 
     if not _radio_start_lock.acquire(blocking=False):

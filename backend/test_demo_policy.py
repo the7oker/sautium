@@ -94,3 +94,27 @@ def test_a_length_the_output_has_not_reported_yet_spends_nothing(policy):
     marks, _drops = policy
     demo.status_observer(_tick("playing", 50.0, length=0.0), _item("t1", "youtube"))
     assert marks == []
+
+
+@pytest.mark.parametrize("origin", [{"kind": "track"}, {"kind": "file", "path": "/m/1.flac"},
+                                    {"kind": "hqp", "path": "/h/1.flac", "endpoint": 7}])
+def test_a_demo_listen_through_a_slots_way_in_is_spent_whatever_it_was_queued_as(policy, origin):
+    """A slot that is the track itself (a streamed one, queued at the tap),
+    or stands in for a copy this output cannot reach, streams the demo
+    channel through its way in — its listen is spent past nine tenths as a
+    queued stream's is (F8: before 2026-11-22 the observer read `preview`,
+    and such a listen was never spent)."""
+    marks, _drops = policy
+    slot = QueueItem(track_id="t9", media_file_id=None, source=origin, title="t9", artist="A",
+                     provider="youtube", play={"kind": "proxy", "token": "tok-t9", "lane": True})
+    demo.status_observer(_tick("playing", 100.0), slot)
+    demo.status_observer(_tick("playing", 185.0), slot)
+    assert marks == [("t9", "youtube")]
+    # its way in an owned file's transcode: no demo channel, nothing watched
+    marks.clear()
+    demo._watch = None
+    m4a = QueueItem(track_id="t8", media_file_id=8, source={"kind": "file", "path": "/m/8.m4a"},
+                    title="t8", artist="A", provider="youtube",
+                    play={"kind": "proxy", "token": "tok-t8", "transcode": True})
+    demo.status_observer(_tick("playing", 185.0), m4a)
+    assert marks == []

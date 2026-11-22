@@ -549,22 +549,19 @@ comes after the control port answers again — so neither can end the wait.
   (`HqpLink.probe`) is a question on the link: a command on its way is
   answered first, and its silence turning out a build is busy, never
   "offline"; so is a probe HQPlayer takes and leaves unanswered
-  (`NotAnswering`, 409). Work no one waits for — a filler adding an album's
-  tracks as they arrive, HQPlayer following a re-bind of the queue's files,
+  (`NotAnswering`, 409). Work no one waits for — a stream landing at the
+  horizon (below), HQPlayer following a re-bind of the queue's files,
   the Stop an output switch owes, the resume after a DSP change, a start
   that met someone else's build — waits for the build's end through one
   mechanism (`hqp_link.through`: the watch's event, never a poll, bounded by
   the build's limit, called off when the work goes elsewhere or a newer
   intent supersedes it), checks again whether it is still wanted (the
   queue's generation, the output) and goes on. A build HQPlayer does not
-  finish, or goes away during, gives it up with why in the log — and a
-  filler loses nothing to it: what it took goes into the queue alone, the
-  mirror marked lost. A wait whose link was let go (another HQPlayer
-  picked) does not stop a filler either: it goes on through the manager, on
-  the output there is then; an add the link did not send waits for the
-  output change to be over (`PlaybackManager.wait_for_output_change`, an
-  event), never a sleep. The node stopping ends a filler; a file the output
-  refused is not offered again.
+  finish, or goes away during, gives it up with why in the log, the mirror
+  marked lost: HQPlayer gets the queue back once it answers again. A
+  person's queue edit meanwhile is refused as busy (since 2026-11-22 no
+  filler adds an album's tracks as they arrive: every slot is in the queue
+  from the tap).
 - **Output switch, address change.** A switch away stops HQPlayer if it
   plays or pauses an entry this node gave it — one this attachment handed
   it (a slot removed since from a playlist that is no mirror is still
@@ -792,13 +789,13 @@ comes after the control port answers again — so neither can end the wait.
   (a take-back that waits for its stream says "loading") — or HQPlayer rests
   on its playlist with nothing of ours read (drifted to an entry the node
   never gave: Roon's stream before its Play, since 2026-11-09 — or Roon's
-  refused stream under the takeover's spot, Roon's Play sent again), an append (a
-  filler's, the radio's, a person's), the radio's own clear and a new queue
+  refused stream under the takeover's spot, Roon's Play sent again), an append (the
+  radio's, a person's), the radio's own clear and a new queue
   put together without playing it are the queue's alone: nothing goes into
   that controller's playlist; the press that takes HQPlayer back hands the
   queue over, and a new queue that takes it back owns it from its own
-  hand-over — the clear ends the hold read before it, so what follows it (a
-  filler's appends) goes to HQPlayer. The radio refills nothing from the spot
+  hand-over — the clear ends the hold read before it, so what follows it (the
+  radio's batch) goes to HQPlayer. The radio refills nothing from the spot
   a takeover left.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
@@ -1013,9 +1010,11 @@ comes after the control port answers again — so neither can end the wait.
   and the reconverge yields to a press asked before it.
 - **Gaps** (since 2026-10-13). HQPlayer's playlist is the queue without its
   gaps, in the same order: a gap is a slot this HQPlayer does not hold —
-  nothing it can open (a file held only in another HQPlayer's library, one
-  that left the library: the slot's way in, `QueueItem.play`, read again at
-  every mirroring, so a copy that came back is handed over), or a file it
+  nothing it can open (a slot whose stream failed — before 2026-11-22 also
+  a file held only in another HQPlayer's library and one that left the
+  library, which stream there since: the slot's way in, `QueueItem.play`, is
+  read again at every mirroring, so a copy that came back is handed over),
+  or a file it
   refused while it took the rest of the batch (until the next full mirror
   hands it over again, or the slot is re-bound to another copy — kept by
   the HQPlayer's link, so a backend attached to it again sees the same
@@ -1654,16 +1653,23 @@ switch each slot is re-read for the NEW output (`QueueItem.play`,
 here for any output; this HQPlayer's own copy when it is the output — and
 preferred there over the rip, as on the album page; else a stream through
 the media proxy standing in for a copy the output cannot reach, resolved
-lazily a lead window (3 slots) ahead of the playhead on the status ticks
+lazily a lead window (4 slots since 2026-11-22, 3 before) ahead of the playhead
 and landed on the slot as it buffers (`PlayerBackend.slot_ready` starts a
 play parked on it — the browser output stands on the slot as "loading"
 until then). Switching back to the HQPlayer that holds the copies plays
-them natively again, nothing rebuilt. The HQPlayer output takes only native
-copies — it mirrors one playlist entry per slot and HQPlayer fetches an
-http entry at ADD time, so a stream it has not buffered cannot sit there; a
-slot only a stream could serve on it (a file held at another HQPlayer with
-no rip here) stays unplayable and the stop names it. The demo ledger applies
-to a substituted stream as to any stream.
+them natively again, nothing rebuilt. HQPlayer fetches an http entry at ADD
+time, so a stream it has not got cannot sit in its playlist: until
+2026-11-22 the HQPlayer output took only native copies and a slot only a
+stream could serve on it was unplayable there; since, it holds the queue up
+to its horizon — the first slot after the one it was handed the queue from
+whose stream (or an owned m4a's transcode, a CUE slice's cut) is still on
+its way — and each landing there is a PlaylistAdd at the playlist's end
+(`HqpBackend._horizon`, `_extend_horizon`); an HQPlayer that plays out the
+last slot it holds waits on the horizon in the node, said as loading
+(`_at_horizon`), and a tap past it hands HQPlayer the queue from the slot
+tapped. A streamed track queued at the tap is such a slot from its start
+(source kind `track`). The demo ledger applies to a substituted stream as to
+any stream (it reads the way in, `QueueItem.stream_token`).
 
 A queued stream HQPlayer holds keeps its entry when the media proxy's RAM
 budget drops its bytes (since 2026-10-31; before, a tap on it, or a tail

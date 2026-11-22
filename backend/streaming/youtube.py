@@ -35,9 +35,9 @@ import threading
 import time
 
 from . import ytdlp_release
-from .base import (FetchedAudio, ProviderError, ProviderManifest, ProviderUnavailable,
-                   ResolvedSource, StreamProvider, TrackQuery, attested_lengths,
-                   fits_length, length_offset, norm_key)
+from .base import (FetchCancelled, FetchedAudio, ProviderError, ProviderManifest,
+                   ProviderUnavailable, Refused, ResolvedSource, StreamProvider, TrackQuery,
+                   attested_lengths, fetching, fits_length, length_offset, norm_key)
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +48,38 @@ logger = logging.getLogger(__name__)
 _STALE_BUILD_RE = re.compile(r"HTTP Error 403|nsig|signature", re.I)
 
 
-class _GateWipeout(ProviderError):
+class _GateWipeout(Refused):
     """The channel gate admitted nothing — the one miss an album can still
     overturn (resolve_batch), so it is told apart from a length miss."""
+
+    def __init__(self, message: str):
+        super().__init__("no_match", message)
+
+
+# The line yt-dlp writes for each step of a download (--progress-template),
+# read for the fetch's progress: downloaded, total, the total's estimate —
+# "NA" where it does not know
+_PROGRESS = "sautium-progress %(progress.downloaded_bytes)s %(progress.total_bytes)s " \
+            "%(progress.total_bytes_estimate)s"
+_PROGRESS_RE = re.compile(r"^sautium-progress (\S+) (\S+) (\S+)")
+
+
+def _progress_of(line: str):
+    """The fraction a progress line says, or None for any other line."""
+    m = _PROGRESS_RE.match(line.strip())
+    if m is None:
+        return None
+    try:
+        done = float(m.group(1))
+    except ValueError:
+        return None
+    for total in (m.group(2), m.group(3)):
+        try:
+            if float(total) > 0:
+                return done / float(total)
+        except ValueError:
+            continue
+    return None
 
 
 _WIPEOUT = object()
@@ -96,6 +125,25 @@ class YouTubeProvider(StreamProvider):
             return subprocess.run([str(exe), "--ignore-config", "--no-plugin-dirs",
                                    "--encoding", "utf-8", *args],
                                   check=True, env=ytdlp_release.child_env(), **kwargs)
+        except OSError as e:
+            service.request_ytdlp_refresh()
+            raise ProviderUnavailable(f"the yt-dlp build in place does not start: {e}") from e
+
+    @staticmethod
+    def _spawn(args: list) -> subprocess.Popen:
+        """yt-dlp with `args` as _run starts it, as a child this fetch can
+        kill — its cancel (fetching()) — and read as it goes: its lines in
+        UTF-8 on both pipes."""
+        from . import service
+        exe = ytdlp_release.executable()
+        if exe is None:
+            service.request_ytdlp_refresh()
+            raise ProviderUnavailable("yt-dlp is not in place yet")
+        try:
+            return subprocess.Popen([str(exe), "--ignore-config", "--no-plugin-dirs",
+                                     "--encoding", "utf-8", *args],
+                                    env=ytdlp_release.child_env(), stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
         except OSError as e:
             service.request_ytdlp_refresh()
             raise ProviderUnavailable(f"the yt-dlp build in place does not start: {e}") from e
@@ -276,7 +324,7 @@ class YouTubeProvider(StreamProvider):
             cands = cands + [c for c in alt if c["id"] not in seen]
         if not cands:
             logger.debug("youtube: no results for %r", search)
-            raise ProviderError("youtube: no results")
+            raise Refused("not_found", "youtube: no results")
         if not matched and trusted and not query.performers:
             # No channel names the artist, but this track's ALBUM has vouched
             # for one (_album_consensus): a channel holding the tracklist under
@@ -320,8 +368,8 @@ class YouTubeProvider(StreamProvider):
             lens = attested_lengths(query)
             nearest = min(matched, key=lambda c: min(abs(c["duration"] - w) for w in lens))
             logger.debug("youtube: no length match for %r", search)
-            raise ProviderError(
-                f"youtube: no length match (catalog "
+            raise Refused(
+                "no_match", f"youtube: no length match (catalog "
                 f"{'/'.join(f'{w:.0f}s' for w in lens)}, "
                 f"nearest {nearest['duration']:.0f}s)")
         best = max(fit, key=lambda c: self._score(c, query))
@@ -391,6 +439,45 @@ class YouTubeProvider(StreamProvider):
             s += 12                                 # official Art Track / channel
         return s
 
+    def _download_run(self, args: list, video_id: str):
+        """Run the download: its progress lines reported to the fetch's
+        context, the child killed on its cancel (FetchCancelled) or past the
+        timeout. Returns None when it exited cleanly, else what it wrote on
+        stderr."""
+        ctx = fetching()
+        proc = self._spawn(args)
+        errors: list = []
+
+        def read_out() -> None:
+            for line in proc.stdout:
+                fraction = _progress_of(line)
+                if fraction is not None:
+                    ctx.progress(fraction)
+
+        def read_err() -> None:
+            for line in proc.stderr:
+                if _progress_of(line) is None:
+                    errors.append(line)
+        readers = [threading.Thread(target=fn, daemon=True, name="yt-dlp-pipe")
+                   for fn in (read_out, read_err)]
+        for t in readers:
+            t.start()
+        unhook = ctx.on_cancel(proc.kill)
+        try:
+            try:
+                code = proc.wait(timeout=self._timeout)
+            except subprocess.TimeoutExpired as e:
+                proc.kill()
+                proc.wait()
+                raise ProviderError(f"youtube download timeout: {video_id}") from e
+        finally:
+            unhook()
+            for t in readers:
+                t.join()
+        if ctx.cancelled.is_set():
+            raise FetchCancelled(f"youtube download of {video_id} cancelled")
+        return None if code == 0 else "".join(errors)
+
     def _download(self, video_id: str) -> FetchedAudio:
         # Download bestaudio -> ffmpeg -> FLAC (HQPlayer can't decode AAC). Temp
         # dir is a transient buffer, deleted at once — no persisted rip.
@@ -405,19 +492,15 @@ class YouTubeProvider(StreamProvider):
             # listener is waiting on; the cross-track fetch stays sequential,
             # which is the part that must not look like a bulk pull.
             args = [url, "-x", "--audio-format", "flac",
-                    "--no-playlist", "--quiet",
+                    "--no-playlist", "--quiet", "--progress", "--newline",
+                    "--progress-template", f"download:{_PROGRESS}",
                     "--extractor-args", "youtube:formats=dashy",
                     "--concurrent-fragments", "8",
                     "-o", os.path.join(tmp, "t.%(ext)s")]
             if self._ffmpeg_location:
                 args += ["--ffmpeg-location", self._ffmpeg_location]
-            try:
-                self._run(args, timeout=self._timeout,
-                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            except subprocess.TimeoutExpired as e:
-                raise ProviderError(f"youtube download timeout: {video_id}") from e
-            except subprocess.CalledProcessError as e:
-                err = e.stderr.decode("utf-8", "replace") if e.stderr else ""
+            err = self._download_run(args, video_id)
+            if err is not None:
                 lines = [ln for ln in err.splitlines() if ln.strip()]
                 detail = lines[-1][-300:] if lines else ""
                 if "No supported JavaScript runtime" in err:
@@ -429,7 +512,7 @@ class YouTubeProvider(StreamProvider):
                     # failed — and the refresh is rate-limited upstream.
                     from . import service
                     service.request_ytdlp_refresh()
-                raise ProviderError(f"youtube download failed for {video_id}: {detail}") from e
+                raise ProviderError(f"youtube download failed for {video_id}: {detail}")
             flacs = glob.glob(os.path.join(tmp, "*.flac"))
             if not flacs:
                 raise ProviderError(f"youtube: no audio for {video_id}")

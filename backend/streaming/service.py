@@ -129,6 +129,9 @@ def _start(settings) -> None:
         _wired = True
     # From here the subsystem is up (is_enabled): the resolve finds providers
     _registry = registry
+    # Queued slots said "streaming is off" while it came up ask again
+    from playback.manager import manager as playback_manager
+    playback_manager.lane.revive()
     if demo and _loop is not None:
         # yt-dlp's stable build, put in place at start and kept current for
         # the life of the subsystem (see the loop's own note on why
@@ -202,28 +205,16 @@ def _on_track_ready(e) -> None:
 
 
 def _wire(proxy: MediaProxy) -> None:
-    """The proxy's hooks and the demo policy's observer, attached once."""
-    # The canonical-queue item of a stream is built once, when its buffer is
-    # first ready; a REFETCH (a budget eviction, a spent demo buffer) may land
-    # on another provider or, as an excerpt, on another length — and DLNA
-    # reads the item's duration at load. The hook runs before the entry is
-    # marked ready (proxy._prepare), so whoever wakes on it sees the item true.
+    """The proxy's hooks and the demo policy's observer, attached once. The
+    queue's own (what landed on which slot, what failed, the lane's next
+    want) are the lane's, attached with the proxy (ensure_proxy)."""
     from playback.manager import manager as playback_manager
     from . import demo
 
-    def _refresh_queue_item(e):
-        excerpt = bool(e.audio.excerpt)
-        playback_manager.queue.refresh_proxy_items(
-            e.token, provider=e.provider.manifest.id if e.provider else None,
-            excerpt=excerpt,
-            duration_seconds=(e.audio.seconds if excerpt and e.audio.seconds
-                              else e.query.duration))
-        # The output hears of the landing with the item already true: a start
-        # it parked on the slot goes, an entry it holds in another shape is
-        # handed again
-        playback_manager.stream_landed(e.token, e.reshaped)
-
-    proxy.track_ready_hooks.append(_refresh_queue_item)
+    # The output hears of a landing with the slot already true (the lane's
+    # hook runs first): a start it parked on the stream goes, an entry it
+    # holds in another shape is handed again
+    proxy.track_ready_hooks.append(lambda e: playback_manager.stream_landed(e.token, e.reshaped))
     # A fetch that ended with no audio: a start the output parked on it goes,
     # and meets the error the attempt then says
     proxy.track_failed_hooks.append(lambda e: playback_manager.stream_failed(e.token))
@@ -231,6 +222,10 @@ def _wire(proxy: MediaProxy) -> None:
     proxy.link_admissible = demo.link_admissible
     playback_manager.subscribe_status(demo.status_observer)
     proxy.track_ready_hooks.append(_on_track_ready)
+    # A link's refusal with a reason is remembered beside the resolve's
+    # answers, so the next resolve does not offer that provider for the track
+    from routers.player import note_refusal
+    proxy.link_refused = note_refusal
 
 
 def stop_enrichers() -> None:
@@ -334,6 +329,9 @@ def ensure_proxy() -> Optional[MediaProxy]:
                 "(Docker). Only one node per machine can serve DLNA/HQPlayer "
                 "media") from e
         _proxy = proxy
+        # The fetch lane's queue side: what the queue wants next, in its order
+        from playback.manager import manager as playback_manager
+        playback_manager.lane.attach(proxy)
         logger.info("media proxy started (providers attach when streaming "
                     "preview initializes)")
     return _proxy

@@ -653,7 +653,8 @@ body.sautium-base {
 .q-row.is-gap .q-title,
 .q-row.is-gap .q-artist,
 .q-row.is-gap .q-dur { opacity: 0.4; }
-.q-gap {
+.q-gap,
+.q-stream {
   font-size: var(--text-caption);
   color: var(--color-text-muted);
   line-height: 1.3;
@@ -2149,6 +2150,13 @@ body.sautium-base {
   animation: track-buffer-pulse 1.2s ease-in-out infinite;
 }
 @keyframes track-buffer-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 0.9; } }
+/* The same line saying a state that does not move: waiting, failed with why */
+.track-buffering.is-quiet { animation: none; }
+/* "Doesn't stream here" in a phantom album's meta row: nothing on it streams */
+.am-unstreamable {
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+}
 .track-rank {
   font-family: var(--font-mono);
   font-size: calc(12 * var(--px));

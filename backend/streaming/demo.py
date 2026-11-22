@@ -81,9 +81,13 @@ _watch: Optional[dict] = None    # the demo-channel listen in progress
 
 
 def _demo_provider_id(item) -> Optional[str]:
-    """The item's provider id when the item is a full-length stream from a
-    demo-limited provider — the only kind of play this policy watches."""
-    if item is None or not item.preview or item.excerpt or not item.track_id:
+    """The item's provider id when the item plays a full-length stream from a
+    demo-limited provider — the only kind of play this policy watches. Read
+    off the slot's way in (QueueItem.stream_token), never off how it was
+    queued: a slot that is the track itself, or stands in for a copy this
+    output cannot reach, streams as a queued stream does (2026-11-22; before
+    it such a listen was never spent)."""
+    if item is None or not item.stream_token or item.excerpt or not item.track_id:
         return None
     from . import service
     prov = service.get_provider(item.provider) if item.provider else None

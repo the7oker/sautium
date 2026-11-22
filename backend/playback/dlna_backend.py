@@ -856,13 +856,16 @@ class DlnaBackend(PlayerBackend):
         return {**chosen, "locations": [*locations, *(
             loc for loc in known_locations(self._renderer) if loc not in locations)]}
 
-    def slot_ready(self, index: int) -> None:
+    def slot_ready(self, index: int, item=None) -> None:
         """A slot's stream landed, or it was found unplayable here
         (playback.substitute): a play parked on it goes now — read on the
         loop, where the park is made."""
         async def _parked_start():
             parked = self._parked
-            if parked is None or self._queue.index_of(parked[0]) != index:
+            # The slot told, or the one parked on whose way in is no longer
+            # to come (an edit moved it between the lane's word and this one)
+            if parked is None or (self._queue.index_of(parked[0]) != index
+                                  and parked[0].opener().get("kind") == "pending"):
                 return
             item = parked[0]
             if not self._external:
@@ -2158,7 +2161,7 @@ class DlnaBackend(PlayerBackend):
         proxy = streaming_service.ensure_proxy()
         if item.cover_id:
             sources = [(item.cover_id, partial(asyncio.to_thread, self._load_cover_jpeg))]
-        elif item.preview:
+        elif item.stream_token or item.cover_url:
             from playback.queue import resolved_artwork
             # Same order as the web UI's coverUrls(): the queued album's own
             # art first, the provider's matched release only as a fallback.

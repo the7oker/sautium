@@ -560,6 +560,7 @@ def test_the_event_stream_says_hello_first_and_carries_the_meter_to_its_page(mon
         stream = (await player_router.events_stream(tab="page-1")).body_iterator
         assert await stream.__anext__() == 'data: {"t": "hello"}\n\n'
         assert json.loads((await stream.__anext__())[6:])["t"] == "status"
+        assert json.loads((await stream.__anext__())[6:])["t"] == "slots"
         assert json.loads((await stream.__anext__())[6:])["t"] == "notice"
         assert json.loads((await stream.__anext__())[6:])["t"] == "identity"
         assert hqp_meter.meter.want("page-1", True, 1)

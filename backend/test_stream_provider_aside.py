@@ -19,6 +19,12 @@ ASIDE = SteppedAside(code="no_tier", since="2026-11-14T09:00:00+00:00",
                      text="Tracks stream from another provider.", detail="")
 
 
+
+def _mint_all(proxy, pairs):
+    """Tokens for (query, chain) pairs, as the fetch lane's queue side mints
+    them: nothing fetched until a slot wants it or a consumer waits on it."""
+    return [proxy.mint(q, chain) for q, chain in pairs]
+
 class _Plain(StreamProvider):
     """A provider built before the live state: it implements none of it."""
 
@@ -182,7 +188,7 @@ def test_a_chain_resolved_earlier_does_not_ask_a_provider_that_stepped_aside(reg
         asked.clear()
         n = next(tracks)                # a track of its own: a held buffer is never fetched again
         query = TrackQuery(artist="A", title=f"T{n}", track_id=f"t{n}")
-        token = proxy.start_session([(query, chain)])[0]
+        token = _mint_all(proxy, [(query, chain)])[0]
         entry = proxy.wait_ready(token, 10)
         return (entry.provider.manifest.id if entry.audio is not None else None,
                 entry.error, list(asked))

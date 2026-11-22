@@ -64,6 +64,12 @@ PHONE_SINK = [f"http-get:*:{mime}:*" for mime in (
     "audio/ogg", "application/ogg")]
 
 
+
+def _mint_all(proxy, pairs):
+    """Tokens for (query, chain) pairs, as the fetch lane's queue side mints
+    them: nothing fetched until a slot wants it or a consumer waits on it."""
+    return [proxy.mint(q, chain) for q, chain in pairs]
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -715,7 +721,7 @@ def streamed(proxy: MediaProxy, n: int, *, cover_url: str, seconds: float = 4.0)
     track_id = f"10000000-0000-0000-0000-{n:012d}"
     tok = f"stream{n}"
     e = _Entry(tok, TrackQuery(artist="Artist", title=f"Stream {n}", album="Album",
-                               duration=seconds, track_id=track_id, cover_url=cover_url), n)
+                               duration=seconds, track_id=track_id, cover_url=cover_url))
     e.audio = FetchedAudio(data=b"fLaC" + b"\x00" * 4092, mime="audio/flac", lossless=True)
     e.provider = SimpleNamespace(manifest=SimpleNamespace(id="test", demo_limited=False))
     e._claimed = True
@@ -1594,7 +1600,7 @@ def test_a_session_across_hqplayer_a_renderer_and_back_keeps_one_listen_a_track(
                                                   mime="audio/flac", lossless=True)
 
     provider = _Stream()
-    late = proxy.start_session([(TrackQuery(artist="Artist", title="Stream 5", album="Album",
+    late = _mint_all(proxy, [(TrackQuery(artist="Artist", title="Stream 5", album="Album",
                                             duration=8.0, track_id=_STREAM_5), [(provider, None)])])[0]
     assert proxy.wait_ready(late, timeout=5).audio is not None
     proxy.track_ready_hooks.append(lambda e: manager.stream_landed(e.token, e.reshaped))
@@ -1733,7 +1739,7 @@ def test_the_browser_keeps_a_carried_second_on_a_slot_whose_stream_is_coming(tmp
     monkeypatch.setattr(media_urls, "signed_media_url", lambda kind, ident, q=None: f"/m/{kind}/{ident}")
     manager.activate("browser")
     # The stream lands when the test says so: no provider resolves it here
-    monkeypatch.setattr(manager._subs, "maintain", lambda idx: None)
+    monkeypatch.setattr(manager.lane, "maintain", lambda: None)
     waiting = track(tmp_path, 1, seconds=40.0)
     waiting.play = {"kind": "pending"}
     manager.queue.replace([waiting])

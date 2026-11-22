@@ -27,6 +27,12 @@ from streaming.base import FetchedAudio, ProviderManifest, StreamProvider, Track
 from streaming.proxy import MediaProxy  # noqa: E402
 
 
+
+def _mint_all(proxy, pairs):
+    """Tokens for (query, chain) pairs, as the fetch lane's queue side mints
+    them: nothing fetched until a slot wants it or a consumer waits on it."""
+    return [proxy.mint(q, chain) for q, chain in pairs]
+
 @pytest.fixture
 def started():
     """A started proxy on loopback, and its port; shut down after."""
@@ -115,7 +121,7 @@ class _Instant(StreamProvider):
 
 def test_a_span_of_a_buffer_is_sent_from_the_buffer_itself(started):
     proxy, port = started()
-    tok = proxy.start_session([(TrackQuery(artist="A", title="t", album="B", duration=60.0,
+    tok = _mint_all(proxy, [(TrackQuery(artist="A", title="t", album="B", duration=60.0,
                                            track_id="id-t"), [(_Instant(), None)])])[0]
     proxy.wait_ready(tok, timeout=5)
     handler = proxy._httpd.RequestHandlerClass

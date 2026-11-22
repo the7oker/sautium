@@ -285,11 +285,18 @@ class PlayerBackend(ABC):
         thread is not carried out. Default: nothing (a renderer had not
         started anything)."""
 
-    def slot_ready(self, index: int) -> None:
+    def slot_ready(self, index: int, item=None) -> None:
         """A slot this output could not open when it was reached now can —
         a stream substitute landed on it — or never will: it was found
         unplayable here (playback.substitute). Default: nothing; an output
         that parked a play there starts it, or walks past it."""
+
+    def stream_arriving(self, item) -> None:
+        """The fetch lane is about to make a stream (or an owned file's
+        preparation) the way in of `item`, which was pending until now. An
+        output that holds the queue only as it was handed it marks one it
+        does not hold before any reader can count it (HQPlayer). Default:
+        nothing."""
 
     def stream_landed(self, token: str, reshaped: bool) -> None:
         """The bytes of the media proxy's stream `token` landed — `reshaped`:

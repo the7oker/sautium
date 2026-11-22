@@ -15,7 +15,8 @@ import os
 import subprocess
 import tempfile
 
-from .base import FetchedAudio, ProviderError, ProviderManifest, StreamProvider, TrackQuery
+from .base import (FetchCancelled, FetchedAudio, ProviderError, ProviderManifest,
+                   StreamProvider, TrackQuery, fetching)
 
 logger = logging.getLogger(__name__)
 
@@ -59,18 +60,28 @@ class LocalTranscodeProvider(StreamProvider):
         # samples, which a stdout pipe can't give), then read into memory.
         fd, out = tempfile.mkstemp(prefix="sautium-xcode-", suffix=".flac")
         os.close(fd)
+        ctx = fetching()
         try:
-            subprocess.run(
+            proc = subprocess.Popen(
                 ["ffmpeg", "-y", "-i", container_path, "-c:a", "flac", out],
-                check=True, timeout=self._timeout,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            # The slot removed while it runs: nobody wants the FLAC any more
+            unhook = ctx.on_cancel(proc.kill)
+            try:
+                _, err = proc.communicate(timeout=self._timeout)
+            except subprocess.TimeoutExpired as e:
+                proc.kill()
+                proc.communicate()
+                raise ProviderError(f"transcode timeout: {container_path}") from e
+            finally:
+                unhook()
+            if ctx.cancelled.is_set():
+                raise FetchCancelled(f"transcode of {container_path} cancelled")
+            if proc.returncode != 0:
+                tail = err.decode("utf-8", "replace")[-300:] if err else ""
+                raise ProviderError(f"transcode failed for {container_path}: {tail}")
             with open(out, "rb") as f:
                 data = f.read()
-        except subprocess.CalledProcessError as e:
-            tail = e.stderr.decode("utf-8", "replace")[-300:] if e.stderr else ""
-            raise ProviderError(f"transcode failed for {container_path}: {tail}") from e
-        except subprocess.TimeoutExpired as e:
-            raise ProviderError(f"transcode timeout: {container_path}") from e
         finally:
             try:
                 os.unlink(out)
