@@ -54,9 +54,11 @@ services:
     # CLAP and its passes' audio when the sonic pass runs); random reads
     # cost little more than sequential ones and the disk takes many at once.
     # synchronous_commit and fsync stay on: the identity and the registry are
-    # written here. Weaker boards override via .env, e.g. PG_SHARED_BUFFERS=512MB
-    # PG_EFFECTIVE_CACHE_SIZE=3GB. Docker on Raspberry Pi OS cannot cap a
-    # container's memory (the firmware boots the kernel with
+    # written here. A smaller board's values are lines of .env (e.g.
+    # PG_SHARED_BUFFERS=512MB PG_EFFECTIVE_CACHE_SIZE=3GB), which ./sautium and
+    # the host agent's update write by the machine's memory and remove where
+    # these defaults fit (desktop/machine_tier.py). Docker on Raspberry Pi OS
+    # cannot cap a container's memory (the firmware boots the kernel with
     # cgroup_disable=memory), so no limit is set here.
     # wal_level=minimal: single-node appliance, no replication/PITR consumers —
     # lets the MB-dump loader's TRUNCATE+COPY-in-one-txn skip WAL entirely.

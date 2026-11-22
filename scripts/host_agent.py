@@ -6,7 +6,9 @@ The node asks by the NAME of an empty file in ./run/requests — `check`,
 takes no path, URL, tag, commit, value or command from the node. Whatever it
 needs it reads from files no container can write: the checkout's tracked
 tree and .git (both read-only in the node), .env, and its own folder ./host/,
-which no container mounts.
+which no container mounts. What a container printed it takes from the Docker
+daemon alone, as text it never parses: for a report, and for the log it
+keeps in ./host/logs/ of a backend container that is about to be replaced.
 
 **The rule it rests on: the host's side never opens a path a container can
 write.** The requests folder is the one such path it touches, and only so:
@@ -56,6 +58,7 @@ import errno
 import fcntl
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -119,12 +122,21 @@ LOG_TAIL = 2000
 # them together), so no line a container logged can move into the facts.
 REPORT_FORMAT = 2
 MACHINE_SECTIONS = ("versions", "board", "power", "disk", "containers", "restarts")
-LOG_SECTIONS = ("log: backend", "log: postgres", "log: the host agent")
+LOG_SECTIONS = ("log: backend", "log: backend before the last update", "log: postgres",
+                "log: the host agent")
 SECTION_MAX = 1024 * 1024                # one log's tail at most, before the whole is bounded
 BOARD_MODEL = Path("/proc/device-tree/model")
 LOG_MAX = 1024 * 1024                    # host/agent.log, one previous kept
 STATE_MAX = 64 * 1024
 VERIFY_MAX = 1024 * 1024
+# The outgoing backend container's log, kept under host/logs/ before an
+# update, its way back or the setup removes the container — the one record
+# of what the node did before it went (PI-NODE-2B's C2 left with its
+# container): a tail, bounded, a few kept
+KEPT_TAIL = 5000
+KEPT_MAX = 1024 * 1024
+KEPT_LOGS = 3
+KEPT_NAME = re.compile(r"backend-\d{8}-\d{6}-(?:update|undo|setup)\.log")
 # The setup code a node logs at each start until its account exists
 # (backend/device_auth._SETUP_CODE_FORM): never in a diagnostics report
 SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){1}")
@@ -223,13 +235,15 @@ def read_env(path: Path) -> Dict[str, str]:
     return values
 
 
-def set_env(path: Path, key: str, value: str) -> None:
-    """One key of .env set, every other line kept as it is; the file's mode
-    kept (it holds the database password: the person's alone)."""
+def _rewrite_env(path: Path, key: str, value: Optional[str]) -> None:
+    """Every line of .env kept as it is but `key`'s own (a commented line is
+    the person's note, not the key's): one line with `value` in the place of
+    the first, or none at all for None. The file's mode is kept (it holds
+    the database password: the person's alone)."""
     raw = _read_bounded(path, STATE_MAX) or b""
     text = raw.decode("utf-8", "surrogateescape")
     lines = text.split("\n")[:-1] if text.endswith("\n") else text.split("\n") if text else []
-    out, done = [], False
+    out, done = [], value is None
     for line in lines:
         if line.split("=", 1)[0].strip() == key and not line.lstrip().startswith("#"):
             if not done:
@@ -243,11 +257,54 @@ def set_env(path: Path, key: str, value: str) -> None:
     tmp = path.with_name(f".{path.name}.{os.getpid()}")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
     with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as f:
-        f.write("\n".join(out) + "\n")
+        f.write("\n".join(out) + "\n" if out else "")
         f.flush()
         os.fsync(f.fileno())
     os.chmod(tmp, mode)
     os.replace(tmp, path)
+
+
+def set_env(path: Path, key: str, value: str) -> None:
+    """One key of .env set, every other line kept as it is."""
+    _rewrite_env(path, key, value)
+
+
+def unset_env(path: Path, key: str) -> None:
+    """One key of .env removed — compose then reads its file's own default —
+    every other line kept as it is."""
+    _rewrite_env(path, key, None)
+
+
+def apply_env(path: Path, plan: Dict[str, Optional[str]]) -> Tuple[List[str], List[str]]:
+    """.env brought to `plan` — a value set, None removed — touching only the
+    keys that differ: (the keys set, the keys removed). The setup's and the
+    update's one way to write the keys they own."""
+    held = read_env(path)
+    changed = [key for key, value in plan.items() if value is not None and held.get(key) != value]
+    removed = [key for key, value in plan.items() if value is None and key in held]
+    for key in changed:
+        set_env(path, key, plan[key])
+    for key in removed:
+        unset_env(path, key)
+    return changed, removed
+
+
+def machine_tier():
+    """desktop/machine_tier.py of the tree this body is in, loaded by path:
+    the agent runs isolated (-I), with nothing of the checkout importable."""
+    path = Path(__file__).resolve().parent.parent / "desktop" / "machine_tier.py"
+    spec = importlib.util.spec_from_file_location("sautium_machine_tier", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def pg_plan() -> Dict[str, Optional[str]]:
+    """PostgreSQL's lines of .env for this machine's memory (the table the
+    console setup writes by), {} where the memory cannot be read."""
+    tier = machine_tier()
+    kib = tier.machine_memory_kib()
+    return tier.pg_settings(kib / 1024 ** 2) if kib else {}
 
 
 def channel_key(root: Path = None) -> bytes:
@@ -349,10 +406,10 @@ def drain(root: Path = None) -> Tuple[List[str], int]:
 # -- git, docker ---------------------------------------------------------------
 
 def _run(args: List[str], *, cwd: Path = None, timeout: int = 120, stdin=None, stdout=None,
-         check: bool = True, env: Optional[dict] = None) -> subprocess.CompletedProcess:
+         stderr=subprocess.PIPE, check: bool = True, env: Optional[dict] = None) -> subprocess.CompletedProcess:
     result = subprocess.run(args, cwd=str(cwd or ROOT), timeout=timeout, stdin=stdin,
                             stdout=stdout if stdout is not None else subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=env)
+                            stderr=stderr, env=env)
     if check and result.returncode != 0:
         err = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
         raise Refusal("failed", f"{args[0]} {args[1] if len(args) > 1 else ''} failed: "
@@ -658,6 +715,54 @@ def leftovers(root: Path = None) -> List[str]:
     return found
 
 
+def kept_logs(root: Path = None) -> List[Path]:
+    """The kept logs, newest first: by their names, which the agent alone gives."""
+    try:
+        names = [name for name in os.listdir(host_dir(root) / "logs") if KEPT_NAME.fullmatch(name)]
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    return [host_dir(root) / "logs" / name for name in sorted(names, reverse=True)]
+
+
+def trim_logs(root: Path = None) -> None:
+    for path in kept_logs(root)[KEPT_LOGS:]:
+        path.unlink(missing_ok=True)
+
+
+def take_log(root: Path, why: str, now: Optional[float] = None) -> Optional[Path]:
+    """The backend container's log as the Docker daemon gives it — its tail,
+    bounded, setup codes scrubbed — written into host/logs/: text a container
+    printed, at rest where no container reaches, never parsed and never run.
+    The file's path; None where there is no log, or it could not be kept —
+    which stops nothing."""
+    try:
+        made = _run([*compose_cmd(root), "logs", "--no-color", "--tail", str(KEPT_TAIL), "backend"],
+                    cwd=root, timeout=120, check=False, stderr=subprocess.STDOUT)
+        text = _tail_cut(_scrub((made.stdout or b"").decode("utf-8", "replace")), KEPT_MAX)
+        if not text.strip():
+            return None
+        folder = host_dir(root) / "logs"
+        folder.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(folder, 0o700)
+        path = folder / f"backend-{time.strftime('%Y%m%d-%H%M%S', time.gmtime(now))}-{why}.log"
+        _write_private(path, text.encode())
+        return path
+    except (Refusal, OSError, subprocess.SubprocessError) as e:
+        log(f"the backend's log was not kept ({why}): {getattr(e, 'detail', e)}")
+        return None
+
+
+def keep_log(root: Path, why: str) -> Optional[Path]:
+    """The outgoing backend container's log kept before the container goes:
+    compose makes the container again from the next image, and its log goes
+    with it. The newest few stay."""
+    path = take_log(root, why)
+    if path is not None:
+        trim_logs(root)
+        log(f"the backend's log kept before its container goes: host/logs/{path.name}")
+    return path
+
+
 def _way_back(root: Path, env: Dict[str, str], moving: dict) -> Tuple[str, str, bool]:
     """The release before, its image and its database put back, and the node
     started: each step tried whatever the one before did — a node left down
@@ -677,6 +782,7 @@ def _way_back(root: Path, env: Dict[str, str], moving: dict) -> Tuple[str, str, 
     step("check the release before out", lambda: git("-c", "advice.detachedHead=false", "checkout", "--quiet",
                                                        "--force", "--detach", moving["from"], root=root))
     step("name its image", lambda: set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", moving["image"]))
+    keep_log(root, "undo")
     step("remove the release's container", lambda: compose("rm", "-f", "backend", root=root, check=False))
     if moving.get("tag") and moving["tag"] != moving["image"]:
         step("remove the release's image", lambda: _run(["docker", "image", "rm", moving["tag"]], cwd=root,
@@ -733,7 +839,10 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     start; the way back when the new node or its agent does not come up, and
     whatever stops the update after the node stopped. A release that did not
     start or build here is not tried again for a day, nor is an update that
-    found nothing to do."""
+    found nothing to do. The outgoing container's log is kept before the
+    container goes, and PostgreSQL's lines of .env follow the machine's
+    memory — by this body's own table, read before the checkout moves; the
+    way back leaves them: they are the machine's, not a release's."""
     root = root or ROOT
     if state.get("moving"):
         return "floor", "an update is still being put back; the agent tries again at its next start", None, None
@@ -767,6 +876,7 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     except ValueError as e:
         state["update_held_at"] = now
         return "refused", f"{e}: an update builds what .env says the image carries", name, None
+    postgres = pg_plan()
     tag = f"sautium-backend:{name}-{commit[:12]}"
     log(f"building {tag} from {name} ({commit})")
     # A build is the heaviest thing a forged request asks for: once a day,
@@ -797,11 +907,16 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     try:
         log("stopping the node, then the copy of its database")
         compose("stop", "backend", root=root)
+        keep_log(root, "update")
         moving["copy"] = _snapshot(root, env)
         save_state(state, root)
         log(f"moving the checkout to {name} and starting it")
         git("-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit, root=root)
         set_env(root / ".env", "SAUTIUM_BACKEND_IMAGE", tag)
+        changed, removed = apply_env(root / ".env", postgres)
+        if changed or removed:
+            log(".env follows this machine's memory: " + ", ".join(
+                [f"{key}={postgres[key]}" for key in changed] + [f"{key} removed" for key in removed]))
         healthy = _healthy(root)
         if healthy and not _body_answers(root):
             healthy, why = False, "came up, but its host agent does not start"
@@ -884,7 +999,8 @@ def report_json(sections: Dict[str, str], made_at: float) -> str:
 def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, str, Optional[str], Optional[str]]:
     """F2's table: what the two containers logged, the power, the disk, the
     versions, the board, the containers' restarts — no journal, no kernel log,
-    no file listing. The report is JSON by section (REPORT_FORMAT)."""
+    no file listing — and the newest log kept of a backend container that is
+    gone (keep_log). The report is JSON by section (REPORT_FORMAT)."""
     root = root or ROOT
     last = state.get("diagnostics_at")
     if last is not None and now - last < DIAGNOSTICS_FLOOR:
@@ -912,11 +1028,18 @@ def verb_diagnostics(state: dict, now: float, root: Path = None) -> Tuple[str, s
     section("disk", ["sh", "-c", f"df -h {shlex.quote(str(root))} \"$(docker info --format "
                                  "'{{.DockerRootDir}}')\""])
     section("containers", [*compose_cmd(root), "ps", "--all"])
+    kept = kept_logs(root)
+    sections["containers"] += "\nkept logs: " + (", ".join(
+        f"{path.name} {path.lstat().st_size // 1024} KiB" for path in kept) or "none")
     section("restarts", ["docker", "inspect", "--format",
                          "{{.Name}} restarts={{.RestartCount}} oom_killed={{.State.OOMKilled}} "
                          "exit={{.State.ExitCode}} started={{.State.StartedAt}}", BACKEND, POSTGRES])
-    for service in ("backend", "postgres"):
-        section(f"log: {service}", [*compose_cmd(root), "logs", "--no-color", "--tail", str(LOG_TAIL), service])
+    section("log: backend", [*compose_cmd(root), "logs", "--no-color", "--tail", str(LOG_TAIL), "backend"])
+    if kept:
+        text = (_read_bounded(kept[0], 2 * KEPT_MAX) or b"").decode("utf-8", "replace")
+        sections["log: backend before the last update"] = "\n".join(
+            [f"(host/logs/{kept[0].name})", *text.splitlines()[-LOG_TAIL:]])
+    section("log: postgres", [*compose_cmd(root), "logs", "--no-color", "--tail", str(LOG_TAIL), "postgres"])
     section("log: the host agent", ["tail", "-n", str(LOG_TAIL), str(host_dir(root) / "agent.log")])
     return "done", "diagnostics made on the machine", None, report_json(sections, now)
 
@@ -1096,7 +1219,8 @@ def run(root: Path = None, api: str = NODE_API, now: Optional[float] = None,
 
 def selftest(root: Path = None) -> int:
     """What an update asks of a release's body before it keeps the release:
-    it starts, under a starter's interface, and reads its own folder."""
+    it starts, under a starter's interface, reads its own folder, and has
+    the table its own next update sizes PostgreSQL by."""
     root = root or ROOT
     api_version = os.environ.get("SAUTIUM_HOST_STARTER_API", "")
     if not api_version.isdigit() or int(api_version) < 1:
@@ -1104,6 +1228,7 @@ def selftest(root: Path = None) -> int:
     channel_key(root)
     load_state(root)
     units(root)
+    machine_tier().pg_settings(4.0)
     return 0
 
 

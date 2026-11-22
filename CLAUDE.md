@@ -586,10 +586,15 @@ See:
   a copy of the database beside it, in its own container, and the way back
   — after any failure past the node's stop, and at the next start for an
   update a run did not finish; a release that did not start is not tried
-  again for a day),
+  again for a day; since 2026-11-22 the outgoing backend container's log is
+  kept first — its tail, `0600` under `./host/logs/`, the three newest —
+  and PostgreSQL's `PG_*` lines of `.env` follow the machine's memory by
+  the setup's own table, `machine_tier.pg_settings`: set, or removed where
+  the compose file's defaults fit),
   `diagnostics` (its report JSON by section since 2026-11-21: the machine's
   facts apart from the containers' logs by name, so a support bundle takes
-  the facts without a tick and the logs only with one) — asked by the NAME
+  the facts without a tick and the logs only with one — the newest kept
+  log among them, the kept logs' names among the facts) — asked by the NAME
   of an empty file in `./run/requests`,
   the one folder of the agent's a container writes. **The host's side never
   opens a path a container can write**: the folder is emptied by handles

@@ -1629,7 +1629,11 @@ its report is JSON by section (format 2, with `made_at`), the machine's facts
 containers and their restarts and OOM kills — into `system.json`'s `host`
 through `scrub_detail`, the containers' and the agent's log tails (2 000
 lines each) into `logs/` only when ticked, through `scrub_personal`; a line a
-container logged cannot move into the facts. The container gains no Docker
+container logged cannot move into the facts. Since 2026-11-22 the agent keeps
+the outgoing backend container's log before an update, its way back or the
+setup makes the container again (`./host/logs/`, the three newest): their
+names and sizes ride with the containers' facts, the newest one's tail as one
+more log (`logs/backend-before-update.log`), ticked like the rest. The container gains no Docker
 socket, journal or host path. The manifest carries `runtime` (launcher or
 docker, with its host networking and its agent) and `unavailable` — what this
 kind of node cannot give and why: no host agent (a hand-run compose, a

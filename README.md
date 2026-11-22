@@ -284,6 +284,13 @@ docker compose -f docker-compose.pi.yml up -d    # the node learns of the agent
 sudo loginctl enable-linger "$USER"              # once: the agent runs with nobody logged in
 ```
 
+An update also writes PostgreSQL's memory lines of `.env` (the five `PG_*`
+keys `docker-compose.pi.yml` reads) for the machine's memory, as `./sautium`
+does — a smaller board's values, or no line where the file's defaults fit
+(since 2026-11-22): a value of your own under one of those names is
+replaced. Before it replaces the node's container it keeps the tail of that
+container's log in `host/logs/` (the three newest stay).
+
 Run `install` again after an update whose notes say its units changed. A
 provider module you put in `backend/streaming/providers/` is named, one per
 line, in `host/allowed-providers`: the agent refuses to move a tree that
