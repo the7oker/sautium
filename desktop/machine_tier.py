@@ -22,7 +22,7 @@ import ipaddress
 import math
 import os
 import re
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 TIERS = ("full", "standard", "lite")
 
@@ -242,3 +242,25 @@ def home_address(address: str) -> bool:
     except ValueError:
         return False
     return isinstance(addr, ipaddress.IPv4Address) and any(addr in net for net in _HOME_NETWORKS)
+
+
+# PostgreSQL's memory lines in a Docker node's .env, the keys every compose
+# file reads with a default beside each. The console setup and the host
+# agent's update own them at every size: written where the board is smaller
+# than the defaults were sized for, removed where the defaults fit — a board
+# that grows must not keep a small board's lines.
+PG_KEYS = ("PG_SHARED_BUFFERS", "PG_EFFECTIVE_CACHE_SIZE", "PG_MAINTENANCE_WORK_MEM",
+           "PG_MAX_WAL_SIZE", "PG_WORK_MEM")
+_PG_BY_RAM = (            # (at least this many GiB, a value per key of PG_KEYS; None: the file's default)
+    (12, (None, None, None, None, None)),
+    (6, ("512MB", "3GB", "256MB", "2GB", None)),
+    (3, ("256MB", "1GB", "128MB", "1GB", None)),
+    (0, ("128MB", "512MB", "64MB", "512MB", "4MB")),
+)
+
+
+def pg_settings(ram_gib: float) -> Dict[str, Optional[str]]:
+    """Every key of PG_KEYS for a board of `ram_gib`: its value, or None
+    where the compose file's own default (a 16 GB board's) fits and the key
+    has no line in .env."""
+    return dict(zip(PG_KEYS, next(values for floor, values in _PG_BY_RAM if ram_gib >= floor)))

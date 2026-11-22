@@ -188,21 +188,6 @@ def machine_line(m: dict, preset: Optional[str]) -> str:
     return f"{round(m['ram_gib'])} GB RAM, {m['cores']} cores, Docker's data on {disk}{said}"
 
 
-def pg_settings(ram_gib: float) -> Dict[str, str]:
-    """PostgreSQL's memory for this board (the compose file's defaults are a
-    16 GB board's); nothing is written where the defaults fit."""
-    if ram_gib >= 12:
-        return {}
-    if ram_gib >= 6:
-        return {"PG_SHARED_BUFFERS": "512MB", "PG_EFFECTIVE_CACHE_SIZE": "3GB",
-                "PG_MAINTENANCE_WORK_MEM": "256MB", "PG_MAX_WAL_SIZE": "2GB"}
-    if ram_gib >= 3:
-        return {"PG_SHARED_BUFFERS": "256MB", "PG_EFFECTIVE_CACHE_SIZE": "1GB",
-                "PG_MAINTENANCE_WORK_MEM": "128MB", "PG_MAX_WAL_SIZE": "1GB"}
-    return {"PG_SHARED_BUFFERS": "128MB", "PG_EFFECTIVE_CACHE_SIZE": "512MB",
-            "PG_MAINTENANCE_WORK_MEM": "64MB", "PG_MAX_WAL_SIZE": "512MB", "PG_WORK_MEM": "4MB"}
-
-
 # -- the checks ------------------------------------------------------------------------
 
 def refuse_root() -> None:
@@ -615,8 +600,11 @@ def database_volume_exists() -> bool:
 
 
 def env_plan(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optional[str],
-             ram_gib: float, assistant: str, volume_exists: bool, roots: bool = True) -> Dict[str, str]:
-    """The keys the setup owns and their values, given what .env holds. A key
+             ram_gib: float, assistant: str, volume_exists: bool,
+             roots: bool = True) -> Dict[str, Optional[str]]:
+    """The keys the setup owns and their values, given what .env holds — None
+    for a key that is to have no line (PostgreSQL's, where the compose
+    file's own defaults fit this machine's memory). A key
     it does not own is never in the plan. The database's password is made
     only at the volume's birth, and a node that already lives is not born
     again: `preset` (birth_of) is written only before that birth. What the
@@ -624,10 +612,10 @@ def env_plan(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optio
     and `asked_preset` (--preset) whenever it is given — the way an install
     set up without the models gets them. `roots` false (keeps_music_line):
     the music line and the compose files stay as they are."""
-    plan: Dict[str, str] = {}
+    plan: Dict[str, Optional[str]] = {}
     if "POSTGRES_PASSWORD" not in held and not volume_exists:
         plan["POSTGRES_PASSWORD"] = secrets.token_urlsafe(24)
-    plan.update(pg_settings(ram_gib))
+    plan.update(machine_tier.pg_settings(ram_gib))
     if not volume_exists and (preset or "SAUTIUM_BIRTH_PRESET" in held):
         plan["SAUTIUM_BIRTH_PRESET"] = preset or ""
     if asked_preset is not None:
@@ -651,15 +639,18 @@ def env_plan(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optio
     return plan
 
 
-def write_env(plan: Dict[str, str]) -> List[str]:
+def write_env(plan: Dict[str, Optional[str]]) -> List[str]:
+    """.env brought to the plan; the keys set. A key the plan gives no line
+    (None) is removed where it has one, and that is said here: compose then
+    reads its file's own default."""
     path = ROOT / ".env"
     if not path.exists():
         agent._write_private(path, b"# Sautium on this machine. Written by ./sautium; your own lines are kept.\n")
-    held = agent.read_env(path)
-    changed = [key for key, value in plan.items() if held.get(key) != value]
-    for key in changed:
-        agent.set_env(path, key, plan[key])
+    changed, removed = agent.apply_env(path, plan)
     os.chmod(path, 0o600)
+    if removed:
+        say(f".env: {', '.join(removed)} removed: this machine's memory fits the compose file's "
+            f"default{'s' if len(removed) > 1 else ''}")
     return changed
 
 
@@ -752,10 +743,26 @@ def build(state: dict, env: Dict[str, str]) -> None:
     save_state(state)
 
 
+def backend_container() -> str:
+    """The backend container's id, running or not; "" where there is none."""
+    return out(run(agent.compose_cmd(ROOT) + ["ps", "--all", "-q", "backend"]))
+
+
 def start() -> None:
     say("Starting Sautium (its first start prepares the database: a few minutes) …")
+    # `up` makes the backend's container again where its image or its lines
+    # changed, and the old one's log goes with it: taken first, and kept only
+    # if the container did go — a run that changed nothing must not push an
+    # update's kept log out
+    before = backend_container()
+    kept = agent.take_log(ROOT, "setup") if before else None
     result = run(agent.compose_cmd(ROOT) + ["up", "-d", "--no-build", "--wait", "--wait-timeout", "2400"],
                  timeout=2500)
+    if kept is not None:
+        if backend_container() == before:
+            kept.unlink()
+        else:
+            agent.trim_logs(ROOT)
     if result.returncode != 0:
         why = result.stderr.decode("utf-8", "replace").strip().splitlines()[-6:]
         raise Stop("Sautium did not start:\n    " + "\n    ".join(why)

@@ -105,15 +105,21 @@ def test_dockers_data_on_a_card_or_a_removable_disk_is_told_from_lsblk():
 
 
 def test_postgres_is_sized_for_the_board():
-    assert setup.pg_settings(15.5) == {}                              # the compose file's own defaults
-    assert setup.pg_settings(7.6)["PG_SHARED_BUFFERS"] == "512MB"
-    assert setup.pg_settings(3.7) == {"PG_SHARED_BUFFERS": "256MB", "PG_EFFECTIVE_CACHE_SIZE": "1GB",
-                                      "PG_MAINTENANCE_WORK_MEM": "128MB", "PG_MAX_WAL_SIZE": "1GB"}
-    small = setup.pg_settings(1.8)
+    """Every key at every size — a value, or None where the compose file's
+    own default fits: the plan can then take a small board's line away."""
+    pg, keys = setup.machine_tier.pg_settings, setup.machine_tier.PG_KEYS
+    for ram in (0.9, 1.8, 3.7, 7.6, 15.5, 64):
+        assert tuple(pg(ram)) == keys
+    assert set(pg(15.5).values()) == set(pg(12).values()) == {None}   # the compose file's own defaults
+    assert pg(7.6)["PG_SHARED_BUFFERS"] == "512MB" and pg(11.9)["PG_SHARED_BUFFERS"] == "512MB"
+    assert pg(3.7) == {"PG_SHARED_BUFFERS": "256MB", "PG_EFFECTIVE_CACHE_SIZE": "1GB",
+                       "PG_MAINTENANCE_WORK_MEM": "128MB", "PG_MAX_WAL_SIZE": "1GB", "PG_WORK_MEM": None}
+    small = pg(1.8)
     assert small["PG_SHARED_BUFFERS"] == "128MB" and small["PG_WORK_MEM"] == "4MB"
     compose = (REPO / "docker-compose.pi.yml").read_text(encoding="utf-8")
-    for key in set(setup.pg_settings(1.8)):
+    for key in keys:
         assert "${%s:-" % key in compose, key                          # every key it writes is one the file reads
+    assert not hasattr(setup, "pg_settings")                          # one table, the agent's update's too
 
 
 # -- .env --------------------------------------------------------------------------------
@@ -129,12 +135,12 @@ def test_a_first_run_writes_the_birth_and_what_the_image_carries():
     assert len(plan.pop("POSTGRES_PASSWORD")) >= 32
     assert plan == {
         "PG_SHARED_BUFFERS": "256MB", "PG_EFFECTIVE_CACHE_SIZE": "1GB", "PG_MAINTENANCE_WORK_MEM": "128MB",
-        "PG_MAX_WAL_SIZE": "1GB", "SAUTIUM_BIRTH_PRESET": "nano", "SAUTIUM_IMAGE_MODELS": "0",
+        "PG_MAX_WAL_SIZE": "1GB", "PG_WORK_MEM": None, "SAUTIUM_BIRTH_PRESET": "nano", "SAUTIUM_IMAGE_MODELS": "0",
         "SAUTIUM_IMAGE_STREAMING": "0", "SAUTIUM_IMAGE_ASSISTANT_CLI": "0", "CLAUDE_CODE_ENABLED": "false",
         "DEFAULT_PROVIDER": "none", "COMPOSE_FILE": "docker-compose.pi.yml:host/compose.roots.yml",
         "MUSIC_LIBRARY_PATH": "./data/no-library"}
     full = _plan({}, preset=None, ram_gib=15.5, assistant="claude")
-    assert "SAUTIUM_BIRTH_PRESET" not in full and "PG_SHARED_BUFFERS" not in full
+    assert "SAUTIUM_BIRTH_PRESET" not in full and full["PG_SHARED_BUFFERS"] is None
     assert (full["SAUTIUM_IMAGE_MODELS"], full["SAUTIUM_IMAGE_STREAMING"],
             full["SAUTIUM_IMAGE_ASSISTANT_CLI"], full["CLAUDE_CODE_ENABLED"]) == ("1", "1", "1", "true")
     # What the agent's update builds with is what the setup records
@@ -374,6 +380,83 @@ def test_the_env_file_keeps_every_line_the_setup_does_not_own(checkout):
     env.unlink()
     setup.write_env({"DEFAULT_PROVIDER": "none"})
     assert stat.S_IMODE(env.stat().st_mode) == 0o600 and "DEFAULT_PROVIDER=none" in env.read_text()
+
+
+def test_a_board_that_grew_loses_the_small_boards_postgres_lines_and_is_told(checkout, capsys):
+    """Before this the setup only set: a 2 GB board's five lines stayed on
+    the 16 GB board the card moved to, for ever."""
+    env = checkout / ".env"
+    env.write_text("# mine\nPOSTGRES_PASSWORD=kept\nPG_SHARED_BUFFERS=128MB\nPG_EFFECTIVE_CACHE_SIZE=512MB\n"
+                   "PG_MAINTENANCE_WORK_MEM=64MB\nPG_MAX_WAL_SIZE=512MB\nPG_WORK_MEM=4MB\nPG_MY_OWN=1\n")
+    held = setup.agent.read_env(env)
+    plan = _plan(held, preset=None, ram_gib=15.5, volume_exists=True)
+    changed = setup.write_env(plan)
+    assert not [key for key in changed if key.startswith("PG_")]
+    assert "PG_" not in env.read_text().replace("PG_MY_OWN=1", "") and "PG_MY_OWN=1\n" in env.read_text()
+    assert env.read_text().startswith("# mine\nPOSTGRES_PASSWORD=kept\n")
+    said = capsys.readouterr().out
+    assert (".env: PG_SHARED_BUFFERS, PG_EFFECTIVE_CACHE_SIZE, PG_MAINTENANCE_WORK_MEM, PG_MAX_WAL_SIZE, "
+            "PG_WORK_MEM removed: this machine's memory fits the compose file's defaults") in said
+    setup.write_env(plan)
+    assert "removed" not in capsys.readouterr().out                    # run again: nothing to say
+    # the 4 GB board: its own four values, the 2 GB board's fifth line gone
+    env.write_text(env.read_text() + "PG_WORK_MEM=4MB\nPG_SHARED_BUFFERS=128MB\n")
+    changed = setup.write_env(_plan(setup.agent.read_env(env), ram_gib=3.7, volume_exists=True))
+    assert "PG_SHARED_BUFFERS" in changed and "PG_WORK_MEM" not in changed
+    assert setup.agent.read_env(env)["PG_SHARED_BUFFERS"] == "256MB" and "PG_WORK_MEM" not in setup.agent.read_env(env)
+    assert "PG_WORK_MEM removed: this machine's memory fits the compose file's default\n" in capsys.readouterr().out
+
+
+class _Docker:
+    """`docker compose` as start() asks it: the backend container's id, its
+    log, and an `up` that makes the container again or leaves it."""
+
+    def __init__(self, monkeypatch, container, remade):
+        self.container, self.remade, self.asked = container, remade, []
+        monkeypatch.setattr(setup, "run", self.run)
+        monkeypatch.setattr(setup.agent, "_run", self.run)
+
+    def run(self, args, **kw):
+        text = " ".join(args)
+        self.asked.append("ps" if " ps " in text else "logs" if " logs " in text else "up" if " up " in text else text)
+        out = b""
+        if " ps " in text:
+            out = self.container.encode()
+        elif " logs " in text:
+            out = b"backend  | the old container's last lines\n"
+        elif " up " in text and self.remade:
+            self.container = "new" + self.container
+        return subprocess.CompletedProcess(args, 0, out, b"")
+
+
+def test_a_start_that_makes_the_container_again_keeps_the_old_ones_log(checkout, monkeypatch):
+    docker = _Docker(monkeypatch, "abc123", remade=True)
+    setup.start()
+    assert docker.asked == ["ps", "logs", "up", "ps"]                  # taken before the container goes
+    kept = setup.agent.kept_logs(checkout)
+    assert len(kept) == 1 and kept[0].name.endswith("-setup.log")
+    assert kept[0].read_text() == "backend  | the old container's last lines\n"
+    assert stat.S_IMODE(kept[0].stat().st_mode) == 0o600
+
+
+def test_a_start_that_leaves_the_container_keeps_nothing_and_trims_nothing(checkout, monkeypatch):
+    """Run again with nothing changed, the setup must not push an update's
+    kept log out with a copy of what Docker still holds."""
+    logs = checkout / "host" / "logs"
+    logs.mkdir()
+    earlier = ["backend-20261120-101500-update.log", "backend-20261121-101500-undo.log",
+               "backend-20261122-101500-update.log"]
+    for name in earlier:
+        (logs / name).write_text("kept\n")
+    _Docker(monkeypatch, "abc123", remade=False)
+    setup.start()
+    assert sorted(p.name for p in logs.iterdir()) == earlier
+
+
+def test_a_first_start_has_no_log_to_keep(checkout, monkeypatch):
+    docker = _Docker(monkeypatch, "", remade=True)
+    setup.start()
+    assert docker.asked == ["ps", "up"] and not (checkout / "host" / "logs").exists()
 
 
 # -- the roots ---------------------------------------------------------------------------

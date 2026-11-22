@@ -55,8 +55,9 @@ REPORT_MAX = 4 * 1024 * 1024
 # same; a test holds them together), and the agent's floor on making one
 REPORT_FORMAT = 2
 MACHINE_SECTIONS = ("versions", "board", "power", "disk", "containers", "restarts")
-LOG_SECTIONS = {"log: backend": "backend.log", "log: postgres": "postgres.log",
-                "log: the host agent": "host-agent.log"}
+LOG_SECTIONS = {"log: backend": "backend.log",
+                "log: backend before the last update": "backend-before-update.log",
+                "log: postgres": "postgres.log", "log: the host agent": "host-agent.log"}
 DIAGNOSTICS_FLOOR = 600
 
 

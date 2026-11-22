@@ -401,6 +401,8 @@ def _install_copy(root: Path, body_text: str = None) -> None:
     """The checkout's body as a starter finds it."""
     (root / "scripts").mkdir(exist_ok=True)
     (root / "scripts" / "host_agent.py").write_text(body_text or BODY.read_text())
+    (root / "desktop").mkdir(exist_ok=True)
+    shutil.copy(REPO / "desktop" / "machine_tier.py", root / "desktop" / "machine_tier.py")
 
 
 def _start(root: Path, starter: Path = None, env: dict = None) -> subprocess.CompletedProcess:
@@ -797,6 +799,10 @@ def test_the_body_answers_its_selftest(checkout):
     assert subprocess.run([sys.executable, "-I", str(body), "selftest"], env=env).returncode == 2
     assert subprocess.run([sys.executable, "-I", str(body), "selftest"],
                           env={**env, "SAUTIUM_HOST_STARTER_API": "1"}).returncode == 0
+    # a release without the table its own next update sizes PostgreSQL by cannot update: not kept
+    (checkout / "desktop" / "machine_tier.py").unlink()
+    assert subprocess.run([sys.executable, "-I", str(body), "selftest"], capture_output=True,
+                          env={**env, "SAUTIUM_HOST_STARTER_API": "1"}).returncode != 0
 
 
 class _Update:
@@ -804,8 +810,13 @@ class _Update:
     what they were asked: the order of the steps, and what a failure at each
     one leaves."""
 
-    def __init__(self, checkout, monkeypatch, *, fail_at=None, healthy=(True,), body_ok=True):
+    def __init__(self, checkout, monkeypatch, *, fail_at=None, healthy=(True,), body_ok=True, logs=None,
+                 ram_gib=16):
         self.calls, self.fail_at, self.healthy, self.root = [], fail_at, list(healthy), checkout
+        self.logs = logs
+        tier = ha.machine_tier()
+        tier.machine_memory_kib = lambda: int(ram_gib * 1024 ** 2)
+        monkeypatch.setattr(ha, "machine_tier", lambda: tier)
         (checkout / ".env").write_text("POSTGRES_DB=music_ai\nSAUTIUM_BACKEND_IMAGE=sautium-backend:v0.2.0-old\n")
         offered = {"name": "v0.3.0", "commit": "c" * 40}
         monkeypatch.setattr(ha, "survey", lambda root=None: {"head": "a" * 40, "installed": None, "offered": offered,
@@ -831,6 +842,13 @@ class _Update:
 
     def run(self, args, **kw):
         joined = " ".join(args)
+        if self.logs is not None:
+            if "logs --no-color" in joined:
+                assert kw.get("stderr") == subprocess.STDOUT     # one stream, in the order it was printed
+                self.calls.append("log")
+                return subprocess.CompletedProcess(args, 0, self.logs, None)
+            if "rm -f backend" in joined:
+                self.calls.append("rm")
         for needle, name in (("stop backend", "stop"), ("CREATE DATABASE", "copy"),
                              ("RENAME TO", "restore"), ("checkout --quiet --detach", "move"),
                              ("checkout --quiet --force --detach", "back"), ("docker build", "build"),
@@ -1138,3 +1156,189 @@ def test_env_lines_are_split_at_newlines_alone(tmp_path):
     env.write_bytes(b"A=1\r\nB=x\x0cy\nSAUTIUM_BACKEND_IMAGE=old\n")
     ha.set_env(env, "SAUTIUM_BACKEND_IMAGE", "new")
     assert env.read_bytes() == b"A=1\r\nB=x\x0cy\nSAUTIUM_BACKEND_IMAGE=new\n"
+
+
+# -- .env: a key removed, and PostgreSQL's lines by the machine (PI-NODE-2C §7) --
+
+def test_one_env_key_is_removed_and_every_other_line_kept(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("# PG_WORK_MEM=64MB was mine once\nPOSTGRES_PASSWORD=secret\nPG_WORK_MEM=4MB\n"
+                   "MUSIC_LIBRARY_PATH='/srv/music'\n PG_WORK_MEM = 8MB\n")
+    env.chmod(0o640)
+    ha.unset_env(env, "PG_WORK_MEM")
+    assert env.read_text() == ("# PG_WORK_MEM=64MB was mine once\nPOSTGRES_PASSWORD=secret\n"
+                               "MUSIC_LIBRARY_PATH='/srv/music'\n")
+    assert stat.S_IMODE(env.stat().st_mode) == 0o640
+    assert "PG_WORK_MEM" not in ha.read_env(env)
+    ha.unset_env(env, "NOT_THERE")
+    assert env.read_text().count("\n") == 3
+    assert [p.name for p in tmp_path.iterdir()] == [".env"]              # no file left beside it
+
+
+SMALL_BOARD = ("POSTGRES_PASSWORD=secret\nPG_SHARED_BUFFERS=128MB\nPG_EFFECTIVE_CACHE_SIZE=512MB\n"
+               "PG_MAINTENANCE_WORK_MEM=64MB\nPG_MAX_WAL_SIZE=512MB\nPG_WORK_MEM=4MB\nPG_MY_OWN=1\n")
+
+
+def test_a_board_that_grew_loses_the_small_boards_lines(tmp_path):
+    tier = ha.machine_tier()
+    assert set(tier.pg_settings(1.8)) == set(tier.pg_settings(15.5)) == set(tier.PG_KEYS)
+    env = tmp_path / ".env"
+    env.write_text(SMALL_BOARD)
+    changed, removed = ha.apply_env(env, tier.pg_settings(15.5))
+    assert changed == [] and removed == list(tier.PG_KEYS)
+    assert env.read_text() == "POSTGRES_PASSWORD=secret\nPG_MY_OWN=1\n"   # a hand's sixth line is not the table's
+    assert ha.apply_env(env, tier.pg_settings(15.5)) == ([], [])
+    changed, removed = ha.apply_env(env, tier.pg_settings(3.7))
+    assert removed == [] and ha.read_env(env) == {
+        "POSTGRES_PASSWORD": "secret", "PG_MY_OWN": "1", "PG_SHARED_BUFFERS": "256MB",
+        "PG_EFFECTIVE_CACHE_SIZE": "1GB", "PG_MAINTENANCE_WORK_MEM": "128MB", "PG_MAX_WAL_SIZE": "1GB"}
+    changed, removed = ha.apply_env(env, tier.pg_settings(1.8))             # and one that shrank
+    assert "PG_WORK_MEM" in changed and ha.read_env(env)["PG_SHARED_BUFFERS"] == "128MB"
+
+
+def test_the_agents_table_is_the_one_beside_its_body():
+    tier = ha.machine_tier()
+    assert Path(tier.__file__) == REPO / "desktop" / "machine_tier.py"
+    compose = (REPO / ha.COMPOSE_FILE).read_text(encoding="utf-8")
+    for key in tier.PG_KEYS:
+        assert "${%s:-" % key in compose, key                              # every key is one the file reads
+
+
+def test_an_update_sets_postgres_by_the_machines_memory_before_the_start(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, ram_gib=15.5)
+    (checkout / ".env").write_text((checkout / ".env").read_text() + SMALL_BOARD)
+    seen = {}
+    healthy = ha._healthy
+    monkeypatch.setattr(ha, "_healthy", lambda root: seen.update(ha.read_env(root / ".env")) or healthy(root))
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"
+    # the lines are there when compose starts the node: PostgreSQL is made again in the one `up`
+    assert seen["SAUTIUM_BACKEND_IMAGE"] == "sautium-backend:v0.3.0-cccccccccccc"
+    assert not [key for key in seen if key in ha.machine_tier().PG_KEYS] and seen["PG_MY_OWN"] == "1"
+
+
+def test_the_way_back_leaves_postgres_lines_as_the_machine_has_them(checkout, monkeypatch):
+    _Update(checkout, monkeypatch, healthy=(False, True), ram_gib=3.7)
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "undone"
+    env = ha.read_env(checkout / ".env")
+    assert env["SAUTIUM_BACKEND_IMAGE"] == "sautium-backend:v0.2.0-old"     # the release's line went back
+    assert env["PG_SHARED_BUFFERS"] == "256MB" and "PG_WORK_MEM" not in env  # the machine's stayed
+
+
+def test_a_machine_whose_memory_cannot_be_read_keeps_its_lines(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch)
+    ha.machine_tier().machine_memory_kib = lambda: None
+    (checkout / ".env").write_text((checkout / ".env").read_text() + SMALL_BOARD)
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"
+    assert ha.read_env(checkout / ".env")["PG_SHARED_BUFFERS"] == "128MB"
+
+
+# -- the log an update loses (PI-NODE-2C §12.1) --------------------------------
+
+LOG = b"".join(b"backend  | line %d\n" % n for n in range(200)) + b"backend  | setup code: K7QM-ZP4X\n"
+
+
+def _logged(monkeypatch, text=LOG):
+    def run(args, **kw):
+        assert args[-5:] == ["logs", "--no-color", "--tail", "5000", "backend"] and not kw.get("check")
+        return subprocess.CompletedProcess(args, 0, text, None)
+    monkeypatch.setattr(ha, "_run", run)
+
+
+def test_the_outgoing_log_is_kept_private_scrubbed_and_bounded(checkout, monkeypatch):
+    _logged(monkeypatch)
+    path = ha.keep_log(checkout, "update")
+    assert path.parent == checkout / "host" / "logs" and ha.KEPT_NAME.fullmatch(path.name)
+    assert path.name.endswith("-update.log")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    text = path.read_text()
+    assert text.startswith("backend  | line 0\n") and "K7QM-ZP4X" not in text and "XXXX-XXXX" in text
+    assert [p.name for p in path.parent.iterdir()] == [path.name]         # no half-written file beside it
+    # more than a mebibyte: its end, from a line's start
+    _logged(monkeypatch, b"".join(b"backend  | %07d %s\n" % (n, b"x" * 80) for n in range(20000)))
+    big = ha.take_log(checkout, "undo", now=86400.0)
+    assert big.name == "backend-19700102-000000-undo.log"
+    data = big.read_bytes()
+    assert len(data) <= ha.KEPT_MAX and data.startswith(b"backend  | ") and data.endswith(b"0019999 " + b"x" * 80 + b"\n")
+
+
+def test_the_three_newest_logs_are_kept_and_nothing_else_is_touched(checkout, monkeypatch):
+    _logged(monkeypatch)
+    logs = checkout / "host" / "logs"
+    logs.mkdir()
+    (logs / "notes.txt").write_text("the person's\n")
+    (logs / "backend-20261122-101500-other.log").write_text("not one the agent names\n")
+    for day, why in enumerate(("update", "undo", "setup", "update", "update"), start=1):
+        assert ha.take_log(checkout, why, now=day * 86400.0)
+    ha.trim_logs(checkout)
+    assert [p.name for p in ha.kept_logs(checkout)] == [
+        "backend-19700106-000000-update.log", "backend-19700105-000000-update.log",
+        "backend-19700104-000000-setup.log"]
+    assert sorted(p.name for p in logs.iterdir())[-2:] == ["backend-20261122-101500-other.log", "notes.txt"]
+    ha.keep_log(checkout, "update")                                        # the verbs' way trims as it keeps
+    assert len(ha.kept_logs(checkout)) == ha.KEPT_LOGS
+    assert ha.kept_logs(checkout / "nowhere") == []
+
+
+def test_a_log_that_cannot_be_kept_stops_nothing(checkout, monkeypatch, capfd):
+    _logged(monkeypatch, b"")
+    assert ha.keep_log(checkout, "update") is None                        # no container, no log: no empty file
+    assert not (checkout / "host" / "logs").exists()
+
+    def timeout(args, **kw):
+        raise subprocess.TimeoutExpired(args, 120)
+    monkeypatch.setattr(ha, "_run", timeout)
+    assert ha.keep_log(checkout, "update") is None
+    _logged(monkeypatch)
+    (checkout / "host" / "logs").write_text("a file where the folder would be\n")
+    assert ha.keep_log(checkout, "update") is None
+    assert capfd.readouterr().err.count("the backend's log was not kept (update)") == 2
+    assert ha.kept_logs(checkout) == []                                   # and a report still names none
+
+
+def test_an_update_keeps_the_log_after_the_stop_and_before_the_container_goes(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, logs=LOG)
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"
+    assert up.calls == ["status", "build", "stop", "log", "copy", "move"]
+    kept = ha.kept_logs(checkout)
+    assert len(kept) == 1 and kept[0].name.endswith("-update.log") and "line 199" in kept[0].read_text()
+
+
+def test_the_way_back_keeps_the_failed_releases_log_before_it_removes_its_container(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, logs=LOG, healthy=(False, True))
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "undone"
+    assert up.calls == ["status", "build", "stop", "log", "copy", "move",
+                        "stop", "back", "log", "rm", "databases", "restore"]
+    assert {p.name.rsplit("-", 1)[1] for p in ha.kept_logs(checkout)} == {"update.log", "undo.log"}
+
+
+def test_an_update_goes_on_when_its_log_cannot_be_kept(checkout, monkeypatch):
+    up = _Update(checkout, monkeypatch, logs=LOG)
+    (checkout / "host" / "logs").write_text("a file where the folder would be\n")
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"
+    assert up.calls == ["status", "build", "stop", "log", "copy", "move"]
+
+
+def test_the_report_names_the_kept_logs_and_carries_the_newest_as_a_log(checkout, monkeypatch):
+    def run(args, **kw):
+        text = " ".join(args)
+        out = (b"sautium-backend running (healthy)" if " ps " in f" {text} "
+               else b"backend  | now\n" if text.endswith("--tail 2000 backend") else b"")
+        return subprocess.CompletedProcess(args, 0, out, b"")
+    monkeypatch.setattr(ha, "_run", run)
+    report = json.loads(ha.verb_diagnostics({}, 1000.0, checkout)[3])["sections"]
+    assert report["containers"] == "sautium-backend running (healthy)\nkept logs: none"
+    assert "log: backend before the last update" not in report and report["log: backend"] == "backend  | now"
+
+    logs = checkout / "host" / "logs"
+    logs.mkdir()
+    (logs / "backend-20261120-101500-update.log").write_text("older\n" * 2000)
+    (logs / "backend-20261122-193000-undo.log").write_text("".join(f"line {n}\n" for n in range(3000)))
+    report = json.loads(ha.verb_diagnostics({}, 2000.0, checkout)[3])["sections"]
+    assert report["containers"].endswith(
+        "\nkept logs: backend-20261122-193000-undo.log 28 KiB, backend-20261120-101500-update.log 11 KiB")
+    kept = report["log: backend before the last update"].splitlines()
+    assert kept[0] == "(host/logs/backend-20261122-193000-undo.log)"
+    assert kept[1] == "line 1000" and kept[-1] == "line 2999" and len(kept) == ha.LOG_TAIL + 1
+    # a log section on the node's side too: it rides a bundle only with the person's tick
+    assert "log: backend before the last update" in ha.LOG_SECTIONS
+    assert list(report)[list(report).index("log: backend") + 1] == "log: backend before the last update"
