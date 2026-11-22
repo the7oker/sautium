@@ -93,8 +93,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- 'convolution' = only convolution), where a DSP sample came from, how a
 -- benchmark run ended ('interrupted' = the process died mid-run), and how
 -- one of its points did ('unstarted' = HQPlayer still building it past the
--- run's build limit, once a setting that started earlier in the run started
--- again: this host does not get it going, or hung).
+-- run's build limit, answering all through, once a setting that started
+-- earlier in the run started again: this host does not get it going;
+-- 'hung' = silent past that limit: it stopped HQPlayer).
 DO $$ BEGIN
     CREATE TYPE hqp_cuda AS ENUM ('off', 'full', 'convolution');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

@@ -1025,8 +1025,7 @@ def test_a_run_measures_into_the_ledger_puts_hqplayer_back_and_returns_the_outpu
                            own_mode, last_rate IS NOT NULL, note
                       FROM hqp_benchmark_runs""") == \
         [("done", 5, 4, 0.6, True, True, "full", False, None, True,
-          "HQPlayer refused 1 combination; 2 rates not measured — the rate next to it on its ladder "
-          "answers for it")]
+          "HQPlayer refused 1 combination")]
     # the rungs under a start that keeps up: answered for by it, never asked
     assert run.q("""SELECT rate_hz, shaper, implied_from, implied_ok FROM hqp_benchmark_points
                      WHERE result = 'implied' ORDER BY shaper""") == \
@@ -1203,7 +1202,7 @@ def test_a_combination_hqplayer_stops_at_play_is_refused_in_seconds(run):
     assert run.q("SELECT result::text, note FROM hqp_benchmark_points WHERE filter = 'sinc-L'") == \
         [("refused", "HQPlayer stopped it again without playing — it does not run this combination "
                      "(its log says why)")]
-    assert run.q("SELECT note FROM hqp_benchmark_runs")[0][0].startswith("HQPlayer refused 2 combinations;")
+    assert run.q("SELECT note FROM hqp_benchmark_runs") == [("HQPlayer refused 2 combinations",)]
     assert fake.settings() == before
     # asked and answered: a later run does not ask it again
     assert not any(p.key[1] == "sinc-L" for p in _plan_now(run))
@@ -1328,7 +1327,7 @@ def test_a_ladder_steps_up_while_it_keeps_up_and_down_while_its_start_does_not(r
     # a refusal stops no climb: the 512+fs modulator plays from 512×
     assert asked[(11289600, "ASDM7EC-light 512+fs")] == "refused"
     assert asked[(22579200, "ASDM7EC-light 512+fs")] in ("measured", "unsettled")
-    assert "rates not measured — the rate next to it on its ladder answers for it" in st["note"]
+    assert "1 rate not measured — the rate next to it on its ladder answers for it" in st["note"]
 
 
 def test_a_start_that_does_not_keep_up_steps_down_at_once_and_holds_the_filters_back(run):
@@ -1493,6 +1492,51 @@ def test_hqplayer_restarted_after_a_hang_is_put_back_whole_over_what_it_saved(ru
                  "FROM hqp_benchmark_runs") == [("interrupted", True, True)]
     restored = _run_restored()
     assert restored["data"]["hung"] is True and restored["data"]["volume_left"] is None, restored
+
+
+def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run, monkeypatch):
+    """HQP-BENCH-63 round 1 M4: the person restarts HQPlayer a minute into a
+    silent build, taking it for hung: the point is not made again on it
+    (failed, asked again by a later run, no mark), the run ends saying so,
+    and HQPlayer — answering again — is put back at once."""
+    fake = run.fake
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.2)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.5)
+    before = fake.settings()
+    fake.builds[("sinc-L", 11289600)] = 999.0
+    bench.start()
+    assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
+                 .startswith("HQPlayer is preparing"), 30)
+    fake.builds.clear()
+    fake.restart()
+    assert _wait(lambda: not bench.running(), 60)
+    st = bench.state()
+    assert st["note"].startswith("HQPlayer was restarted while it prepared sinc-L at DSD256 from a "
+                                 "44.1 kHz source. It answered again, and your filter, rate and volume "
+                                 "were put back."), st["note"]
+    assert run.q("SELECT result::text FROM hqp_benchmark_points WHERE filter = 'sinc-L' "
+                 "AND rate_hz = 11289600") == [("failed",)]
+    assert run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert fake.settings() == before
+
+
+def test_a_cancel_in_a_long_silent_build_marks_hqplayer_lost(run, monkeypatch):
+    """Round 1 M4: cancelled a minute into a silent build, HQPlayer still
+    silent — the restart that follows is no one's change: the run is marked
+    lost and put back whole over it."""
+    fake = run.fake
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.2)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.5)
+    monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
+    fake.builds[("sinc-L", 11289600)] = 999.0
+    bench.start()
+    assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
+                 .startswith("HQPlayer is preparing"), 30)
+    bench.cancel()
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["outcome"] == "cancelled"
+    assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
+        [(True, True)]
 
 
 def test_a_long_silent_build_says_hqplayer_is_still_preparing_it(run, monkeypatch):

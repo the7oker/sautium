@@ -2300,7 +2300,9 @@ cooling — so Sautium measures it instead of predicting it
   rate it asked — 0 at the automatic rate slot — a mark by the rate that
   plays; both are read). A rung a neighbour on its ladder answered for
   (`implied`) carries its class in a word ("too slow", "keeps up") and the
-  rate that answered, no speed. Where the readings swung, the mark is their
+  rate that answered, no speed — while that neighbour's newest benchmark
+  answer still says so at today's line; planning never reads those rows (it
+  asks the measurements afresh). Where the readings swung, the mark is their
   range ("21–33×"); "~" is left for a point near the line that did not
   settle. Beside a key the running engine has not measured, the newest
   earlier engine's mark in the same CUDA state and mode is a hint
@@ -2324,9 +2326,10 @@ cooling — so Sautium measures it instead of predicting it
   within 90 days: a benchmark sample or three listens of the key, or an
   earlier run's point that ASKED for it and ended in an answer
   (`hqp_benchmark_points`: measured, unsettled, dropped out, refused, never
-  started on this host, stopped HQPlayer (`hung`), answered for by a
-  neighbour on its ladder (`implied`, since 2026-11-22) — not one that failed
-  to run). A repeat run fills gaps: a combination HQPlayer refuses
+  started on this host, stopped HQPlayer (`hung`, since 2026-11-22;
+  migration 072 named the two silent builds of 2026-11-20 so) — not one that
+  failed to run, nor a rung a neighbour on its ladder answered for
+  (`implied`: written for the sheet, read afresh by every plan)). A repeat run fills gaps: a combination HQPlayer refuses
   ("…512+fs" below 512×) and an adaptive output rate that plays another rate
   than the one asked are never samples of the asked key, and the ledger is
   what keeps them from being planned again. HQPlayer refuses a combination at
@@ -2494,8 +2497,13 @@ cooling — so Sautium measures it instead of predicting it
   hang look the same from outside — 6.3.3 Desktop built poly-sinc-hb-xs at
   44.1 → 768 kHz for 6 min in silence and then ran it at 21×, and hung twice
   at that conversion with the CUDA resampler (2026-11-20) — so the bound
-  stays 10 min. Past a minute of silence the run's line says HQPlayer is
-  still preparing that filter at that rate and that some take minutes here.
+  stays 10 min. Before a minute of silence is out the run's line says
+  HQPlayer is still preparing that filter at that rate and that some take
+  minutes here. Restarted by the person out of a silence past that minute,
+  HQPlayer is not asked the point again in that run: the run ends there
+  (the point failed, asked again by a later run) and puts HQPlayer back at
+  once; cancelled past that minute, the run is marked as having lost
+  HQPlayer, so the restart that follows is put back whole.
   A `hung` point is not asked again on that engine, CUDA state and mode;
   the run ends at once, says HQPlayer needs restarting and that Sautium puts
   everything back when it answers, and marks itself as having lost HQPlayer

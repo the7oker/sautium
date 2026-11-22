@@ -38,8 +38,9 @@ after weeks of listening takes minutes. The grid (build_grid):
 Each point leaves a row in hqp_benchmark_points by what it ASKED — measured,
 unsettled, dropped out, refused by HQPlayer, never started here, stopped
 HQPlayer (hung), or failed — and so does each rung a neighbour on its
-ladder answers for (implied) — and a later run skips every point asked
-before that did not fail (hqp_load.covered): a combination HQPlayer refuses
+ladder answers for (implied: for the sheet, never read by a plan) — and a
+later run skips every point asked before that did not fail
+(hqp_load.covered): a combination HQPlayer refuses
 is never a sample, and an adaptive output rate plays another rate than the
 one asked. HQPlayer refuses
 a combination either at the Set* command or at Play, stopping at once
@@ -578,7 +579,7 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
         if below is not None:
             steps.setdefault(below.step, []).append(below)
 
-    probes = [p for p in probes if p.key not in covered and p.key != own.key]
+    probes = [p for p in probes if p.key not in covered]
     seen = {own.key} | {p.key for p in probes}
     points = [own, *probes]
     for batch in [steps[n] for n in sorted(steps, key=lambda n: (abs(n), n > 0))] + [cross]:
@@ -596,8 +597,8 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
 
 @dataclass(frozen=True)
 class Entry:
-    """One picker entry measured alone — "Measure" on a row the screen marks
-    "Not measured on this computer": a filter or a shaper (a dither, a
+    """One picker entry measured alone — "Test speed" on a row the screen marks
+    "Speed not tested on this computer": a filter or a shaper (a dither, a
     modulator) by name, at the owner's setting otherwise, for the source its
     mark is read at (routers.hqplayer._headroom)."""
     kind: str                 # 'filter' | 'shaper'
@@ -932,10 +933,37 @@ class _Hung(_Lost):
     """HQPlayer stayed silent past BUILD_LIMIT_S."""
 
 
+class _Restarted(_Hung):
+    """HQPlayer came back on a new connection after a long silence
+    (LONG_BUILD_S) in a point: the person restarted what they took for hung."""
+
+
+class _BuildCancelled(_Lost):
+    """A cancel in a long silence (LONG_BUILD_S): HQPlayer may be hung and
+    restarted next — what it shows then is no one's change."""
+
+
 class _HungRun(_Lost):
-    """A point left HQPlayer silent past BUILD_LIMIT_S: the run ends at once,
-    knowing it lost HQPlayer — whatever HQPlayer shows when it answers again
-    is a restart's, put back whole (_recover), never a person's change."""
+    """HQPlayer stopped answering in a point, or was restarted out of a long
+    silence in one: the run ends at once, knowing it lost HQPlayer — what
+    HQPlayer shows when it answers again is a restart's, put back whole
+    (_recover), never a person's change. `head`: what happened; `marked`:
+    the combination is ledgered as one that stops HQPlayer."""
+
+    def __init__(self, head: str, *, marked: bool = False):
+        self.head, self.marked = head, marked
+        super().__init__(self.words(reached=False))
+
+    def words(self, *, reached: bool) -> str:
+        """The run's note: what happened, then what the person does — or, put
+        back already (HQPlayer answered the restore), that it was."""
+        words = self.head + (" It answered again, and your filter, rate and volume were put back."
+                             if reached else " Restart HQPlayer: Sautium puts your filter, rate and "
+                                             "volume back as soon as it answers.")
+        if self.marked:
+            words += (" This combination is now marked as one that stops HQPlayer and is not tried "
+                      "again.")
+        return words
 
 
 class _Link:
@@ -1049,6 +1077,7 @@ def pace(endpoint_id: int) -> float:
         ), each AS (
             SELECT extract(epoch FROM p.at - lag(p.at, 1, l.started_at) OVER (ORDER BY p.at)) AS s
               FROM hqp_benchmark_points p JOIN last l ON l.id = p.run_id
+             WHERE p.result <> 'implied'          -- written beside a point, never played
         )
         SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY s) AS s FROM each
     """, {"e": endpoint_id})
@@ -1327,9 +1356,9 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
         own: Optional[dict] = None
         stats: Dict[str, Any] = {"measured": 0, "dropouts": [], "own": [], "refused": 0,
                                  "unstarted": 0, "failed": 0, "implied": 0, "deferred": 0,
-                                 "skipped": 0, "stopped": []}
+                                 "stopped": []}
         outcome, note = "failed", None
-        hung = False
+        hung = lost_build = False
         try:
             st, filters, shapers, rates = _again(lambda: _enter_mode(link, mode_index, switched))
             if switched:
@@ -1366,9 +1395,11 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
         except _Abort as e:
             outcome, note = "failed", str(e)
         except _HungRun as e:
-            outcome, note, hung = "failed", str(e), True
+            outcome, note, hung = "failed", e, True
         except _Lost as e:
             outcome, note = ("cancelled", None) if _cancel.is_set() else ("failed", str(e))
+            # a cancel in a long silence: the restart that may follow is no one's change
+            lost_build = isinstance(e, _BuildCancelled)
         except Exception as e:          # recorded on the run, whatever it was
             logger.exception("HQPlayer benchmark failed")
             outcome, note = "failed", _why(e)
@@ -1376,9 +1407,12 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             _live = None                # a second cancel must not cut the put-back
             reached, restore_note, gone, measured_left = _restore(link, pre, own, mute,
                                                                   switched)
-            # A hang's words already say HQPlayer is put back once it answers
-            note = "; ".join(x for x in (note, None if hung and not reached else restore_note)
-                             if x) or None
+            if hung:
+                # its words say what the restore did, or that it is owed
+                note = "; ".join(x for x in (note.words(reached=reached),
+                                             restore_note if reached else None) if x)
+            else:
+                note = "; ".join(x for x in (note, restore_note) if x) or None
             # An HQPlayer that did not answer the restore keeps the run
             # open: the next attach, or its next answer, puts it back
             # (recover) — unless the owner changes it first. One that went
@@ -1389,7 +1423,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             if not reached:
                 _owe(run_id)
             _close_run(run_id, outcome, note, stats, finished=reached,
-                       lost=(gone or hung) and not _halt.is_set(),
+                       lost=(gone or hung or lost_build) and not _halt.is_set(),
                        unchecked=reached and measured_left)
         return outcome, note
     finally:
@@ -1485,7 +1519,8 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
     points = list(grid.points)
     known = dict(grid.known)
     passed = set(grid.covered)          # and what this run has asked so far
-    implied: set = set()                # the rungs this run wrote as answered for
+    implied: set = set()                # the rungs a neighbour answers for now
+    standing = hqp_load.implied(ctx)    # their rows, as the ledger holds them
 
     def step_down(p: Point) -> None:
         if p.ladder is None or i == len(points):
@@ -1500,8 +1535,10 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
 
     def imply(ladders) -> None:
         """Every rung of these ladders a neighbour now answers for, not asked
-        yet: its row, so the sheet and Compare by ear read it as too slow or
-        keeping up here rather than as never measured."""
+        yet: its row — written again only when what answers for it changed —
+        so the sheet and Compare by ear read it as too slow or keeping up
+        here rather than as never measured. Planning never reads those rows:
+        it asks _implied afresh (hqp_load.keeps_up)."""
         for lid in ladders:
             rungs = grid.rungs[lid]
             for r in rungs:
@@ -1512,8 +1549,10 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                     continue
                 passed.add(r.key)
                 implied.add(r.key)
-                _ledger(run_id, r, "implied", None, implied_from=by[0].rate_hz, implied_ok=by[1])
-                stats["implied"] += 1
+                answer = (by[0].rate_hz, by[1])
+                if standing.get(r.key) != answer:
+                    _ledger(run_id, r, "implied", None, implied_from=answer[0], implied_ok=answer[1])
+                    standing[r.key] = answer
 
     applied: Dict[str, Any] = {}
     failures: Dict[str, int] = {}
@@ -1533,17 +1572,15 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
             known.update(grid.known)
             points[i:] = [*(q for q in grid.points[1:-1] if q.key not in passed), grid.points[-1]]
             imply(grid.rungs)
-            if i == len(points):
-                break
         p = points[i]
         i += 1
         if not p.own and p.key in implied:
+            stats["implied"] += 1
             continue
         if grid.deferred(p, known):
             stats["deferred"] += 1
             continue
         if p.source in stopped:
-            stats["skipped"] += 1
             continue
         asked += 1
         passed.add(p.key)
@@ -1605,6 +1642,10 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                     continue              # it says nothing of this point: asked next run
                 if again.get("cancelled"):
                     return "cancelled", None
+                if again.get("hung"):
+                    # silent, starting the control again: HQPlayer stopped
+                    # answering — no mark on either point
+                    raise _HungRun(_hung_head(c, "started"))
                 if not again.get("started"):
                     raise _Abort(f"HQPlayer stopped starting anything: {c.label} started "
                                  f"earlier in this run and did not start again within "
@@ -1629,14 +1670,21 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
         if missed is not None:
             logger.info(line + result[missed])
             if result.get("hung"):
-                _ledger(run_id, p, "hung" if missed == "unstarted" else "failed", result[missed])
-                raise _HungRun(_hung_words(p, marked=missed == "unstarted"))
+                # never started and silent past the bound: it stops HQPlayer;
+                # silent once it played, or restarted out of a long silence:
+                # failed, asked again next run
+                marked = missed == "unstarted" and not result.get("restarted")
+                _ledger(run_id, p, "hung" if marked else "failed", result[missed])
+                raise _HungRun(_hung_head(p, "restarted" if result.get("restarted")
+                                          else "prepared" if marked else "played"), marked=marked)
             _ledger(run_id, p, missed, result[missed])
             stats[missed] += 1
             if not result.get("outran"):            # that one played
                 failures[p.source] = failures.get(p.source, 0) + 1
             if failures.get(p.source, 0) >= 3:
-                if p.source == control_src or len(stopped) + 1 >= len({q.source for q in points}):
+                # the control's source going leaves no run: the owner's own setting
+                # and the drift check are its points
+                if p.source == control_src:
                     raise _Abort(f"three points in a row did not play: {result[missed]}")
                 stopped[p.source] = result[missed]
                 stats["stopped"].append((p.source, result[missed]))
@@ -1710,18 +1758,22 @@ SOURCE_WORDS = {"pcm44": "The 44.1 kHz signal", "pcm96": "The 96 kHz signal", "d
                 "signal": "The test signal"}
 
 
-def _hung_words(p: Point, *, marked: bool) -> str:
-    """A run HQPlayer stopped answering in: what it was doing, what the
-    person does, and what Sautium does when HQPlayer answers again."""
+# How a run's note begins when HQPlayer stopped answering in it (_hung_head)
+_HUNG_NOTES = ("HQPlayer stopped responding while", "HQPlayer was restarted while")
+
+
+def _hung_head(p: Point, how: str) -> str:
+    """What happened in a point HQPlayer stopped answering in (`how`:
+    'prepared', 'played', 'started' — the control started again — or
+    'restarted', the person restarting it out of a long silence)."""
     rate_hz, filt, _, src_rate, _ = p.key
     rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
-    did = "prepared" if marked else "played"
-    words = (f"HQPlayer stopped responding while it {did} {filt} at {rate} from a "
-             f"{rate_name(src_rate)} source. Restart HQPlayer: Sautium puts your filter, rate and "
-             "volume back as soon as it answers.")
-    if marked:
-        words += " This combination is now marked as one that stops HQPlayer and is not tried again."
-    return words
+    what = f"{filt} at {rate} from a {rate_name(src_rate)} source"
+    if how == "restarted":
+        return f"HQPlayer was restarted while it prepared {what}."
+    if how == "started":
+        return f"HQPlayer stopped responding while it started {what} again."
+    return f"HQPlayer stopped responding while it {how} {what}."
 
 
 def _verdict(r: dict) -> str:
@@ -1918,7 +1970,8 @@ def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int, *,
                     read()
                 return verdict
     except _Hung as e:
-        return {"failed" if settle.moved else "unstarted": str(e), "hung": True}
+        return {"failed" if settle.moved else "unstarted": str(e), "hung": True,
+                "restarted": isinstance(e, _Restarted)}
 
 
 def _outlast(link: _Link, settle: Settle,
@@ -1926,36 +1979,52 @@ def _outlast(link: _Link, settle: Settle,
     """HQPlayer took the point's setting and fell silent building it (or
     stuck while it played): ask for its <Status/> again on each new
     connection until it answers — the build is done then. The silence is
-    given back to the point's deadlines; its start keeps it (init_s). Past
-    LONG_BUILD_S `building` is told (True), and again (False) once HQPlayer
-    answers. A cancel ends the wait at the next ask; past BUILD_LIMIT_S,
-    _Hung."""
+    given back to the point's deadlines; its start keeps it (init_s). Once
+    the next answer cannot come before LONG_BUILD_S, `building` is told
+    (True) — the person reads that it is a long build — and again (False)
+    once HQPlayer answers. A cancel ends the wait at the next ask; past
+    BUILD_LIMIT_S, _Hung. Once told, a cancel is _BuildCancelled, and an
+    HQPlayer that closed or reset the connection under the wait — restarted
+    by the person who took it for hung — _Restarted: the point is not made
+    again on the HQPlayer that hung in it."""
     began = time.monotonic() - ANSWER_WAIT_S          # the ask that met the silence
     said = False
+    # A connection HQPlayer closed or reset under the wait (a silence alone is
+    # no loss): a restart, once the answer comes on the next one
+    losses = link.c.losses
 
     def unsay() -> None:
         if said and building is not None:
             building(False)
     while True:
         if _cancel.is_set():
-            raise _Lost("cancelled while HQPlayer was still building a setting")
+            raise (_BuildCancelled if said else _Lost)(
+                "cancelled while HQPlayer was still building a setting")
         if time.monotonic() - began >= settle.build_limit:
             raise _Hung(f"HQPlayer stayed silent {settle.build_limit / 60:.0f} min building it — "
                         "this host does not get it going, or HQPlayer hung")
-        if not said and building is not None and time.monotonic() - began >= LONG_BUILD_S:
+        # Said before the ask whose answer can only come past LONG_BUILD_S: a
+        # silent read waits ANSWER_WAIT_S whole
+        if not said and time.monotonic() - began + ANSWER_WAIT_S >= LONG_BUILD_S:
             said = True
-            building(True)
+            if building is not None:
+                building(True)
         try:
             status = link("get_status")
         except _Silent:
             continue
-        except _Reopened:
+        except _Reopened as e:
             if not _cancel.is_set():
                 unsay()
+                if said:
+                    raise _Restarted(f"HQPlayer was restarted after {time.monotonic() - began:.0f} s "
+                                     f"of silence building it ({e})") from e
                 raise
             continue                # the cancel woke the read (interrupt)
         silent = time.monotonic() - began
         unsay()
+        if said and link.c.losses > losses:
+            raise _Restarted(f"HQPlayer was restarted after {silent:.0f} s of silence building it")
         if status is not None and status.state in (PlaybackState.STOPPED, PlaybackState.STOPREQ):
             # Built and stopped, or restarted — a box reset mid-point goes
             # silent the same way, and its stop read as a dropout: made
@@ -2852,10 +2921,11 @@ def restored_notice() -> Optional[dict]:
     dates the run, so a put-back days later does not read as a change made
     on its own; `volume_left`, with the owner's level, when the put-back
     left HQPlayer's volume as it came back; `hung`, when HQPlayer stopped
-    answering in one of its points (a restart, not a connection lost)."""
+    answering in one of its points, or was restarted out of a long silence
+    in one (its note says so: _hung_head) — not a connection lost."""
     run = db_query_one("""SELECT r.restored_at, r.started_at, r.volume_left, r.pre_volume,
-                                 EXISTS (SELECT 1 FROM hqp_benchmark_points p
-                                          WHERE p.run_id = r.id AND p.result = 'hung') AS hung
+                                 (r.note LIKE 'HQPlayer stopped responding while%%'
+                                  OR r.note LIKE 'HQPlayer was restarted while%%') AS hung
                             FROM hqp_benchmark_runs r
                            WHERE r.restored_at IS NOT NULL ORDER BY r.restored_at DESC LIMIT 1""")
     if run is None:
@@ -3057,8 +3127,9 @@ def _recover(link: _Link, run: dict,
             else unset["pre"] and run["last_rate"] is not None):
         unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
     if whole:
-        note = ("cut short; HQPlayer went away under the run — its settings were put back when "
-                "it answered again")
+        how = ("stopped responding during the run" if (run["note"] or "").startswith(_HUNG_NOTES)
+               else "went away under the run")
+        note = f"cut short; HQPlayer {how} — its settings were put back when it answered again"
         if left_at is not None:
             note += f" (its volume left as it is, {left_at:g} dB)"
     else:

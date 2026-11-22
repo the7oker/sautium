@@ -86,6 +86,7 @@ DIAG_DRIVER = r"""
 'use strict';
 %(escape)s
 %(consts)s
+let hqpDiagAllOpen = false;
 %(block)s
 const a = (id, code, title) => ({ id, started: '2026-11-22T10:00:00Z', artist: 'A', title: 'T' + id,
                                   intent: 'play', verdict: { code, title } });

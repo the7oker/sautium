@@ -311,7 +311,8 @@ def covered(ctx: Dict[str, Any]) -> set:
         SELECT p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels
           FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
          WHERE {_RUN_KEY}
-           AND p.result <> 'failed' AND p.at >= now() - make_interval(days => %(days)s)
+           AND p.result NOT IN ('failed', 'implied')
+           AND p.at >= now() - make_interval(days => %(days)s)
     """, {**ctx, "days": RETENTION_DAYS, "cover": PASSIVE_COVER})
     return {(r["rate"], r["filter"], r["shaper"], r["src_rate"], r["src_channels"]) for r in rows}
 
@@ -323,19 +324,17 @@ def keeps_up(ctx: Dict[str, Any]) -> Dict[tuple, bool]:
     integrator, "FIR2/XFi", whatever filter was asked) and by what HQPlayer
     PLAYED (the keys covered() counts as measured, listens included — what
     played outweighs what was asked); a point that never started
-    (unstarted), or stopped HQPlayer (hung), does not keep up, and a rung a
-    neighbour answered for (implied) as that neighbour said. The benchmark's
-    ladders climb by it."""
+    (unstarted), or stopped HQPlayer (hung), does not keep up. A rung a
+    neighbour answered for (implied) is not read here: what answers for it
+    is read afresh. The benchmark's ladders climb by it."""
     rows = db_query(f"""
         SELECT 0 AS prio, p.at, p.rate_hz AS rate, p.filter, p.shaper, p.src_rate,
-               p.src_channels,
-               CASE WHEN p.result = 'implied' THEN p.implied_ok
-                    ELSE p.result NOT IN ('unstarted', 'hung') AND s.process_speed >= %(ok)s
-                         AND NOT s.dropout END AS ok
+               p.src_channels, (p.result NOT IN ('unstarted', 'hung') AND s.process_speed >= %(ok)s
+                                AND NOT s.dropout) AS ok
           FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
           LEFT JOIN hqp_dsp_samples s ON s.id = p.sample_id
          WHERE {_RUN_KEY}
-           AND (s.id IS NOT NULL OR p.result IN ('unstarted', 'hung', 'implied'))
+           AND (s.id IS NOT NULL OR p.result IN ('unstarted', 'hung'))
            AND p.at >= now() - make_interval(days => %(days)s)
         UNION ALL
         SELECT 1, last_seen, rate_out, filter, shaper, src_rate, src_channels,
@@ -404,6 +403,43 @@ def thresholds(ctx: Dict[str, Any]) -> Dict[str, Any]:
 _CLASS = "CASE WHEN speed_p10 < %(no)s THEN 'no' WHEN speed_p10 < %(ok)s THEN 'tight' ELSE 'ok' END"
 
 
+# An implied row (`p`, of run `r`) stands while the neighbour that answered
+# for it still says so: that neighbour's newest benchmark answer in the run's
+# context at today's line (`%(ok)s`) — a dropout, a point that never started
+# or stopped HQPlayer is "does not keep up". A neighbour measured again, or a
+# line a dropout moved, takes the implication back: never a stale class.
+_IMPLIED_HOLDS = """(p.result <> 'implied' OR p.implied_ok = (
+        SELECT CASE WHEN q.result IN ('unstarted', 'hung') THEN FALSE
+                    ELSE s.process_speed >= %(ok)s AND NOT s.dropout END
+          FROM hqp_benchmark_points q JOIN hqp_benchmark_runs x ON x.id = q.run_id
+          LEFT JOIN hqp_dsp_samples s ON s.id = q.sample_id
+         WHERE x.hqp_endpoint_id = r.hqp_endpoint_id AND x.hqp_engine = r.hqp_engine
+           AND x.mode = r.mode AND x.cuda IS NOT DISTINCT FROM r.cuda
+           AND x.matrix_profile IS NOT DISTINCT FROM r.matrix_profile
+           AND x.convolution = r.convolution
+           AND q.rate_hz = p.implied_from AND q.filter = p.filter AND q.shaper = p.shaper
+           AND q.src_rate = p.src_rate AND q.src_channels = p.src_channels
+           AND (s.id IS NOT NULL OR q.result IN ('unstarted', 'hung'))
+         ORDER BY q.at DESC, q.id DESC LIMIT 1))"""
+
+
+def implied(ctx: Dict[str, Any]) -> Dict[tuple, Tuple[int, bool]]:
+    """The rungs a neighbour answered for in this context, by key — the newest
+    such row within the retention: (that neighbour's rate, its answer). A run
+    writes a rung's row again only when what answers for it changed."""
+    rows = db_query(f"""
+        SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels)
+               p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels, p.implied_from,
+               p.implied_ok
+          FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
+         WHERE {_RUN_KEY} AND p.result = 'implied'
+           AND p.at >= now() - make_interval(days => %(days)s)
+         ORDER BY p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels, p.at DESC, p.id DESC
+    """, {**ctx, "days": RETENTION_DAYS})
+    return {(r["rate_hz"], r["filter"], r["shaper"], r["src_rate"], r["src_channels"]):
+            (r["implied_from"], r["implied_ok"]) for r in rows}
+
+
 # An engine's build as PostgreSQL compares it — "6.3.3" → {6,3,3} — NULL for
 # one that starts with no number (build() in SQL)
 _BUILD = r"string_to_array(substring({col} from '^[0-9]+(?:\.[0-9]+)*'), '.')::int[]"
@@ -456,7 +492,7 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
         SELECT * FROM (
             SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper)
                    p.rate_hz, p.filter, p.shaper, p.result::text AS result, p.implied_from,
-                   p.implied_ok, p.at, p.id
+                   p.implied_ok, p.at, p.id, {_IMPLIED_HOLDS} AS holds
               FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
              WHERE {_RUN_KEY} AND p.result <> 'failed'
                AND p.src_rate = %(src_rate)s AND p.src_channels = %(src_channels)s
@@ -465,9 +501,9 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
                     OR (p.filter = %(filter)s AND p.shaper = %(shaper)s))
                AND p.at >= now() - make_interval(days => %(days)s)
              ORDER BY p.rate_hz, p.filter, p.shaper, p.at DESC, p.id DESC) newest
-         WHERE result IN ('refused', 'unstarted', 'hung', 'implied')
+         WHERE result IN ('refused', 'unstarted', 'hung', 'implied') AND holds
          ORDER BY at DESC, id DESC
-    """, {**ctx, "rate_out": rate_out, "filter": filter, "shaper": shaper,
+    """, {**ctx, **th, "rate_out": rate_out, "filter": filter, "shaper": shaper,
           "src_rate": src_rate, "src_channels": src_channels, "days": RETENTION_DAYS,
           "asked": rate_out if asked_rate is None else asked_rate})
     out["refused"] = {"filters": {}, "shapers": {}}
@@ -536,7 +572,8 @@ _RESULTS_SQL = f"""
                NULL::boolean, NULL::float, FALSE, NULL::float, NULL::float, implied_from
           FROM (SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels)
                        p.filter, p.shaper, p.rate_hz, p.src_rate, p.src_channels,
-                       p.result::text AS result, p.implied_from, p.implied_ok
+                       p.result::text AS result, p.implied_from, p.implied_ok,
+                       {_IMPLIED_HOLDS} AS holds
                   FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
                  WHERE p.result IN ('refused', 'unstarted', 'hung', 'implied') AND {_RUN_KEY}
                    AND NOT EXISTS (
@@ -549,6 +586,7 @@ _RESULTS_SQL = f"""
                           AND s.src_rate = p.src_rate AND s.src_channels = p.src_channels)
                  ORDER BY p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels,
                           p.at DESC) asked
+         WHERE holds
 """
 
 # The most rows of one name the assistant is told (hqplayer_host_fit)

@@ -9611,6 +9611,9 @@
     loadHqpLog(el.querySelector('[data-log-body]'));
   }
 
+  // "All plays" stays as the person left it through the screen's re-renders
+  let hqpDiagAllOpen = false;
+
   // The HQPlayer screen's Diagnostics block: the plays that did not reach
   // HQPlayer, newest first, each opening its sheet — with none, one line —
   // then every play it watched folded under one quiet link (a good play's
@@ -9639,7 +9642,8 @@
       ? 'Every play since the node started reached HQPlayer.'
       : 'Every play on this HQPlayer is traced here — none yet since the node started.';
     const all = attempts.length
-      ? `<details class="hqp-diag-all"><summary>All plays ›</summary>${attempts.map(row).join('')}</details>`
+      ? `<details class="hqp-diag-all"${hqpDiagAllOpen ? ' open' : ''}><summary>All plays ›</summary>${
+          attempts.map(row).join('')}</details>`
       : '';
     const src = (d.log_source && d.log_source.kind) || 'none';
     return `
@@ -10066,7 +10070,7 @@
         <p class="hqp-diag-note"><span class="hqp-hr is-ok"><span class="hqp-hr-dot"></span></span> from ${th.ok}× ·
           <span class="hqp-hr is-tight"><span class="hqp-hr-dot"></span></span> tight ·
           <span class="hqp-hr is-no"><span class="hqp-hr-dot"></span></span> under ${th.no}×${
-          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer · ○ never started here · — not measured (above a rate that does not keep up, or below ${/^PCM/.test(ctx.mode || '') ? '8×' : 'DSD256'} when it does)</p>
+          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer · ○ never started here · ⊗ stopped HQPlayer here · a dot alone: a rate next to it on its ladder answers for it · — not measured</p>
         <div class="confirm-actions single">
           <button class="profile-btn primary" type="button" data-close>Close</button>
         </div>
@@ -10582,6 +10586,8 @@
       body.querySelectorAll('[data-attempt]').forEach(row => {
         row.addEventListener('click', () => onceInFlight(row, () => openHqpDiagnosis(row.dataset.attempt)));
       });
+      const allPlays = body.querySelector('.hqp-diag-all');
+      if (allPlays) allPlays.addEventListener('toggle', () => { hqpDiagAllOpen = allPlays.open; });
       const logRow = body.querySelector('[data-action="hqp-log"]');
       if (logRow) logRow.addEventListener('click', e => { if (e.detail < 2) openHqpLog(); });
 
@@ -10799,8 +10805,8 @@
     // row, never a class — nothing else reads it
     const earlier = (hr.earlier || {})[filter ? 'filters' : 'shapers'] || {};
     // A row's mark is read for one source and setting (hr.setting): known,
-    // a row without one is not measured here — said, not guessed; "Measure"
-    // runs the benchmark for that entry alone, where a run can play the
+    // a row without one is not measured here — said, not guessed; "Test
+    // speed" runs the benchmark for that entry alone, where a run can play the
     // source the marks are read for (hr.measurable), none runs now and one
     // could start (no_estimate: unregistered, a list missing, [source] mode).
     const marksKnown = !!hr.setting;

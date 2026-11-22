@@ -678,3 +678,18 @@ def test_the_chat_says_the_six_look_up_filters_and_modulators():
     script = f"{fn}\nconsole.log(JSON.stringify({json.dumps(asked)}.map(toolPipLabel)));"
     out = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True, check=True)
     assert json.loads(out.stdout) == ["looking up filters and modulators…"] * 12 + ["controlling playback…"] * 2
+
+
+def test_host_fit_says_a_combination_that_stopped_hqplayer_and_a_rung_its_ladder_answered_for():
+    """HQP-BENCH-63: a `hung` row and an implied one (its class, no speed,
+    the rate that answered for it)."""
+    rows = [_host_row(44100, 11289600, "DMX5", "hung"),
+            {**_host_row(44100, 22579200, "DMX5", "no"), "implied_from": 11289600}]
+    host = {"context": {"engine": "6.3.3", "cuda": "off", "mode": "SDM (DSD)", "matrix_profile": None,
+                        "convolution": False},
+            "knob": "filter", "thresholds": _TH, "rows": rows, "total": len(rows)}
+    text = _say("host_fit", _read(host=host), name="demo-sinc-a").split("\n")
+    assert text[2] == ("    DSD256 · DMX5: HQPlayer stopped responding while it prepared this when the "
+                       "Benchmark asked it — not asked again on this engine")
+    assert text[3] == ("    DSD512 · DMX5: too slow here (under 1×), by the Benchmark's measurement at "
+                       "DSD256 (not measured itself)")

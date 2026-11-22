@@ -725,25 +725,39 @@ def _implied(conn, run_id, rate, ok, *, by=11289600, filter="poly-sinc-gauss-xla
                     (run_id, rate, filter, shaper, by, ok))
 
 
+def _bench_point(conn, run_id, speed, *, rate=11289600, shaper="ASDM7ECv3", dropout=False):
+    """A benchmark point measured at `speed`: its sample and its ledger row."""
+    sid = hqp_load.write(_sample(conn, speed, rate_out=rate, shaper=shaper, source="benchmark",
+                                 run_id=run_id, settled=True, init_s=1.0, settle_s=5.0, dropout=dropout))
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate,
+                         src_channels, result, sample_id)
+                       VALUES (%s, %s, 'poly-sinc-gauss-xla', %s, 44100, 2,
+                               %s, %s)""", (run_id, rate, shaper, "dropout" if dropout else "measured", sid))
+
+
 def test_a_hung_combination_and_an_implied_rung_are_answers_of_their_own(db):
     """HQP-BENCH-63 §3.2, §5.2: a point that stopped HQPlayer (`hung`) is
-    covered and does not keep up, and reads as its own class; a rung a
-    neighbour on its ladder answered for (`implied`) is covered, keeps up as
-    the neighbour said, and reads as a mark of that class with no speed —
-    never as not measured."""
+    covered and does not keep up, and reads as its own class. A rung a
+    neighbour on its ladder answered for (`implied`) reads as a mark of that
+    class with no speed — never as not measured — while the neighbour still
+    says so; planning never reads it (covered and keeps_up are the
+    measurements'), and a neighbour measured again takes it back."""
     run = _run_row(db)
     _asked(db, run, "hung", rate=11289600, shaper="H")
-    _implied(db, run, 22579200, False)               # above a rung that is too slow
-    _implied(db, run, 5644800, True, by=11289600, shaper="K")
+    _bench_point(db, run, 0.8)                         # too slow at DSD256 …
+    _implied(db, run, 22579200, False)               # … so at DSD512 too
+    _bench_point(db, run, 2.0, shaper="K")           # keeps up at DSD256 …
+    _implied(db, run, 5644800, True, shaper="K")     # … so at DSD128 too
     ctx = _ctx(db)
     covered = hqp_load.covered(ctx)
-    assert {(11289600, "poly-sinc-gauss-xla", "H", 44100, 2),
-            (22579200, "poly-sinc-gauss-xla", "ASDM7ECv3", 44100, 2),
-            (5644800, "poly-sinc-gauss-xla", "K", 44100, 2)} <= covered
+    assert (11289600, "poly-sinc-gauss-xla", "H", 44100, 2) in covered
+    assert (22579200, "poly-sinc-gauss-xla", "ASDM7ECv3", 44100, 2) not in covered
     known = hqp_load.keeps_up(ctx)
     assert known[(11289600, "poly-sinc-gauss-xla", "H", 44100, 2)] is False
-    assert known[(22579200, "poly-sinc-gauss-xla", "ASDM7ECv3", 44100, 2)] is False
-    assert known[(5644800, "poly-sinc-gauss-xla", "K", 44100, 2)] is True
+    assert (5644800, "poly-sinc-gauss-xla", "K", 44100, 2) not in known
+    assert hqp_load.implied(ctx) == {(22579200, "poly-sinc-gauss-xla", "ASDM7ECv3", 44100, 2): (11289600, False),
+                                     (5644800, "poly-sinc-gauss-xla", "K", 44100, 2): (11289600, True)}
     rows = {(r["rate_out"], r["shaper"]): r for r in hqp_load.results(ctx)}
     assert rows[(11289600, "H")]["class"] == "hung" and rows[(11289600, "H")]["speed"] is None
     assert (rows[(22579200, "ASDM7ECv3")]["class"], rows[(22579200, "ASDM7ECv3")]["implied_from"]) == \
@@ -758,12 +772,12 @@ def test_a_hung_combination_and_an_implied_rung_are_answers_of_their_own(db):
     at_k = hqp_load.headroom(ctx, rate_out=5644800, filter="poly-sinc-gauss-xla", shaper="K",
                              src_rate=44100, src_channels=2)
     assert at_k["filters"]["poly-sinc-gauss-xla"]["class"] == "ok"
-    # a measurement after it is what the sheet reads
-    hqp_load.write(_sample(db, 0.7, rate_out=22579200, source="benchmark", settled=True, init_s=1.0,
-                           settle_s=5.0, dropout=False))
+    # the neighbour measured again keeping up: what it implied stands no more
+    _bench_point(db, run, 1.9)
     hr = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-xla", shaper="ASDM7ECv3",
                            src_rate=44100, src_channels=2)
-    assert hr["rates"]["22579200"]["speed"] == 0.7
+    assert "22579200" not in hr["rates"]
+    assert (22579200, "ASDM7ECv3") not in {(r["rate_out"], r["shaper"]) for r in hqp_load.results(ctx)}
     # an implied row names its neighbour, or is no row
     with pytest.raises(psycopg2.IntegrityError):
         _asked(db, run, "implied", shaper="L")
@@ -801,3 +815,23 @@ def test_a_points_range_rides_its_mark_and_an_earlier_engines_mark_is_only_a_hin
     assert hr["earlier"]["filters"] == {"A": {"engine": "6.2.4", "speed": 2.4}}
     rows = {r["filter"]: r for r in hqp_load.results(_ctx(db, engine="6.3.3"))}
     assert (rows["B"]["lo"], rows["B"]["hi"]) == (21.0, 33.46)
+
+
+def test_072_names_the_points_hqplayer_stopped_answering_in_hung(db):
+    """The two real hangs of 2026-11-20 were ledgered 'unstarted' with the
+    silent-build note; 072 makes them 'hung', leaves a build HQPlayer
+    answered through as it was, and a second run changes nothing."""
+    run = _run_row(db)
+    with db.cursor() as cur:
+        for shaper, note in (("A", "HQPlayer stayed silent 10 min building it — this host does not get "
+                                   "it going, or HQPlayer hung"),
+                             ("B", "HQPlayer was still starting it 10 min after Play — this host does "
+                                   "not get it going")):
+            cur.execute("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate,
+                             src_channels, result, note)
+                           VALUES (%s, 11289600, 'f', %s, 44100, 2, 'unstarted', %s)""", (run, shaper, note))
+        delta = Path(__file__).resolve().parent.parent / "desktop" / "migrations" / "072_hqp_bench_63_hung.sql"
+        for _ in range(2):
+            cur.execute(delta.read_text())
+    assert _q(db.conn, "SELECT shaper, result::text FROM hqp_benchmark_points ORDER BY shaper") == \
+        [("A", "hung"), ("B", "unstarted")]
