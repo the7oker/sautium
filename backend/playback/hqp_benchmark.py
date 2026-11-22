@@ -1643,7 +1643,8 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                     return "cancelled", None
                 if again.get("hung"):
                     # silent, starting the control again: HQPlayer stopped
-                    # answering — no mark on either point
+                    # answering, or was restarted out of it — no mark on
+                    # either point
                     raise _HungRun(_hung_head(c, "started", restarted=again.get("restarted", False)))
                 if not again.get("started"):
                     raise _Abort(f"HQPlayer stopped starting anything: {c.label} started "
