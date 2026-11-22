@@ -7621,9 +7621,10 @@ html { -webkit-tap-highlight-color: transparent; }
 }
 
 /* Music path — JS-side truncation in fmtPathTruncatedFromStart keeps
-   the tail visible (it's the user-meaningful folder name). CSS just
-   styles the font; no max-width / text-overflow, so the string the
-   renderer produces is the string the user sees. */
+   the tail visible (it's the user-meaningful folder name). CSS styles
+   the font and sets no max-width / text-overflow: the string the renderer
+   produces is the string the user sees — but for the row with the folder
+   button, below, where a string that still does not fit loses its head. */
 .path-value {
   font-family: var(--font-mono);
   font-size: calc(12.5 * var(--px));

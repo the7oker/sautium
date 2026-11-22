@@ -1407,6 +1407,12 @@ class LibraryScanner:
                 # the unreachable library every scan refuses (an expected
                 # condition, said in the Library row), not a failed scan.
                 refuse_if_unreachable()
+                # A folder the owner picked under the roots is never a wrong
+                # setting: gone before its first file was read, its disk is
+                # away all the same.
+                import library_root
+                if library_root.picks():
+                    raise LibraryUnreachable(UNREACHABLE)
             raise ValueError(f"Library path does not exist: {self.library_path}")
 
         logger.info(f"Initialized scanner for: {self.library_path}")

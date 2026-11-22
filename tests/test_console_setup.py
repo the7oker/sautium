@@ -332,7 +332,8 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
     built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
     assert built == ("UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat ro,nofail,nosuid,nodev,noexec,uid=1000,"
                      "gid=1000,fmask=0133,dmask=0022" + systemd)
-    assert "sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab" in commands       # its undo
+    # its undo, the mount point in a variable
+    assert "P=/mnt/sautium-4A21-0000" in pasted and 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in commands
     assert "Elements" not in " ".join(commands)        # the volume's own name is in no root command
     # The root to name is the mount point — there with or without the disk — and the folder on it is
     # chosen in the Web UI: a bind of a folder ON the disk would stop the node's start without the disk
@@ -870,9 +871,8 @@ def test_remove_prints_the_undo_of_a_boot_mount_the_setup_printed(installed, mon
     assert setup.boot_mounts(fstab.decode()) == ["/mnt/sautium-4A21-0000"]
     assert setup.main(["remove"]) == 0
     said = capsys.readouterr().out
-    for line in ("    sudo umount /mnt/sautium-4A21-0000",
-                 "    sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab",
-                 "    sudo rmdir /mnt/sautium-4A21-0000"):
+    for line in ("    P=/mnt/sautium-4A21-0000", '    sudo umount "$P"',
+                 '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab', '    sudo rmdir "$P"'):
         assert line in said, line
     assert "reboot" not in said and "/mnt/music" not in said
 
@@ -950,6 +950,25 @@ def test_status_says_what_is_there_and_changes_nothing(installed, monkeypatch, c
     assert not any(word in line for line in asked for word in (" up", " down", " stop", " rm", "sudo")), asked
 
 
+@pytest.mark.parametrize("fstype, uuid", [("ext4", "02f61d5e-92cb-4f9c-a781-099d97795020"), ("exfat", "4A21-0000"),
+                                          ("vfat", "0398-3084"), ("ntfs", "01DC5A7E6B2F4C10"), ("ntfs3", "01DC5A7E6B2F4C10")])
+def test_the_boot_mount_lines_are_short_and_build_the_very_line(fstype, uuid):
+    """Every filesystem's line, with the longest UUID there is (ext4's 36
+    characters, twice in the line): no piece and no undo line long enough to
+    be wrapped, and the pieces put together are the line byte for byte."""
+    found = setup.boot_mount(f"/media/pi/Disk/Music", json.dumps({"filesystems": [
+        {"source": "/dev/sda1", "target": "/media/pi/Disk", "fstype": fstype, "uuid": uuid}]}), 1000, 1000)
+    pieces = setup.in_pieces(found["line"])
+    lines = pieces + setup.boot_mount_undo(found["point"])
+    assert max(len(line) for line in lines) <= 76, lines
+    built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
+    assert built == found["line"]
+    # The undo's sed address, as the shell hands it to sed: that one line of fstab and no other
+    script = "\n".join(setup.boot_mount_undo(found["point"])[:1]) + '\nprintf %s "\\|^UUID=[^ ]* $P |d"'
+    address = subprocess.run(["sh", "-c", script], capture_output=True, text=True).stdout
+    assert address == f"\\|^UUID=[^ ]* {found['point']} |d"
+
+
 def test_status_names_the_disks_mounted_under_the_roots():
     """`findmnt -R /media/sautium` answered nothing — the automount's folder is
     no mount point — so a plugged disk never showed (PI-NODE-2B item 8, S1)."""
@@ -963,6 +982,9 @@ def test_status_names_the_disks_mounted_under_the_roots():
     assert setup.mounts_under(roots, table) == [
         "/media/sautium/B269-E281 exfat ro,nosuid,nodev,noexec,uid=1002", "/mnt/sautium-4A21-0000 exfat ro,nofail"]
     assert setup.mounts_under([], table) == []
+    # a root with a space in its name: findmnt -r writes it \\x20
+    assert setup.mounts_under(["/srv/My Music"], "/srv/My\\x20Music/disk ext4 ro\n/srv/My ext4 rw\n") == [
+        "/srv/My\\x20Music/disk ext4 ro"]
 
 
 def test_the_machine_line_says_an_asked_preset_as_asked():

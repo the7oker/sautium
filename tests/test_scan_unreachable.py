@@ -140,6 +140,17 @@ def test_a_folder_that_never_was_is_still_a_wrong_setting(cur, library):
         scanner.LibraryScanner()
 
 
+def test_a_picked_folder_gone_before_its_first_file_is_away_not_a_wrong_setting(cur, library, monkeypatch):
+    """On a node whose owner picks the folder under mounted roots, the folder
+    is a choice, never a setting to get wrong: its disk pulled before any file
+    was read is the unreachable library too."""
+    import library_root
+    monkeypatch.setattr(library_root, "picks", lambda: True)
+    library.rmdir()
+    with pytest.raises(scanner.LibraryUnreachable):
+        scanner.LibraryScanner()
+
+
 def _owned_file(cur, album="Solar Fields/Shaped By Time", name="01.flac"):
     """A catalogued file with a track of its own; a second name in the same
     folder joins that folder's copy (one album, one variant)."""

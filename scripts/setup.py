@@ -985,25 +985,28 @@ def boot_mount(real: str, findmnt_json: str, uid: int, gid: int, disk_type=disk_
 
 def in_pieces(line: str, width: int = 68) -> List[str]:
     """A long line of /etc/fstab as shell lines that build it in the variable
-    L, each short enough that nothing wraps it: cut at the commas of its
-    options. The line holds no quote and no `$` (a UUID, numbers, option
+    L, each short enough that nothing wraps it: cut at its spaces and at the
+    commas of its options, each piece carrying the separator before it. The
+    line holds no quote, no backslash and no `$` (a UUID, numbers, option
     names), so the pieces are quoted as they are."""
-    parts, pieces = line.split(","), []
-    piece = parts[0]
-    for part in parts[1:]:
-        if len(piece) + 1 + len(part) > width:
+    tokens = re.split(r"([, ])", line)
+    pieces, piece = [], tokens[0]
+    for sep, text in zip(tokens[1::2], tokens[2::2]):
+        if len(piece) + 1 + len(text) > width:
             pieces.append(piece)
-            piece = part
+            piece = sep + text
         else:
-            piece += "," + part
+            piece += sep + text
     pieces.append(piece)
-    return [f"L='{pieces[0]}'"] + [f'L="$L,{piece}"' for piece in pieces[1:]]
+    return [f"L='{pieces[0]}'"] + [f'L="$L{piece}"' for piece in pieces[1:]]
 
 
 def boot_mount_undo(point: str) -> List[str]:
-    its_line = shlex.quote("\\|^UUID=[^ ]* " + point + " |d")              # sed's address for that one line
-    return [f"sudo umount {point}", f"sudo sed -i {its_line} /etc/fstab", f"sudo rmdir {point}",
-            "sudo systemctl daemon-reload"]
+    # The mount point in a variable: with a 36-character UUID in it the sed
+    # line would be long enough to be wrapped on its way to a root terminal
+    return [f"P={point}", 'sudo umount "$P"',
+            'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab',     # sed's address for that one line
+            'sudo rmdir "$P"', "sudo systemctl daemon-reload"]
 
 
 def boot_mounts(fstab_targets: str) -> List[str]:
@@ -1269,7 +1272,8 @@ def mounts_under(roots: List[str], findmnt_rn: str) -> List[str]:
     automount's folder never is.)"""
     found = []
     for line in findmnt_rn.splitlines():
-        target = line.split(" ", 1)[0]
+        # findmnt -r writes a space in a path as \x20; a root is its own letters
+        target = re.sub(r"\\x([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), line.split(" ", 1)[0])
         if any(target == root or target.startswith(root.rstrip("/") + "/") for root in roots):
             found.append(line)
     return found
