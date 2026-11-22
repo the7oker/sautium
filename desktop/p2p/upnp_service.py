@@ -7,6 +7,7 @@ the internet.  Uses miniupnpc (optional dependency).
 
 import asyncio
 import http.client
+import ipaddress
 import json
 import logging
 import socket
@@ -45,26 +46,32 @@ def discover_igd():
         return None
 
 
-def holder(u, external: int, protocol: str = "TCP") -> Optional[Tuple[str, int]]:
-    """(LAN address, port) the router's mapping of `external` leads to; None
-    where it holds none, or will not say."""
+def held_elsewhere(u, external: int, internal: int,
+                   protocol: str = "TCP") -> Optional[Tuple[str, int]]:
+    """(LAN address, port) the router's mapping of `external` leads to where
+    that is not this machine's `internal` port — another device's, or
+    another port of this machine. None where the router holds no mapping of
+    it, holds this very one, or does not say in a way that can be compared
+    (an error, a host name for the client): the mapper then asks as it did
+    before it looked, and the check from inside is what is left."""
     try:
         mapping = u.getspecificportmapping(external, protocol)
+        if not mapping:
+            return None
+        held = (ipaddress.ip_address(mapping[0]).compressed, int(mapping[1]))
+        return None if held == (ipaddress.ip_address(u.lanaddr).compressed, internal) else held
     except Exception:
         return None
-    return (mapping[0], int(mapping[1])) if mapping else None
 
 
 def add_mapping(u, external: int, internal: int, protocol: str = "TCP",
                 lease: int = LEASE_DURATION, description: str = "") -> bool:
     """Add one port mapping to the IGD, or renew this machine's own of that
-    very port. Never asked over a mapping that leads elsewhere — another
-    device's, or another port of this machine: a router that says yes to
-    anyone would hand a neighbour's port over (a second node behind one
-    router asked for the first one's 8801, PI-NODE-2B §8.3). Returns True on
-    success."""
-    held = holder(u, external, protocol)
-    if held is not None and held != (u.lanaddr, internal):
+    very port. Never asked over a mapping that leads elsewhere: a router
+    that says yes to anyone would hand a neighbour's port over (a second
+    node behind one router asked for the first one's 8801, PI-NODE-2B §8.3).
+    Returns True on success."""
+    if held_elsewhere(u, external, internal, protocol) is not None:
         return False
     try:
         return bool(u.addportmapping(

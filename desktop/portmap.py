@@ -29,7 +29,7 @@ import time
 
 from desktop.p2p.lan_discovery import LAN_DISCOVERY_PORT
 from desktop.p2p.upnp_service import (
-    HAS_UPNP, LEASE_DURATION, add_mapping, answers_as_peer_surface, discover_igd, holder,
+    HAS_UPNP, LEASE_DURATION, add_mapping, answers_as_peer_surface, discover_igd, held_elsewhere,
     list_mappings,
 )
 
@@ -117,8 +117,8 @@ def cmd_map(args) -> None:
         return
 
     u = _igd_or_exit()
-    held = holder(u, external, proto)
-    if held is not None and held != (u.lanaddr, port):
+    held = held_elsewhere(u, external, port, proto)
+    if held is not None:
         sys.exit(f"{external}/{proto} on the router leads to {held[0]}:{held[1]} - it is "
                  f"not this port's to take. Choose another with --external, or remove "
                  f"that mapping first.")

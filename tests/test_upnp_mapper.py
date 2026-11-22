@@ -175,6 +175,16 @@ def test_a_router_that_will_not_say_is_asked_as_before(igd, monkeypatch):
     assert upnp.get_external_port(8801) == 8801
 
 
+def test_a_client_named_and_not_numbered_is_asked_as_before(igd):
+    """A router may name a mapping's client by host name: whose it is cannot
+    be read, and taking it for another's would drop the node's own mapping
+    at every renewal."""
+    igd.table[(8801, "TCP")] = ("node.lan", 8801, "Sautium (8801)")
+    upnp = UPnPService(ports=[8801])
+    upnp.open_ports()
+    assert upnp.get_external_port(8801) == 8801
+
+
 def test_five_ports_held_leave_the_node_unmapped(igd):
     for port in range(8801, 8806):
         igd.table[(port, "TCP")] = (NEIGHBOUR, port, "held")
