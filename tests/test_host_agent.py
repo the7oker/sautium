@@ -1308,7 +1308,6 @@ def test_older_logs_that_cannot_be_trimmed_never_stop_what_keeps_the_new_one(che
     assert path is not None and path.read_text() == "INFO the release's last lines\n"
 
 
-
 def test_an_update_keeps_the_log_after_the_stop_and_before_the_container_goes(checkout, monkeypatch):
     up = _Update(checkout, monkeypatch, logs=LOG)
     assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"

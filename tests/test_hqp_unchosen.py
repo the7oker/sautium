@@ -147,17 +147,19 @@ def test_the_links_connect_refuses_an_address_nobody_chose_registered_or_probes(
     assert hqp_library.get_info(*at)["product"]
     assert len(fake._conns) == 1
 
+    # ...and no longer once the row is forgotten: a link nothing drives kept no socket to ride
     cur.execute("DELETE FROM hqp_endpoints")
-    _fresh_links()
     with pytest.raises(hqp_link.NotChosen):
         hqp_library.get_info(*at)
 
     # the person's own look at an address (the scan, "Add device by address") — while it lasts
-    with hqp_link.probing(*at):
+    with hqp_link.probing(*at) as link:
         assert hqp_library.get_info(*at)["product"]
-    _fresh_links()                  # the probe's connection gone: the next request must dial
+        assert link is hqp_link.link_for(*at)
+    assert link._probes == 0 and not link._may_dial(at)
     with pytest.raises(hqp_link.NotChosen):
         hqp_library.get_info(*at)
+    assert len(fake._conns) == 2
 
 
 def test_the_chosen_hqplayer_is_asked_as_before(default_hqp, cur):
@@ -260,7 +262,8 @@ def test_the_start_saves_the_old_choice_before_it_drops_the_environments_address
     it. Swapped, an install the environment configured would be saved at the
     old default instead of its own address."""
     source = (BACKEND / "main.py").read_text()
-    assert 0 < source.index("db_migrate.apply_pending()") < source.index("load_hqplayer_from_db()")
+    lifespan = source[source.index("async def lifespan("):]
+    assert 0 < lifespan.index("db_migrate.apply_pending()") < lifespan.index("load_hqplayer_from_db()")
 
 
 def test_an_install_with_a_saved_host_and_no_output_gets_the_output_saved(default_hqp, cur, scratch_dsn):

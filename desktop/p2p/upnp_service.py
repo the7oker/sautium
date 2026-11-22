@@ -65,7 +65,8 @@ def held_elsewhere(u, external: int, internal: int,
         held = (ipaddress.ip_address(mapping[0]).compressed, int(mapping[1]))
         here = (ipaddress.ip_address(u.lanaddr).compressed, internal)
     except (ValueError, TypeError) as e:
-        logger.debug("UPnP: port %s is held by a client the router names %r: %s", external, mapping[0], e)
+        logger.debug("UPnP: who holds port %s cannot be compared (the router names %r, this machine %r): %s",
+                     external, mapping[0], getattr(u, "lanaddr", None), e)
         return None
     return None if held == here else held
 

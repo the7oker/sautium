@@ -1546,7 +1546,7 @@ class HqpLink:
         loudly, before the dial — on 2026-11-22 the Library screen of a node
         with no HQPlayer chosen connected to the default address at every
         wake of its stream."""
-        with self._state_lock:
+        with _probe_lock:
             probed = self._probes > 0
         if probed or self._selected():
             return True
@@ -1653,6 +1653,10 @@ _closed_why: Optional[str] = None
 # The key of the HQPlayer this node drives: the link that retires when the
 # owner chooses another (choose)
 _chosen: Optional[tuple] = None
+# Guards every link's count of probes (probing): its own lock — the scan
+# takes it on the event loop, where a link's state lock may be held across a
+# send
+_probe_lock = threading.Lock()
 
 
 def _key(host: str, port: int) -> tuple:
@@ -1678,14 +1682,16 @@ def probing(host: str, port: int):
     """The person is looking at this address (the picker's scan, "Add device
     by address", the library CLI's --host): for the block its link may dial
     it though nothing chose or registered it yet (HqpLink._may_dial) — and
-    no longer: an address once looked at is not one the node was pointed at."""
+    no longer: an address once looked at is not one the node was pointed at,
+    and a link nothing drives keeps no socket past its question (_end_scope),
+    so the next request to it must dial."""
     link = link_for(host, port)
-    with link._state_lock:
+    with _probe_lock:
         link._probes += 1
     try:
         yield link
     finally:
-        with link._state_lock:
+        with _probe_lock:
             link._probes -= 1
 
 
