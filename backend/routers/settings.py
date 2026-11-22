@@ -709,6 +709,9 @@ async def _library_state() -> Dict[str, Any]:
         # "setup" — the node's .env (a Docker node's MUSIC_LIBRARY_PATH)
         "music_folder":       ("pick" if library_root.picks()
                                else "launcher" if is_launcher_mode() else "setup"),
+        # The chosen folder is on a plugged disk the machine mounted
+        # read-only: it can be pulled at any time
+        "music_folder_pullable": library_root.pullable(music_path),
         # Library counts (matches launcher's Library block 2×2)
         "total_tracks":       stats.get("total_tracks", 0),
         "total_artists":      stats.get("total_artists", 0),
@@ -1420,6 +1423,15 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": "library.mount_missing", "kind": "error",
                       "since": since, "until": None,
                       "data": {"path": app_settings.library_db_root()}})
+    # A volume plugged into this machine that nothing mounted (the
+    # automount's own word, library_root.unread): there while its file is,
+    # gone with the disk. Its onset is the file's, so the same disk plugged
+    # in again is news.
+    import library_root
+    for volume in library_root.unread():
+        items.append({"key": f"disk.unread.{volume['device']}", "kind": "warning",
+                      "since": volume["since"], "until": None,
+                      "data": {k: volume[k] for k in ("label", "format", "mounts")}})
     missing = [t for t in _MEDIA_TOOLS if not shutil.which(t)]
     since = _derived("tools.missing", bool(missing))
     if since:
