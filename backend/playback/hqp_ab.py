@@ -106,6 +106,10 @@ SOUND_S = 15.0
 END_S = 90.0
 DELAY_S = 15.0
 STATUS_TICK_S = 0.25
+# How long the sitting's own link waits on one answer before it asks again on
+# a new connection: its builds are paid in the paused lead, bounded by
+# FIRST_FRAME_S, never by the benchmark's one-minute test
+ANSWER_S = 45.0
 # A step whose silence missed this often in a row is not played again: the
 # sitting ends (what grows P after a miss converges in a step or two)
 SLIPS_A_STEP = 3
@@ -124,7 +128,7 @@ WORDS = {
     "too_slow_implied": "Too slow here: slower than at {from_rate}",
     "rate": "It would make HQPlayer stop on this track: it does not convert {src} to {out}",
     "not_in_atlas": "Not in Sautium's measurements for this context",
-    "slow_start": "Over 10 minutes to start here",
+    "slow_start": "Over a minute to start here",
     "refused": "HQPlayer refuses it at this setting",
     "unstarted": "HQPlayer never got it going on this computer",
     "identical": "The same output as {other}, so one of them is offered.",
@@ -140,7 +144,7 @@ EMPTY = {
     "too_slow": "Every other filter is too slow here at {out}.",
     "rate": "Every other filter would make HQPlayer stop on this track: none converts {src} to {out}.",
     "not_in_atlas": "No other filter is in Sautium's measurements for this context.",
-    "slow_start": "Every other filter took over 10 minutes to start here.",
+    "slow_start": "Every other filter took over a minute to start here.",
     "refused": "HQPlayer refuses every other filter at this setting.",
     "unstarted": "HQPlayer never got the other filters going on this computer.",
     "identical": "Every other filter gives the same output as yours here.",
@@ -548,7 +552,7 @@ class Sitting:
         try:
             with manager.hold("ab", LABEL, spot=self.spot):
                 self._publish()
-                link = _Link(self._halt.wait, answer_s=search_answer_s())
+                link = _Link(self._halt.wait, answer_s=ANSWER_S)
                 if not link.connect():
                     self._finish("failed", "HQPlayer is not answering")
                     return
@@ -1416,9 +1420,7 @@ class Sitting:
                          {"name": pair.other, "picks": m, "speed": speeds.get(pair.other)}]}
 
 
-def search_answer_s() -> float:
-    from playback.hqp_benchmark import ANSWER_WAIT_S
-    return ANSWER_WAIT_S
+
 
 
 def _chain_say(chain: search.Chain) -> Optional[Dict[str, Any]]:

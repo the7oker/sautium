@@ -22,8 +22,9 @@ after weeks of listening takes minutes. The grid (build_grid):
   at an automatic rate, the owner's setting on each source first, and the
   rest planned at the rates it played there (build_grid's `played`);
 - a point at a rate of another family than its source's goes after every
-  ladder: an asynchronous conversion — every slow build and both hangs on
-  6.3.3 were 44.1 kHz → 768 kHz — so a hang there ends a run that measured
+  ladder: an asynchronous conversion — every slow build and both long
+  silences on 6.3.3 were 44.1 kHz → 768 kHz — so a slow start there ends a
+  run that measured
   everything else;
 - each modulator (in PCM each filter) on a source is a ladder over the
   rates of its family (LADDER_START): measured from DSD256 (PCM: 8×, 352.8
@@ -36,24 +37,23 @@ after weeks of listening takes minutes. The grid (build_grid):
   shuffled.
 
 Each point leaves a row in hqp_benchmark_points by what it ASKED — measured,
-unsettled, dropped out, refused by HQPlayer, never started here, stopped
-HQPlayer within the build limit (slow_start), or failed — and so does each rung a neighbour on its
-ladder answers for (implied: for the sheet, never read by a plan) — and a
-later run skips every point asked before that did not fail
-(hqp_load.covered): a combination HQPlayer refuses
-is never a sample, and an adaptive output rate plays another rate than the
-one asked. HQPlayer refuses
+unsettled, dropped out, refused by HQPlayer, never started here, not started
+within the build limit (slow_start), or failed — and so does each rung a
+neighbour on its ladder answers for (implied: for the sheet, never read by
+a plan) — and a later run skips every point asked before that did not fail
+(hqp_load.covered): a combination HQPlayer refuses is never a sample, and
+an adaptive output rate plays another rate than the one asked. HQPlayer refuses
 a combination either at the Set* command or at Play, stopping at once
 ("Requested filter not possible with this rate combination …" in its log):
 a point stopped again after its one re-Play, never having moved, is refused
 too. HQPlayer builds a setting in silence, for minutes at times: a point
-waits it out and is measured, the build counted into its start; one that
-keeps HQPlayer silent past BUILD_LIMIT_S did not start here within it
-(`slow_start`: between rate families a build can take hours, and a long
-build and a stopped HQPlayer look the same from outside) — not asked again
-on that engine, CUDA state and mode — and the run ends at once, says so,
-and knows it lost HQPlayer: what HQPlayer shows when it answers again is a restart's, put
-back whole (recover). Three points of one source in a row that do not
+waits it out up to BUILD_LIMIT_S (a minute) and is measured, the build
+counted into its start; one that keeps HQPlayer silent past it did not
+start here within it (`slow_start`: between rate families a build can take
+hours, and a long build and a stopped HQPlayer look the same from outside)
+— not asked again on that engine, CUDA state and mode — and the run ends
+at once, says so, and knows it lost HQPlayer: what HQPlayer shows when it
+answers again is a restart's, put back whole (recover). Three points of one source in a row that do not
 play end that source's points; the others go on.
 
 The signals are pink noise at about -20 dBFS, 24-bit stereo FLAC — the
@@ -165,19 +165,25 @@ START_DEADLINE_S = 60.0
 # just built, and an interrupted build failed inside HQPlayer). So a point
 # asks for <Status/> again until HQPlayer answers (_outlast); HQPlayer
 # keeps a design it built, and the same setting starts in a second after.
-ANSWER_WAIT_S = 45.0
+# A third of the bound: the silence is asked into three times before it.
+ANSWER_WAIT_S = 20.0
 # Building this long — silent, or answering that it plays with nothing out
 # yet (_building, Embedded) — this host does not get the setting going in
 # time: the point is `unstarted`; one silent all through is `slow_start` —
 # the run cannot go on with an HQPlayer that answers nothing — and the run
-# ends. 1.7 × the longest live build seen (358 s, 6.3.3 Desktop, 44.1 →
-# 768 kHz, silent throughout); between rate families a build can take hours
-# (HQP-BENCH-63 Q2, §12.2): what is measured is no start within the bound.
-BUILD_LIMIT_S = 600.0
-# A silent build this long has the run's line say HQPlayer is still building
-# it, and that some take minutes here, some much longer: the person is not
-# left guessing through the silence (HQP-BENCH-63 Q2, §12.2)
-LONG_BUILD_S = 60.0
+# ends. A minute (the owner, 2026-11-22, HQP-BENCH-63 §12.2 item 8): a person
+# does not wait minutes for the music to start, and the same filter at the
+# same ratio is built again each time it plays, so a slow start is paid at
+# every album of another rate. Of 1 451 builds in HQPlayer's log on the lab
+# machine, within a rate family every one took ≤ 10 s; between families 36
+# of 42 ≤ 1 s, one 25 s, one 358 s, and two the owner ended after half an
+# hour (between families some builds take hours). The
+# playback's own patience with a build is the link's (hqp_link).
+BUILD_LIMIT_S = 60.0
+# A silence this long has the run's line say HQPlayer is still preparing it
+# (§12.2 item 8: at 20 s); from here a restart out of it, or a cancel, is the
+# person's answer to that line (_outlast)
+LONG_BUILD_S = 20.0
 # A point that has not decided by then never will (a frozen output that
 # still says it plays).
 POINT_DEADLINE_S = 90.0
@@ -558,7 +564,7 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
     replan = auto and (bool(probes) or "pcm44" not in known_rates)
     rungs: Dict[tuple, List[Point]] = {}
     # Another family than the source's (only the owner's rate makes one): an
-    # asynchronous conversion — every slow build and both hangs on 6.3.3
+    # asynchronous conversion — every slow build and both long silences on 6.3.3
     # were 44.1 kHz → 768 kHz (HQP-BENCH-63 F6) — so they go last, and a
     # hang there ends a run that measured everything else
     cross = [p for p in singles if p.key not in covered and p.rate_hz
@@ -830,7 +836,7 @@ class Settle:
             self._silent += now - self._last        # the build's time, not the start's
         self._last = now
         if building and now - self.t0 > self.build_limit:
-            return {"unstarted": f"HQPlayer was still starting it {self.build_limit / 60:.0f} min "
+            return {"unstarted": f"HQPlayer was still starting it {self.build_limit:.0f} s "
                                  "after Play — this host does not get it going"}
         elapsed = now - self.t0 - self._silent
         if elapsed > POINT_DEADLINE_S:
@@ -972,23 +978,23 @@ class _SlowStartRun(_Lost):
         if self.restarted:
             words = f"HQPlayer was restarted while it {self.verb} {self.what}." + (back if reached else later)
         elif self.verb == "prepared" and reached:
-            words = f"HQPlayer took over 10 minutes to prepare {self.what}." + back
+            words = f"HQPlayer took over a minute to prepare {self.what}." + back
         elif self.verb == "prepared":
             words = (f"HQPlayer is still preparing {self.what}. Between rate families some filters take "
                      "a very long time to prepare — hours, for some." + test + later)
         elif reached:
-            words = f"HQPlayer answered nothing for over 10 minutes while it {self.verb} {self.what}." + back
+            words = f"HQPlayer answered nothing for over a minute while it {self.verb} {self.what}." + back
         else:
             words = f"HQPlayer stopped answering while it {self.verb} {self.what}." + test + later
         if self.marked:
-            words += (" This combination is now marked as taking over 10 minutes to start here and is "
+            words += (" This combination is now marked as taking over a minute to start here and is "
                       "not tested again.")
         return words
 
 
 # How a run's note begins when HQPlayer answered nothing past the build
 # limit in it, or was restarted out of a long silence (_SlowStartRun)
-_SLOW_NOTES = ("HQPlayer is still preparing", "HQPlayer took over 10 minutes",
+_SLOW_NOTES = ("HQPlayer is still preparing", "HQPlayer took over a minute",
                "HQPlayer answered nothing for over", "HQPlayer stopped answering while",
                "HQPlayer was restarted while")
 
@@ -1764,7 +1770,7 @@ def _tally(stats: dict) -> Optional[str]:
                      f"{'s' if stats['refused'] != 1 else ''}")
     if stats["unstarted"]:
         parts.append(f"{stats['unstarted']} setting{'s' if stats['unstarted'] != 1 else ''} "
-                     f"never started here within {BUILD_LIMIT_S / 60:.0f} min — not asked again")
+                     f"never started here within {BUILD_LIMIT_S:.0f} s — not asked again")
     if stats["failed"]:
         parts.append(f"{stats['failed']} point{'s' if stats['failed'] != 1 else ''} did not "
                      "play through and are measured again next run")
@@ -1847,7 +1853,7 @@ def _preparing(p: Point) -> str:
     rate_hz, filt = p.key[0], p.key[1]
     rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
     return (f"HQPlayer is preparing {filt} at {rate} — between rate families some filters take "
-            "minutes here, some much longer.")
+            "long to prepare.")
 
 
 def _start(send: Callable[..., Any], read: Callable[[], Optional[TrackStatus]],
@@ -2007,7 +2013,7 @@ def _outlast(link: _Link, settle: Settle,
             raise (_BuildCancelled if long() else _Lost)(
                 "cancelled while HQPlayer was still building a setting")
         if time.monotonic() - began >= settle.build_limit:
-            raise _Silenced(f"HQPlayer answered nothing {settle.build_limit / 60:.0f} min after Play — "
+            raise _Silenced(f"HQPlayer answered nothing for {settle.build_limit:.0f} s after Play — "
                             "still preparing it, or stopped")
         # Said before the ask whose answer can only come past LONG_BUILD_S: a
         # silent read waits ANSWER_WAIT_S whole
@@ -3133,8 +3139,10 @@ def _recover(link: _Link, run: dict,
             else unset["pre"] and run["last_rate"] is not None):
         unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
     if whole:
-        how = ("answered nothing past the build limit during the run"
-               if (run["note"] or "").startswith(_SLOW_NOTES) else "went away under the run")
+        said = run["note"] or ""
+        how = ("was restarted during the run" if said.startswith("HQPlayer was restarted while")
+               else "answered nothing past the build limit during the run"
+               if said.startswith(_SLOW_NOTES) else "went away under the run")
         note = f"cut short; HQPlayer {how} — its settings were put back when it answered again"
         if left_at is not None:
             note += f" (its volume left as it is, {left_at:g} dB)"

@@ -689,7 +689,7 @@ def test_host_fit_says_a_combination_that_stopped_hqplayer_and_a_rung_its_ladder
                         "convolution": False},
             "knob": "filter", "thresholds": _TH, "rows": rows, "total": len(rows)}
     text = _say("host_fit", _read(host=host), name="demo-sinc-a").split("\n")
-    assert text[2] == ("    DSD256 · DMX5: did not start within 10 minutes when the Benchmark asked it "
+    assert text[2] == ("    DSD256 · DMX5: did not start within a minute when the Benchmark asked it "
                        "(HQPlayer answers nothing while it prepares) — not asked again on this engine")
     assert text[3] == ("    DSD512 · DMX5: too slow here (under 1×), by the Benchmark's measurement at "
                        "DSD256 (not measured itself)")

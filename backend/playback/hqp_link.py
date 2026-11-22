@@ -76,9 +76,14 @@ from typing import Any, Callable, Dict, Optional
 
 from config import settings
 from hqplayer_client import HQPlayerClient, PlaybackState, Waker, redact_uri, wait_on
-from playback.hqp_benchmark import BUILD_LIMIT_S
-
 logger = logging.getLogger(__name__)
+
+# How long the playback waits out a build HQPlayer answers nothing through
+# before it says HQPlayer is not answering: a person's own filter or rate,
+# which between rate families can take minutes (358 s on the lab's 6.3.3)
+# and longer. The benchmark's bound is its own (hqp_benchmark.BUILD_LIMIT_S:
+# a minute, a test that marks what does not start in it).
+BUILD_LIMIT_S = 600.0
 
 # An answer later than this is HQPlayer building a setting. A PCM filter
 # changed mid-play swaps without a silence, and a PCM start holds its answer

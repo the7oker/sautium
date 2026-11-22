@@ -96,7 +96,7 @@ RUNS = "{rate} · {other}: runs at {speed}× ({samples}){unsettled}{dropout} —
 DROPOUT = ", and it dropped out here"
 REFUSED_HERE = "{rate} · {other}: refused by HQPlayer when the Benchmark asked it"
 UNSTARTED_HERE = "{rate} · {other}: never got going here when the Benchmark asked it"
-SLOW_START_HERE = ("{rate} · {other}: did not start within 10 minutes when the Benchmark asked it "
+SLOW_START_HERE = ("{rate} · {other}: did not start within a minute when the Benchmark asked it "
                    "(HQPlayer answers nothing while it prepares) — not asked again on this engine")
 IMPLIED_HERE = "{rate} · {other}: {cls}, by the Benchmark's measurement at {from_rate} (not measured itself)"
 AUTO = "auto"
