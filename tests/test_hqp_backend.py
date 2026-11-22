@@ -59,6 +59,13 @@ _ATTR_RE = re.compile(r'([\w:]+)="([^"]*)"')
 _NAMED_LISTS = {"GetFilters": ("FiltersItem", "f"), "GetShapers": ("ShapersItem", "s")}
 
 
+
+def _mint_all(proxy, pairs):
+    """Tokens for (query, chain) pairs, as the fetch lane's queue side mints
+    them: nothing fetched until a slot wants it or a consumer waits on it."""
+    return [proxy.mint(q, chain) for q, chain in pairs]
+
+
 class _ReusableServer(socketserver.ThreadingTCPServer):
     # come_back() rebinds the port the box listened on before it went down.
     allow_reuse_address = True
@@ -6690,7 +6697,7 @@ def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int):
     monkeypatch.setattr(hl.BuildWatch, "after", 0.3)
     proxy = streaming_service.get_proxy()
     prov = _GatedStream()
-    toks = proxy.start_session([(TrackQuery(artist="Artist", title=f"Stream {i}", album="Album",
+    toks = _mint_all(proxy, [(TrackQuery(artist="Artist", title=f"Stream {i}", album="Album",
                                             duration=300.0, track_id=f"stream-{i}"), [(prov, None)])
                                 for i in (2, 3, 4)])
     for tok in toks:
@@ -6766,7 +6773,7 @@ def test_a_refetch_in_another_shape_is_handed_to_hqplayer_again_before_it_gets_t
         prov.data = b"fLaC" + b"\x01" * 2000                 # the refetch's other shape
         uri = next(u for u in fake.playlist if toks[3] in u)
         n = len(fake.commands)
-        streaming_service.get_proxy().ensure_buffered([toks[3]])   # the window ahead asks
+        streaming_service.get_proxy().demand(toks[3])   # the window ahead asks
         assert _wait(lambda: any(c == "PlaylistAdd" and a.get("uri") == uri
                                  for c, a in fake.commands[n:]))
         assert [c for c, a in fake.commands[n:] if c == "PlaylistRemove"][:1] == ["PlaylistRemove"]
@@ -6782,7 +6789,7 @@ def _stream_item(n):
     part of its URI that names it."""
     from streaming.base import TrackQuery
     proxy = streaming_service.get_proxy()
-    tok = proxy.add_tracks([(TrackQuery(artist="Artist", title=f"Stream {n}", album="Album",
+    tok = _mint_all(proxy, [(TrackQuery(artist="Artist", title=f"Stream {n}", album="Album",
                                         duration=300.0, track_id=f"stream-{n}"), [(_GatedStream(), None)])])[0]
     assert proxy.wait_ready(tok, timeout=5).audio is not None
     return QueueItem(track_id=f"stream-{n}", media_file_id=None, source={"kind": "proxy", "token": tok},
@@ -7125,7 +7132,7 @@ def test_bytes_that_land_as_a_start_parks_start_it(fake, monkeypatch):
         away = real(token)
         if token == toks[3] and not raced:
             raced.append(True)
-            proxy.ensure_buffered([token])                # the window's refetch lands right after it
+            proxy.demand(token)                # the window's refetch lands right after it
             assert _wait(lambda: not real(token), 10)
         return away
     try:
@@ -7175,7 +7182,7 @@ def test_a_refetch_in_another_shape_while_stopped_keeps_where_hqplayer_rested(fa
         assert proxy._peek(toks[4]).audio is None
         prov.data = b"fLaC" + b"\x01" * 2000                 # the refetch's other shape
         n = len(fake.commands)
-        proxy.ensure_buffered([toks[4]])
+        proxy.demand(toks[4])
         assert _wait(lambda: any(c == "PlaylistAdd" and a.get("clear") == "1"
                                  for c, a in fake.commands[n:]))
         assert _wait(lambda: len(fake.playlist) == 4)
@@ -7196,7 +7203,7 @@ def test_a_refetch_in_another_shape_on_a_tail_mirror_is_handed_again(fake, monke
         prov.data = b"fLaC" + b"\x01" * 2000
         uri = next(u for u in fake.playlist if toks[4] in u)
         n = len(fake.commands)
-        proxy.ensure_buffered([toks[4]])
+        proxy.demand(toks[4])
         assert _wait(lambda: any(c == "PlaylistAdd" and a.get("uri") == uri
                                  for c, a in fake.commands[n:]))
         assert _wait(lambda: fake.playlist.count(uri) == 1 and fake.playlist.index(uri) == 3)
@@ -7212,7 +7219,7 @@ def test_the_window_keeps_the_bytes_of_a_start_under_way(fake, monkeypatch):
     from streaming.base import TrackQuery
     proxy = streaming_service.get_proxy()
     prov = _GatedStream()
-    toks = proxy.start_session([(TrackQuery(artist="Artist", title=f"Stream {i}", album="Album",
+    toks = _mint_all(proxy, [(TrackQuery(artist="Artist", title=f"Stream {i}", album="Album",
                                             duration=300.0, track_id=f"stream-{i}"), [(prov, None)])
                                 for i in range(1, 11)])
     for tok in toks:
@@ -7364,7 +7371,7 @@ def test_a_new_queue_started_over_budget_keeps_its_first_tracks_bytes_for_the_pl
     mgr, b = output
     proxy = streaming_service.get_proxy()
     prov = _GatedStream()
-    toks = proxy.start_session([(TrackQuery(artist="New", title=f"New {i}", album="New album",
+    toks = _mint_all(proxy, [(TrackQuery(artist="New", title=f"New {i}", album="New album",
                                             duration=300.0, track_id=f"new-{i}"), [(prov, None)])
                                 for i in (1, 2)])
     for tok in toks:
@@ -7896,55 +7903,6 @@ def _routes_on(monkeypatch, mgr):
     return player_router
 
 
-def test_a_filler_waits_out_a_build_and_adds_once_it_is_done(fake, output, monkeypatch):
-    mgr, b = output
-    player_router = _routes_on(monkeypatch, mgr)
-    fake.build("SetFilter", 2.0)
-    began = hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"]["since"]
-    assert player_router._filler_append(_item("E:/Music/B/09.flac", 9), mgr.queue.generation)
-    assert time.time() >= began + 1.0                # it waited
-    assert fake.playlist[-1] == "file:///E:/Music/B/09.flac" and len(mgr.queue) == 4
-    assert fake.sent_into_silence() == []
-
-
-@pytest.mark.parametrize("ending,why", [("unfinished", "HQPlayer did not finish building the filter"),
-                                        ("gone", "HQPlayer went away during the build")])
-def test_a_filler_whose_build_does_not_end_with_an_answer_loses_nothing(fake, output, monkeypatch,
-                                                                       caplog, ending, why):
-    """I11: the build a filler waits out ran out, or HQPlayer went away
-    during it: what the filler took goes into the queue alone, the mirror
-    lost — and the HQPlayer that answers again gets the whole queue."""
-    mgr, b = output
-    player_router = _routes_on(monkeypatch, mgr)
-    _limit(monkeypatch, 1.5)
-    waiting = threading.Event()
-    wait_out = hl.BuildWatch.wait_out
-    monkeypatch.setattr(hl.BuildWatch, "wait_out",
-                        lambda self, until: (waiting.set(), wait_out(self, until))[1])
-    fake.build("SetFilter", 4.0 if ending == "unfinished" else 60.0)
-    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
-    album = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
-    t = threading.Thread(target=lambda: player_router._owned_filler(album, mgr.queue.generation),
-                         daemon=True)
-    t.start()
-    assert waiting.wait(5)
-    if ending == "gone":
-        fake.close()
-    t.join(10)
-    assert [it.track_id for it in mgr.queue.snapshot()] == [
-        "track-1", "track-2", "track-3", "track-11", "track-12", "track-13"]
-    assert why in caplog.text and "go into the queue alone" in caplog.text
-    if ending == "gone":
-        fake.come_back()                             # restarted: stopped, its playlist empty
-    # HQPlayer answers again (the build over, or back): it gets the whole queue
-    want = [f"file:///E:/Music/{d}/0{i}.flac" for d, i in
-            (("A", 1), ("A", 2), ("A", 3), ("B", 1), ("B", 2), ("B", 3))]
-    assert _wait(lambda: (b.poke(), fake.playlist[-3:] == want[-3:])[1], timeout=15)
-    assert _wait(lambda: b.healthy(), timeout=10)
-    if ending == "gone":
-        assert fake.playlist == want
-
-
 def test_a_radio_start_while_hqplayer_builds_is_busy_and_splits_no_history(fake, output, monkeypatch):
     from fastapi import HTTPException
     mgr, b = output
@@ -8473,36 +8431,9 @@ def test_a_start_that_meets_someone_elses_build_waits_and_a_switch_drops_it(fake
     assert fake.sent_into_silence() == []
 
 
-def test_waiting_out_a_build_holds_neither_the_command_lock_nor_the_queue_lock(fake, output,
-                                                                             monkeypatch):
-    """I4: a filler waiting for a build's end holds no lock — the queue lock
-    is free for a queue edit, the command lock is the build's own."""
-    mgr, b = output
-    player_router = _routes_on(monkeypatch, mgr)
-    waiting, waiter = threading.Event(), []
-    wait_out = hl.BuildWatch.wait_out
-
-    def recorded(self, until):
-        waiter.append(threading.get_ident())
-        waiting.set()
-        return wait_out(self, until)
-    monkeypatch.setattr(hl.BuildWatch, "wait_out", recorded)
-    fake.build("SetFilter", 2.0)
-    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
-    t = threading.Thread(target=lambda: player_router._filler_append(
-        _item("E:/Music/B/09.flac", 9), mgr.queue.generation), daemon=True)
-    t.start()
-    assert waiting.wait(5)
-    assert _link().lock.owner != waiter[0]
-    assert mgr._mutate_lock.acquire(timeout=1.0), "the waiter holds the queue lock"
-    mgr._mutate_lock.release()
-    t.join(10)
-    assert len(mgr.queue) == 4
-
-
 def test_the_node_stop_lets_go_of_everything_within_two_seconds(fake, output, monkeypatch):
-    """I5: mid-build — a DSP change holding its answer, a filler waiting it
-    out, the Stop a switch owes, the meter open — the node stop returns at
+    """I5: mid-build — a DSP change holding its answer, the Stop a switch
+    owes, the meter open — the node stop returns at
     once and lets every one of them go within 2 s; the meter's socket is
     closed, and a link asked for afterwards sends nothing."""
     import asyncio
@@ -8523,13 +8454,10 @@ def test_the_node_stop_lets_go_of_everything_within_two_seconds(fake, output, mo
         page.until(lambda m: m.get("state") == "open")
         fake.build("SetFilter", 60.0, answer="last")
         hb.change_dsp({"filter": "f57", "filter1x": "f57", "shaper": "s2"})
-        filler = threading.Thread(target=lambda: player_router._filler_append(
-            _item("E:/Music/B/09.flac", 9), mgr.queue.generation), daemon=True)
-        filler.start()
         mgr.activate(None)                           # the switch: its Stop is owed
         assert _wait(lambda: any(t.name == "hqp-late-stop" for t in threading.enumerate()))
         workers = [t for t in threading.enumerate()
-                   if t.name in ("hqp-dsp-change", "hqp-late-stop")] + [filler]
+                   if t.name in ("hqp-dsp-change", "hqp-late-stop")]
         n = len(fake.arrivals)
         t0 = time.monotonic()
         hl.close_all("the node is stopping")
@@ -8864,137 +8792,6 @@ def test_a_dsp_changes_outcome_is_its_attachments_and_its_id_is_never_repeated(f
         b2.shutdown()
     assert manager_mod.manager is mgr
 
-
-def test_a_filler_whose_hqplayer_vanished_loses_nothing_and_the_return_gets_the_queue(
-        fake, output, monkeypatch):
-    """I11, I13: HQPlayer gone mid-fill, no build at all — what the filler
-    took goes into the queue alone, the mirror lost; the HQPlayer that comes
-    back, restarted and stopped, takes the whole queue."""
-    mgr, b = output
-    player_router = _routes_on(monkeypatch, mgr)
-    monkeypatch.setattr(hl, "CIRCUIT_COOLDOWN_S", 0.0)
-    fake.close()
-    album = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
-    player_router._owned_filler(album, mgr.queue.generation)
-    assert [it.track_id for it in mgr.queue.snapshot()] == [
-        "track-1", "track-2", "track-3", "track-11", "track-12", "track-13"]
-    assert b._mirror == "lost"
-    fake.come_back()
-    want = [f"file:///E:/Music/{d}/0{i}.flac" for d, i in
-            (("A", 1), ("A", 2), ("A", 3), ("B", 1), ("B", 2), ("B", 3))]
-    assert _wait(lambda: (b.poke(), fake.playlist == want)[1], timeout=20)
-    assert _wait(lambda: b._mirror == "step", timeout=10)
-
-
-def test_a_filler_waiting_on_one_hqplayer_when_another_is_picked_lands_on_the_new_one(
-        fake, fake_b, output, monkeypatch):
-    """I11, I2: a filler waits out HQPlayer A's build, and HQPlayer B is
-    picked meanwhile: the wait gives up with A's link — the filler is not
-    stopped by it: it goes on through the manager, and B gets the queue
-    whole."""
-    mgr, b = output
-    settings_router = _picker(monkeypatch, fake)
-    player_router = _routes_on(monkeypatch, mgr)
-    waiting = threading.Event()
-    wait_out = hl.BuildWatch.wait_out
-    monkeypatch.setattr(hl.BuildWatch, "wait_out",
-                        lambda self, until: (waiting.set(), wait_out(self, until))[1])
-    fake.build("SetFilter", 3.0)
-    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
-    album = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
-    t = threading.Thread(target=lambda: player_router._owned_filler(album, mgr.queue.generation),
-                         daemon=True)
-    t.start()
-    assert waiting.wait(5)
-    _pick(settings_router, type="hqplayer", hqplayer={"host": "127.0.0.1", "port": fake_b.port})
-    t.join(15)
-    live = mgr.active
-    try:
-        assert [it.track_id for it in mgr.queue.snapshot()] == [
-            "track-1", "track-2", "track-3", "track-11", "track-12", "track-13"]
-        want = [f"file:///E:/Music/{d}/0{i}.flac" for d, i in
-                (("A", 1), ("A", 2), ("A", 3), ("B", 1), ("B", 2), ("B", 3))]
-        assert _wait(lambda: (live.poke(), fake_b.playlist == want)[1], timeout=15)
-        assert "PlaylistAdd" not in [c for ts, c in fake.arrivals if ts >= _silence_began(fake)]
-    finally:
-        live.shutdown()
-
-
-def _silence_began(fake) -> float:
-    """When the fake's latest silence began — the build the filler waited on."""
-    return fake.silences[-1][0] if fake.silences else 0.0
-
-
-def test_the_node_stop_ends_a_filler_at_once(fake, output, monkeypatch):
-    """A filler waiting out a build when the node stops ends there —
-    no add tried again, no seconds slept per track."""
-    mgr, b = output
-    player_router = _routes_on(monkeypatch, mgr)
-    waiting = threading.Event()
-    wait_out = hl.BuildWatch.wait_out
-    monkeypatch.setattr(hl.BuildWatch, "wait_out",
-                        lambda self, until: (waiting.set(), wait_out(self, until))[1])
-    fake.build("SetFilter", 30.0)
-    hb.change_dsp({"filter": "f57", "filter1x": "f57"})
-    album = [_item(f"E:/Music/B/0{i}.flac", 10 + i) for i in range(1, 4)]
-    done = threading.Event()
-    t = threading.Thread(target=lambda: (player_router._owned_filler(album, mgr.queue.generation),
-                                         done.set()), daemon=True)
-    t.start()
-    assert waiting.wait(5)
-    t0 = time.monotonic()
-    hl.close_all("the node is stopping")
-    assert done.wait(2.0), "the filler went on after the node stop"
-    assert time.monotonic() - t0 < 1.0
-    assert len(mgr.queue) == 3
-
-
-def test_a_file_the_output_refused_is_offered_once(fake, output, monkeypatch):
-    """A filler's file HQPlayer refuses is not tried again — one add,
-    no seconds slept, the track left out."""
-    mgr, b = output
-    player_router = _routes_on(monkeypatch, mgr)
-    fake.refuse.add("B/09.flac")
-    n = len(fake.commands)
-    t0 = time.monotonic()
-    assert player_router._filler_append(_item("E:/Music/B/09.flac", 9), mgr.queue.generation) is False
-    assert time.monotonic() - t0 < 1.0
-    assert [a["uri"] for c, a in fake.commands[n:] if c == "PlaylistAdd"] == [
-        "file:///E:/Music/B/09.flac"]
-    assert len(mgr.queue) == 3
-
-
-def test_an_add_the_link_let_go_lands_once_the_output_change_is_over(fake, output, monkeypatch):
-    """An add the link did not send because the output changed under it
-    goes again once the change is over — on the output there is then, and
-    with no sleep in between."""
-    mgr, b = output
-    player_router = _routes_on(monkeypatch, mgr)
-    _away(monkeypatch, fake)
-    append, tried = mgr.append, threading.Event()
-
-    def let_go_once(*args, **kwargs):
-        if not tried.is_set():
-            tried.set()
-            raise hl.Dropped("another HQPlayer was chosen")
-        return append(*args, **kwargs)
-    monkeypatch.setattr(mgr, "append", let_go_once)
-    placed = {}
-    t = threading.Thread(target=lambda: placed.setdefault("it", player_router._filler_append(
-        _item("E:/Music/B/09.flac", 9), mgr.queue.generation)), daemon=True)
-    t.start()
-    assert tried.wait(5)
-    time.sleep(0.3)                                  # it waits: nothing to land on yet
-    assert "it" not in placed
-    t0 = time.monotonic()
-    mgr.activate(None)
-    mgr.activate("browser")
-    t.join(5)
-    assert placed.get("it") is True and time.monotonic() - t0 < 1.0
-    assert [it.track_id for it in mgr.queue.snapshot()][-1] == "track-9"
-
-
-# -- the routes: history rotates once the output took the queue; the assistants ---------------
 
 @pytest.fixture
 def play_route(fake, output, monkeypatch):
@@ -14398,7 +14195,7 @@ def test_a_new_order_is_taken_over_a_queue_whose_slots_did_not_move(fake, output
             with mgr._mutate_lock:
                 b._ways_in()
         else:
-            assert mgr.queue.set_play(mgr.queue.item_at(3), None) == 3
+            assert mgr.queue.swap_play(mgr.queue.item_at(3), mgr.queue.item_at(3).play, None)
         return apply(plan)
     monkeypatch.setattr(mgr, "apply_reorder", changed_first)
     said = player_router.reorder(player_router.ReorderRequest(

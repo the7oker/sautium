@@ -1096,17 +1096,6 @@ def _entity_items(ids: list[str]) -> list[dict] | str:
     return items or "None of those IDs exist in the catalog."
 
 
-def _queue_outcome(r: dict, verb: str) -> str:
-    parts = []
-    if r.get("queued"):
-        parts.append(f"{r['queued']} track(s) from the library")
-    if r.get("streaming"):
-        parts.append(f"{r['streaming']} streaming in behind them")
-    missing = len(r.get("not_found") or [])
-    tail = f" ({missing} had nothing playable)" if missing else ""
-    return f"{verb}: " + (", ".join(parts) or "nothing") + tail
-
-
 @mcp.tool()
 def build_playlist(ids: list[str]) -> str:
     """Assemble a NEW queue from these tracks and/or albums, in the given order,
@@ -1116,7 +1105,7 @@ def build_playlist(ids: list[str]) -> str:
     playlist": the user is curating a set, not asking for sound. The queue that
     was there is archived to the listening history, so the new one is a playlist
     of its own rather than a tail on the old one. Mixed lists are fine: entities
-    with no file stream, and they arrive behind their provider lookup.
+    with no file stream, each in its place from the start.
 
     Args:
         ids: Track and/or album UUIDs, in play order (max 50)
@@ -1127,7 +1116,7 @@ def build_playlist(ids: list[str]) -> str:
             return items
         r = _backend_post("/api/player/play-entities",
                           {"items": items, "autoplay": False}, timeout=120.0)
-        return _queue_outcome(r, "New queue ready (not started)")
+        return aq.queue_outcome(r, "New queue ready (not started)")
     except Exception as e:
         return f"Error building the playlist: {e}"
 
@@ -1149,7 +1138,7 @@ def play_all(ids: list[str]) -> str:
         if isinstance(items, str):
             return items
         r = _backend_post("/api/player/play-entities", {"items": items}, timeout=120.0)
-        return _queue_outcome(r, "Playing a new queue")
+        return aq.queue_outcome(r, "Playing a new queue")
     except Exception as e:
         return f"Error starting playback: {e}"
 
@@ -1170,7 +1159,7 @@ def add_to_queue(ids: list[str]) -> str:
         if isinstance(items, str):
             return items
         r = _backend_post("/api/player/queue-entities", {"items": items}, timeout=60.0)
-        return _queue_outcome(r, "Queued")
+        return aq.queue_outcome(r, "Queued")
     except Exception as e:
         return f"Error adding to queue: {e}"
 

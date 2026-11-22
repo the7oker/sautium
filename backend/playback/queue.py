@@ -9,8 +9,10 @@ one-way (HQPlayer's native playlist); `/api/player/playlist` serves its
 `version` is bumped on every payload-visible change and embedded in each
 SSE status payload as `playlist_version`, so clients refetch
 deterministically. `generation` is bumped whenever a NEW queue starts
-(replace / radio clear): background fillers capture it and stop appending
-the instant the user moves to another queue.
+(replace / radio clear): a radio fill captures it and appends nothing to a
+queue the user moved off. A streamed track is a slot from the tap
+(items_for_streamed): what its row shows of its stream is told apart from
+the version (playback.substitute.Lane.slots).
 """
 
 import logging
@@ -55,9 +57,11 @@ class QueueItem:
                         can (it is played as a stream there)
       {"kind": "proxy", "token": <media-proxy token>}
       {"kind": "uri",   "uri": <verbatim>}   — foreign/out-of-library
-      {"kind": "track"} — its file left the library and no other copy of
-                        the track is here (rebind_origins): every output
-                        opens whatever copy it reaches, else a stream
+      {"kind": "track"} — the track itself: queued with no copy here (a
+                        streamed track, items_for_streamed), or its file
+                        left the library with no other copy here
+                        (rebind_origins): every output opens whatever copy
+                        it reaches, else a stream
     """
     track_id: Optional[str]
     media_file_id: Optional[int]
@@ -89,6 +93,15 @@ class QueueItem:
     def opener(self) -> dict:
         """What the active output reads to open this slot."""
         return self.play or self.source
+
+    @property
+    def stream_token(self) -> Optional[str]:
+        """The media proxy's token of a provider's stream this slot plays —
+        queued as one, or its way in (an owned file's transcode is none):
+        every reader of "is this slot a stream" asks this, never `preview`,
+        which says only how the slot was queued."""
+        src = self.opener()
+        return src.get("token") if src.get("kind") == "proxy" and not src.get("transcode") else None
 
 
 class CanonicalQueue:
@@ -179,7 +192,7 @@ class CanonicalQueue:
         with self._lock:
             changed = False
             for it in self._items:
-                if not any(s.get("kind") == "proxy" and s.get("token") == token
+                if not any(s.get("kind") in ("proxy", "pending") and s.get("token") == token
                            for s in (it.source, it.play or {})):
                     continue
                 new = (provider, excerpt, duration_seconds)
@@ -229,16 +242,23 @@ class CanonicalQueue:
                 self._version += 1
             return moved
 
-    def set_play(self, item: "QueueItem", play: Optional[dict]) -> Optional[int]:
-        """A substitute landed on (or failed for) this very item: its 1-based
-        slot, or None when the item left the queue meanwhile."""
+    def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
+                  bump: bool = True) -> bool:
+        """This very item's way in becomes `play` — if it still is `expected`
+        (the same dict) and the item is still queued: a stream that landed, or
+        failed, on a slot whose way in nothing re-read meanwhile. `bump`: a
+        change the playlist shows (a landing, a failure) moves the version;
+        the lane's own marks on a pending slot do not."""
         with self._lock:
-            for i, it in enumerate(self._items):
-                if it is item:
-                    it.play = play
-                    self._version += 1
-                    return i + 1
-            return None
+            if item.play is not expected or not any(it is item for it in self._items):
+                return False
+            item.play = play
+            if not item.preview and (play is None or play.get("kind") != "proxy"):
+                # what the stream told of itself is no more this slot's
+                item.provider, item.excerpt = None, False
+            if bump:
+                self._version += 1
+            return True
 
     # -- mutations (serialized by the manager's mutate lock) ----------------
 
@@ -291,18 +311,26 @@ class CanonicalQueue:
 
     # -- payload -------------------------------------------------------------
 
-    def payload(self, gap=None) -> dict:
+    def payload(self, gap=None, states=None) -> dict:
         """The exact `/api/player/playlist` JSON shape the UI has always
         consumed (owned / preview / foreign row variants). `gap` — the
         active output's (PlayerBackend.gap) — names each slot that output
-        does not hold."""
+        does not hold; `states` — the lane's (Lane.slots) — what each
+        streamed row shows of its stream, as the `slots` message says it
+        after."""
         with self._lock:
             tracks = [self._row(it, idx) for idx, it in enumerate(self._items)]
             gaps = [gap(it) for it in self._items] if gap is not None else []
+            version = self._version
         for row, why in zip(tracks, gaps):
             if why is not None:
                 row["gap"] = why
-        return {"tracks": tracks, "count": len(tracks)}
+        for st in (states() if states is not None else []):
+            row = tracks[st["index"] - 1] if st["index"] <= len(tracks) else None
+            if row is not None and row.get("track_id") == st["track_id"]:
+                row["stream"] = {k: v for k, v in st.items()
+                                 if k not in ("index", "track_id", "album_id")}
+        return {"tracks": tracks, "count": len(tracks), "version": version}
 
     @staticmethod
     def _row(item: QueueItem, idx: int) -> dict:
@@ -323,7 +351,7 @@ class CanonicalQueue:
                 "index": idx,
                 "play": play,
             }
-        if item.preview or play == "proxy":
+        if item.preview or play == "proxy" or item.source.get("kind") == "track":
             return {
                 "id": None,
                 "title": item.title or "Unknown",
@@ -601,6 +629,30 @@ def items_for_file_spans(spans: list[tuple]) -> dict[tuple, QueueItem]:
         out[(r["file_path"], float(start) if start is not None else None)] = \
             _item_from_media_row(r)
     return out
+
+
+def items_for_streamed(queries: list) -> list[QueueItem]:
+    """QueueItems for streamed tracks — one per TrackQuery (streaming.base),
+    in order: the track itself (`{"kind": "track"}`), its way in a stream to
+    come — what a tap on a not-owned album or track commits, all its slots in
+    one mutation, before any provider was asked. Its way in is a stream to
+    come on every output (the tap streams what has no copy here; an output
+    that holds one reads it again as it mirrors, playback.substitute), which
+    the fetch lane brings in the queue's order. `duration_seconds` is the
+    catalog's length on the album it was queued from, else the one the
+    resolve recovered for a track the catalog gives none (display only)."""
+    return [QueueItem(
+        track_id=q.track_id,
+        media_file_id=None,
+        source={"kind": "track"},
+        play={"kind": "pending"},
+        title=q.title or "",
+        artist=q.artist or "",
+        album=q.album or "",
+        album_id=q.album_id,
+        duration_seconds=q.duration or resolved_durations.get(q.track_id),
+        cover_url=q.cover_url,
+    ) for q in queries if q.track_id]
 
 
 def item_for_proxy_token(token: str) -> Optional[QueueItem]:

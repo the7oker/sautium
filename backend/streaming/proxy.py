@@ -9,9 +9,12 @@ Design points proven during bring-up:
   owned tracks) — so a preview track is just one more playlist URI.
 - A provider fetch takes seconds (search + download + transcode), so we PREFETCH
   the next track off the request path; HQPlayer's GET then hits a ready buffer.
-- Queued work is BOUND to the canonical-queue generation that will hold it, so
-  moving to another queue cancels the pending fetches at the source instead of
-  downloading an album nobody will hear (`bind` / `retire_generation`).
+- ONE fetch lane, serial, with no list of its own: when it is free it takes an
+  on-demand read first (a consumer's GET, a start parked on a stream), then
+  what the canonical queue wants next in ITS order (`picker`, the queue side's
+  — playback.substitute), so a slot moved nearer the playhead is fetched
+  sooner; a token nobody wants any more is cancelled at the source
+  (`cancel`, the provider's fetch context — contract 3).
 - HQPlayer probe-then-streams (HEAD → Range GET, sometimes resets) — we support
   HEAD + Range(206) and swallow client resets.
 
@@ -35,8 +38,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Optional
 
 from . import transcode
-from .base import FetchedAudio, ProviderError, StreamProvider, TrackQuery
-from .events import preview_events
+from .base import (FetchCancelled, FetchContext, FetchedAudio, ProviderError, Refused,
+                   StreamProvider, TrackQuery, fetch_context)
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +103,6 @@ class _FileEntry:
 class _Entry:
     token: str
     query: TrackQuery
-    index: int                      # position in the session, for prefetch/eviction
     # Lossless-first fallback chain of (provider, source_id). source_id is the
     # pre-resolved id (skip re-resolution) or None (the provider resolves inside
     # fetch). Tried in order: a provider that RESOLVED but fails to DOWNLOAD (e.g.
@@ -120,10 +122,19 @@ class _Entry:
     # refetch that lands otherwise must be handed to it again (`reshaped`)
     held: Optional[tuple] = None
     reshaped: bool = False
-    # Canonical-queue generation whose filler will place this track. None = the
-    # request that made it still owns it (a start_session still pre-buffering, an
-    # owned m4a transcode); a bound entry dies with its generation.
-    generation: Optional[int] = None
+    # The fetch under way: its cancel and its progress (contract 3)
+    ctx: Optional[FetchContext] = None
+    progress: Optional[float] = None
+    # Why the links that refused said so — (provider id, Refused code) — and
+    # the reason the failure is shown with: the chain head's code, else the
+    # first coded one (None: a plain failure, "couldn't be fetched")
+    refusals: list = field(default_factory=list)
+    code: Optional[str] = None
+    cancelled: bool = False
+
+
+# A fetch's progress is told in tenths: a row's line, never a repaint a second
+_PROGRESS_STEP = 0.1
 
 
 
@@ -166,19 +177,32 @@ class MediaProxy:
         self._prepare_timeout = prepare_timeout
         self._file_token_key = file_token_key
         self._lock = threading.RLock()
-        # SEQUENTIAL, in-ORDER fetching: one worker drains an ordered token queue
-        # (enqueue order == playlist order). The next-to-play track gets the full
-        # pipe (best keep-up on a slow link), and one-at-a-time traffic looks like
-        # normal listening — a parallel bulk pull is a classic scraping/piracy
-        # signal that trips provider abuse detection (account flags / YouTube 403).
-        self._fetch_q: list[str] = []
+        # SEQUENTIAL fetching: one worker, one track at a time. The track
+        # wanted next gets the full pipe (best keep-up on a slow link), and
+        # one-at-a-time traffic looks like normal listening — a parallel bulk
+        # pull is a classic scraping/piracy signal that trips provider abuse
+        # detection (account flags / YouTube 403). What it takes is asked when
+        # it is free: `_demand` first (a consumer waits on those bytes), then
+        # `picker` — the queue's next want, in the queue's order — then
+        # `_later` (a wait with no hurry).
+        self._demand: list[str] = []
+        self._later: list[str] = []
         self._fetch_cv = threading.Condition(self._lock)
         self._fetch_worker = False
+        self._woken = 0                 # wakes so far: a wake while the picker ran is not lost
         self._entries: dict[str, _Entry] = {}
-        self._session: list[str] = []   # ordered tokens of the current preview
-        # The canonical-queue generation currently being played, as last reported
-        # by the manager. Work bound to any other generation has no consumer left.
-        self._live_generation: Optional[int] = None
+        # The queue side's next want (playback.substitute.Lane.pick): a token
+        # to fetch, a callable to run in the lane (a CUE cut), or None.
+        # Called on the worker with no proxy lock held.
+        self.picker: Callable[[], object] = lambda: None
+        # Fired (with the _Entry) whenever what a row shows of it moves: the
+        # fetch begins, its progress passes a tenth, it ends. Kept generic, as
+        # the ready hooks are: the queue side turns it into the rows' states.
+        self.state_hooks: list[Callable[["_Entry"], None]] = []
+        # Fired (with the query, the provider, its Refused code) for every link
+        # that refused with a reason: the resolve remembers it (routers.player)
+        self.link_refused: Callable[[TrackQuery, StreamProvider, str], None] = \
+            lambda query, provider, code: None
         self._files: dict[str, _FileEntry] = {}          # /file/{token} registry
         # What each /file/ and /preview/ token was actually asked for — the
         # consumer's side of a hand-over, which the HQPlayer playback trace
@@ -282,9 +306,9 @@ class MediaProxy:
 
     @staticmethod
     def _entry_keys(e: _Entry) -> set:
-        """Queue identities an entry answers to: its token (phantom rows carry
-        it in source) and ("mf", id) for an owned transcode (the queue row is
-        the file item; only the HQP mirror knows the token)."""
+        """Queue identities an entry answers to: its token (a streamed slot's
+        way in names it) and ("mf", id) for an owned transcode (HQPlayer's
+        slot names it too, but the file is what the queue row is)."""
         keys = {e.token}
         if e.query.media_file_id:
             keys.add(("mf", e.query.media_file_id))
@@ -313,6 +337,7 @@ class MediaProxy:
                 return min(rank.get(k, len(ranked)) for k in ks)
 
             freed = 0
+            evicted = []
             for e in sorted(fetched, key=order):
                 if freed >= excess:
                     break
@@ -320,7 +345,10 @@ class MediaProxy:
                     continue
                 freed += len(e.audio.data)
                 self._evict(e)
-            return freed
+                evicted.append(e)
+        for e in evicted:
+            self._said(e)
+        return freed
 
     @staticmethod
     def _evict(e: _Entry) -> None:
@@ -328,7 +356,10 @@ class MediaProxy:
         wait/GET refetches transparently. Caller holds _lock."""
         e.audio = None
         e.error = None
+        e.code = None
+        e.refusals = []
         e.fetch_seconds = None
+        e.progress = None
         e.evicted = True
         e._claimed = False
         # Fresh event: late waiters on the old (set) one read audio=None
@@ -343,17 +374,17 @@ class MediaProxy:
         the number of entries dropped."""
         if not track_id:
             return 0
-        n = 0
+        dropped = []
         with self._lock:
             for e in self._entries.values():
                 if (e.query.track_id == track_id and e.ready.is_set()
                         and e.audio is not None and e.provider is not None
                         and e.provider.manifest.demo_limited):
                     self._evict(e)
-                    n += 1
-        if n:
-            preview_events.ping()
-        return n
+                    dropped.append(e)
+        for e in dropped:
+            self._said(e)
+        return len(dropped)
 
     def bytes_away(self, token: str) -> bool:
         """Whether the stream `token` names is out of RAM and comes back with
@@ -364,22 +395,70 @@ class MediaProxy:
             e = self._entries.get(token)
             return e is not None and e.audio is None and e.error is None
 
-    def ensure_buffered(self, keys: list) -> None:
-        """Priority-(re)fetch the playback window, first key most urgent —
-        window tokens go to the HEAD of the sequential fetch queue, ahead of
-        background album fills. Keys are queue identities (see _entry_keys);
-        unknown ones are skipped."""
+    def wanted(self, token: str) -> bool:
+        """Whether the lane would fetch `token` if it took it now: known
+        here, its bytes neither in hand nor on their way, its fetch not over
+        with an error — what the queue side's picker hands the worker."""
         with self._lock:
-            by_mf = {e.query.media_file_id: e.token
-                     for e in self._entries.values() if e.query.media_file_id}
-            toks = []
-            for k in keys:
-                tok = by_mf.get(k[1]) if isinstance(k, tuple) else (
-                    k if k in self._entries else None)
-                if tok:
-                    toks.append(tok)
-        for tok in reversed(toks):
-            self._prefetch(tok, front=True)
+            e = self._entries.get(token)
+            return e is not None and not e._claimed
+
+    def state(self, token: str) -> Optional[tuple]:
+        """What a row shows of the stream `token`: (state, progress, code) —
+        `waiting` (its fetch not begun: behind another, or its bytes dropped
+        by the budget), `buffering` (its fetch runs; progress 0..1 where the
+        provider gives it), `ready` (its bytes in hand), `failed` (code: the
+        refusal's, None for a plain failure). None for a token not known
+        here."""
+        with self._lock:
+            e = self._entries.get(token)
+            if e is None:
+                return None
+            if e.ready.is_set():
+                return ("ready", None, None) if e.audio is not None else ("failed", None, e.code)
+            if e._claimed:
+                return "buffering", e.progress, None
+            return "waiting", None, None
+
+    def demand(self, token: str) -> None:
+        """Fetch `token` before anything the queue wants next: a consumer waits
+        on those bytes (an output's GET, a start parked on the stream, a
+        transcode a mirror waits for). Idempotent."""
+        self._submit(token, front=True)
+
+    def wake(self) -> None:
+        """What the queue wants next may have moved (an edit, the playhead, a
+        resolve that landed): the lane, if idle, asks the picker again."""
+        with self._fetch_cv:
+            self._woken += 1
+            self._start_worker()
+            self._fetch_cv.notify()
+
+    def cancel(self, token: str) -> bool:
+        """Nobody wants the bytes of `token` any more (the slot that named it
+        was removed, the queue replaced): out of the lane if not begun,
+        stopped at the source if running — a provider that reads its fetch's
+        cancel stops; one that does not is waited out and its bytes
+        discarded, never run beside another fetch. Bytes already in hand stay
+        for the budget, which takes an orphan first. Every waiter is woken.
+        Returns whether a fetch was cancelled."""
+        with self._lock:
+            e = self._entries.get(token)
+            if e is None or e.ready.is_set():
+                return False
+            for line in (self._demand, self._later):
+                if token in line:
+                    line.remove(token)
+            del self._entries[token]
+            e.cancelled = True
+            e.error = "cancelled: nobody wants these bytes any more"
+            ctx = e.ctx
+        if ctx is not None:
+            ctx.cancel()
+        e.ready.set()
+        logger.info("preview: fetch of %s cancelled (%s)", shown(token),
+                    "under way" if ctx is not None else "not begun")
+        return True
 
     # ---- entry minting ---------------------------------------------------
 
@@ -390,167 +469,29 @@ class MediaProxy:
         return {e.query.track_id: e for e in self._entries.values()
                 if e.ready.is_set() and e.audio is not None and e.query.track_id}
 
-    def _mint(self, token: str, query: TrackQuery, index: int, chain: list,
-              in_ram: dict) -> _Entry:
-        """A fresh entry, adopting `in_ram` audio when the same track is already
-        in hand (a re-streamed or re-queued album downloads nothing) — from a
-        provider the new chain still names: a chain built without the demo
-        channel (its listen spent) must not inherit the demo channel's bytes.
-        Caller holds _lock."""
-        prior = in_ram.get(query.track_id)
-        if (prior is None or prior.audio is None
-                or prior.provider not in {p for p, _sid in chain}):
-            return _Entry(token, query, index, chain=chain,
-                          provider=chain[0][0] if chain else None)
-        e = _Entry(token, query, index, chain=chain, provider=prior.provider)
-        e.audio = prior.audio
-        e.held = (len(prior.audio.data), prior.audio.mime)
-        e.fetch_seconds = prior.fetch_seconds
-        e._claimed = True
-        e.ready.set()                    # already in hand — waiters return at once
-        return e
-
-    # ---- session API (called by the player endpoint) --------------------
-    def start_session(self, items: list) -> list[str]:
-        """Open a new album session — the ordered set a phantom play pre-buffers
-        and then rolls into the queue. Each item is a ``(query, chain)`` pair
-        where chain is the lossless-first fallback list of ``(provider,
-        source_id)`` (see _Entry). Returns the per-track tokens; build URLs with
-        ``url_for``. The tokens start UNBOUND — the caller binds them to the
-        queue generation it goes on to build (see ``bind``).
-
-        Whatever serves the live queue is left alone. The request opening a
-        session spends tens of seconds resolving and buffering before it
-        replaces the queue, and the previous queue plays on through that
-        window — a track boundary inside it used to land on tokens this call
-        had dropped, and the output ran off the end of its queue reporting
-        nonsense. Bound entries die with their generation
-        (``retire_generation``, which replace_queue reports) and the budget
-        owns their audio. Only the previous session's still-UNBOUND fetches
-        are superseded here: they belong to a request that never reached the
-        queue (an earlier tap still pre-buffering), so nothing will ever place
-        them."""
-        reused = superseded = 0
+    def mint(self, query: TrackQuery, chain: list) -> str:
+        """A token for one track: `chain` is its lossless-first fallback list
+        of ``(provider, source_id)`` (see _Entry). Nothing is fetched yet —
+        the lane takes it when the queue wants it (picker) or a consumer asks
+        (demand). A track already in RAM, from a provider the chain still
+        names, is adopted at once: a re-queued album downloads nothing — but a
+        chain built without the demo channel (its listen spent) does not
+        inherit the demo channel's bytes."""
+        tok = secrets.token_urlsafe(12)
         with self._lock:
-            in_ram = self._ram_index()
-            for tok in self._session:
-                e = self._entries.get(tok)
-                if e is None or e.generation is not None or e.ready.is_set():
-                    continue
-                if tok in self._fetch_q:
-                    self._fetch_q.remove(tok)
-                del self._entries[tok]
-                # Wake every waiter on the dropped set (fillers block
-                # unbounded) — "superseded" is an event, not a timeout.
-                e.error = "superseded by a new preview session"
-                e.ready.set()
-                superseded += 1
-            self._session = []
-            for i, (q, chain) in enumerate(items):
-                tok = secrets.token_urlsafe(12)
-                e = self._mint(tok, q, i, chain, in_ram)
-                if e.ready.is_set():
-                    reused += 1
-                self._entries[tok] = e
-                self._session.append(tok)
-            session = list(self._session)
-        # The whole session lines up at the HEAD of the pipe, in order. The
-        # worker is strictly sequential, so track 0 still gets the full pipe
-        # first, and the previous queue's background fills — queued behind
-        # until its generation retires — cannot delay the album the user just
-        # started. Tokens reused from RAM are no-ops. This is rolling-append:
-        # HQPlayer HEAD-probes each URI at ADD time, so the caller adds the
-        # ready prefix, plays, then appends the tail as each track lands.
-        for tok in reversed(session):
-            self._prefetch(tok, front=True)
-        logger.info("preview session: %d tracks (%d reused from RAM, %d unbound "
-                    "fetch(es) superseded)", len(items), reused, superseded)
-        preview_events.ping()   # new buffering set → open album page re-fetches
-        return session
-
-    def add_tracks(self, items: list, *, front: bool = False) -> list:
-        """Add tracks to the served pool WITHOUT replacing the current album
-        session — for queue-appends, so the album and the queued tracks are
-        served at once. Each item is a ``(query, chain)`` pair (see start_session).
-        Returns the new tokens (prefetched); the caller waits and places them.
-        They are NOT part of the rolling-append `_session`; ``bind`` ties them
-        to the queue generation that will hold them, and retiring that
-        generation is what cancels them.
-
-        ``front`` fetches them AHEAD of everything already pending: a 'play next'
-        block is wanted before the current track ends, so it cannot sit behind an
-        album that was merely queued at the end (the whole point of 'next')."""
-        toks = []
-        with self._lock:
-            in_ram = self._ram_index()
-            for i, (q, chain) in enumerate(items):
-                tok = secrets.token_urlsafe(12)
-                self._entries[tok] = self._mint(tok, q, i, chain, in_ram)
-                toks.append(tok)
-        # Reversed for `front`, so head-inserting each one leaves the block in
-        # its own order at the head of the fetch queue.
-        for tok in (reversed(toks) if front else toks):
-            self._prefetch(tok, front=front)
-        preview_events.ping()   # queued tracks now buffering → re-fetch
-        return toks
-
-    # ---- generation binding (cancellation at the source) -----------------
-
-    def bind(self, tokens: list, generation: int) -> None:
-        """Attach tokens to the canonical-queue generation whose filler will
-        place them, so retiring that generation cancels them. Binding to an
-        ALREADY superseded generation retires immediately — that closes the
-        window between submitting tracks and reading the generation they were
-        submitted for."""
-        with self._lock:
-            for tok in tokens:
-                e = self._entries.get(tok)
-                if e is not None:
-                    e.generation = generation
-            live = self._live_generation
-        if live is not None and generation != live:
-            self.retire_generation(live)
-
-    def retire_generation(self, live_generation: int) -> int:
-        """Cancel work bound to a superseded queue generation: the user moved to
-        another queue, so nothing will ever place these tracks. Their fetches
-        leave the queue and their waiters are woken, so a filler blocked on
-        `wait_ready` stops at once instead of downloading an album nobody will
-        hear (and hammering the provider for it). Entries already holding audio
-        stay as RAM-reuse candidates — the budget owns their memory. UNBOUND
-        entries belong to the request that made them and are never touched.
-        Returns the number of fetches cancelled."""
-        with self._lock:
-            self._live_generation = live_generation
-            cancelled = 0
-            for tok, e in list(self._entries.items()):
-                if e.generation is None or e.generation == live_generation:
-                    continue
-                if e.ready.is_set() and e.audio is not None:
-                    continue
-                if tok in self._fetch_q:
-                    self._fetch_q.remove(tok)
-                del self._entries[tok]
-                e.error = "superseded: the queue moved on"
-                e.ready.set()
-                cancelled += 1
-        if cancelled:
-            logger.info("preview: cancelled %d pending fetch(es) — the queue "
-                        "moved to generation %d", cancelled, live_generation)
-            preview_events.ping()   # those rows stopped buffering → re-fetch
-        return cancelled
-
-    def fetch_rtf(self, token: str) -> Optional[float]:
-        """Real-time factor of a fetched track: wall seconds spent fetching per
-        second of audio. <1 means the pipeline outruns playback on a single
-        stream — the channel-speed signal the buffering policy sizes its lead by.
-        None until the track is fetched and its duration is known."""
-        with self._lock:
-            e = self._entries.get(token)
-        secs = self._seconds(e) if e is not None else None
-        if e is None or e.fetch_seconds is None or not secs:
-            return None
-        return e.fetch_seconds / secs
+            prior = self._ram_index().get(query.track_id)
+            if (prior is None or prior.audio is None
+                    or prior.provider not in {p for p, _sid in chain}):
+                e = _Entry(tok, query, chain=chain, provider=chain[0][0] if chain else None)
+            else:
+                e = _Entry(tok, query, chain=chain, provider=prior.provider)
+                e.audio = prior.audio
+                e.held = (len(prior.audio.data), prior.audio.mime)
+                e.fetch_seconds = prior.fetch_seconds
+                e._claimed = True
+                e.ready.set()                    # already in hand — waiters return at once
+            self._entries[tok] = e
+        return tok
 
     @staticmethod
     def _seconds(e: _Entry) -> Optional[float]:
@@ -559,39 +500,6 @@ class MediaProxy:
         if e.audio is not None and e.audio.excerpt and e.audio.seconds:
             return e.audio.seconds
         return e.query.duration
-
-    def ready_run(self, tokens: list) -> tuple[list, float, int]:
-        """The leading run of already-fetched tokens, without blocking: the
-        playable ones (failed fetches skipped), their total audio-seconds, and
-        how many tokens the run consumed — the first not-yet-fetched token is
-        the buffer boundary. This is what is safe to hand a player right now."""
-        with self._lock:
-            playable: list = []
-            secs = 0.0
-            used = 0
-            for tok in tokens:
-                e = self._entries.get(tok)
-                if e is None or not e.ready.is_set():
-                    break                       # first un-fetched track = boundary
-                used += 1
-                if e.audio is None:
-                    continue                    # fetched-but-failed → skip, scan on
-                playable.append(tok)
-                secs += self._seconds(e) or 0.0
-            return playable, secs, used
-
-    def is_buffering(self, track_id: str) -> bool:
-        """True if a track with this id is still in-flight in the served pool (an
-        entry exists that hasn't finished fetching) — the UI buffering flag. Read
-        by /api/albums/{id} so one re-fetch carries buffering with the features.
-        A budget-evicted entry is NOT buffering — it refetches on demand and
-        would otherwise show an eternal spinner."""
-        if not track_id:
-            return False
-        with self._lock:
-            return any(e.query.track_id == track_id and not e.ready.is_set()
-                       and not e.evicted
-                       for e in self._entries.values())
 
     # ---- materialization: what a GET would have to produce ----------------
     def materialize_file(self, token: str, q: Optional[str],
@@ -722,50 +630,88 @@ class MediaProxy:
 
     def wait_ready(self, token: str, timeout=_UNSET_TIMEOUT, *,
                    front: bool = False) -> _Entry:
-        """Block until a track is fetched (used by the endpoint to absorb the
-        first track's startup latency before telling HQPlayer to play).
-        ``timeout=None`` waits indefinitely — safe because every enqueued token
-        reaches a terminal ready (fetch success, fetch failure, or the
-        superseded wake-up when a new session drops the set). ``front``
-        priority-fetches (an on-demand read, not a background fill)."""
+        """Block until a track is fetched. ``timeout=None`` waits indefinitely
+        — safe because every token reaches a terminal ready (fetch success,
+        fetch failure, or the cancel's wake-up). ``front`` asks for it before
+        anything the queue wants (an on-demand read); without it the lane
+        takes it once the queue wants nothing sooner."""
         if timeout is _UNSET_TIMEOUT:
             timeout = self._prepare_timeout
         return self._ensure_ready(token, timeout, front=front)
 
-    # ---- preparation -----------------------------------------------------
-    def _prefetch(self, token: str, *, front: bool = False) -> None:
-        """Enqueue a token for the single sequential fetch worker (FIFO = playlist
-        order). Idempotent — a claimed token is a no-op. ``front`` puts the token
-        at the HEAD of the queue (and promotes an already-queued one): on-demand
-        requests and the playback window outrank background album fills."""
+    # ---- the lane ----------------------------------------------------------
+    def _submit(self, token: str, *, front: bool) -> None:
+        """Ask the lane for `token`: `front` at the head of the on-demand
+        reads (and promoted there from the later ones), else after everything
+        the queue wants. Idempotent — a claimed token is a no-op."""
         with self._fetch_cv:
             e = self._entries.get(token)
             if e is None or e._claimed:
                 return
             e.evicted = False
-            if token in self._fetch_q:
-                if front and self._fetch_q[0] != token:
-                    self._fetch_q.remove(token)
-                    self._fetch_q.insert(0, token)
-                return
             if front:
-                self._fetch_q.insert(0, token)
-            else:
-                self._fetch_q.append(token)
-            if not self._fetch_worker:
-                self._fetch_worker = True
-                threading.Thread(target=self._fetch_loop, daemon=True,
-                                 name="preview-fetch").start()
+                if token in self._later:
+                    self._later.remove(token)
+                if token in self._demand:
+                    self._demand.remove(token)
+                self._demand.insert(0, token)
+            elif token not in self._demand and token not in self._later:
+                self._later.append(token)
+            self._woken += 1
+            self._start_worker()
             self._fetch_cv.notify()
 
+    def _start_worker(self) -> None:
+        """Caller holds the lane's condition."""
+        if not self._fetch_worker:
+            self._fetch_worker = True
+            threading.Thread(target=self._fetch_loop, daemon=True,
+                             name="preview-fetch").start()
+
     def _fetch_loop(self) -> None:
-        """One worker fetches the queue strictly in order, one track at a time."""
+        """One worker, one track at a time: an on-demand read first, then the
+        queue's next want (the picker, asked with no proxy lock held: it reads
+        the queue), then a wait with no hurry; asleep until a wake when there
+        is none — a wake while the picker ran is not lost."""
         while True:
             with self._fetch_cv:
-                while not self._fetch_q:
-                    self._fetch_cv.wait()
-                token = self._fetch_q.pop(0)
-            self._prepare(token)        # serial — full pipe per track, in order
+                seen = self._woken
+                token = self._demand.pop(0) if self._demand else None
+            job = token
+            if job is None:
+                try:
+                    job = self.picker()
+                except Exception:
+                    logger.exception("the lane's picker failed")
+                    job = None
+            if job is None:
+                with self._fetch_cv:
+                    job = self._later.pop(0) if self._later else None
+                    if job is None:
+                        if self._woken == seen:
+                            self._fetch_cv.wait()
+                        continue
+            if callable(job):
+                try:
+                    job()
+                except Exception:
+                    logger.exception("a lane job failed")
+            else:
+                self._prepare(job)
+
+    def _progress(self, e: _Entry, fraction: float) -> None:
+        """A provider's progress (its fetch context): told at each tenth."""
+        before = e.progress
+        e.progress = fraction
+        if before is None or int(fraction / _PROGRESS_STEP) != int(before / _PROGRESS_STEP):
+            self._said(e)
+
+    def _said(self, e: _Entry) -> None:
+        for hook in list(self.state_hooks):
+            try:
+                hook(e)
+            except Exception:
+                logger.exception("state hook failed for %s", shown(e.token))
 
     def _prepare(self, token: str) -> None:
         with self._lock:
@@ -773,17 +719,22 @@ class MediaProxy:
             if e is None or e._claimed:
                 return
             e._claimed = True
+            e.progress = None
+            ctx = e.ctx = FetchContext(on_progress=lambda f: self._progress(e, f))
+        self._said(e)
         try:
             # Walk the lossless-first chain: a provider that RESOLVED but can't
             # DOWNLOAD (the lossless provider has the track but no lossless tier for this account) falls
             # through to the next provider (e.g. YouTube) instead of dropping it.
             last_err = None
             for prov, sid in e.chain:
+                if ctx.cancelled.is_set():
+                    break
                 if not self.link_admissible(prov, e.query):
                     last_err = last_err or ProviderError(
                         f"{prov.manifest.id}: demo listen spent")
-                    logger.info("preview link refused [%d] via %s: demo listen spent",
-                                e.index, prov.manifest.id)
+                    logger.info("preview link refused %s via %s: demo listen spent",
+                                shown(token), prov.manifest.id)
                     continue
                 # A chain resolved while the provider was offered still names
                 # it: one that has stepped aside since is not asked
@@ -791,25 +742,56 @@ class MediaProxy:
                 if aside is not None:
                     last_err = last_err or ProviderError(
                         f"{prov.manifest.id}: stepped aside ({aside.code})")
-                    logger.info("preview link skipped [%d] via %s: stepped aside (%s)",
-                                e.index, prov.manifest.id, aside.code)
+                    logger.info("preview link skipped %s via %s: stepped aside (%s)",
+                                shown(token), prov.manifest.id, aside.code)
                     continue
                 started = time.monotonic()
                 try:
-                    e.audio = prov.download(sid) if sid else prov.fetch(e.query)
+                    with fetch_context(ctx):
+                        audio = prov.download(sid) if sid else prov.fetch(e.query)
+                    if ctx.cancelled.is_set():
+                        break                   # waited out, and nobody wants it
+                    e.audio = audio
                     e.provider = prov                     # the one that actually served
                     e.fetch_seconds = time.monotonic() - started
                     break
+                except FetchCancelled:
+                    break
+                except Refused as ex:
+                    last_err = ex
+                    e.refusals.append((prov.manifest.id, ex.code))
+                    logger.warning("preview fetch refused %s via %s (%s): %s",
+                                   shown(token), prov.manifest.id, ex.code, ex)
+                    try:
+                        self.link_refused(e.query, prov, ex.code)
+                    except Exception:
+                        logger.exception("the refusal of %s was not remembered", shown(token))
                 except ProviderError as ex:
                     last_err = ex
-                    logger.warning("preview fetch failed [%d] via %s: %s",
-                                   e.index, prov.manifest.id, ex)
-            if e.audio is None and last_err is not None:
+                    logger.warning("preview fetch failed %s via %s: %s",
+                                   shown(token), prov.manifest.id, ex)
+            if e.audio is None and last_err is not None and not ctx.cancelled.is_set():
                 e.error = str(last_err)
+                head = e.chain[0][0].manifest.id if e.chain else None
+                codes = dict(e.refusals)
+                e.code = codes.get(head) or (e.refusals[0][1] if e.refusals else None)
         except Exception as ex:  # provider bug — surface, don't hang the GET
             e.error = f"unexpected: {ex}"
-            logger.error("preview fetch crashed [%d]: %s", e.index, ex, exc_info=True)
+            logger.error("preview fetch crashed %s: %s", shown(token), ex, exc_info=True)
         finally:
+            e.ctx = None
+            self._settle(e, ctx)
+
+    def _settle(self, e: _Entry, ctx: FetchContext) -> None:
+        """A fetch is over: its hooks told — what landed, or that it failed —
+        before the entry is marked ready, so a waiter that wakes finds the
+        world they keep already true. A cancelled one lands nothing: cancel()
+        took it out and woke its waiters."""
+        token = e.token
+        if e.cancelled or ctx.cancelled.is_set():
+            e.audio = None
+            e.ready.set()
+        else:
             if e.audio is not None:
                 shape = (len(e.audio.data), e.audio.mime)
                 e.reshaped = e.held is not None and e.held != shape
@@ -818,18 +800,18 @@ class MediaProxy:
                     try:
                         hook(e)
                     except Exception:
-                        logger.exception("track-ready hook failed [%d]", e.index)
+                        logger.exception("track-ready hook failed %s", shown(token))
             elif e.error is not None:
                 for hook in list(self.track_failed_hooks):
                     try:
                         hook(e)
                     except Exception:
-                        logger.exception("track-failed hook failed [%d]", e.index)
+                        logger.exception("track-failed hook failed %s", shown(token))
             e.ready.set()
-            preview_events.ping()   # buffering ended → re-fetch picks up the change
+            self._said(e)
 
     def _peek(self, token: str) -> Optional[_Entry]:
-        """Lookup without triggering a fetch or advancing — for cheap HEAD."""
+        """Lookup without triggering a fetch — for a cheap HEAD."""
         with self._lock:
             return self._entries.get(token)
 
@@ -840,22 +822,12 @@ class MediaProxy:
         if e is None:
             raise KeyError(token)
         if not e._claimed:
-            self._prefetch(token, front=front)  # enqueue (keeps fetching strictly sequential)
+            self._submit(token, front=front)
         if not e.ready.wait(timeout):
-            raise TimeoutError(f"preview [{e.index}] not ready")
+            raise TimeoutError(f"preview {shown(token)} not ready")
+        if e.cancelled:
+            raise KeyError(token)
         return e
-
-    def _advance(self, index: int) -> None:
-        """Ensure the next track is fetched. Never evicts on GET — HQPlayer
-        GETs every URI at ADD time (not in playback order), so that dropped
-        tracks before they were ever played. Memory-bounded eviction lives in
-        the manager's playback-position window (enforce_budget)."""
-        with self._lock:
-            nxt = index + 1
-            tok = self._session[nxt] if nxt < len(self._session) else None
-        if tok:
-            self._prefetch(tok)
-
 
 class _BoundedServer(ThreadingHTTPServer):
     """A thread per connection, _CONNECTIONS of them at most and
@@ -1174,7 +1146,6 @@ def _make_handler(proxy: MediaProxy):
             if e.error or e.audio is None:
                 self.send_error(502, "provider could not fetch this track")
                 return
-            proxy._advance(e.index)
             opus = self._opus_for_preview(tok)
             if opus:
                 import os

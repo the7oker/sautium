@@ -696,8 +696,9 @@ class World:
             self.batches.append((gen, items))
 
     def fill_through_build(self) -> None:
-        """A filler adding while HQPlayer builds — a build that may run out
-        or end in a vanish: what it took is never lost."""
+        """An append made while HQPlayer builds, waited out as the fetch
+        lane's landings are (hqp_link.through) — a build that may run out or
+        end in a vanish: what it took is never lost."""
         r = self.rng
         self.driven().build("SetFilter", r.uniform(0.6, 1.6), answer=r.choice(["first", "last"]))
         self.dsp()
@@ -707,8 +708,14 @@ class World:
 
     def fill(self) -> None:
         items, gen = self.items(self.rng.randint(1, 3)), self.mgr.queue.generation
-        self.fills.append((gen, items))
-        self.player._owned_filler(items, gen)
+        try:
+            added = hl.through(lambda: self.mgr.append(items, generation=gen),
+                               needed=lambda: None if self.mgr.queue.generation == gen
+                               else "the queue moved on", until=lambda: False)
+        except (hl.GaveUp, hl.Dropped):
+            return              # not taken: nothing the queue was promised
+        if added:
+            self.fills.append((gen, items))
 
     def remove(self) -> None:
         mgr = self.mgr
@@ -949,12 +956,12 @@ class World:
         for gen, items in self.fills:
             if gen != self.mgr.queue.generation:
                 continue
-            # what HQPlayer refused whole the filler never took
+            # what HQPlayer refused whole the append never took
             lost = [it.title for it in items
                     if self.mgr.queue.index_of(it) is None and id(it) not in self.removed
                     and it.source.get("path") not in self.refused]
             if lost:
-                self.violate(f"I11: a filler's tracks are not in the queue: {lost}")
+                self.violate(f"I11: an append's tracks are not in the queue: {lost}")
         for gen, items in self.batches:
             if gen != self.mgr.queue.generation:
                 continue

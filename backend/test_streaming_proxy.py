@@ -1,6 +1,6 @@
 """
-MediaProxy session semantics — pure logic, a stub provider, no network. Run
-inside the backend container:
+MediaProxy — its fetch lane, its entries, its serving — pure logic, a stub
+provider, no network. Run inside the backend container:
 
     python -m pytest test_streaming_proxy.py -q
 """
@@ -62,106 +62,199 @@ def _q(title):
                       track_id=f"id-{title}")
 
 
-def _session(proxy, prov, *titles):
-    return proxy.start_session([(_q(t), [(prov, None)]) for t in titles])
+def _mint(proxy, prov, *titles):
+    return [proxy.mint(_q(t), [(prov, None)]) for t in titles]
 
 
 def _proxy():
     return MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"test-key")
 
 
-def test_live_queue_streams_survive_a_new_session():
-    prov = _GatedProvider()
-    prov.release("a1", "a2", "a3", "b1", "b2")
+def test_a_minted_token_fetches_nothing_until_it_is_wanted():
+    """The lane has no list of its own: a token is fetched when the queue's
+    picker hands it over or a consumer asks for it — never at its minting."""
+    prov = _Instant("p")
     proxy = _proxy()
-    a = _session(proxy, prov, "a1", "a2", "a3")
-    for t in a:
-        proxy.wait_ready(t, timeout=5)
-    proxy.retire_generation(1)          # replace_queue reports the live generation …
-    proxy.bind(a, 1)                    # … then the request binds its set to it
-
-    b = _session(proxy, prov, "b1", "b2")
-
-    # A plays on through B's pre-buffer: every token still answers, metadata intact.
-    for t, title in zip(a, ("a1", "a2", "a3")):
-        e = proxy.wait_ready(t, timeout=5)
-        assert e.audio is not None
-        assert proxy.preview_meta(t)["title"] == title
-
-    for t in b:
-        proxy.wait_ready(t, timeout=5)
-    proxy.retire_generation(2)          # the replace: A's generation retires
-    proxy.bind(b, 2)
-    # Fetched audio stays as a RAM-reuse candidate — the budget owns that memory.
-    assert all(proxy._peek(t) is not None for t in a)
+    tok = proxy.mint(_q("a1"), [(prov, None)])
+    proxy.wake()
+    assert proxy.state(tok) == ("waiting", None, None) and prov.fetched == []
+    assert proxy.wait_ready(tok, timeout=5).audio is not None
+    assert proxy.state(tok) == ("ready", None, None) and prov.fetched == ["a1"]
 
 
-def test_new_session_supersedes_only_unbound_pending_fetches():
+def test_the_lane_takes_the_pickers_wants_in_its_order_and_a_demand_first():
+    """Each time it is free the worker takes an on-demand read first, then
+    the picker's next want — so an order the picker changes is the order the
+    fetches go in."""
     prov = _GatedProvider()
     proxy = _proxy()
-    a = _session(proxy, prov, "a1", "a2", "a3")
-    prov.wait_started("a1")             # worker inside a1; a2, a3 queued behind
-    proxy.retire_generation(1)          # replace_queue reports the live generation …
-    proxy.bind(a, 1)                    # … then the request binds its set to it
-
-    u = _session(proxy, prov, "u1", "u2")   # a tap that never reaches the queue
-    u_entries = [proxy._peek(t) for t in u]
-    b = _session(proxy, prov, "b1", "b2")   # the next tap supersedes it
-
-    assert all(proxy._peek(t) is None for t in u)
-    assert all(e.ready.is_set() and e.error for e in u_entries)   # waiters woken
-    # B goes first; A's fills wait behind it instead of being dropped.
-    assert proxy._fetch_q == [b[0], b[1], a[1], a[2]]
-    assert proxy._peek(a[1]) is not None and not proxy._peek(a[1]).ready.is_set()
-
-    prov.release("a1")
-    assert proxy.wait_ready(a[0], timeout=5).audio is not None
-    prov.wait_started("b1")
-    assert prov.started == ["a1", "b1"]
-
-    # The replace: A's pending fills retire, its fetched track stays.
-    proxy.retire_generation(2)
-    proxy.bind(b, 2)
-    assert proxy._fetch_q == [b[1]]
-    assert proxy._peek(a[1]) is None and proxy._peek(a[2]) is None
-    assert proxy._peek(a[0]) is not None
-
-    prov.release("b1", "b2")
-    for t in b:
+    toks = _mint(proxy, prov, "a1", "a2", "a3", "a4")
+    order = [toks[0], toks[2], toks[1]]
+    proxy.picker = lambda: next((t for t in order if proxy.wanted(t)), None)
+    proxy.wake()
+    prov.wait_started("a1")
+    order[:] = [toks[1], toks[2]]           # a2 moved nearer while a1 fetches
+    proxy.demand(toks[3])                   # a consumer waits on a4
+    prov.release("a1", "a2", "a3", "a4")
+    for t in toks:
         assert proxy.wait_ready(t, timeout=5).audio is not None
+    assert prov.started == ["a1", "a4", "a2", "a3"]
 
 
-def test_ready_run_scans_the_callers_tokens():
-    prov = _GatedProvider()
-    prov.release("a1", "a2")
+def test_a_wake_while_the_picker_runs_is_not_lost():
+    prov = _Instant("p")
     proxy = _proxy()
-    a = _session(proxy, prov, "a1", "a2", "a3")
-    proxy.wait_ready(a[1], timeout=5)
-    playable, secs, used = proxy.ready_run(a)
-    assert playable == [a[0], a[1]] and secs == 200.0 and used == 2
+    tok = proxy.mint(_q("a1"), [(prov, None)])
+    asked = threading.Event()
+    wanted = []
+
+    def picker():
+        if not asked.is_set():
+            asked.set()
+            proxy.wake()            # the queue moved as the picker read it
+            return None
+        return next((t for t in wanted if proxy.wanted(t)), None)
+    proxy.picker = picker
+    proxy.wake()
+    assert asked.wait(5)
+    wanted.append(tok)
+    proxy.wake()
+    assert proxy._peek(tok).ready.wait(5) and prov.fetched == ["a1"]
+
+
+class _Cooperative(StreamProvider):
+    """Reads its fetch's context: reports progress, stops on the cancel."""
+    manifest = ProviderManifest(id="coop", name="Coop", kind="direct_url", lossless=False)
+
+    def __init__(self):
+        self.began = threading.Event()
+        self.stopped = threading.Event()
+
+    def fetch(self, query):
+        from streaming.base import FetchCancelled, fetching
+        ctx = fetching()
+        ctx.progress(0.42)
+        self.began.set()
+        ctx.cancelled.wait(5)
+        self.stopped.set()
+        raise FetchCancelled("stopped")
+
+
+def test_a_cancel_stops_a_running_fetch_at_the_source_and_the_lane_goes_on():
+    coop, nxt = _Cooperative(), _Instant("next")
+    proxy = _proxy()
+    tok = proxy.mint(_q("a1"), [(coop, None), (nxt, None)])
+    other = proxy.mint(_q("a2"), [(nxt, None)])
+    proxy.demand(tok)
+    assert coop.began.wait(5)
+    assert proxy.state(tok) == ("buffering", 0.42, None)
+    e = proxy._peek(tok)
+    assert proxy.cancel(tok) is True
+    assert coop.stopped.wait(5) and e.ready.wait(5)
+    assert proxy._peek(tok) is None and nxt.fetched == []     # the chain does not cascade
+    with pytest.raises(KeyError):
+        proxy.wait_ready(tok, timeout=1)
+    assert proxy.wait_ready(other, timeout=5).audio is not None
+
+
+def test_a_provider_that_ignores_the_cancel_is_waited_out_and_its_bytes_discarded():
+    prov = _GatedProvider()
+    landed = []
+    proxy = _proxy()
+    proxy.track_ready_hooks.append(lambda e: landed.append(e.token))
+    tok, after = _mint(proxy, prov, "a1", "a2")
+    proxy.demand(tok)
+    prov.wait_started("a1")
+    e = proxy._peek(tok)
+    assert proxy.cancel(tok) is True and e.ready.is_set()   # its waiters woken at once
+    proxy.demand(after)
+    prov.release("a1", "a2")                                # a1's download returns
+    assert proxy.wait_ready(after, timeout=5).audio is not None
+    assert landed == [after] and e.audio is None            # a1 never landed
+    assert prov.started == ["a1", "a2"]                     # never run beside another
+
+
+def test_a_cancel_of_a_fetch_not_begun_takes_it_out_of_the_lane():
+    prov = _Instant("p")
+    proxy = _proxy()
+    tok = proxy.mint(_q("a1"), [(prov, None)])
+    assert proxy.cancel(tok) is True and proxy._peek(tok) is None
+    assert proxy.cancel(tok) is False                       # nothing left to cancel
+    ready = proxy.mint(_q("a2"), [(prov, None)])
+    proxy.wait_ready(ready, timeout=5)
+    assert proxy.cancel(ready) is False and proxy._peek(ready).audio is not None
+
+
+class _Refusing(StreamProvider):
+    def __init__(self, pid, code):
+        self.manifest = ProviderManifest(id=pid, name=pid, kind="direct_url", lossless=False)
+        self._code = code
+
+    def fetch(self, query):
+        from streaming.base import Refused
+        raise Refused(self._code, f"{self.manifest.id}: {self._code}")
+
+
+def test_a_refusal_with_a_reason_is_told_and_the_failure_carries_the_heads_code():
+    """Every link that refused with a reason is told (link_refused, the
+    resolve's memory), and the failure is shown with the chain head's code;
+    a plain failure carries none."""
+    from streaming.base import ProviderError
+    region, clip = _Refusing("lossless", "region"), _Refusing("clip", "no_clip")
+    told = []
+    proxy = _proxy()
+    proxy.link_refused = lambda q, p, code: told.append((q.track_id, p.manifest.id, code))
+    tok = proxy.mint(_q("a1"), [(region, None), (clip, None)])
+    e = proxy.wait_ready(tok, timeout=5)
+    assert e.audio is None and e.code == "region"
+    assert proxy.state(tok) == ("failed", None, "region")
+    assert told == [("id-a1", "lossless", "region"), ("id-a1", "clip", "no_clip")]
+
+    class _Broken(_Instant):
+        def fetch(self, query):
+            raise ProviderError("a cut connection")
+    plain = proxy.mint(_q("a2"), [(_Broken("x"), None)])
+    assert proxy.wait_ready(plain, timeout=5).code is None
+    assert proxy.state(plain) == ("failed", None, None)
+
+
+def test_progress_is_told_in_tenths():
+    """A row hears a fetch's progress at each tenth, never at every step a
+    provider reports."""
+    class _Steps(_Instant):
+        def fetch(self, query):
+            from streaming.base import fetching
+            for i in range(1, 101):
+                fetching().progress(i / 100)
+            return super().fetch(query)
+    proxy = _proxy()
+    said = []
+    proxy.state_hooks.append(lambda e: said.append(e.progress))
+    tok = proxy.mint(_q("a1"), [(_Steps("p"), None)])
+    proxy.wait_ready(tok, timeout=5)
+    assert len(said) <= 13 and said[-1] == 1.0              # begin, ten tenths, the end
 
 
 def test_an_excerpt_reports_the_clips_own_length():
     clip = _Instant("clip", excerpt=True, seconds=30.0)
     proxy = _proxy()
-    tok = proxy.start_session([(_q("a1"), [(clip, None)])])[0]
+    tok = proxy.mint(_q("a1"), [(clip, None)])
     proxy.wait_ready(tok, timeout=5)
     meta = proxy.preview_meta(tok)
-    assert meta["excerpt"] is True and meta["duration"] == 30.0
+    assert meta["excerpt"] is True and meta["duration"] == 30.0     # not the 100 s catalog length
     assert meta["provider"] == "clip"
-    assert proxy.ready_run([tok])[1] == 30.0          # not the 100 s catalog length
 
 
 def test_the_link_gate_skips_refused_links_and_the_chain_cascades():
     demo, clip = _Instant("demo", demo_limited=True), _Instant("clip", excerpt=True, seconds=30.0)
     proxy = _proxy()
     proxy.link_admissible = lambda provider, query: not provider.manifest.demo_limited
-    tok = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    tok = proxy.mint(_q("a1"), [(demo, None), (clip, None)])
     e = proxy.wait_ready(tok, timeout=5)
     assert e.audio is not None and e.provider is clip and demo.fetched == []
     # Every link refused: a fetch failure, not a hang.
     proxy.link_admissible = lambda provider, query: False
-    tok2 = proxy.start_session([(_q("a2"), [(demo, None), (clip, None)])])[0]
+    tok2 = proxy.mint(_q("a2"), [(demo, None), (clip, None)])
     e2 = proxy.wait_ready(tok2, timeout=5)
     assert e2.audio is None and "demo listen spent" in (e2.error or "")
 
@@ -169,14 +262,14 @@ def test_the_link_gate_skips_refused_links_and_the_chain_cascades():
 def test_ram_audio_is_adopted_only_from_a_provider_the_new_chain_names():
     demo, clip = _Instant("demo", demo_limited=True), _Instant("clip", excerpt=True, seconds=30.0)
     proxy = _proxy()
-    first = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    first = proxy.mint(_q("a1"), [(demo, None), (clip, None)])
     assert proxy.wait_ready(first, timeout=5).provider is demo
     # Same track, same providers: the bytes in RAM are reused, nothing fetched.
-    again = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    again = proxy.mint(_q("a1"), [(demo, None), (clip, None)])
     assert proxy._peek(again).ready.is_set() and demo.fetched == ["a1"]
     # Same track, a chain without the demo channel (its listen spent): the
     # demo channel's bytes must not come along — the excerpt is fetched.
-    spent = proxy.start_session([(_q("a1"), [(clip, None)])])[0]
+    spent = proxy.mint(_q("a1"), [(clip, None)])
     e = proxy.wait_ready(spent, timeout=5)
     assert e.provider is clip and clip.fetched == ["a1"]
 
@@ -184,7 +277,7 @@ def test_ram_audio_is_adopted_only_from_a_provider_the_new_chain_names():
 def test_drop_audio_rearms_the_demo_channels_entry_and_a_wait_refetches():
     demo, clip = _Instant("demo", demo_limited=True), _Instant("clip", excerpt=True, seconds=30.0)
     proxy = _proxy()
-    tok = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    tok = proxy.mint(_q("a1"), [(demo, None), (clip, None)])
     proxy.wait_ready(tok, timeout=5)
     assert proxy.drop_audio("id-a1") == 1
     assert proxy.drop_audio("id-a1") == 0               # nothing left to drop
@@ -206,7 +299,7 @@ def test_track_ready_hooks_all_run_before_the_entry_is_ready():
     proxy.track_ready_hooks.append(lambda e: seen.append(("first", e.ready.is_set())))
     proxy.track_ready_hooks.append(lambda e: 1 / 0)      # a failing hook stops nothing
     proxy.track_ready_hooks.append(lambda e: seen.append(("third", e.ready.is_set())))
-    tok = proxy.start_session([(_q("a1"), [(prov, None)])])[0]
+    tok = proxy.mint(_q("a1"), [(prov, None)])
     assert proxy.wait_ready(tok, timeout=5).audio is not None
     assert seen == [("first", False), ("third", False)]
 
@@ -381,7 +474,7 @@ def test_a_preview_counts_the_bytes_it_sends_as_they_go(tmp_path):
                        bind_host="127.0.0.1")
     proxy.start()
     port = proxy._httpd.server_address[1]
-    tok = _session(proxy, _Big(), "a")[0]
+    tok = _mint(proxy, _Big(), "a")[0]
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/preview/{tok}", timeout=10) as r:
             assert len(r.read()) == 1_000_000
@@ -407,7 +500,7 @@ def test_a_head_for_bytes_the_budget_dropped_answers_at_once_from_what_it_told()
     proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k", bind_host="127.0.0.1")
     proxy.start()
     try:
-        tok = _session(proxy, prov, "a1")[0]
+        tok = _mint(proxy, prov, "a1")[0]
         size = len(proxy.wait_ready(tok, timeout=5).audio.data)
         proxy.enforce_budget(set(), [tok], 0)             # every byte over the budget: dropped
         assert proxy._peek(tok).audio is None
@@ -431,7 +524,7 @@ def _refetch_fails(proxy, prov, tok):
     def gone(query):
         raise ProviderError("the provider has it no more")
     prov.fetch = gone
-    proxy.ensure_buffered([tok])
+    proxy.demand(tok)
     assert proxy.wait_ready(tok, timeout=5).error
 
 
@@ -446,7 +539,7 @@ def test_a_head_for_a_stream_whose_refetch_failed_answers_the_error():
     proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k", bind_host="127.0.0.1")
     proxy.start()
     try:
-        tok = _session(proxy, prov, "a1")[0]
+        tok = _mint(proxy, prov, "a1")[0]
         proxy.wait_ready(tok, timeout=5)
         _refetch_fails(proxy, prov, tok)
         req = urllib.request.Request(f"http://127.0.0.1:{proxy._httpd.server_address[1]}/preview/{tok}",
@@ -470,7 +563,7 @@ def test_a_refetch_that_fails_is_told_and_comes_back_with_no_fetch():
     proxy = _proxy()
     failed = []
     proxy.track_failed_hooks.append(lambda e: failed.append(e.token))
-    tok = _session(proxy, prov, "a1")[0]
+    tok = _mint(proxy, prov, "a1")[0]
     proxy.wait_ready(tok, timeout=5)
     assert not proxy.bytes_away(tok)
     proxy.enforce_budget(set(), [tok], 0)
@@ -487,7 +580,7 @@ def test_a_refetch_that_lands_in_another_shape_says_so():
     clip.fetch = lambda query: FetchedAudio(data=b"y" * 9, mime="audio/ogg", lossless=False,
                                            excerpt=True, seconds=30.0)
     proxy = _proxy()
-    tok = proxy.start_session([(_q("a1"), [(demo, None), (clip, None)])])[0]
+    tok = proxy.mint(_q("a1"), [(demo, None), (clip, None)])
     e = proxy.wait_ready(tok, timeout=5)
     assert (e.held, e.reshaped) == ((16, "audio/mpeg"), False)
     proxy.drop_audio("id-a1")

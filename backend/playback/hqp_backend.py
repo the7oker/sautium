@@ -469,6 +469,14 @@ def _slot_key(item: QueueItem) -> tuple:
 # Why a slot is a gap when HQPlayer refused its file while it took the rest
 # of the batch: it stays one until the next full mirror hands it over again
 REFUSED_HERE = "this HQPlayer did not open it"
+# Why a slot is a gap when its stream landed after HQPlayer was handed the
+# queue past it (the person had played on beyond it): the next full mirror
+# hands it over
+CAME_LATE = "it streamed in after HQPlayer took the queue past it"
+
+# What a start waits on (_park) when the slot's stream is still to come, not
+# a stream's bytes the budget dropped: no media proxy token is ever this
+_PENDING = "\x00pending"
 
 
 @dataclass(frozen=True, order=True)
@@ -493,11 +501,17 @@ class Entry:
 class _Layout:
     """The queue as this HQPlayer holds it — its slots in order, the gaps
     left out — and the one translation between a queue slot and HQPlayer's
-    entry."""
+    entry. A slot whose stream (or an owned file's preparation) is still on
+    its way is never held, and nothing from the horizon on is: `cut`, the
+    slot HQPlayer's playlist ends before (HqpBackend._horizon)."""
 
-    def __init__(self, items: list, gap: Callable[[QueueItem], Optional[str]]):
+    def __init__(self, items: list, gap: Callable[[QueueItem], Optional[str]],
+                 cut: Optional[int] = None):
         self.items = items
-        self.slots = [s for s, it in enumerate(items, 1) if gap(it) is None]
+        self.cut = cut
+        self.slots = [s for s, it in enumerate(items, 1)
+                      if (cut is None or s < cut) and gap(it) is None
+                      and it.opener().get("kind") != "pending"]
         self.handed = [items[s - 1] for s in self.slots]
 
     def entry(self, slot: Optional[int]) -> Optional[Entry]:
@@ -572,9 +586,6 @@ def _same_entry(a: str, b: str) -> bool:
     return a == b
 
 
-_local_provider = None
-
-
 def _stream_mode() -> bool:
     """Streams, unless HQPlayer runs on this very machine (auth_hmac's
     own-address test): a mounted share is an extra setup on the HQPlayer
@@ -620,9 +631,11 @@ def _http_served(item: QueueItem) -> bool:
     opens itself? Then HQPlayer's own tags for it are not authoritative (it
     may know the track only as 'HTTP stream') and its playlist URI carries a
     token, not a path."""
-    src = item.source
+    src = item.opener()
     if src["kind"] == "proxy":
         return True
+    if src["kind"] == "hqp":
+        return False
     if src["kind"] != "file":
         return src.get("uri", "").startswith("http")
     if src.get("cue_start") is not None:
@@ -749,17 +762,16 @@ def _owned_play_uri(item: QueueItem, host: str) -> str:
 
     A CUE slice always rides the media proxy as a cached FLAC cut — the raw
     path would play the whole disc image; the only fallback is that whole
-    image, loudly logged. An m4a (MP4 container: HQPlayer decodes neither AAC
-    nor ALAC) is transcoded to FLAC in memory and served from /preview/,
-    displayed as owned, falling back to the raw file when streaming is off
-    or the transcode fails. Everything else is a file:// URI at the path an
+    image, loudly logged (the fetch lane made the cut before the slot was
+    handed: playback.substitute). An m4a (MP4 container: HQPlayer decodes
+    neither AAC nor ALAC) is handed as the lane's transcode, a stream of its
+    own, and reaches here only as the raw file — streaming off, or the
+    transcode failed. Everything else is a file:// URI at the path an
     HQPlayer on this machine opens itself, or /file/{token} on the media
     proxy for one anywhere else. `host` is the proxy address HQPlayer
     reaches."""
-    global _local_provider
     src = item.opener()
-    media_file_id, db_path, file_format = (
-        src.get("media_file_id", item.media_file_id), src["path"], src.get("format"))
+    db_path, file_format = src["path"], src.get("format")
 
     def whole_file_uri() -> str:
         """The file itself — for a CUE slice, the raw image (cut failed)."""
@@ -793,33 +805,10 @@ def _owned_play_uri(item: QueueItem, host: str) -> str:
             return whole_file_uri()
         return proxy.file_url(_register_owned(item, proxy), host=host)
 
-    from streaming.local import TRANSCODE_FORMATS
-    if (file_format or "").upper() not in TRANSCODE_FORMATS:
-        return whole_file_uri()
-
-    from streaming import service as streaming_service
-    proxy = streaming_service.get_proxy() if streaming_service.is_enabled() else None
-    if proxy is None:
-        return whole_file_uri()
-
-    if _local_provider is None:
-        from streaming.local import LocalTranscodeProvider
-        _local_provider = LocalTranscodeProvider()
-    from streaming.base import TrackQuery
-    container_path = settings.translate_to_local_path(db_path)
-    # artist/title are required but unused for display here — the playlist payload
-    # renders this entry from media_file_id (a real owned row), not the query.
-    q = TrackQuery(artist="", title="", media_file_id=media_file_id)
-    tokens = proxy.add_tracks([(q, [(_local_provider, container_path)])])
-    try:
-        # front: a local transcode the mirror is waiting on — it must not
-        # queue behind a backlog of network phantom fetches.
-        e = proxy.wait_ready(tokens[0], front=True)
-    except (TimeoutError, KeyError):
-        e = None
-    if e is None or e.audio is None:
-        return whole_file_uri()
-    return proxy.url_for(tokens[0], host=host)
+    # An m4a reaches here only where nothing transcodes it (streaming off, or
+    # its transcode failed): the lane makes the transcode, in the queue's
+    # order, and the slot is handed as that stream (playback.substitute)
+    return whole_file_uri()
 
 # -- The HQPlayer output backend ------------------------------------------------
 
@@ -1036,7 +1025,7 @@ class _Parked:
     item: QueueItem
     second: int
     start: Item
-    token: str
+    token: str              # _PENDING: the slot's stream is still to come (slot_ready)
     press: bool = False
     under_another: bool = False
 
@@ -1319,9 +1308,24 @@ class HqpBackend(PlayerBackend):
         self._spot: Optional[tuple] = None
         self._spot_lock = threading.Lock()
         # A start of a streamed slot whose bytes are out of the media proxy's
-        # RAM: it waits here for them, never on HQPlayer's control thread
-        # (_park, _land)
+        # RAM, or whose stream is still to come: it waits here for them,
+        # never on HQPlayer's control thread (_park, _land)
         self._parked: Optional[_Parked] = None
+        # The horizon: the first slot after the one HQPlayer was handed the
+        # queue from whose stream (or an owned file's preparation) was still
+        # on its way — HQPlayer's playlist ends before it, and nothing of the
+        # queue from it on is HQPlayer's until it lands, when what follows it
+        # up to the next such slot is appended (_extend_horizon). An item,
+        # not a slot: an edit before it moves its index. None: HQPlayer holds
+        # the queue to its end. Set by every full mirror (_place_horizon) and
+        # every edit that changes what lies behind the playing slot.
+        self._horizon: Optional[QueueItem] = None
+        self._horizon_removed: Optional[int] = None     # the slot it stood at (queue_remove)
+        self._extending = False                         # the safety net's extension runs
+        # Slots before the horizon whose stream landed after HQPlayer was
+        # handed the queue past them: gaps (CAME_LATE) until the next full
+        # mirror, as a refused file is
+        self._left_out: list = []
         # The streams whose bytes landed in another shape than HQPlayer was
         # handed them in, where no repair could hand them again in place: the
         # next hand-over that reads the playlist does (_first_reshaped)
@@ -1827,11 +1831,33 @@ class HqpBackend(PlayerBackend):
             return src["reason"]
         if any(item is it and key == _slot_key(item) for it, key in self._link.refusals):
             return REFUSED_HERE
+        if any(item is it for it in self._left_out):
+            return CAME_LATE
         return None
 
     def _layout(self, items: Optional[list] = None) -> _Layout:
-        """The queue — or `items`, a new order of it — as HQPlayer holds it."""
-        return _Layout(self._queue.snapshot() if items is None else items, self.gap)
+        """The queue — or `items`, a new order of it — as HQPlayer holds it,
+        up to its horizon."""
+        items = self._queue.snapshot() if items is None else items
+        return _Layout(items, self.gap, self._horizon_at(items))
+
+    def _horizon_at(self, items: list) -> Optional[int]:
+        """The slot of `items` HQPlayer's playlist ends before: the horizon's,
+        None when there is none — or `items` does not hold it."""
+        h = self._horizon
+        if h is None:
+            return None
+        return next((s for s, it in enumerate(items, 1) if it is h), None)
+
+    def _place_horizon(self, items: list, start: Optional[QueueItem]) -> None:
+        """A full mirror of `items` that plays from `start` (None: the first):
+        the horizon is the first slot from it on whose stream is still to
+        come. A slot before it on its way too is a gap of the layout (never
+        held), and one that lands is left out until the next full mirror
+        (slot_ready)."""
+        at = next((i for i, it in enumerate(items) if it is start), 0) if start is not None else 0
+        self._horizon = next((it for it in items[at:] if it.opener().get("kind") == "pending"), None)
+        self._left_out = []
 
     def _ways_in(self, items: Optional[list] = None) -> None:
         """How this HQPlayer opens each slot, read again at every mirroring
@@ -1924,10 +1950,14 @@ class HqpBackend(PlayerBackend):
 
     def _bytes_away(self, item: Optional[QueueItem]) -> Optional[str]:
         """The token of the media proxy's stream `item` opens while its bytes
-        are out of RAM and come back with a fetch (MediaProxy.bytes_away),
-        else None: a file, a stream in hand, one whose fetch failed — its GET
-        answers at once, with the error the start's attempt then says."""
+        are out of RAM and come back with a fetch (MediaProxy.bytes_away) —
+        _PENDING while its stream (or an owned file's preparation) is still to
+        come — else None: a file, a stream in hand, one whose fetch failed —
+        its GET answers at once, with the error the start's attempt then
+        says."""
         src = item.opener() if item is not None else {}
+        if src.get("kind") == "pending":
+            return _PENDING
         if src.get("kind") != "proxy":
             return None
         from streaming import service as streaming_service
@@ -1955,9 +1985,18 @@ class HqpBackend(PlayerBackend):
                 return True         # a newer start waits already: this one is over
             self._parked = _Parked(item, int(second), start, token, under_another=self._taken())
         proxy = streaming_service.get_proxy()
-        proxy.ensure_buffered([token])
         logger.info("HQPlayer: slot %s waits for its stream", self._queue.index_of(item))
         self.poke()
+        if token == _PENDING:
+            # Its stream is the fetch lane's: the status names this slot from
+            # now (loading), and the lane's window counts from it
+            pending = (item.play or {}).get("token")
+            if pending and proxy is not None:
+                proxy.demand(pending)
+            if item.opener().get("kind") != "pending":
+                self._land_item(item)   # landed, or failed, before the park stood
+            return True
+        proxy.demand(token)
         if not proxy.bytes_away(token):
             self._land(token)       # in, or failed, before the park stood: it goes now
         return True
@@ -1985,6 +2024,93 @@ class HqpBackend(PlayerBackend):
         threading.Thread(target=self._start_parked, args=(park,), daemon=True,
                          name="hqp-parked").start()
 
+    def _land_item(self, item: QueueItem) -> None:
+        """The slot `item`'s stream is no longer to come — it landed, or it
+        failed (slot_ready): a start parked on it goes — its stream, or past
+        it, on a thread of its own."""
+        with self._spot_lock:
+            park = self._parked
+            if park is None or park.token != _PENDING or park.item is not item:
+                return
+            self._parked = None
+        threading.Thread(target=self._start_parked, args=(park,), daemon=True,
+                         name="hqp-parked").start()
+
+    def slot_ready(self, index: int) -> None:
+        """A slot's stream landed, or it was found unplayable here (the fetch
+        lane): at the horizon, HQPlayer's playlist takes it and what follows
+        it up to the next slot still to come — an append at its end, gapless
+        while it plays (_extend_horizon); then a start parked on it goes. As
+        background work under the queue lock: a build met is waited out."""
+        from playback.manager import manager
+        item = self._queue.item_at(index)
+        if item is None:
+            return
+
+        def step() -> None:
+            if item is self._horizon:
+                self._extend_horizon()
+            elif self._horizon_at(self._queue.snapshot()) is not None and \
+                    self._queue.index_of(item) < self._horizon_at(self._queue.snapshot()):
+                # Before the horizon, on its way when HQPlayer was handed the
+                # queue past it: HQPlayer does not hold it — a gap until the
+                # next full mirror, which a start parked on it is
+                if item.opener().get("kind") != "unplayable" and not any(
+                        item is it for it in self._left_out):
+                    self._left_out.append(item)
+
+        def go() -> None:
+            try:
+                background("HQPlayer did not take the slot that streamed in",
+                           lambda: manager.mirror_step(self, step),
+                           needed=lambda: "HQPlayer was detached" if self._detached else None,
+                           until=lambda: self._detached)
+            finally:
+                self._land_item(item)
+                self.poke()
+        threading.Thread(target=go, daemon=True, name="hqp-horizon").start()
+
+    def _extend_horizon(self) -> None:
+        """The horizon's slot landed or failed: HQPlayer's playlist, which ends
+        right before it, takes it — a failed one is a gap, skipped — and every
+        slot after it up to the next one still to come, by PlaylistAdd at its
+        end; the horizon moves there (_move_horizon). Under the queue lock."""
+        h = self._horizon
+        items = self._queue.snapshot()
+        at = self._horizon_at(items)
+        if h is None or at is None or h.opener().get("kind") == "pending":
+            return
+        self._move_horizon(items, at, beyond=True)
+
+    def _move_horizon(self, items: list, at: int, *, beyond: bool) -> None:
+        """The horizon moves on from the queue's slot `at` — past it
+        (`beyond`: it landed or failed), or from it (the horizon's slot was
+        removed, and `at` is where it stood): to the next slot still to come,
+        and HQPlayer's playlist takes what lies between by PlaylistAdd at its
+        end — on a playlist that is the queue's (in step, or a tail mirror,
+        whose end is the queue's too): any other is handed what the layout
+        then holds by the reconverge or the play press. Under the queue
+        lock."""
+        start = at if beyond else at - 1
+        self._horizon = next((it for it in items[start:] if it.opener().get("kind") == "pending"),
+                             None)
+        if self._mirror not in ("step", "tail"):
+            return
+        layout = self._layout(items)
+        new = [items[s - 1] for s in layout.slots if s >= at]
+        if not new:
+            return
+        uris = [self._uri_for(it) for it in new]
+        try:
+            taken, unsent = self._cmd(lambda c: _add_uris_with_retry(self._link, uris))
+        except NotAnswering:
+            taken, unsent = [False] * len(uris), 0
+        self.poke()
+        if self._took(new, taken, unsent, "that streamed in"):
+            logger.info("HQPlayer's playlist takes %d slot(s) that streamed in (the horizon %s)",
+                        len(new), "at slot %d" % self._horizon_at(self._queue.snapshot())
+                        if self._horizon is not None else "gone")
+
     def _start_parked(self, park: _Parked) -> None:
         """A parked start goes, as the intent it serves — dropped once a newer
         one superseded it — a build it meets waited out (background): at the
@@ -1995,6 +2121,23 @@ class HqpBackend(PlayerBackend):
         def go() -> None:
             index = self._queue.index_of(park.item)
             if index is None:
+                return
+            if self.gap(park.item) is not None:
+                # Its stream failed: walked past, onto the next slot this
+                # HQPlayer may hold — a wait again while that one's is still to
+                # come
+                beyond = next((it for it in self._queue.snapshot()[index:]
+                               if self.gap(it) is None), None)
+                if beyond is not None and beyond.opener().get("kind") == "pending":
+                    self._park(beyond, 0, _PENDING, start=park.start)
+                    return
+            if (self.gap(park.item) is None and park.item.opener().get("kind") != "pending"
+                    and self._layout().entry(index) is None):
+                # Beyond the horizon (a tap past it, a slot left out behind
+                # the playhead): whatever the mirror, HQPlayer is handed the
+                # queue from it afresh
+                self._move_mirror("lost", by="press")
+                self._press(park.item, park.second, item=park.start)
                 return
             if park.press:
                 # HQPlayer holds the entry in a shape it must be handed again
@@ -2104,6 +2247,47 @@ class HqpBackend(PlayerBackend):
                     if self._parked is not None and self._parked.token == token:
                         self._parked = replace(self._parked, press=True)
             self._land(token)
+
+    def _at_horizon(self, prev: tuple, status) -> None:
+        """On the poller, each tick a horizon stands. HQPlayer played the last
+        entry it holds out — its playlist ends right before the horizon, whose
+        stream is still to come — and stopped: the start waits on the horizon
+        in the node (_park, Now Playing "loading"), and goes when it lands. A
+        horizon whose slot landed with its extension not taken (its word
+        missed) is extended here — the safety net, never the way."""
+        h = self._horizon
+        if (h is None or self._pressed is not None or self._queue.view()[2]
+                or self._mirror not in ("step", "tail") or self._parked_now() is not None):
+            return
+        if h.opener().get("kind") != "pending":
+            if not self._extending and self._horizon_at(self._queue.snapshot()) is not None:
+                self._extending = True
+                threading.Thread(target=self._extend_later, daemon=True,
+                                 name="hqp-horizon").start()
+            return
+        before, playing = prev
+        if (before.state != PlaybackState.PLAYING or status.state != PlaybackState.STOPPED
+                or playing is None or not playing[0] or playing[2]
+                or not 1 <= before.track_index == before.tracks_total
+                or before.length <= 0 or before.position < before.length - diag.ADVANCE_END_S):
+            return
+        layout = self._layout()
+        if not layout.slots or layout.slots[-1] != playing[0]:
+            return
+        logger.info("HQPlayer played out the last slot it holds: the start waits on slot %s, "
+                    "its stream still on its way", self._queue.index_of(h))
+        self._park(h, 0, _PENDING)
+
+    def _extend_later(self) -> None:
+        from playback.manager import manager
+        try:
+            background("HQPlayer did not take the slot that streamed in",
+                       lambda: manager.mirror_step(self, self._extend_horizon),
+                       needed=lambda: "HQPlayer was detached" if self._detached else None,
+                       until=lambda: self._detached)
+        finally:
+            self._extending = False
+            self.poke()
 
     def _unpark(self) -> None:
         with self._spot_lock:
@@ -2440,6 +2624,7 @@ class HqpBackend(PlayerBackend):
         it (_hold_words)."""
         self._ways_in()
         self._link.refusals = []
+        self._place_horizon(self._queue.snapshot(), at)
         layout = self._layout()
         with self._handing(layout.items, stops=True,
                            base=(at, position) if at is not None else None, owes=False,
@@ -2791,6 +2976,8 @@ class HqpBackend(PlayerBackend):
                     self._last_entry = Entry.read(status) or self._last_entry
                     prev, prev_at = self._before, self._before_at
                     self._before, self._before_at = (status, playing), read_at
+                    if prev is not None and self._horizon is not None:
+                        self._at_horizon(prev, status)
                     if (parked and self._rate_refused and not self._rate_woken
                             and status.state == PlaybackState.PLAYING and playing is not None
                             and playing[1] is not None and not playing[2]):
@@ -3234,7 +3421,7 @@ class HqpBackend(PlayerBackend):
         entry = Entry.read(status)
         if entry is None:
             return None if busy else (0, None, False)
-        layout = _Layout(items, self.gap)
+        layout = self._layout(items)
         slot = layout.slot(entry)
         readings = self._readings(status.uri)
         if not readings:
@@ -5487,6 +5674,10 @@ class HqpBackend(PlayerBackend):
             return self._press(target, 0)
         here = self._queue.index_of(last.item) if last is not None and last.item is not None else None
         beside = self._queue.item_at(layout.held(here + by, by)) if here else None
+        if by > 0 and beside is None and here and layout.cut is not None:
+            # The last slot HQPlayer holds: the next is the horizon's, its
+            # stream still on its way — the start waits on it
+            beside = self._horizon
         token = self._bytes_away(beside)
         if token is not None:
             # HQPlayer's own Next would open a stream whose bytes the proxy
@@ -5538,7 +5729,7 @@ class HqpBackend(PlayerBackend):
             ref = newest.target if newest is not None else (
                 words.base[0] if words.base else None)
         i = words.index(ref) if ref is not None else None
-        slot = _Layout(words.items, self.gap).held(i + by, by) if i is not None else None
+        slot = self._layout(words.items).held(i + by, by) if i is not None else None
         if slot is not None and at_spot:
             words.base, words.base_moved = (words.items[slot - 1], 0), True
             words.moved.append(self._link.reserve())    # its place among the words, no intent
@@ -5592,13 +5783,18 @@ class HqpBackend(PlayerBackend):
             self._local.refusal = "it is no longer in the queue"
             return False
         why = self.gap(item)
-        if why is not None:
+        if why is not None and why != CAME_LATE:
             self._local.refusal = f"it is not on this HQPlayer — {why}"
             return False
         self._unpark()                      # a newer start replaces one that waits
         token = self._bytes_away(item)
         if token is not None:
             return self._park(item, 0, token)
+        if self._layout().entry(index) is None:
+            # Behind the horizon, or left out behind the playhead: whatever
+            # the mirror, HQPlayer is handed the queue from this slot afresh
+            self._move_mirror("lost", by="press")
+            return self._press(item, 0)
         if self._mirror != "step" or self._live(self._pressed) is not None or self._taken():
             if not self._link.word_waiting() and self._starts_already(item):
                 return True                 # decided as it is asked: a press waits for no turn
@@ -5918,6 +6114,10 @@ class HqpBackend(PlayerBackend):
             return _IN_STEP
         self._ways_in()
         self._link.refusals = []
+        # The horizon from where the press starts: the newest start's track
+        with self._press_lock:
+            newest = press.newest()
+        self._place_horizon(self._queue.snapshot(), newest.target if newest is not None else None)
         layout = self._layout()
         self._move_mirror("lost", by="press")
         return layout, [_slot_key(it) for it in layout.handed]
@@ -6414,7 +6614,8 @@ class HqpBackend(PlayerBackend):
             return file_path_to_uri(src["path"]), "held"
         if src["kind"] == "proxy":
             from streaming import service as streaming_service
-            return streaming_service.get_proxy().url_for(src["token"], host=self._url_host), "preview"
+            return (streaming_service.get_proxy().url_for(src["token"], host=self._url_host),
+                    "transcode" if src.get("transcode") else "preview")
         return src["uri"], "foreign"
 
     def queue_changed(self, kind: str, *, play: bool = False) -> None:
@@ -6426,6 +6627,14 @@ class HqpBackend(PlayerBackend):
         held rate check's event, a new queue generation asking State —
         spent unasked while a refused list parks the check."""
         self._rate_event(*(("state",) if self._queue.generation != self._rate_gen else ()))
+        removed, self._horizon_removed = self._horizon_removed, None
+        if kind == "remove" and removed is not None:
+            items = self._queue.snapshot()
+            if self._horizon_at(items) is None:
+                self._move_horizon(items, removed, beyond=False)
+        if kind == "clear":
+            # The radio's clear keeps the playing slot alone: nothing behind it
+            self._horizon, self._left_out = None, []
         if kind == "rebind":
             try:
                 self._converge_mirror()
@@ -6581,6 +6790,7 @@ class HqpBackend(PlayerBackend):
         Returns whether HQPlayer holds the queue now — then it is in step."""
         self._ways_in()
         self._link.refusals = []
+        self._place_horizon(items, target)
         layout = self._layout(items)
         uris = [self._uri_for(it) for it in layout.handed]
         from_target = items[next((i for i, it in enumerate(items) if it is target), 0):]
@@ -6650,8 +6860,15 @@ class HqpBackend(PlayerBackend):
         # Refused before it is numbered or watched: it supersedes nothing
         self._link.refuse_edits()
         self._ways_in(items)
-        layout = _Layout(items, self.gap)
-        if items and not layout.handed:
+        horizon, left_out = self._horizon, self._left_out
+        self._place_horizon(items, None)
+        layout = self._layout(items)
+        # Nothing it holds yet, every slot up to the first one it can open
+        # still on its way (a streamed album): HQPlayer's playlist is emptied,
+        # and the play waits on slot 1 until its stream lands (_park)
+        waits = not layout.handed and any(it.opener().get("kind") == "pending" for it in items)
+        if not layout.handed and not waits:
+            self._horizon, self._left_out = horizon, left_out
             raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
         if not play and (self._taken() or self._rests_on_another()):
             self._drifted("another controller holds HQPlayer")
@@ -6667,7 +6884,15 @@ class HqpBackend(PlayerBackend):
         with self._handing(layout.items, stops=True,
                            base=(layout.handed[0], 0) if layout.handed else None, owes=play,
                            intent="queue") as n, self._steps(att):
-            taken, unsent, n = self._afresh(uris, "queue", number=n)
+            fresh = self._afresh(uris, "queue", number=n)
+            if fresh is None:
+                # Its playlist not emptied: not the queue's — the next play
+                # press hands it over
+                self._horizon, self._left_out = horizon, left_out
+                self.lose_mirror("HQPlayer did not clear its playlist for a new queue")
+                self._local.refusal = "HQPlayer did not take the new queue"
+                return []
+            taken, unsent, n = fresh
             if uris and not any(taken):
                 if unsent < len(uris) and self._link.owed is not None:
                     why = ("HQPlayer is still opening the first track of the new queue — try "
@@ -6681,13 +6906,20 @@ class HqpBackend(PlayerBackend):
                     self.lose_mirror(why, by="refusal")
                     self._note_refused(layout.handed, taken)
                 self._local.refusal = why
+                self._horizon, self._left_out = horizon, left_out
                 accepted = []
             else:
                 self._in_step()
                 self._link.refusals = []
                 self._took(layout.handed, taken, unsent, "of a new queue")
                 accepted = list(items)
-                if play:
+                if play and not uris:
+                    # Its first slot is still on its way: the play waits on it
+                    # once the queue commits
+                    first = items[0]
+                    self._owe_start(None, self._link.item("start", n),
+                                    lambda it: self._park(first, 0, _PENDING, start=it))
+                elif play:
                     # Its Play starts the first track HQPlayer took
                     att.aim(next(it for it, t in zip(layout.handed, taken) if t))
                     self._owe_start(att, self._link.item("start", n), self._play_replaced)
@@ -6775,7 +7007,14 @@ class HqpBackend(PlayerBackend):
             # before its Play, ROON-COEX §6.1 P1) — what goes behind it would
             # play inside its session: the queue's alone
             return list(items)
-        handed = _Layout(items, self.gap).handed
+        if self._horizon_at(self._queue.snapshot()) is not None:
+            # Behind a horizon: HQPlayer's playlist ends before a slot still
+            # on its way, and what follows it is the queue's alone until it
+            # lands (_extend_horizon)
+            return list(items)
+        # The first appended slot still on its way is the horizon now
+        self._horizon = next((it for it in items if it.opener().get("kind") == "pending"), None)
+        handed = self._layout(items).handed
         uris = [self._uri_for(it) for it in handed]
         try:
             taken, unsent = (self._cmd(lambda h: _add_uris_with_retry(self._link, uris))
@@ -6811,9 +7050,17 @@ class HqpBackend(PlayerBackend):
         self._ways_in(items)
         if self._mirror in ("lost", "drift"):
             return list(items), anchor_index
-        handed = _Layout(items, self.gap).handed
-        uris = [self._uri_for(it) for it in handed]
         queue = self._queue.snapshot()
+        cut = self._horizon_at(queue)
+        if cut is not None and anchor_index is not None and anchor_index >= cut:
+            return list(items), anchor_index    # behind the horizon: the queue's alone
+        # A slot of the block still on its way is the horizon now: HQPlayer
+        # takes the block up to it, and what lay behind the anchor goes back
+        # only while no such slot stands before it
+        ahead = next((it for it in items if it.opener().get("kind") == "pending"), None)
+        handed = _Layout(items, self.gap, next((s for s, it in enumerate(items, 1) if it is ahead),
+                                               None)).handed
+        uris = [self._uri_for(it) for it in handed]
         at = len(queue) if anchor_index is None else anchor_index
         self._hold_around(queue[:at] + list(items) + queue[at:])
         unplaced = None
@@ -6844,9 +7091,16 @@ class HqpBackend(PlayerBackend):
                     self._link, lambda c: _remove(c, Entry(place + 1)), "PlaylistRemove"):
                 removed += 1
             taken, unsent = _add_uris_with_retry(self._link, uris)
+            if ahead is not None:
+                self._horizon = ahead
             if unsent < len(uris):
                 # The silence ends it: what was removed comes back with the
                 # queue once HQPlayer answers again (_queue_takes loses the mirror)
+                return taken, unsent, True
+            if ahead is not None:
+                # Behind the new horizon now: the queue's alone until it lands
+                if removed < len(after):
+                    self._drifted("HQPlayer did not take the tracks after the playing one away")
                 return taken, unsent, True
             back, back_unsent = (_add_uris_with_retry(self._link, after[:removed])
                                  if removed else ([], 0))
@@ -6857,7 +7111,7 @@ class HqpBackend(PlayerBackend):
                 self._drifted("HQPlayer did not take the tracks after the playing one back")
             return taken, unsent, True
         try:
-            taken, unsent, _ = self._cmd(insert) if uris else ([], 0, True)
+            taken, unsent, _ = self._cmd(insert) if (uris or ahead is not None) else ([], 0, True)
         except NotAnswering:
             taken, unsent = [False] * len(uris), 0
         self.poke()
@@ -6966,7 +7220,11 @@ class HqpBackend(PlayerBackend):
             return True
         layout = self._layout()
         if layout.entry(index) is None:
-            return True                                 # a gap: never handed over
+            if self._queue.item_at(index) is self._horizon:
+                # The horizon's own slot: once it is gone, what follows it up
+                # to the next slot still to come is HQPlayer's (queue_changed)
+                self._horizon_removed = index
+            return True                                 # a gap, or behind the horizon
         queue = self._queue.snapshot()
         self._hold_around(queue[:index - 1] + queue[index:])
         head = tuple(queue[:index - 1])
@@ -7163,10 +7421,21 @@ class HqpBackend(PlayerBackend):
             # transcode): a raw file_path_to_uri would hand HQPlayer the
             # whole disc image for a CUE slice and an unplayable path for an
             # m4a.
+            # HQPlayer holds the old order up to its horizon; the new one it
+            # takes up to the first slot behind the playing one still on its
+            # way — the horizon from then on
+            holds = {id(it) for it in self._layout().handed}
+            ahead = next((it for it in plan.new_after if it.opener().get("kind") == "pending"), None)
+            upto = (plan.new_after[:next(i for i, it in enumerate(plan.new_after) if it is ahead)]
+                    if ahead is not None else plan.new_after)
+
             def held(items: list) -> list:
-                return [it for it in items if self.gap(it) is None]
-            old_after, new_after = held(plan.old_after), held(plan.new_after)
-            old_before, new_before = held(plan.old_before), held(plan.new_before)
+                return [it for it in items if self.gap(it) is None
+                        and it.opener().get("kind") != "pending"]
+            old_after = [it for it in plan.old_after if id(it) in holds]
+            new_after = held(upto)
+            old_before = [it for it in plan.old_before if id(it) in holds]
+            new_before = held(plan.new_before)
             uris = [self._uri_for(it) for it in new_after]
             current = self._layout().entry(plan.status_idx)
 
@@ -7235,6 +7504,7 @@ class HqpBackend(PlayerBackend):
                 logger.warning("HQPlayer did not take the new order: %s",
                                diag.redact_text(refusal))
                 raise OutputRefused(f"HQPlayer did not take the new order: {refusal}")
+            self._horizon = ahead
             return {
                 "removed": len(plan.old_after) + (len(plan.old_before) - len(plan.new_before)),
                 "added": len(plan.new_after),

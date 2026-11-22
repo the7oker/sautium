@@ -30,12 +30,12 @@ from db_pool import Listener
 from hqplayer_client import STATUS_READINGS, format_time
 
 from playback import sessions, tracker
-from playback.base import PlaybackStatus, PlayerBackend, ReorderPlan, Spot
+from playback.base import PlaybackStatus, PlayerBackend, ReorderPlan, Spot, new_id
 from playback.queue import CanonicalQueue, QueueItem, resolved_artwork
+from playback.substitute import LEAD, Lane
 
 logger = logging.getLogger(__name__)
 
-_PREVIEW_AHEAD = 4    # slots past the playing one kept fetched (gapless horizon)
 _PREVIEW_BEHIND = 1   # instant "previous"
 
 
@@ -110,11 +110,23 @@ class PlaybackManager:
         self._observers: list[Callable] = []
         self._persist_timer: Optional[threading.Timer] = None
         self._preview_window_key = None   # (slot, queue version) the window last ran for
-        # The streams standing in for slots the active output cannot open
-        # natively (playback.substitute): reset on every switch, fed from
-        # the status ticks a lead window ahead of the playhead.
-        from playback.substitute import Substitutes
-        self._subs = Substitutes(self.queue, self._slot_ready)
+        # The slot the output plays or stands on — what the fetch lane's
+        # window counts from (playback.substitute.Lane): the item, so an edit
+        # before it moves the window with it. None: slot 1, where Play starts.
+        self._anchor_item: Optional[QueueItem] = None
+        # The streams the queue's slots need, in the queue's order, a lead
+        # window ahead of the playhead; what each streamed row shows
+        # (`slots`, told on the event stream apart from the status)
+        self.lane = Lane(self.queue, self._slot_ready, self._window_anchor,
+                         self._slots_changed, self._slot_failed)
+        self._slots: list = []
+        self._slots_version = 0
+        self._slots_lock = threading.Lock()
+        # A Play of streamed slots: whether its first ones failed with nothing
+        # played — said once, then once more when all of them failed
+        # (`stream_event` on the status, toasted once per page)
+        self._play_run: Optional[dict] = None
+        self._stream_event: Optional[dict] = None
 
     # -- backend lifecycle ---------------------------------------------------
 
@@ -527,10 +539,10 @@ class PlaybackManager:
             else:
                 raise ValueError(f"unknown output type: {output_type}")
             # Every slot is re-read for THIS output before it mirrors or
-            # loads anything: the copy it opens itself, or a stream to come
-            # (playback.substitute) — the queue survives the switch, the way
-            # in does not.
-            self._subs.reset()
+            # loads anything: the copy it opens itself, or a stream — the
+            # one the lane brings a slot is every output's (playback.
+            # substitute) — the queue survives the switch, the way in does
+            # not.
             self._reresolve(backend)
             # The track and its second go on here: so does the listen —
             # before the new output's first word, its attach's among them. A
@@ -579,7 +591,9 @@ class PlaybackManager:
                     logger.debug("resume_at(%d) failed: %s", spot.slot, e)
             # The streams for what this output cannot open natively, from
             # the slot it resumes at — the play press finds them buffering.
-            self._subs.maintain(prev_idx if prev_idx >= 1 else 1)
+            if prev_idx >= 1:
+                self._anchor_item = self.queue.item_at(prev_idx)
+            self.lane.maintain()
             logger.info("playback backend activated: %s", backend.id)
             return told
 
@@ -621,6 +635,76 @@ class PlaybackManager:
         b = self._active
         if b is not None:
             b.slot_ready(index)
+
+    def _window_anchor(self) -> int:
+        """The slot the fetch lane's window counts from: the one the output
+        plays or stands on, else 1."""
+        item = self._anchor_item
+        return (self.queue.index_of(item) if item is not None else None) or 1
+
+    # -- what the streamed rows show ------------------------------------------
+
+    @property
+    def slots_version(self) -> int:
+        return self._slots_version
+
+    def slots_message(self) -> dict:
+        """The `slots` message of the event stream: every streamed slot's
+        state, whole, with the queue version it was read at — a page applies
+        it to the rows of that version, never to another's."""
+        with self._slots_lock:
+            return {"version": self.queue.version, "slots": list(self._slots)}
+
+    def _slots_changed(self) -> None:
+        """What a streamed row shows may have moved (a fetch began, passed a
+        tenth, ended; a slot landed or failed; the queue changed): read again,
+        and told when it did — never a queue version, which repaints the
+        sheet."""
+        slots = self.lane.slots()
+        with self._slots_lock:
+            if slots == self._slots:
+                return
+            self._slots = slots
+            self._slots_version += 1
+        self.wake_sse()
+
+    def _slot_failed(self, item: QueueItem, index: int, code: str) -> None:
+        """A streamed slot failed (the lane): a Play whose first two slots
+        failed with nothing played — or whose only one did — is said at once,
+        with why; and once more when every one of its slots failed."""
+        with self._slots_lock:
+            run = self._play_run
+            if run is None or run["generation"] != self.queue.generation or run["played"]:
+                return
+            run["failed"][id(item)] = code
+            items = [it for it in self.queue.snapshot()
+                     if it.media_file_id is None and it.source.get("kind") == "track"]
+            failed = [it for it in items if id(it) in run["failed"]]
+            firsts = items[:2]
+            event = None
+            if len(failed) == len(items) and not run["told_all"]:
+                run["told_all"] = run["told_first"] = True
+                event = {"all": True}
+            elif (firsts and all(id(it) in run["failed"] for it in firsts)
+                  and not run["told_first"]):
+                run["told_first"] = True
+                event = {"all": False}
+            if event is None:
+                return
+            head = run["failed"].get(id(items[0])) if items else code
+            self._stream_event = {"id": new_id(), "kind": "not_streamable",
+                                  "album": run["album"], "reason": head or code, **event}
+        self._push_status(dict(self._latest_status))
+
+    def _play_started(self, items: list) -> None:
+        """A new queue that plays: its run of streamed slots is watched from
+        its start (_slot_failed), and what the last one said is over."""
+        with self._slots_lock:
+            albums = {it.album for it in items if it.album}
+            self._play_run = {"generation": self.queue.generation, "played": False,
+                              "failed": {}, "told_first": False, "told_all": False,
+                              "album": albums.pop() if len(albums) == 1 else None}
+            self._stream_event = None
 
     def stream_landed(self, token: str, reshaped: bool) -> None:
         """A stream's bytes landed in the media proxy (its track-ready hook,
@@ -766,6 +850,12 @@ class PlaybackManager:
             new_data["connecting"] = self._connecting
         else:
             new_data.pop("connecting", None)
+        # A Play of streamed slots that does not stream here: said while that
+        # run stands, toasted once per page (the event's id, as output_event)
+        if self._stream_event is not None:
+            new_data["stream_event"] = self._stream_event
+        else:
+            new_data.pop("stream_event", None)
         if new_data != self._latest_status:
             self._latest_status = new_data
             self._status_version += 1
@@ -789,17 +879,18 @@ class PlaybackManager:
         """Playback-position-keyed RAM bound for streamed/transcoded buffers —
         the long-standing eviction follow-up (the OOM path: a long phantom
         queue held every fetched FLAC in RAM forever). The window
-        [idx-1 .. idx+4] is untouchable and priority-(re)fetched so
-        transitions stay gapless, and so is `start`, the slot a start under
-        way goes to while the status still names the one it leaves: its
-        bytes, just in, stay until the output reads them; beyond it
-        enforce_budget evicts most-distant-first (behind the playhead before
-        far-ahead), and an evicted track refetches transparently on demand.
-        Runs on the status thread; the (slot, queue-version, start) guard
-        keeps it off the 1 Hz tick. Never while a mutation is in flight: the
-        queue it would read is the one about to go, and a new queue's fetched
-        tracks are in no slot of it — first out, before the output opens
-        them; the commit's version brings the window back at the next tick."""
+        [idx-1 .. idx+LEAD] is untouchable — the fetch lane refetches what of
+        it the budget dropped (playback.substitute.Lane.pick) — and so is
+        `start`, the slot a start under way goes to while the status still
+        names the one it leaves: its bytes, just in, stay until the output
+        reads them; beyond it enforce_budget evicts most-distant-first
+        (behind the playhead before far-ahead), and an evicted track
+        refetches transparently on demand. Runs on the status thread; the
+        (slot, queue-version, start) guard keeps it off the 1 Hz tick. Never
+        while a mutation is in flight: the queue it would read is the one
+        about to go, and a new queue's fetched tracks are in no slot of it —
+        first out, before the output opens them; the commit's version brings
+        the window back at the next tick."""
         if self.queue.view()[2]:
             return
         anchor = idx if isinstance(idx, int) and idx >= 1 else 1
@@ -813,40 +904,38 @@ class PlaybackManager:
             return
 
         def ident(it: QueueItem):
-            if it.source.get("kind") == "proxy":
-                return it.source.get("token")
+            tok = it.opener().get("token") or it.source.get("token")
+            if tok:
+                return tok
             if it.media_file_id is not None:
                 return ("mf", it.media_file_id)
             return None
 
         lo = max(1, anchor - _PREVIEW_BEHIND)
-        hi = anchor + _PREVIEW_AHEAD
+        hi = anchor + LEAD
         keys = [ident(it) for it in self.queue.snapshot()]
         keep = {k for k in keys[lo - 1:hi] if k}
-        window = [k for k in keys[anchor - 1:hi] if k]
         if isinstance(start, int) and 1 <= start <= len(keys) and keys[start - 1]:
             keep.add(keys[start - 1])
-            window.insert(0, keys[start - 1])
         ranked = ([k for k in keys[:lo - 1] if k]             # behind: oldest first
                   + [k for k in reversed(keys[hi:]) if k])    # ahead: farthest first
         freed = proxy.enforce_budget(
             keep, ranked, settings.streaming_preview_ram_mb * 1048576)
-        proxy.ensure_buffered(window)
         if freed:
             logger.info("preview budget: freed %.0f MiB beyond slots %d..%d",
                         freed / 1048576, lo, hi)
 
-    def _retire_previews(self, generation: int) -> None:
-        """Tell the media proxy which queue generation is live. Streamed tracks
-        still being fetched for a superseded one have lost their consumer (the
-        filler's generation guard will refuse them), so their downloads are
-        cancelled at the source rather than run to completion and be thrown
-        away — this is the same reconciliation as _maintain_preview_window,
-        driven by the mutation instead of the playhead."""
-        from streaming import service as streaming_service
-        proxy = streaming_service.get_proxy()
-        if proxy is not None:
-            proxy.retire_generation(generation)
+    def _played(self) -> None:
+        """Something of the queue sounds: a Play's run of failures is over,
+        and so is what it said."""
+        with self._slots_lock:
+            run = self._play_run
+            if run is None or run["played"]:
+                return
+            run["played"] = True
+            told, self._stream_event = self._stream_event is not None, None
+        if told:
+            self._push_status(dict(self._latest_status))
 
     def _on_backend_status(self, sender: PlayerBackend, s: PlaybackStatus) -> None:
         """One status tick from the active backend → SSE payload (exact
@@ -880,10 +969,10 @@ class PlaybackManager:
         else:
             idx = s.queue_index
             item = self.queue.item_at(idx)
-        # A stream — queued as one, or standing in for a copy this output
-        # cannot reach (playback.substitute): the provider's own metadata
-        # and badges either way.
-        preview = bool(item and (item.preview or (item.play or {}).get("kind") == "proxy"))
+        # A provider's stream — queued as one, or the way in of a slot this
+        # output reaches no copy of (playback.substitute): the provider's own
+        # metadata and badges either way.
+        preview = bool(item and item.stream_token)
         # Phantom previews carry 'HTTP stream' in the player's own metadata —
         # surface the provider's real artist/title from the queue item. For
         # non-preview rows a backend with authoritative metadata (HQPlayer
@@ -1006,8 +1095,12 @@ class PlaybackManager:
                                  holds=bool(s.extra.get("resume")),
                                  corrected=bool(s.extra.get("corrected")),
                                  taken=bool(s.extra.get("taken")))
+        if item is not None and idx:
+            self._anchor_item = item
         self._maintain_preview_window(idx, s.extra.get("start_slot"))
-        self._subs.maintain(idx)
+        self.lane.maintain()
+        if new_data["state"] == "playing" and s.position > 0:
+            self._played()
 
         # Natural end-of-queue: the player stopped on the last track. Archive
         # the active session so a fully-listened album/queue lands in history
@@ -1073,8 +1166,17 @@ class PlaybackManager:
             if said:
                 e._said = said
             raise
+        finally:
+            self._lane_follows()
         if backend is not None:
             backend.queue_start()
+
+    def _lane_follows(self) -> None:
+        """After a mutation: a slot that left cancels its fetch at the source,
+        the window is the new queue's, and the rows' states are read again."""
+        self.lane.prune()
+        self.lane.maintain()
+        self._slots_changed()
 
     def replace_queue(self, items: list[QueueItem], *, play: bool,
                       archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
@@ -1110,7 +1212,9 @@ class PlaybackManager:
                     raise
             if added:
                 gen = self.queue.replace(accepted)
-                self._retire_previews(gen)
+                self._anchor_item = accepted[0]
+                if play:
+                    self._play_started(accepted)
                 self._last_slot = 0   # fresh queue — no resume slot in it
                 backend.queue_changed("replace", play=play)
                 self._schedule_persist()
@@ -1212,15 +1316,15 @@ class PlaybackManager:
             "media_file_id": first.media_file_id, "track_id": first.track_id,
             "cover_id": first.cover_id, "cover_url": first.cover_url,
             "provider_cover_url": (resolved_artwork.get(first.track_id)
-                                   if first.preview else None),
+                                   if first.stream_token else None),
             "progress_percent": 0.0, "position_formatted": "0:00",
             "length_formatted": format_time(first.duration_seconds or 0),
             "playlist_version": self.queue.version,
             "radio_mode": self.radio_mode,
-            "preview": bool(first.preview),
+            "preview": bool(first.stream_token),
             "album_id": first.album_id,
-            "provider": first.provider if first.preview else None,
-            "excerpt": bool(first.excerpt) if first.preview else False,
+            "provider": first.provider if first.stream_token else None,
+            "excerpt": bool(first.excerpt) if first.stream_token else False,
             "output": self.output_info,
             "ui_build": ui_build(),
         }
@@ -1318,7 +1422,7 @@ class PlaybackManager:
         """The queue as /api/player/playlist serves it: each slot the active
         output does not hold named with why (PlayerBackend.gap)."""
         b = self._active
-        return self.queue.payload(gap=b.gap if b is not None else None)
+        return self.queue.payload(gap=b.gap if b is not None else None, states=self.lane.slots)
 
     def mirror_step(self, backend: PlayerBackend, step: Callable[[], None]) -> None:
         """An output's own mirror step — the reconverge, HQPlayer following a
@@ -1358,7 +1462,7 @@ class PlaybackManager:
             gen = self.queue.generation
             if cleared:
                 gen = self.queue.clear_for_radio(self._latest_status.get("track_index"))
-                self._retire_previews(gen)
+                self._anchor_item = self.queue.item_at(1)
                 backend.queue_changed("clear")
                 self._schedule_persist()
         return gen
@@ -1371,9 +1475,11 @@ class PlaybackManager:
     # user_settings (debounced) and restored on boot — stopped, never
     # auto-playing. Proxy-backed items are skipped: their in-memory stream
     # sessions die with the process and would restore as dead tokens. A slot
-    # whose file left the library (`track`) is kept: it names no session, and
-    # the attach resolves it again. The files named may leave the library
-    # while the queue sits in storage, so the restore re-binds it.
+    # that is the track itself (`track`: a streamed one, one whose file left
+    # the library) is kept as its identity, its way in left behind — the
+    # attach resolves it again, and the lane brings its stream anew. The
+    # files named may leave the library while the queue sits in storage, so
+    # the restore re-binds it.
 
     def _schedule_persist(self) -> None:
         if self._persist_timer is not None:
@@ -1386,7 +1492,10 @@ class PlaybackManager:
     def _persist_queue(self) -> None:
         try:
             from routers.settings import _write
-            items = [asdict(it) for it in self.queue.snapshot()
+            items = [{**asdict(it), "play": None,
+                      **({"provider": None, "excerpt": False}
+                         if it.source.get("kind") == "track" else {})}
+                     for it in self.queue.snapshot()
                      if it.source.get("kind") in ("file", "track")]
             _write("player.queue", {"items": items})
         except Exception as e:

@@ -186,6 +186,22 @@ def flac_path_for_file(source_path: str) -> str:
                     out_args=out_args, stdin_bytes=None, family="file")
 
 
+def _slice_key(source_path: str, start: float, end: Optional[float]) -> str:
+    mtime = int(os.path.getmtime(source_path))
+    span = f"{start:.6f}|{'' if end is None else format(end, '.6f')}"
+    return hashlib.sha1(f"{source_path}|{mtime}|slice|{span}".encode()).hexdigest()
+
+
+def flac_slice_cached(source_path: str, start: float, end: Optional[float]) -> bool:
+    """Whether the cut flac_slice_path_for_file makes of [start, end) is on
+    disk already — an HQPlayer is handed it at once; one to make is the fetch
+    lane's (playback.substitute). False for an image gone from disk."""
+    try:
+        return (_CACHE_DIR / f"{_slice_key(source_path, start, end)}.flac").exists()
+    except OSError:
+        return False
+
+
 def flac_slice_path_for_file(source_path: str, start: float,
                              end: Optional[float], tags: dict) -> str:
     """Cached lossless FLAC cut [start, end) of an owned CUE image (end=None
@@ -193,9 +209,7 @@ def flac_slice_path_for_file(source_path: str, start: float,
     album/track) are display-only and don't key — the first producer's stick.
     -map 0:a:0 + -map_metadata -1 keep the image's own tags and embedded art
     out of every slice; explicit -metadata gives HQPlayer proper names."""
-    mtime = int(os.path.getmtime(source_path))
-    span = f"{start:.6f}|{'' if end is None else format(end, '.6f')}"
-    key = hashlib.sha1(f"{source_path}|{mtime}|slice|{span}".encode()).hexdigest()
+    key = _slice_key(source_path, start, end)
     out_args = [] if end is None else ["-t", f"{end - start:.6f}"]
     out_args += ["-map", "0:a:0", "-map_metadata", "-1"]
     for tag in ("title", "artist", "album", "track"):

@@ -59,6 +59,12 @@ from streaming import transcode  # noqa: E402
 PLAYING = int(PlaybackState.PLAYING)
 
 
+
+def _mint_all(proxy, pairs):
+    """Tokens for (query, chain) pairs, as the fetch lane's queue side mints
+    them: nothing fetched until a slot wants it or a consumer waits on it."""
+    return [proxy.mint(q, chain) for q, chain in pairs]
+
 def _observed(scenario: str, **what) -> None:
     print("OBSERVED", scenario, json.dumps(what, default=str, sort_keys=True))
 
@@ -975,7 +981,6 @@ def test_an_album_that_takes_hqplayer_back_from_roon_reaches_it_whole(fake, list
     try:
         _, _, ticks = _roon_takes_over(fake, mgr, roon)
         assert ticks is not None, "the node never said external"
-        player_router = _routes_on(monkeypatch, mgr)
         real = fake._dispatch
 
         def dispatch(cmd, attrs):
@@ -989,8 +994,8 @@ def test_an_album_that_takes_hqplayer_back_from_roon_reaches_it_whole(fake, list
             fake.length = 8
         added, gen = mgr.replace_queue([_item("E:/Music/C/01.flac", 31)], play=True)
         assert added == 1
-        for it in (_item("E:/Music/C/02.flac", 32), _item("E:/Music/C/03.flac", 33)):
-            assert player_router._filler_append(it, gen)
+        assert mgr.append([_item("E:/Music/C/02.flac", 32), _item("E:/Music/C/03.flac", 33)],
+                          generation=gen) == 2
         album = [f"file:///E:/Music/C/0{i}.flac" for i in (1, 2, 3)]
         assert fake.playlist == album, fake.playlist
         assert _wait(lambda: fake.state == PLAYING and fake.track == 2, 30), (fake.state, fake.track)
@@ -2248,7 +2253,7 @@ def _one_stream_on_hqplayer(fake, monkeypatch):
     from streaming.base import TrackQuery
     proxy = streaming_service.get_proxy()
     prov = _GatedStream()
-    toks = proxy.start_session([(TrackQuery(artist="Artist", title="Stream 1", album="Album", duration=300.0,
+    toks = _mint_all(proxy, [(TrackQuery(artist="Artist", title="Stream 1", album="Album", duration=300.0,
                                             track_id="stream-1"), [(prov, None)])])
     assert proxy.wait_ready(toks[0], timeout=5).audio is not None
     mgr = PlaybackManager()

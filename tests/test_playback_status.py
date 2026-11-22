@@ -138,11 +138,10 @@ def test_empty_backend_tags_fall_back_to_the_queue_item():
     assert (st["artist"], st["album"], st["song"]) == ("Artist", "Album", "Song")
 
 
-def test_a_next_block_that_rolls_in_keeps_its_order(monkeypatch):
-    """A block queued Next whose tracks land one by one (a CUE album, an m4a
-    set) extends its own run: each track follows the one before it, right
-    behind the playing slot — not at the end, and not backwards."""
-    import routers.player as player
+def test_a_next_block_takes_its_places_at_once_in_its_order(monkeypatch):
+    """A block queued Next (a CUE album, an m4a set, a streamed album) is
+    committed whole, in one mutation: right behind the playing slot, in its
+    own order — not at the end, and not backwards."""
 
     def item(n):
         return QueueItem(track_id=f"t{n}", media_file_id=n,
@@ -153,13 +152,10 @@ def test_a_next_block_that_rolls_in_keeps_its_order(monkeypatch):
     mgr = PlaybackManager()
     # The test database is the live one: the queue snapshot stays out of it.
     monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
-    monkeypatch.setattr(player, "manager", mgr)
     mgr.queue.replace([item(1), item(2)])
     mgr._latest_status = {"state": "playing", "track_index": 1}
 
-    first, rest = item(10), [item(11), item(12)]
-    assert mgr.append([first], "next") == 1
-    player._owned_filler(rest, mgr.queue.generation, position="next", after=first)
+    assert mgr.append([item(10), item(11), item(12)], "next") == 3
 
     assert [it.track_id for it in mgr.queue.snapshot()] == [
         "t1", "t10", "t11", "t12", "t2"]
@@ -214,6 +210,8 @@ def test_the_status_a_connection_opens_with_carries_the_floor_of_its_events(monk
         assert first["t"] == "status" and first["d"]["output_event"] == {"id": before, "kind": "took"}
         floor = first["d"]["event_floor"]
         assert before < floor < new_id()
+        slots = json.loads((await stream.__anext__())[6:])
+        assert slots["t"] == "slots" and slots["d"] == {"version": mgr.queue.version, "slots": []}
         assert json.loads((await stream.__anext__())[6:])["t"] == "notice"
         assert json.loads((await stream.__anext__())[6:])["t"] == "identity"
         mgr._push_status({"state": "stopped", "output": {}, "output_event": {"id": new_id(), "kind": "refused"}})

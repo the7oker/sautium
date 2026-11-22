@@ -676,6 +676,22 @@ def format_track_info(row: dict, features: dict | None) -> str:
     return "\n".join(lines)
 
 
+def queue_outcome(r: dict, verb: str) -> str:
+    """What a play / queue route of entities did, in a line for the
+    assistant: the library's tracks, the streamed ones — each in its place
+    from the tap — and what had nothing playable or does not stream here."""
+    parts = []
+    if r.get("queued"):
+        parts.append(f"{r['queued']} track(s) from the library")
+    if r.get("streaming"):
+        parts.append(f"{r['streaming']} streamed, each in its place")
+    missing = len(r.get("not_found") or [])
+    unstreamable = len(r.get("not_streamable") or [])
+    tail = "".join([f" ({missing} had nothing playable)" if missing else "",
+                    f" ({unstreamable} do not stream here)" if unstreamable else ""])
+    return f"{verb}: " + (", ".join(parts) or "nothing") + tail
+
+
 def _latin(q: str) -> str:
     """Query-side half of the symmetric normalization that fills name_latin /
     title_latin. Imported lazily: the MCP surface can run in an environment

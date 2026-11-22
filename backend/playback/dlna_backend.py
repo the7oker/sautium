@@ -2158,7 +2158,7 @@ class DlnaBackend(PlayerBackend):
         proxy = streaming_service.ensure_proxy()
         if item.cover_id:
             sources = [(item.cover_id, partial(asyncio.to_thread, self._load_cover_jpeg))]
-        elif item.preview:
+        elif item.stream_token or item.cover_url:
             from playback.queue import resolved_artwork
             # Same order as the web UI's coverUrls(): the queued album's own
             # art first, the provider's matched release only as a fallback.
