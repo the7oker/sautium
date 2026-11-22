@@ -231,8 +231,6 @@ def test_a_played_files_path_leaves_the_node_without_its_name(tmp_path, monkeypa
     transcode, a file gone since the scan, the URI HQPlayer is handed — names
     neither the file nor its folders once scrubbed for support, and a bare
     file name is not logged at INFO at all."""
-    import subprocess as sp
-
     from desktop.p2p.diag_protocol import scrub_personal
     from hqplayer_client import file_path_to_uri, redact_uri
     from streaming import local
@@ -243,11 +241,21 @@ def test_a_played_files_path_leaves_the_node_without_its_name(tmp_path, monkeypa
     played = folder / "05 Some Song Title.m4a"
     played.write_bytes(b"\0" * 64)
 
-    def ffmpeg(cmd, **kw):
-        Path(cmd[-1]).write_bytes(b"fLaC" + b"\0" * 64)
-        return sp.CompletedProcess(cmd, 0)
+    class ffmpeg:
+        """The transcode's child, as streaming.local runs it (killed on a cancel)."""
 
-    monkeypatch.setattr(local.subprocess, "run", ffmpeg)
+        def __init__(self, cmd, **kw):
+            self.cmd, self.returncode = cmd, None
+
+        def communicate(self, timeout=None):
+            Path(self.cmd[-1]).write_bytes(b"fLaC" + b"\0" * 64)
+            self.returncode = 0
+            return None, b""
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(local.subprocess, "Popen", ffmpeg)
     provider = local.LocalTranscodeProvider()
     with caplog.at_level(logging.INFO):
         provider._download(str(played))

@@ -205,9 +205,8 @@ def test_no_copy_left_makes_the_slot_the_track_itself(conn, mgr):
     assert it.play == {"kind": "pending"}             # streamed, like any phantom
     assert browser.changed == ["rebind"]
     assert mgr.queue.payload()["tracks"][0]["id"] is None
-    # HQPlayer opens native copies only
-    assert native_plays([it], "hqplayer", None) == [
-        {"kind": "unplayable", "reason": "its file left the library"}]
+    # HQPlayer streams it too, its playlist ending before it until it lands
+    assert native_plays([it], "hqplayer", None) == [{"kind": "pending"}]
 
 
 def test_a_track_gone_with_its_file_leaves_an_inert_entry(conn, mgr):

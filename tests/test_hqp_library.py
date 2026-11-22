@@ -320,9 +320,10 @@ def test_native_plays_follow_the_output(db, monkeypatch):
     assert plays[1]["media_file_id"] == media_ids[1]
     # the HQPlayer that holds them: as queued
     assert native_plays(held, "hqplayer", ep) == [None, None, None]
-    # another HQPlayer: the rips here, and Bonobo has nothing it could open
+    # another HQPlayer: the rips here, and Bonobo, with nothing it could open
+    # itself, streams there too (behind its horizon until it lands)
     other = native_plays(held, "hqplayer", ep + 1)
-    assert [p and p["kind"] for p in other] == ["file", "file", "unplayable"]
+    assert [p and p["kind"] for p in other] == ["file", "file", "pending"]
     # a rip queued on the browser, played on the HQPlayer that holds a copy: its copy
     local = items_for_media_ids(media_ids)
     assert [p and p["kind"] for p in native_plays(local, "hqplayer", ep)] == ["hqp", "hqp"]
