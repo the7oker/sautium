@@ -901,21 +901,21 @@ if __name__ == "__main__":
     ap.add_argument("--since", help="with --forget-endpoint: also drop artists minted after this ISO time")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    # the address is the operator's own word: its link may dial it (HqpLink._may_dial)
+    # the address is the operator's own word: its link may dial it meanwhile (HqpLink._may_dial)
     from playback import hqp_link
-    hqp_link.link_for(args.host, args.port, probing=True)
-    if args.dry_run:
-        ep, how, facts = resolve_endpoint(args.host, args.port)
-        found, found_counts = parse_library(fetch_library(args.host, args.port))
-        have = _known_paths(ep["id"]) if ep else {}
-        fresh = sum(1 for _, md in found if md["file_path"] not in have)
-        print(f"endpoint: {ep['name'] + ' (by ' + how + ')' if ep else 'new — ' + (facts['hqp_name'] or args.host)}; "
-              f"library: {found_counts['files']} files ({found_counts['unsupported']} unsupported); "
-              f"known here: {len(have)}; new: {fresh}")
-    elif args.forget_missing:
-        print(forget_missing(args.host, args.port))
-    elif args.forget_endpoint:
-        since = datetime.fromisoformat(args.since.replace("Z", "+00:00")) if args.since else None
-        print(forget_endpoint(args.host, args.port, since))
-    else:
-        print(sync(args.host, args.port, force=args.force))
+    with hqp_link.probing(args.host, args.port):
+        if args.dry_run:
+            ep, how, facts = resolve_endpoint(args.host, args.port)
+            found, found_counts = parse_library(fetch_library(args.host, args.port))
+            have = _known_paths(ep["id"]) if ep else {}
+            fresh = sum(1 for _, md in found if md["file_path"] not in have)
+            print(f"endpoint: {ep['name'] + ' (by ' + how + ')' if ep else 'new — ' + (facts['hqp_name'] or args.host)}; "
+                  f"library: {found_counts['files']} files ({found_counts['unsupported']} unsupported); "
+                  f"known here: {len(have)}; new: {fresh}")
+        elif args.forget_missing:
+            print(forget_missing(args.host, args.port))
+        elif args.forget_endpoint:
+            since = datetime.fromisoformat(args.since.replace("Z", "+00:00")) if args.since else None
+            print(forget_endpoint(args.host, args.port, since))
+        else:
+            print(sync(args.host, args.port, force=args.force))

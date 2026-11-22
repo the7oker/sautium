@@ -758,8 +758,13 @@ def keep_log(root: Path, why: str) -> Optional[Path]:
     with it. The newest few stay."""
     path = take_log(root, why)
     if path is not None:
-        trim_logs(root)
         log(f"the backend's log kept before its container goes: host/logs/{path.name}")
+        try:
+            trim_logs(root)
+        except OSError as e:
+            # An older file that cannot be unlinked: the new one is kept all
+            # the same, and the update — or its way back — goes on
+            log(f"the older kept logs could not be trimmed: {e}")
     return path
 
 

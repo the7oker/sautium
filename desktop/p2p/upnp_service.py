@@ -56,12 +56,18 @@ def held_elsewhere(u, external: int, internal: int,
     before it looked, and the check from inside is what is left."""
     try:
         mapping = u.getspecificportmapping(external, protocol)
-        if not mapping:
-            return None
-        held = (ipaddress.ip_address(mapping[0]).compressed, int(mapping[1]))
-        return None if held == (ipaddress.ip_address(u.lanaddr).compressed, internal) else held
-    except Exception:
+    except Exception as e:      # miniupnpc raises bare Exception for a router's error
+        logger.debug("UPnP: the router did not say who holds port %s: %s", external, e)
         return None
+    if not mapping:
+        return None
+    try:
+        held = (ipaddress.ip_address(mapping[0]).compressed, int(mapping[1]))
+        here = (ipaddress.ip_address(u.lanaddr).compressed, internal)
+    except (ValueError, TypeError) as e:
+        logger.debug("UPnP: port %s is held by a client the router names %r: %s", external, mapping[0], e)
+        return None
+    return None if held == here else held
 
 
 def add_mapping(u, external: int, internal: int, protocol: str = "TCP",

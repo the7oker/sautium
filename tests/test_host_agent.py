@@ -1295,6 +1295,20 @@ def test_a_log_that_cannot_be_kept_stops_nothing(checkout, monkeypatch, capfd):
     assert ha.kept_logs(checkout) == []                                   # and a report still names none
 
 
+def test_older_logs_that_cannot_be_trimmed_never_stop_what_keeps_the_new_one(checkout, monkeypatch):
+    """The update and its way back call keep_log bare: an older file the
+    agent cannot unlink must cost neither (PI-NODE-2C review round 1 — the
+    way back stopped before its `rm`, the restore and the start)."""
+    _logged(monkeypatch, b"INFO the release's last lines\n")
+
+    def refuses(root=None):
+        raise PermissionError(13, "Permission denied", "host/logs/backend-old.log")
+    monkeypatch.setattr(ha, "trim_logs", refuses)
+    path = ha.keep_log(checkout, "undo")
+    assert path is not None and path.read_text() == "INFO the release's last lines\n"
+
+
+
 def test_an_update_keeps_the_log_after_the_stop_and_before_the_container_goes(checkout, monkeypatch):
     up = _Update(checkout, monkeypatch, logs=LOG)
     assert ha.verb_update({}, 1000.0, checkout)[0] == "updated"

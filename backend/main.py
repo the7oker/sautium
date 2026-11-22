@@ -667,14 +667,17 @@ async def lifespan(app: FastAPI):
 
     # The HQPlayer the person chose, copied onto the runtime settings — or
     # none: the environment's address is dropped here (hqp_library.driven).
+    # After db_migrate above, never before it: hqp_choice_v1 is the last
+    # reader of the environment's address, and saves it for an install it
+    # configured.
     try:
         from routers.settings import load_hqplayer_from_db
         load_hqplayer_from_db()
     except Exception as e:
         logger.warning(f"Failed to overlay HQPlayer settings at startup: {e}")
 
-    # Activate the persisted playback output (HQPlayer legacy default —
-    # HARDWARE-TIERS §2.6: no configured output, no status loop).
+    # Activate the persisted playback output (nothing chosen is this device:
+    # HARDWARE-TIERS §2.6 — no configured output, no status loop).
     from routers.player import stop_status_poller
     from playback.manager import manager as playback_manager
     playback_manager.init_from_settings()

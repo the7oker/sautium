@@ -1350,6 +1350,8 @@ GENERATOR = "/lib/systemd/system-generators/systemd-fstab-generator"
 
 
 @pytest.mark.skipif(not os.access(GENERATOR, os.X_OK), reason="no systemd fstab generator on this system")
+@pytest.mark.skipif(os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"),
+                    reason="inside a container systemd's generator leaves every device line out")
 @pytest.mark.parametrize("uuid", ["4A21-0000", "02f61d5e-92cb-4f9c-a781-099d97795020"])
 def test_systemds_own_generator_makes_the_disks_device_want_the_mount(tmp_path, uuid):
     """The line as the paste writes it, read by systemd's fstab generator

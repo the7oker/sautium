@@ -14,6 +14,7 @@ A FakeHqp listens on loopback as the address the environment names; it
 counts every connection it accepts. On the module's scratch database."""
 
 import asyncio
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -151,9 +152,12 @@ def test_the_links_connect_refuses_an_address_nobody_chose_registered_or_probes(
     with pytest.raises(hqp_link.NotChosen):
         hqp_library.get_info(*at)
 
-    # the person's own look at an address (the scan, "Add device by address")
-    hqp_link.link_for(*at, probing=True)
-    assert hqp_library.get_info(*at)["product"]
+    # the person's own look at an address (the scan, "Add device by address") — while it lasts
+    with hqp_link.probing(*at):
+        assert hqp_library.get_info(*at)["product"]
+    _fresh_links()                  # the probe's connection gone: the next request must dial
+    with pytest.raises(hqp_link.NotChosen):
+        hqp_library.get_info(*at)
 
 
 def test_the_chosen_hqplayer_is_asked_as_before(default_hqp, cur):
@@ -191,7 +195,7 @@ def _scan_finding(monkeypatch, host):
     monkeypatch.setattr(player, "_dlna_pins", lambda: {})
     monkeypatch.setattr(player, "_hqp_discovered", {})
     monkeypatch.setattr(player, "_dlna_discovered", {})
-    monkeypatch.setattr(player.hqp_link, "link_for", lambda host, port, **kw: Link())
+    monkeypatch.setattr(player.hqp_link, "probing", lambda host, port: contextlib.nullcontext(Link()))
     monkeypatch.setattr(hqp_library, "resolve_endpoint", lambda host, port: (None, None, {}))
     monkeypatch.setattr(hqp_library, "register", lambda host, port: registered.append((host, port)))
     asyncio.run(player._scan_run())
@@ -243,6 +247,20 @@ def test_an_install_the_environment_enabled_gets_its_choice_saved_and_still_atta
     settings_router.load_hqplayer_from_db()
     assert hqp_library.driven() == ("127.0.0.1", fake.port)
     assert player._hqp_configured()
+    # ...and the start attaches it, as it did when "configured" was the choice
+    attached = []
+    monkeypatch.setattr(PlaybackManager, "_restore_persisted_queue", lambda self: None)
+    monkeypatch.setattr(PlaybackManager, "activate", lambda self, kind, **kw: attached.append(kind))
+    PlaybackManager().init_from_settings()
+    assert attached == ["hqplayer"]
+
+
+def test_the_start_saves_the_old_choice_before_it_drops_the_environments_address():
+    """hqp_choice_v1 reads the environment's HQPLAYER_HOST; the overlay drops
+    it. Swapped, an install the environment configured would be saved at the
+    old default instead of its own address."""
+    source = (BACKEND / "main.py").read_text()
+    assert 0 < source.index("db_migrate.apply_pending()") < source.index("load_hqplayer_from_db()")
 
 
 def test_an_install_with_a_saved_host_and_no_output_gets_the_output_saved(default_hqp, cur, scratch_dsn):

@@ -201,7 +201,7 @@ class NotChosen(ConnectionError):
     pointed at: nothing is asked and nothing is dialled."""
 
 
-NOT_CHOSEN = "No HQPlayer is chosen. Choose one in More › Output."
+NOT_CHOSEN = "No HQPlayer is chosen. Choose one in More › Audio output."
 
 
 class Owed(NotAnswering):
@@ -671,10 +671,11 @@ class HqpLink:
         self.key = key
         self.host = host
         self.port = port
-        # Made for the person's own act of looking (the picker's scan, "Add
-        # device by address"): the one link that may dial an address neither
-        # chosen nor registered (_may_dial)
-        self.probing = False
+        # The person's own acts of looking at this address going on now (the
+        # picker's scan, "Add device by address": probing()): while one
+        # lasts the link may dial an address neither chosen nor registered
+        # (_may_dial)
+        self._probes = 0
         self.build = BuildWatch(self)
         self.lock = _CommandLock(self)
         self.client = HQPlayerClient(host=host, port=port, timeout=COMMAND_WAIT_S,
@@ -1545,7 +1546,9 @@ class HqpLink:
         loudly, before the dial — on 2026-11-22 the Library screen of a node
         with no HQPlayer chosen connected to the default address at every
         wake of its stream."""
-        if self.probing or self._selected():
+        with self._state_lock:
+            probed = self._probes > 0
+        if probed or self._selected():
             return True
         import hqp_library
         return hqp_library.endpoint_by_address(*at) is not None
@@ -1657,12 +1660,9 @@ def _key(host: str, port: int) -> tuple:
     return hqp_library.address_key(host, port)
 
 
-def link_for(host: str, port: int, *, probing: bool = False) -> HqpLink:
+def link_for(host: str, port: int) -> HqpLink:
     """The link of the HQPlayer at this address — this machine's aliases are
-    one — made on first use; a closed one is made afresh. `probing`: the
-    person is looking at this address (the picker's scan, "Add device by
-    address") — its link may dial it though nothing chose or registered it
-    yet (HqpLink._may_dial)."""
+    one — made on first use; a closed one is made afresh."""
     key = _key(host, port)
     with _registry_lock:
         link = _links.get(key)
@@ -1670,9 +1670,23 @@ def link_for(host: str, port: int, *, probing: bool = False) -> HqpLink:
             link = _links[key] = HqpLink(key, host, port)
             if _closed_why is not None:
                 link.close(_closed_why)
-        if probing:
-            link.probing = True
         return link
+
+
+@contextmanager
+def probing(host: str, port: int):
+    """The person is looking at this address (the picker's scan, "Add device
+    by address", the library CLI's --host): for the block its link may dial
+    it though nothing chose or registered it yet (HqpLink._may_dial) — and
+    no longer: an address once looked at is not one the node was pointed at."""
+    link = link_for(host, port)
+    with link._state_lock:
+        link._probes += 1
+    try:
+        yield link
+    finally:
+        with link._state_lock:
+            link._probes -= 1
 
 
 def selected() -> Optional[HqpLink]:

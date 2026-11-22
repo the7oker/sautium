@@ -922,8 +922,9 @@ async def _scan_run():
         try:
             # Its link says first whether HQPlayer takes anything now — a
             # build, one it did not finish, a silence: busy, never asked into
-            hqp_link.link_for(host, 4321, probing=True).refuse()
-            return host, await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321), None
+            with hqp_link.probing(host, 4321) as link:
+                link.refuse()
+                return host, await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321), None
         except Exception as e:
             return host, None, e
     hqps: dict[tuple, dict] = {}
@@ -1067,21 +1068,21 @@ def _probe_hqplayer(host: str, port: int) -> Optional[dict]:
     None. The discovery datagram first; GetInfo over TCP where a firewall
     passes only that."""
     import hqp_library
-    # the person's own look at this address: its link may dial it
-    hqp_link.link_for(host, port, probing=True)
     facts = hqp_library.discover(host, port)
-    if facts is None:
-        try:
-            info = hqp_library.get_info(host, port)
-        except OSError:
-            return None
-        if not info.get("product"):
-            return None
-        facts = {"name": info["name"], "product": info["product"]}
-    entry = {"kind": "hqplayer", "host": host, "port": port, "name": facts["name"],
-             "product": facts["product"], "embedded": hqp_library.is_embedded(facts["product"]),
-             "endpoint_id": None}
-    ep = hqp_library.register(host, port)
+    # the person's own look at this address: its link may dial it meanwhile
+    with hqp_link.probing(host, port):
+        if facts is None:
+            try:
+                info = hqp_library.get_info(host, port)
+            except OSError:
+                return None
+            if not info.get("product"):
+                return None
+            facts = {"name": info["name"], "product": info["product"]}
+        entry = {"kind": "hqplayer", "host": host, "port": port, "name": facts["name"],
+                 "product": facts["product"], "embedded": hqp_library.is_embedded(facts["product"]),
+                 "endpoint_id": None}
+        ep = hqp_library.register(host, port)
     if ep is not None:
         entry["endpoint_id"], entry["name"] = ep["id"], ep["name"]
     return entry

@@ -1103,6 +1103,8 @@ def swap_lines(found: List[dict], step: bool) -> None:
             else:
                 say()
                 say(why)
+                if not step:
+                    say("./sautium setup shows the step for it, where it knows one.")
         back = swap.get("writeback")
         if back and not step and back["medium"] in machine_tier.CARD_MEDIA:
             written = "" if back["written_mb"] is None else f": {back['written_mb']:.0f} MB written there since this start"

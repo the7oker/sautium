@@ -112,6 +112,16 @@ class P2PManager:
         """The verdict the chat client holds (unknown without an account)."""
         return self._chat_client.reachability if self._chat_client else "unknown"
 
+    def _mapping_changed(self, ext: Optional[int]) -> None:
+        """The router's mapping of the sync port moved or is gone (None): the
+        DHT announces what is left — the external port, else the local one —
+        and the verdict is asked again, as the Docker node does
+        (backend/main._map_peer_port). A lost mapping left announced was a
+        dead address in the DHT until the next verdict's hour."""
+        self._dht_service.set_announce_port(ext or self._http_port)
+        if self._chat_client:
+            self._chat_client.recheck_reachability()
+
     def start(self, node_id: str = "", progress_cb: Callable = None):
         """Start P2P services in a background thread."""
         if self._running:
@@ -404,9 +414,7 @@ class P2PManager:
                 # renew_ports() retries a full open when nothing is mapped,
                 # so a router that appears later still gets picked up.
                 self._upnp_renewal_task = asyncio.create_task(
-                    self._upnp.keep_mapped(
-                        self._http_port, lambda ext: ext and self._dht_service.set_announce_port(ext))
-                )
+                    self._upnp.keep_mapped(self._http_port, self._mapping_changed))
 
             # Cheap local CGNAT tells gate the very first announces — an
             # unreachable node's announces are dead-address DHT pollution.

@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import stat
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -135,7 +136,7 @@ def apply() -> None:
         if _gone(root, mounts):
             logger.warning("music root %s is empty: its disk is not mounted, or the folder was removed; "
                            "its albums are away. Forget it on the machine: ./sautium roots --forget %s",
-                           root, root)
+                           root, shlex.quote(root))
 
 
 def choose(path: str) -> str:
