@@ -75,6 +75,20 @@ W_TAG = 0.08            # × weighted tag Jaccard. Sized on the Smooth Operator
                         # never gate)
 
 
+# The recall arms' side of `served=True`: a track with a copy here or at the
+# HQPlayer that is the output — a superset of the pool's exact `playable`
+# (its representative copy, owned_rank's pick), which still decides. The
+# ANN arm keeps walking under hnsw.iterative_scan until its LIMIT is met.
+_SERVED_RECALL = """(%(served)s::boolean IS NOT TRUE
+                   OR EXISTS (SELECT 1 FROM media_files rmf
+                              JOIN album_variants rav ON rav.id = rmf.album_variant_id
+                              WHERE rmf.track_id = e.track_id AND rav.location = 'local')
+                   OR EXISTS (SELECT 1 FROM hqp_library_files rhf
+                              JOIN album_variants rav ON rav.id = rhf.album_variant_id
+                              WHERE rhf.track_id = e.track_id
+                                AND rav.hqp_endpoint_id = %(hqp_id)s))"""
+
+
 def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                    artist_cap: int = 2, jitter: float = 0.0,
                    pool: int = POOL, served: Optional[bool] = None) -> list:
@@ -91,7 +105,9 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     file or one held at the HQPlayer that is the output) or only the others
     (False — they stream), BEFORE the artist cap and the LIMIT: radio's
     owned-only station and its streamed candidates are each a full top-N of
-    their own, never what a mixed top-N left of them. Excludes the seed and
+    their own, never what a mixed top-N left of them. For True the recall
+    arms walk the owner's tracks alone too (_SERVED_RECALL): on a node whose
+    embeddings are mostly imported ones, a mixed 600-NN would hold few. Excludes the seed and
     `exclude` UUIDs; empty when the seed has no embedding (a NULL target would
     otherwise order arbitrarily). Every embeddings row has segments (written
     atomically since v2), so the chamfer join never drops a pool row.
@@ -133,6 +149,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             (SELECT e.track_id FROM embeddings e
              WHERE e.track_id != %(seed)s::uuid
                AND e.track_id <> ALL(%(exclude)s::uuid[])
+               AND {_SERVED_RECALL}
              ORDER BY e.vector <=> (SELECT vector FROM target)
              LIMIT %(pool)s)
             UNION
@@ -146,6 +163,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
              JOIN kin k ON k.artist_id = kta.artist_id
              WHERE e.track_id != %(seed)s::uuid
                AND e.track_id <> ALL(%(exclude)s::uuid[])
+               AND {_SERVED_RECALL}
              ORDER BY (e.vector <=> (SELECT vector FROM target)) + 0
              LIMIT %(kin_cap)s)
         ),

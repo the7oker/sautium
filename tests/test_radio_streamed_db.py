@@ -61,6 +61,7 @@ class _Provider(StreamProvider):
                                          excerpt=excerpt, demo_limited=demo)
         self.has: set = set()
         self.fails: set = set()
+        self.silent: set = set()
         self.resolved: list = []
         self.downloads: list = []
 
@@ -72,6 +73,9 @@ class _Provider(StreamProvider):
 
     def _resolve(self, query):
         self.resolved.append(query.track_id)
+        if query.track_id in self.silent:
+            from streaming.base import ProviderUnavailable
+            raise ProviderUnavailable(f"{self.manifest.id}: quota")
         if query.track_id not in self.has:
             return None
         return ResolvedSource(source_id=query.track_id, duration=query.duration)
@@ -176,10 +180,24 @@ def node(scratch_dsn, monkeypatch):
     out = _Output(mgr._on_backend_status)
     mgr._active = out
     monkeypatch.setattr(mgr, "ensure_active", lambda: out)
-    yield {"mgr": mgr, "player": player, "cur": cur, "owned": owned, "streamed": streamed,
+    model = str(uuid.uuid4())
+    cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)", (model,))
+    yield {"mgr": mgr, "player": player, "cur": cur, "owned": owned, "streamed": streamed, "model": model,
            "pool": pool_rows, "asked": asked, "providers": provs, "full": full, "demo": demo_ch, "clip": clip, "proxy": proxy}
     conn.close()
     pool.closeall()
+
+
+def _embed(node, track, angle=0.0):
+    """An analysed track: its embedding and one segment, at `angle` from the
+    seed's direction."""
+    import math
+    cur = node["cur"]
+    v = "[" + ",".join(map(str, (math.cos(angle), math.sin(angle)) + (0.0,) * 510)) + "]"
+    cur.execute("INSERT INTO embeddings (vector, model_id, track_id) VALUES (%s::vector, %s, %s) "
+                "RETURNING id", (v, node["model"], track))
+    cur.execute("INSERT INTO embedding_segments (embedding_id, segment_index, vector) "
+                "VALUES (%s, 0, %s::vector)", (cur.fetchone()[0], v))
 
 
 def _switch(node, on: bool):
@@ -403,10 +421,7 @@ def test_radio_start_with_the_switch_off_and_nothing_owned_names_the_switch(node
     from fastapi import HTTPException
     mgr, player, cur = node["mgr"], node["player"], node["cur"]
     seed = node["streamed"][7]["track_id"]
-    model = str(uuid.uuid4())
-    cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)", (model,))
-    cur.execute("INSERT INTO embeddings (vector, model_id, track_id) VALUES (%s::vector, %s, %s)",
-                ("[" + ",".join(["0.1"] * 512) + "]", model, seed))
+    _embed(node, seed)
     node["pool"][:] = node["streamed"][:4]
     mgr.replace_queue(player.queue_mod.items_for_owned_rows(
         [{"id": node["owned"][0]["file_id"], "location": "local"}]), play=False)
@@ -428,6 +443,7 @@ def test_play_similar_follows_the_switch(node):
     from fastapi import HTTPException
     mgr, player = node["mgr"], node["player"]
     s = node["streamed"]
+    _embed(node, s[7]["track_id"])
     node["full"].has.update(r["track_id"] for r in s)
     node["pool"][:] = s[:3] + node["owned"][:3]
     answer = player.play_similar(player.PlaySimilarRequest(track_id=s[7]["track_id"], limit=6))
@@ -452,6 +468,7 @@ def test_play_similar_leaves_out_what_the_node_knows_plays_only_as_an_excerpt(no
     _switch(node, True)
     mgr, player, cur = node["mgr"], node["player"], node["cur"]
     s = node["streamed"]
+    _embed(node, s[7]["track_id"])
     node["providers"][:] = [node["demo"], node["clip"]]
     node["demo"].has.update(r["track_id"] for r in s[:2])
     cur.execute("INSERT INTO demo_plays (track_id, provider) VALUES (%s, 'demo')", (s[0]["track_id"],))
@@ -478,17 +495,8 @@ def test_the_real_scorer_filters_the_served_rows_before_its_limit(node):
     """Against the real statement: eight streamed tracks nearer the seed than
     four owned ones — `served=True` is a top-3 of the owned ones, `False`
     of the streamed, and the mixed top-3 holds no owned track at all."""
-    import math
-    cur = node["cur"]
-    model = str(uuid.uuid4())
-    cur.execute("INSERT INTO embedding_models (id, name, dimension) VALUES (%s, 'clap', 512)", (model,))
-
     def embed(track, angle):
-        v = "[" + ",".join(map(str, (math.cos(angle), math.sin(angle)) + (0.0,) * 510)) + "]"
-        cur.execute("INSERT INTO embeddings (vector, model_id, track_id) VALUES (%s::vector, %s, %s) "
-                    "RETURNING id", (v, model, track))
-        cur.execute("INSERT INTO embedding_segments (embedding_id, segment_index, vector) "
-                    "VALUES (%s, 0, %s::vector)", (cur.fetchone()[0], v))
+        _embed(node, track, angle)
     seed = node["streamed"][7]["track_id"]
     embed(seed, 0.0)
     streamed = [r["track_id"] for r in node["streamed"][:7]]
@@ -503,3 +511,56 @@ def test_the_real_scorer_filters_the_served_rows_before_its_limit(node):
     theirs = _SCORER(seed, limit=3, served=False)
     assert [r["track_id"] for r in theirs] == streamed[:3]
     assert not any(r["is_owned"] for r in _SCORER(seed, limit=3))
+    # past the mixed recall horizon too: a recall of 3 nearest holds no owned
+    # track, the owner's own recall walks to them
+    assert [r["track_id"] for r in _SCORER(seed, limit=3, served=True, pool=3)] == owned[:3]
+
+
+def test_play_similar_on_a_seed_not_analysed_says_so_whatever_the_switch(node):
+    from fastapi import HTTPException
+    player = node["player"]
+    node["pool"][:] = node["owned"][:3]
+    with pytest.raises(HTTPException) as e:
+        player.play_similar(player.PlaySimilarRequest(track_id=node["streamed"][7]["track_id"]))
+    assert e.value.status_code == 404 and "not be analysed" in e.value.detail
+
+
+def test_a_candidate_a_silent_provider_did_not_answer_for_is_asked_again(node):
+    _switch(node, True)
+    player = node["player"]
+    s = node["streamed"]
+    node["pool"][:] = s[:2] + node["owned"]
+    node["full"].has.add(s[0]["track_id"])
+    node["full"].silent.add(s[1]["track_id"])
+    _batch_rows, passed = player._radio_build_batch("seed", set(), None)
+    assert s[1]["track_id"] not in passed
+
+
+def test_a_fill_overtaken_by_a_new_station_teaches_it_nothing(node, monkeypatch):
+    mgr, player = node["mgr"], node["player"]
+    mgr.set_radio_mode(True)
+    gen = mgr.queue.generation
+    monkeypatch.setattr(player, "_radio_dry_seed", None)
+    monkeypatch.setattr(player, "_radio_played", set())
+
+    def build(seed, played, prev):
+        mgr.queue.clear_for_radio(None)             # a restart while this one resolved
+        return [], {"passed-over"}
+    monkeypatch.setattr(player, "_radio_build_batch", build)
+    player._radio_fill("seed", gen)
+    assert player._radio_dry_seed is None and player._radio_played == set()
+    mgr.set_radio_mode(False)
+
+
+def test_the_words_name_no_switch_where_the_deployment_streams_nothing(node, monkeypatch):
+    from config import settings as app_settings
+    from streaming import service as streaming_service
+    player = node["player"]
+    from routers import settings as settings_router
+    monkeypatch.setattr(streaming_service, "is_enabled", lambda: False)
+    settings_router._write("discovery.phantom_layer", False)
+    assert "Discover new and" in player._radio_owned_only_words("Radio")
+    _switch(node, True)
+    assert "Turn on Discover new in" in player._radio_owned_only_words("Radio")
+    monkeypatch.setattr(app_settings, "streaming_preview_enabled", False)
+    assert player._radio_owned_only_words("Radio") == "Radio found nothing of yours like this track."

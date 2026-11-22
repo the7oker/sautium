@@ -2295,7 +2295,7 @@ def _refused_code(track_id: Optional[str]) -> Optional[str]:
     return next(iter(refused.values()))
 
 
-def _resolve_waterfall(queries: list) -> list:
+def _resolve_waterfall(queries: list, unanswered_ids: Optional[set] = None) -> list:
     """Per-track lossless-first fallback CHAIN ``[(provider, source_id), ...]``.
     Each track resolves to its best provider (lossless before YouTube lossy);
     the chain then appends LOWER-preference providers (source_id=None, resolved
@@ -2306,7 +2306,8 @@ def _resolve_waterfall(queries: list) -> list:
     play would re-search every provider for a track known to be nowhere. A
     track some provider could not ANSWER for (timeout, quota) is not cached:
     its chain is built from the providers that did answer, and the next
-    resolve asks the silent one again."""
+    resolve asks the silent one again; `unanswered_ids`, when given, is told
+    those tracks' ids."""
     from streaming import demo
     from streaming import service as streaming_service
     from streaming.base import ProviderUnavailable
@@ -2424,6 +2425,8 @@ def _resolve_waterfall(queries: list) -> list:
         chains[i] = chain
         if q.track_id and i not in unanswered:
             _chain_cache[(q.track_id, order_for(q))] = (now, chain)
+    if unanswered_ids is not None:
+        unanswered_ids.update(queries[i].track_id for i in unanswered if queries[i].track_id)
     return chains
 
 
@@ -3394,13 +3397,14 @@ def play_similar(req: PlaySimilarRequest):
     # radio's rule, its switch and never an excerpt: a static station. Owned
     # only, the scorer's top-N is of the owner's own (never what a mixed
     # top-N left of them)
-    streams = _radio_streams()
-    rows = track_similarity.similar_tracks(req.track_id, limit=req.limit,
-                                           served=None if streams else True)
-    if not rows and streams:
+    if not _db_query_one("SELECT 1 AS ok FROM embeddings WHERE track_id = %(t)s::uuid LIMIT 1",
+                         {"t": req.track_id}):
         raise HTTPException(
             status_code=404,
             detail="No similar tracks found — the seed may not be analysed yet.")
+    streams = _radio_streams()
+    rows = track_similarity.similar_tracks(req.track_id, limit=req.limit,
+                                           served=None if streams else True)
     native = [bool(r["is_owned"] and r["playable"]) for r in rows]
     queries = (_phantom_track_queries([r["track_id"] for r, n in zip(rows, native) if not n])
                if streams else {})
@@ -3608,9 +3612,12 @@ def _radio_owned_only_words(what: str) -> str:
     drafts for the words sitting): it names the switch that would mix others
     in — the ones of the two that are off (Discover new, while the
     streaming library is off)."""
+    from config import settings as app_settings
     from routers.settings import _read as read_setting
     from streaming import service as streaming_service
     head = f"{what} found nothing of yours like this track."
+    if not getattr(app_settings, "streaming_preview_enabled", False):
+        return head                 # the deployment streams nothing: no switch would help
     radio_off = not bool(read_setting("radio.streamed"))
     layer_off = not streaming_service.is_enabled() and not bool(
         read_setting("discovery.phantom_layer"))
@@ -3688,10 +3695,13 @@ def _radio_build_batch(seed_uuid: str, played: set,
         queries = _phantom_track_queries([r["track_id"] for r in candidates])
         passed = {r["track_id"] for r in candidates if r["track_id"] not in queries}
         candidates = [r for r in candidates if r["track_id"] in queries]
-        chains = (_resolve_waterfall([queries[r["track_id"]] for r in candidates])
+        silent: set = set()
+        chains = (_resolve_waterfall([queries[r["track_id"]] for r in candidates], silent)
                   if candidates else [])
         phantom = [r for r, ch in zip(candidates, chains) if _plays_whole(ch)]
-        passed |= {r["track_id"] for r in candidates} - {r["track_id"] for r in phantom}
+        # passed over on a definite answer only: a provider silent this time
+        # (a timeout, a quota) is asked again at the next batch
+        passed |= {r["track_id"] for r in candidates} - {r["track_id"] for r in phantom} - silent
         phantom = phantom[:_RADIO_MAX_PHANTOM]
     for r in owned:
         r["is_owned"] = True
@@ -3741,10 +3751,14 @@ def _radio_fill(seed_uuid: str, gen: int, built: Optional[tuple] = None) -> None
         if manager.radio_mode and manager.queue.generation == gen:
             batch, passed = built if built is not None else _radio_build_batch(
                 seed_uuid, _radio_played, _radio_last_artist)
-            _radio_played.update(passed)
-            if not batch:
-                _radio_dry_seed = seed_uuid
-                logger.info("radio: nothing more like %s — the next seed asks again", seed_uuid)
+            # what this station learned, only while it is still the station
+            # (a restart meanwhile has its own played set and no dry seed)
+            if manager.queue.generation == gen:
+                _radio_played.update(passed)
+                if not batch:
+                    _radio_dry_seed = seed_uuid
+                    logger.info("radio: nothing more like %s — the next seed asks again",
+                                seed_uuid)
             _radio_append_batch(batch, gen)
     except Exception:
         logger.exception("radio fill failed")
