@@ -69,17 +69,63 @@ def test_a_document_of_another_key_is_moved_aside_whole_and_said(tmp_path, caplo
 
 
 def test_this_key_s_document_or_none_at_all_is_written_in_place(tmp_path, caplog):
-    """The email upgrade of a pow certificate replaces it; a file that is no
-    verified document of anyone (garbage, an unknown issuer's) is no document
-    to keep."""
+    """The email upgrade of a pow certificate replaces it; a file that names
+    no key is no document to keep."""
     mine = _key()
     caplog.set_level(logging.ERROR)
-    for held in (certificate(mine, method="pow"), "{not json", {"pubkey": _key(), "sig": "00"}):
+    for held in (certificate(mine, method="pow"), "{not json", {"pubkey": "not a key"}, ["a list"]):
         _write(tmp_path, CERT, held)
         upgraded = json.dumps(certificate(mine)).encode("utf-8")
         node_identity.write_identity_document(tmp_path, CERT, upgraded, mine)
         assert (tmp_path / CERT).read_bytes() == upgraded
     assert _aside(tmp_path) == {} and not caplog.records
+
+
+def test_another_key_s_certificate_is_kept_though_this_release_no_longer_trusts_it(tmp_path):
+    """Keeping a file is not trusting it: a certificate of an issuer dropped
+    since, or of an older version, is still someone's."""
+    retired = certificate(_key(), authority=Ed25519PrivateKey.generate())
+    older = dict(certificate(_key()), v=1)
+    for held in (retired, older):
+        d = tmp_path / held["sig"][:8]
+        d.mkdir()
+        kept = _write(d, CERT, held)
+        node_identity.write_identity_document(d, CERT, b"{}", _key())
+        assert _aside(d) == {CERT: kept}
+
+
+def test_two_moves_in_one_tick_of_the_clock_get_a_folder_each(tmp_path, monkeypatch):
+    """The launcher's Python ticks every ~15.6 ms on Windows: a bundle's
+    certificate and proof are moved within one tick."""
+    import datetime as real
+
+    class Frozen(real.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real.datetime(2026, 11, 23, tzinfo=tz)
+    monkeypatch.setattr(node_identity.datetime, "datetime", Frozen)
+    theirs = certificate(_key())
+    kept = {CERT: _write(tmp_path, CERT, theirs), PROOF: _write(tmp_path, PROOF, proof(theirs))}
+    mine = _key()
+    node_identity.write_identity_document(tmp_path, CERT, b"{}", mine)
+    node_identity.write_identity_document(tmp_path, PROOF, b"{}", mine)
+    assert _aside(tmp_path) == kept and len(list(tmp_path.glob("replaced-*"))) == 2
+
+
+def test_a_document_moved_meanwhile_by_another_writer_is_no_error(tmp_path, monkeypatch, caplog):
+    theirs = certificate(_key())
+    _write(tmp_path, CERT, theirs)
+    real_key = node_identity._document_key
+
+    def read_then_lose(path):
+        held = real_key(path)
+        path.unlink()                                     # another writer, between the read and the move
+        return held
+    monkeypatch.setattr(node_identity, "_document_key", read_then_lose)
+    caplog.set_level(logging.ERROR)
+    node_identity.write_identity_document(tmp_path, CERT, b"{}", _key())
+    assert (tmp_path / CERT).read_bytes() == b"{}"
+    assert list(tmp_path.glob("replaced-*")) == [] and not caplog.records
 
 
 def test_the_docker_writer_keeps_the_master_s_certificate(tmp_path, caplog):

@@ -537,6 +537,29 @@ async def lifespan(app: FastAPI):
     hold_secrets()
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
 
+    # The database is a precondition, not a step to log around: the process
+    # that launched uvicorn waited for postgres first (Docker: entrypoint.py;
+    # launcher: service_manager._wait_for_postgres), so a failure here is
+    # real and ends the startup. Logging it and going on skipped the
+    # migrations and died 25 s later on the first unguarded query anyway
+    # (2026-09-22).
+    test_db_connection()
+    logger.info("Database connection successful")
+    # A backend meant to be the master under another key refuses here, before
+    # anything is written — the API secret, the agents' MCP config, the
+    # migrations, the signing key of record (record_identity_state) — so
+    # every restart refuses again (B-113). The process ends at once: uvicorn
+    # logs an exception out of a lifespan with its traceback, and a refusal is
+    # a state, not a crash; nothing has started that would need a stop.
+    from p2p_identity import master_refusal
+    refusal = await asyncio.to_thread(master_refusal, settings)
+    if refusal:
+        import os
+        from uvicorn.main import STARTUP_FAILURE
+        logger.error(refusal)
+        logging.shutdown()
+        os._exit(STARTUP_FAILURE)
+
     # Materialize the API secret on disk so launcher / sync_server can
     # read the same value, and warm the module-level cache. Reading at
     # startup surfaces filesystem errors here rather than on first
@@ -556,28 +579,6 @@ async def lifespan(app: FastAPI):
             f"Missing required settings: {', '.join(missing_settings)}"
         )
 
-
-    # The database is a precondition, not a step to log around: the process
-    # that launched uvicorn waited for postgres first (Docker: entrypoint.py;
-    # launcher: service_manager._wait_for_postgres), so a failure here is
-    # real and ends the startup. Logging it and going on skipped the
-    # migrations and died 25 s later on the first unguarded query anyway
-    # (2026-09-22).
-    test_db_connection()
-    logger.info("Database connection successful")
-    # A backend meant to be the master under another key refuses here, before
-    # the migrations and record_identity_state write anything — so every
-    # restart refuses again (B-113). The process ends at once: uvicorn logs
-    # an exception out of a lifespan with its traceback, and a refusal is a
-    # state, not a crash; nothing has started that would need a stop.
-    from p2p_identity import master_refusal
-    refusal = await asyncio.to_thread(master_refusal, settings)
-    if refusal:
-        import os
-        from uvicorn.main import STARTUP_FAILURE
-        logger.error(refusal)
-        logging.shutdown()
-        os._exit(STARTUP_FAILURE)
     # Bring the schema and the data to this code's version before
     # anything writes: pending desktop/migrations/NNN_*.sql deltas and
     # the Python data migrations (identity rule). One place for every
@@ -831,7 +832,7 @@ async def lifespan(app: FastAPI):
     # offline are drained on the wake socket — only the shipped master has one.
     try:
         from master_node import MASTER_PUBKEY_HEX
-        if is_master():
+        if settings.p2p_enabled and is_master():
             from desktop.p2p import mailbox_client
             from p2p_identity import load_signing_key
             from routers.peer_chat import mailbox_import

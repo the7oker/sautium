@@ -339,8 +339,8 @@ def test_a_nested_document_is_a_400_not_an_error(monkeypatch):
 
 
 def test_the_diag_routes_answer_on_the_master_only_and_before_reading(monkeypatch):
-    monkeypatch.setattr(peer_diag, "resolve_identity",
-                        lambda s: {"public_key_hex": "cd" * 32})            # not the master
+    from desktop.p2p import master_node
+    master_node.decide("cd" * 32)                                           # not the master
     body = b"x" * 1024
     status, _, read = asyncio.run(_call(
         "POST", "/api/diag/report",

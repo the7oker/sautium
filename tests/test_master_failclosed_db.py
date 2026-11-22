@@ -148,6 +148,20 @@ def test_both_signals_are_named_and_a_record_of_its_own_key_does_not_lift_the_fl
             in p2p_identity.master_refusal(_settings(d, sautium_master=True)))
 
 
+def test_a_name_the_nickname_rule_refuses_is_named_not_raised(db, pin, tmp_path):
+    """A keyboard's layout switched mid-word (a Cyrillic "і") is a B-113 of the
+    name: the refusal names it as given, with no traceback and no second
+    derivation."""
+    _record(db, pin.pub)
+    (tmp_path / "id").mkdir()
+    name = "Saut\u0456um"
+    words = p2p_identity.master_refusal(_settings(tmp_path / "id", p2p_username=name,
+                                                  p2p_password="the master's, maybe"))
+    key = p2p_identity.derive_private_key(name, "the master's, maybe")
+    code = node_identity.make_invite_code(name, key.public_key().public_bytes_raw())
+    assert f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD" in words
+
+
 def test_a_master_with_no_key_at_all_is_refused(db, pin, tmp_path):
     _record(db, pin.pub)
     (tmp_path / "id").mkdir()
@@ -197,9 +211,8 @@ def test_the_master_s_own_paths_read_the_decision_not_the_key(pin, monkeypatch):
     support._require_master()
 
 
-# A real start of the backend's lifespan, as uvicorn runs it, up to the refusal
-# or past it. The pin and the MCP config file (a path outside the test's reach)
-# are the only things the driver changes.
+# A real start of the backend's lifespan, as uvicorn runs it, up to the refusal.
+# The pin is the only thing the driver changes.
 _DRIVER = r"""
 import asyncio, sys
 sys.path[:0] = [sys.argv[1], sys.argv[2]]
@@ -208,8 +221,6 @@ import master_node
 from desktop.p2p import master_node as role
 for module in (master_node, role):
     module.MASTER_PUBKEY_HEX, module.MASTER_INVITE_CODE = pin, code
-import claude_code_runner
-claude_code_runner.write_docker_mcp_config = lambda: None
 import main
 
 async def start():
@@ -240,7 +251,6 @@ def test_the_lifespan_refuses_before_anything_writes_and_again_at_the_restart(db
     d = tmp_path / "id"
     d.mkdir()
     (d / "birth_certificate.json").write_text('{"the master\'s": "certificate"}')
-    (d / ".api_secret").write_text("s" * 43)                 # the Web UI's, from an earlier start
     _record(db, pin.pub)
     url = urlparse(scratch_dsn)
     env = dict(os.environ, POSTGRES_HOST=url.hostname, POSTGRES_PORT=str(url.port),

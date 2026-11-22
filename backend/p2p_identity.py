@@ -9,6 +9,7 @@ Identity is derived in-memory at startup (no files saved).
 """
 
 import hashlib
+import json
 import logging
 import re
 from typing import Optional
@@ -252,18 +253,24 @@ def master_refusal(settings) -> Optional[str]:
         meant = f"its database records {pin} as its key"
     else:
         meant = f"SAUTIUM_MASTER=1: its key is {pin}"
+    # The code is made from the key and the name as given, never derived or
+    # validated again: a name with a character the nickname rule refuses is
+    # exactly the accident to name (and it would cost a second Argon2id)
+    folder = Path(settings.p2p_identity_dir) if settings.p2p_identity_dir else None
     if pubkey is None:
         held = ("but it has no key: neither its identity folder nor P2P_USERNAME and "
                 "P2P_PASSWORD give one. Check both in .env.")
+    elif folder is not None and (folder / "node_ed25519.key").exists():
+        try:
+            name = json.loads((folder / "node_info.json").read_text(encoding="utf-8")).get("username")
+        except (OSError, ValueError):
+            name = None
+        code = make_invite_code(name, bytes.fromhex(pubkey)) if name else f"the key {pubkey[:16]}…"
+        held = f"but its identity folder holds {code}. Check that the folder is the master's."
     else:
-        ident = resolve_identity(settings)
-        code = (ident["invite_code"] if ident and ident["public_key_hex"].lower() == pubkey
-                else f"the key {pubkey[:16]}…")
-        if settings.p2p_identity_dir and (Path(settings.p2p_identity_dir) / "node_ed25519.key").exists():
-            held = f"but its identity folder holds {code}. Check that the folder is the master's."
-        else:
-            held = (f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD "
-                    f"in .env — one changed character is another key.")
+        code = make_invite_code(settings.p2p_username, bytes.fromhex(pubkey))
+        held = (f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD "
+                f"in .env — one changed character is another key.")
     return (f"This backend is the Sautium master ({meant}), {held} "
             f"Nothing was written, signed or announced; not starting.")
 

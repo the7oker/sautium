@@ -482,16 +482,18 @@ master started with a password changed by accident in its `.env`, derived
 another key and ran as an ordinary node: it seeded itself as its own Support
 contact, stored a certificate of the new key over its own and sealed rows
 under the wrong key, and every node saw Support offline). Each process
-decides its role once at its start (`desktop/p2p/master_node.decide`): the
-master exactly when its key is the pin. A backend is *meant* to be the
+decides its role at its start (`desktop/p2p/master_node.decide`; again where
+its key itself changes — an account made later, a rotation): the master
+exactly when its key is the pin. A backend is *meant* to be the
 master when its database records the pin as its signing key of record
 (`identity.signing_key`, written by every start with a key — a restored
 backup carries it) or its configuration says `SAUTIUM_MASTER=1` (for a
 master on a database that never held it); such a backend whose key is not
 the pin refuses to start, in the lifespan right after the database answers
-and before the migrations and the record's own write, so every restart
-refuses again. It logs one `error` line naming the pinned invite code and
-the derived one and exits with uvicorn's startup failure (3); Docker's
+and before anything is written (the API secret, the migrations, the
+record's own write), so every restart refuses again. It logs one `error`
+line naming the pinned invite code and the one the node holds instead and
+exits with uvicorn's startup failure (3); Docker's
 restart policy keeps trying, and each try says why. The trusted front and
 the username are no signal: a person may run a front or take the name
 `Sautium`, and is never refused a start for it. The certificate and the

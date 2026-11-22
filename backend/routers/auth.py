@@ -267,7 +267,13 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
     # Support contact, the handshakes, the outbox) and its identity worker
     # (the certificate, the proof), with no restart.
     import p2p_chat
+    from desktop.p2p import master_node
     from routers import p2p as p2p_router
+    # The role follows the identity this process now holds (its start decided
+    # it on none): the master's own account made here builds no client and
+    # seeds no Support contact to itself; its paths as the master begin at
+    # the next start.
+    master_node.decide(info["public_key_hex"])
     p2p_chat.soon(p2p_chat.start_client())
     p2p_chat.soon(p2p_router.start_identity_worker())
     return reply({"token": device_auth.current_token(_secret()),

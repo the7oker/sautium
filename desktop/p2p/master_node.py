@@ -35,9 +35,10 @@ def master_configured() -> bool:
     return bool(MASTER_INVITE_CODE and MASTER_PUBKEY_HEX and MASTER_TOKEN_ID)
 
 
-# Whether this process is the master: decided once by its start (the
-# backend's lifespan, the launcher's P2PManager.start) from the key it signs
-# with, read by every path that acts as the master. A remote's pin is never
+# Whether this process is the master: decided by its start (the backend's
+# lifespan, the launcher's P2PManager.start) from the key it signs with, and
+# again only where that key changes in the process (an account made later, a
+# rotation); read by every path that acts as the master. A remote's pin is never
 # read from here: "that peer is the master" stays a comparison with
 # MASTER_PUBKEY_HEX.
 _role: Optional[bool] = None
@@ -45,8 +46,10 @@ _role: Optional[bool] = None
 
 def decide(public_key_hex: Optional[str]) -> bool:
     """This process's role from its own key: the master exactly when the key
-    is the pin. The start that calls it has already refused a backend meant
-    to be the master under another key (p2p_identity.master_refusal)."""
+    is the pin. The backend's start decides it inside its refusal
+    (p2p_identity.master_refusal), which ends a backend meant to be the
+    master under another key; an account made later and a rotation decide it
+    again on their new key."""
     global _role
     _role = bool(public_key_hex) and public_key_hex.lower() == MASTER_PUBKEY_HEX.lower()
     return _role
