@@ -1435,6 +1435,41 @@ def test_coverage_and_the_trail_count_what_the_passes_read(
     assert stats["analysable_tracks"] == stats["tracks_with_embeddings"] == 2
 
 
+def test_a_bursts_canon_leaves_the_scans_outcome_on_the_screen(cur, library, main_module, monkeypatch):
+    """PI-NODE-2B §8.17: the Library read "Canonicalizing (MusicBrainz)…" with
+    `running: false` — the canon after a burst's last round wrote its own
+    lines over the round's outcome, and nothing wrote after it."""
+    _flac(library / "Ostrava Unit" / "Pulse Archive" / "01.flac", 1, "Carrier", track=1)
+    during = []
+
+    def canon(state, result, since, **kw):
+        during.append(state["progress"])
+        state["progress"] = "Canonicalizing (MusicBrainz)..."
+    state = _scan(main_module, monkeypatch, False, post=canon)
+    assert during == ["Scan complete"] and not state["running"]
+    assert state["progress"] == "Scan complete"
+
+
+def test_the_lyrics_row_counts_the_tracks_that_are_here(
+        cur, library, main_module, monkeypatch, tmp_path, scanned_library):
+    """PI-NODE-2B L6: the Lyrics row read `7 / 2 186` beside analysis rows of
+    93 — its denominator counted the albums that were away. Both of its
+    figures now name the tracks with a copy that is here; the Tracks cell
+    still counts the library, away albums included."""
+    cur.execute("""INSERT INTO track_lyrics (track_id, source, plain_lyrics)
+                   SELECT id, 'lrclib', 'la' FROM tracks WHERE title IN ('Carrier', 'Probe B')""")
+    stats = asyncio.run(main_module.get_stats())
+    assert (stats["total_tracks"], stats["present_tracks"], stats["tracks_with_lyrics"]) == (3, 3, 2)
+
+    _move(library / "Q2 Probe", tmp_path / "card" / "Q2 Probe")
+    _rescan(main_module, monkeypatch)
+
+    stats = asyncio.run(main_module.get_stats())
+    assert (stats["total_tracks"], stats["present_tracks"], stats["tracks_with_lyrics"]) == (3, 2, 1)
+    lib = asyncio.run(settings_router._library_state())
+    assert (lib["total_tracks"], lib["present_tracks"], lib["lyrics_done"]) == (3, 2, 1)
+
+
 def test_a_cover_asked_for_a_copy_away_is_deferred_and_nothing_pinned(
         cur, library, main_module, monkeypatch, tmp_path, scanned_library):
     import covers

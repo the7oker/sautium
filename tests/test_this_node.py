@@ -102,7 +102,11 @@ def test_the_block_reads_what_the_install_carries_and_what_runs(db, tmp_path, mo
     assert "models_cache_bytes" not in state and state["machine"] is None
     assert state["restart_required"] is True          # the switch says off: applied at the next start
     monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("absent"))
-    assert settings_router.get_hardware_profile()["image"]["models"] is False
+    state = settings_router.get_hardware_profile()
+    assert state["image"]["models"] is False and state["birth_preset"] is None
+    # What the setup made this node at its birth: the models row's words read it
+    db.execute("INSERT INTO user_settings (key, value) VALUES ('node.birth_preset', '\"nano\"')")
+    assert settings_router.get_hardware_profile()["birth_preset"] == "nano"
 
 
 # -- the restart ---------------------------------------------------------------------------------
@@ -324,6 +328,7 @@ def test_the_blocks_rows_say_each_state_in_its_words():
         "off": {"models": "off", "models_switch": False, "restart_required": False},
         "turned on, not restarted": {"models": "off", "models_switch": True, "restart_required": True},
         "absent in an image": {"models": "absent", "restartable": True},
+        "absent on a node born Nano": {"models": "absent", "restartable": True, "birth_preset": "nano"},
         "absent on a machine": {"models": "absent", "restartable": False},
     }
     driver = DRIVER % {"fns": fns, "profiles": json.dumps(profiles), "models": json.dumps(models),
@@ -338,6 +343,12 @@ def test_the_blocks_rows_say_each_state_in_its_words():
         "turned on, not restarted": "AI models Off on this machine Turn off On from the next start of Sautium.",
         "absent in an image": ("AI models Off — this install was set up without the models. "
                                "On the machine, run: ./sautium setup --preset full"),
+        # PI-NODE-2C §18.4: what the node is and why nothing is missing, then how
+        "absent on a node born Nano": (
+            "AI models Off — this node was set up as Nano, without the AI models: sound features arrive "
+            "from other Sautium nodes, and nothing is missing from your library. To analyse music on this "
+            "machine instead, run on it: ./sautium setup --preset full (it downloads about 10 GB, and needs "
+            "25 GB of free disk and 8 GB of memory to work well)."),
         "absent on a machine": "AI models Not available: no AI models exist for this machine.",
     }
     said = {name: case["text"] for name, case in out["software"].items()}

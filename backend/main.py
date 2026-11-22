@@ -1518,6 +1518,7 @@ async def get_stats() -> Dict[str, Any]:
         "total_file_size_bytes": 0, "unique_genres": 0,
         # Enrichment coverage
         "tracks_with_features": 0, "tracks_with_instruments": 0, "analysable_tracks": 0,
+        "present_tracks": 0,
         "library_artists": 0, "artists_with_lastfm": 0,
         "library_albums": 0,
     }
@@ -1552,8 +1553,24 @@ async def get_stats() -> Dict[str, Any]:
                                   AND av.absent_since IS NULL
                                   AND (mf.duration_seconds IS NULL
                                        OR mf.duration_seconds >= :min_seconds))
+            ),
+            -- The Lyrics row's population: owned tracks with a copy that is
+            -- here — on this disk or at the HQPlayer, the lookup needs no
+            -- bytes. Against total_tracks an album that was away stayed in
+            -- the denominator ("7 / 2 186" beside analysis rows of 93); the
+            -- numerator comes from the same set (this overrides the view's
+            -- tracks_with_lyrics).
+            present AS (
+                SELECT t.id FROM tracks t
+                 WHERE EXISTS (SELECT 1 FROM owned_files f
+                                JOIN album_variants av ON av.id = f.album_variant_id
+                                WHERE f.track_id = t.id AND av.absent_since IS NULL)
             )
             SELECT
+                (SELECT COUNT(*) FROM present) as present_tracks,
+                (SELECT COUNT(*) FROM present p
+                  WHERE EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = p.id)
+                ) as tracks_with_lyrics,
                 (SELECT COUNT(*) FROM analysable) as analysable_tracks,
                 (SELECT COUNT(*) FROM analysable a
                   WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = a.id)
@@ -1746,8 +1763,13 @@ def _scan_loop() -> None:
             if req is None:
                 if not state["cancel_requested"]:
                     from canon import post_import
+                    # The canon's lines are its progress; the burst ends on
+                    # what its last round found, or the screen keeps
+                    # "Canonicalizing…" with nothing running
+                    outcome = state["progress"]
                     post_import.run(state, state["result"] or {}, burst_started,
                                     take_arriving=take_arriving)
+                    state["progress"] = outcome
                 imported = take_arriving = False
                 continue
             state["cancel_requested"] = False

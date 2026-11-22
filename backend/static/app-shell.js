@@ -17591,12 +17591,19 @@
   }
 
   // The "AI models" row: the owner's switch, or why there is none to move.
-  // Draft words for the owner's words review.
+  // A node the setup made Nano is told what it is and that nothing is
+  // missing before how to change it (the figures: the image and the models
+  // of desktop/machine_tier.py's NANO_BELOW_* rule, the disk the setup asks
+  // for the full node). Draft words for the owner's words review.
   function hwModelsRow(hw) {
     if (hw.models === 'absent') {
-      const why = hw.restartable
-        ? 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full'
-        : 'Not available: no AI models exist for this machine.';
+      const why = !hw.restartable ? 'Not available: no AI models exist for this machine.'
+        : hw.birth_preset === 'nano'
+          ? 'Off — this node was set up as Nano, without the AI models: sound features arrive from other '
+            + 'Sautium nodes, and nothing is missing from your library. To analyse music on this machine '
+            + 'instead, run on it: ./sautium setup --preset full (it downloads about 10 GB, and needs '
+            + '25 GB of free disk and 8 GB of memory to work well).'
+          : 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full';
       return `<div class="form-row stacked"><div class="row-stack"><span class="row-stack-label">AI models</span></div>
         <div class="row-stack-sub">${escapeProfileHtml(why)}</div></div>`;
     }
@@ -18474,7 +18481,7 @@
         ${_enrichRow('features',   'Features',   lib.features_done,   lib.analysable_tracks)}
         ${_enrichRow('instruments', 'Instruments', lib.instruments_done, lib.analysable_tracks)}
         ${_enrichRow('lastfm',     'Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
-        ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.total_tracks)}
+        ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.present_tracks)}
         <div class="form-row stacked"><div class="row-stack-sub">${localAnalysis
           ? 'Analyse library computes embeddings and features on this machine, and instruments while Recognise instruments is on.'
           : 'This machine does not analyse audio locally, so embeddings, features and instruments arrive from peers over P2P.'} Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div></div>
@@ -18755,7 +18762,7 @@
         }
       }
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
-      _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
+      _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.present_tracks);
       _askPrunePlan(lib.scan && lib.scan.prune_plan);
 
       // The screen is drawn again only where its structure no longer says

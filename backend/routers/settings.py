@@ -732,6 +732,9 @@ async def _library_state() -> Dict[str, Any]:
         "embeddings_done":    stats.get("tracks_with_embeddings", 0),
         "features_done":      stats.get("tracks_with_features", 0),
         "instruments_done":   stats.get("tracks_with_instruments", 0),
+        # The Lyrics row reads against the tracks with a copy that is here;
+        # the Tracks cell above counts the library, away albums included
+        "present_tracks":     stats.get("present_tracks", 0),
         "lyrics_done":        stats.get("tracks_with_lyrics", 0),
         "lastfm_done":        stats.get("artists_with_lastfm", 0),
         "lastfm_total":       stats.get("library_artists", 0),
@@ -2384,6 +2387,9 @@ def _hardware_state() -> Dict[str, Any]:
         state["models_cache_bytes"] = model_cache.store_bytes()
     state["machine"] = _machine_name()
     state["software"] = _software()
+    # What the setup made this node at its birth ("nano", or None): the
+    # models row says what the node is where it was set up without them
+    state["birth_preset"] = _read("node.birth_preset")
     # A node a restart policy holds (the image) can be restarted from here
     from claude_code_runner import IN_DOCKER
     state["restartable"] = IN_DOCKER
