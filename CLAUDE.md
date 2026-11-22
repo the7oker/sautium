@@ -418,7 +418,15 @@ See:
   HQPlayers and renderers, HQPlayer probed first), and tapping one makes
   it the HQPlayer the node drives; its screen syncs its library. This
   machine's aliases (`localhost`, `host.docker.internal`, its LAN address)
-  are one HQPlayer (`address_key`); there is no connection editor.
+  are one HQPlayer (`address_key`); there is no connection editor. The
+  HQPlayer a node drives is ONE fact, the saved pick (`hqp_library.driven`,
+  since 2026-11-22): with none picked there is no link and no connection —
+  the environment's `HQPLAYER_HOST` and any default address are dialled by
+  nothing (an install older than the picker had its choice saved once,
+  `db_migrate`'s `hqp_choice_v1`), an unset `output.type` is this device to
+  every gate, and the link's own connect refuses an address that is neither
+  chosen, registered nor being probed by the person's own look
+  (`HqpLink._may_dial`).
 
 ---
 
