@@ -120,6 +120,11 @@ class CanonicalQueue:
     def version(self) -> int:
         return self._version
 
+    def reading(self):
+        """The queue's lock, for a reader whose read must not straddle a
+        swap of a slot's way in (an output's layout of what it holds)."""
+        return self._lock
+
     @property
     def generation(self) -> int:
         return self._generation
@@ -199,10 +204,12 @@ class CanonicalQueue:
                        duration_seconds if duration_seconds is not None else it.duration_seconds)
                 if new != (it.provider, it.excerpt, it.duration_seconds):
                     first = (it.play or {}).get("kind") == "pending"
+                    shown = new[1:] != (it.excerpt, it.duration_seconds)
                     it.provider, it.excerpt, it.duration_seconds = new
-                    # A first landing is the `slots` message's to tell; a
-                    # refetch that lands otherwise changes what a row shows
-                    changed = changed or not first
+                    # A first landing is the `slots` message's to tell, unless
+                    # it changes what the row shows (an excerpt's own length);
+                    # a refetch that lands otherwise always does
+                    changed = changed or not first or shown
             if changed:
                 self._version += 1
             return changed

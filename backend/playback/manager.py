@@ -640,7 +640,7 @@ class PlaybackManager:
         b = self._active
         index = self.queue.index_of(item)
         if b is not None and index is not None:
-            b.slot_ready(index)
+            b.slot_ready(index, item)
 
     def _stream_arriving(self, item: QueueItem) -> None:
         b = self._active

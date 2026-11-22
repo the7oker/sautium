@@ -387,3 +387,31 @@ def test_a_new_order_behind_a_late_slot_removes_none_of_what_hqplayer_holds(fake
     finally:
         prov.land("stream-1")
         b.shutdown()
+
+
+def test_a_new_queue_hqplayer_did_not_take_leaves_the_horizon_and_its_landing_to_the_old(
+        fake, lane, monkeypatch):
+    """A tap on a new queue that does not commit (HQPlayer busy) while the old
+    queue's horizon lands: the old queue keeps its horizon, the landing is no
+    late slot, and HQPlayer is handed it at its playlist's end."""
+    prov, _proxy = lane
+    mgr, b = _playing((lane, monkeypatch), fake, monkeypatch,
+                      [_item("E:/Music/A/01.flac", 1), _streamed(2), _item("E:/Music/A/03.flac", 3)])
+    try:
+        real = b._afresh
+        old = mgr.queue.item_at(2)
+
+        def busy(*a, **k):
+            prov.land("stream-2")
+            assert _wait(lambda: old.opener()["kind"] == "proxy")
+            raise hl.Dropped("a newer intent came first")
+        monkeypatch.setattr(b, "_afresh", busy)
+        with pytest.raises(hl.Dropped):
+            mgr.replace_queue([_item("E:/Music/C/01.flac", 31)], play=True)
+        monkeypatch.setattr(b, "_afresh", real)
+        assert b._horizon is old and not b._late
+        assert _wait(lambda: len(fake.playlist) == 3), fake.playlist
+        assert "/preview/" in fake.playlist[1]
+    finally:
+        prov.land("stream-2")
+        b.shutdown()

@@ -384,6 +384,8 @@ class Lane:
         if not streaming_service.is_enabled():
             for it, marked in todo:
                 self._fail(it, marked, "off")
+            if streaming_service.is_enabled():
+                self.revive()       # it came up as these failed: revive skipped them
             return
         if not streaming_service.providers_preferred():
             # every provider aside since the look that marked them: to come again

@@ -398,3 +398,27 @@ def test_a_cue_slice_to_cut_for_hqplayer_starts_the_media_proxy_it_is_cut_on(mon
         raise RuntimeError("media port in use")
     monkeypatch.setattr(streaming_service, "ensure_proxy", gone)
     assert substitute._prepared(cue, None) is None        # the mirror cuts it, as it can
+
+
+def test_a_browser_wait_whose_slot_landed_as_an_edit_went_starts_and_holds_no_wait(monkeypatch):
+    """Round 3: the start a queue edit makes of a wait whose stream landed
+    meanwhile leaves no wait behind — a tab that reconnects later starts
+    nothing from it."""
+    import routers.settings as settings_router
+    from playback.browser_backend import BrowserBackend
+    from playback.manager import PlaybackManager
+    monkeypatch.setattr(settings_router, "_read", lambda key: None)
+    mgr = PlaybackManager()
+    monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
+    monkeypatch.setattr(mgr.lane, "maintain", lambda: None)
+    b = BrowserBackend(emit=mgr._on_backend_status, queue=mgr.queue)
+    mgr._active = b
+    b._channel = object()
+    monkeypatch.setattr(b, "_push", lambda d: None)
+    first = _track(1)
+    first.play = {"kind": "pending"}
+    mgr.queue.replace([_file(9), first])
+    assert b._start_at(2, play=True)
+    mgr.queue.swap_play(first, first.play, {"kind": "proxy", "token": "t", "lane": True})
+    assert mgr.remove(1)                  # the edit goes before the lane's word
+    assert (b._index, b._pending_play_index, b._state) == (1, None, "playing")

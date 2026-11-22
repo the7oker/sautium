@@ -62,7 +62,7 @@ class LocalBackend(PlayerBackend):
         # from the slot, at the second
         self._engine.post("seed", index=index, seconds=position)
 
-    def slot_ready(self, index: int) -> None:
+    def slot_ready(self, index: int, item=None) -> None:
         self._engine.post("slot_ready", index=index)
 
     def play(self) -> bool:

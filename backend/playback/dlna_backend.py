@@ -856,7 +856,7 @@ class DlnaBackend(PlayerBackend):
         return {**chosen, "locations": [*locations, *(
             loc for loc in known_locations(self._renderer) if loc not in locations)]}
 
-    def slot_ready(self, index: int) -> None:
+    def slot_ready(self, index: int, item=None) -> None:
         """A slot's stream landed, or it was found unplayable here
         (playback.substitute): a play parked on it goes now — read on the
         loop, where the park is made."""

@@ -49,7 +49,7 @@ class _Output(PlayerBackend):
     def previous(self): return True
     def select(self, index, track_id=None): return True
 
-    def slot_ready(self, index):
+    def slot_ready(self, index, item=None):
         self.ready.append(index)
 
 

@@ -1836,10 +1836,13 @@ class HqpBackend(PlayerBackend):
     def _layout(self, items: Optional[list] = None) -> _Layout:
         """The queue — or `items`, a new order of it — as HQPlayer holds it,
         up to its horizon."""
-        items = self._queue.snapshot() if items is None else items
-        late = self._late
-        gap = (lambda it: "late" if any(it is x for x in late) else self.gap(it)) if late else self.gap
-        return _Layout(items, gap, self._horizon_at(items))
+        # Read under the queue's lock, the one a landing and its late mark take
+        # together (Lane._settle): no slot is seen landed and unmarked
+        with self._queue.reading():
+            items = self._queue.snapshot() if items is None else items
+            late = self._late
+            gap = (lambda it: "late" if any(it is x for x in late) else self.gap(it)) if late else self.gap
+            return _Layout(items, gap, self._horizon_at(items))
 
     def _horizon_at(self, items: list) -> Optional[int]:
         """The slot of `items` HQPlayer's playlist ends before: the horizon's,
@@ -1856,16 +1859,33 @@ class HqpBackend(PlayerBackend):
         held), and one that lands is left out until the next full mirror
         (slot_ready)."""
         at = next((i for i, it in enumerate(items) if it is start), 0) if start is not None else 0
-        self._horizon = next((it for it in items[at:] if it.opener().get("kind") == "pending"), None)
-        with self._late_lock:
+        with self._queue.reading(), self._late_lock:
+            self._horizon = next((it for it in items[at:] if it.opener().get("kind") == "pending"),
+                                 None)
             self._late = []
 
-    def _restore_horizon(self, horizon: Optional[QueueItem], late: list) -> None:
+    def _horizon_state(self) -> tuple:
+        """What a full mirror is about to replace, for _restore_horizon: the
+        horizon, the late slots, and the slots on their way now."""
+        with self._queue.reading():
+            pending = [it for it in self._queue.snapshot() if it.opener().get("kind") == "pending"]
+            return self._horizon, self._late, pending
+
+    def _restore_horizon(self, saved: tuple) -> None:
         """A full mirror that did not commit: the queue that stays keeps the
-        horizon HQPlayer holds it by — and every slot marked late since."""
-        self._horizon = horizon
-        with self._late_lock:
-            self._late = late + [it for it in self._late if not any(it is x for x in late)]
+        horizon HQPlayer holds it by. Late, before it, is what was late then
+        and every slot on its way then that has landed since — whatever the
+        failed mirror's own horizon made of the marks meanwhile; nothing at
+        or past the restored horizon is late (its landing appends it)."""
+        horizon, late, pending = saved
+        with self._queue.reading(), self._late_lock:
+            self._horizon = horizon
+            items = self._queue.snapshot()
+            cut = self._horizon_at(items)
+            before = items[:cut - 1] if cut is not None else items
+            landed = [it for it in pending if it.opener().get("kind") != "pending"]
+            self._late = [it for it in before
+                          if any(it is x for x in late) or any(it is x for x in landed)]
 
     def _ways_in(self, items: Optional[list] = None) -> None:
         """How this HQPlayer opens each slot, read again at every mirroring
@@ -2063,14 +2083,14 @@ class HqpBackend(PlayerBackend):
             if not any(item is it for it in self._late):
                 self._late = self._late + [item]
 
-    def slot_ready(self, index: int) -> None:
+    def slot_ready(self, index: int, item: Optional[QueueItem] = None) -> None:
         """A slot's stream landed, or it was found unplayable here (the fetch
         lane): at the horizon, HQPlayer's playlist takes it and what follows
         it up to the next slot still to come — an append at its end, gapless
         while it plays (_extend_horizon); then a start parked on it goes. As
         background work under the queue lock: a build met is waited out."""
         from playback.manager import manager
-        item = self._queue.item_at(index)
+        item = item or self._queue.item_at(index)
         if item is None:
             return
 
@@ -2111,8 +2131,13 @@ class HqpBackend(PlayerBackend):
         then holds by the reconverge or the play press. Under the queue
         lock."""
         start = at if beyond else at - 1
-        self._horizon = next((it for it in items[start:] if it.opener().get("kind") == "pending"),
-                             None)
+        with self._queue.reading(), self._late_lock:
+            self._horizon = next((it for it in items[start:] if it.opener().get("kind") == "pending"),
+                                 None)
+            # from the old horizon's slot on nothing is late: what of it the
+            # layout holds now is appended here
+            after = items[at - 1:]
+            self._late = [it for it in self._late if not any(it is x for x in after)]
         if self._mirror not in ("step", "tail"):
             return
         layout = self._layout(items)
@@ -2653,12 +2678,12 @@ class HqpBackend(PlayerBackend):
         it (_hold_words)."""
         self._ways_in()
         self._link.refusals = []
-        horizon, late = self._horizon, self._late
+        saved = self._horizon_state()
         self._place_horizon(self._queue.snapshot(), at)
         try:
             return self._remirror_now(at, position)
         except BaseException:
-            self._restore_horizon(horizon, late)
+            self._restore_horizon(saved)
             raise
 
     def _remirror_now(self, at: Optional[QueueItem], position: int) -> bool:
@@ -6848,13 +6873,13 @@ class HqpBackend(PlayerBackend):
         Returns whether HQPlayer holds the queue now — then it is in step."""
         self._ways_in()
         self._link.refusals = []
-        horizon, late = self._horizon, self._late
+        saved = self._horizon_state()
         self._place_horizon(items, target)
         try:
             return self._rebuild_now(items, target, position, resume=resume, what=what,
                                      patient=patient, reading=reading)
         except BaseException:
-            self._restore_horizon(horizon, late)
+            self._restore_horizon(saved)
             raise
 
     def _rebuild_now(self, items: list, target: QueueItem, position: int, *, resume: bool,
@@ -6928,7 +6953,7 @@ class HqpBackend(PlayerBackend):
         # Refused before it is numbered or watched: it supersedes nothing
         self._link.refuse_edits()
         self._ways_in(items)
-        horizon, late = self._horizon, self._late
+        saved = self._horizon_state()
         self._place_horizon(items, None)
         try:
             layout = self._layout(items)
@@ -6937,7 +6962,7 @@ class HqpBackend(PlayerBackend):
             # and the play waits on slot 1 until its stream lands (_park)
             waits = not layout.handed and any(it.opener().get("kind") == "pending" for it in items)
             if not layout.handed and not waits:
-                self._restore_horizon(horizon, late)
+                self._restore_horizon(saved)
                 raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
             if not play and (self._taken() or self._rests_on_another()):
                 self._drifted("another controller holds HQPlayer")
@@ -6957,7 +6982,7 @@ class HqpBackend(PlayerBackend):
                 if fresh is None:
                     # Its playlist not emptied: not the queue's — the next play
                     # press hands it over
-                    self._restore_horizon(horizon, late)
+                    self._restore_horizon(saved)
                     self.lose_mirror("HQPlayer did not clear its playlist for a new queue")
                     self._local.refusal = "HQPlayer did not take the new queue"
                     return []
@@ -6975,7 +7000,7 @@ class HqpBackend(PlayerBackend):
                         self.lose_mirror(why, by="refusal")
                         self._note_refused(layout.handed, taken)
                     self._local.refusal = why
-                    self._restore_horizon(horizon, late)
+                    self._restore_horizon(saved)
                     accepted = []
                 else:
                     self._in_step()
@@ -6995,7 +7020,7 @@ class HqpBackend(PlayerBackend):
         except BaseException:
             # Not committed (busy, refused, gone): the queue that stays keeps
             # the horizon HQPlayer holds it by
-            self._restore_horizon(horizon, late)
+            self._restore_horizon(saved)
             raise
         self.poke()
         return accepted

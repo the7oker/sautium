@@ -115,10 +115,13 @@ class BrowserBackend(PlayerBackend):
         self._holds_spot = True
         self._emit_now()
 
-    def slot_ready(self, index: int) -> None:
+    def slot_ready(self, index: int, item=None) -> None:
         """The stream for a slot landed (playback.substitute): a play parked
         on that slot starts now; a tab waiting on it with nothing to play
-        learns the slot is loadable on its next status."""
+        learns the slot is loadable on its next status. `item`, the slot's
+        own item: where the wait stands now, whatever the index said."""
+        if item is not None and item is self._waiting_on:
+            index = self._queue.index_of(item) or index
         if self._pending_play_index == index and self._index == index:
             self._pending_play_index = None
             self._start_at(index, play=True, position=self._position)
@@ -574,6 +577,7 @@ class BrowserBackend(PlayerBackend):
             # from its place
             at = self._queue.index_of(self._waiting_on) if self._waiting_on is not None else None
             if at is None:
+                self._pending_play_index = None
                 if snapshot:
                     self._start_at(min(self._index, len(snapshot)), play=True)
                 else:
@@ -584,6 +588,7 @@ class BrowserBackend(PlayerBackend):
                 self._emit_now()
             if self._waiting_on.opener().get("kind") != "pending":
                 # it landed as the edit went: the lane's word named its old slot
+                self._pending_play_index = None
                 self._start_at(at, play=True, position=self._position)
                 return
             self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})

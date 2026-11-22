@@ -285,7 +285,7 @@ class PlayerBackend(ABC):
         thread is not carried out. Default: nothing (a renderer had not
         started anything)."""
 
-    def slot_ready(self, index: int) -> None:
+    def slot_ready(self, index: int, item=None) -> None:
         """A slot this output could not open when it was reached now can —
         a stream substitute landed on it — or never will: it was found
         unplayable here (playback.substitute). Default: nothing; an output
