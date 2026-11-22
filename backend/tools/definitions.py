@@ -777,7 +777,8 @@ def register_all():
     REGISTRY.register(ToolDef(
         name="play_similar",
         description="Play a station of tracks acoustically similar to the seed track "
-                    "(replaces the queue). Results mix owned files with streamed tracks.",
+                    "(replaces the queue). Owned files, and — when the owner's switch "
+                    "\"Radio plays tracks you don't own\" is on — streamed tracks, each played whole.",
         parameters=[
             ToolParam("track_id", "string", "Track UUID of the seed", required=True),
             ToolParam("limit", "integer", "Number of similar tracks to queue (default 10)", required=False, default=10),

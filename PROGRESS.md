@@ -716,16 +716,27 @@ implementation details live in the code, DB and git history.
   generation (`PlaybackQueue.generation`); a new start or any replace bumps
   it, and a fill that finds another generation stops appending while the
   proxy drops the fetches bound to the old one.
-- **Owned and streamed tracks share a batch (2026-06-29).** Ten tracks per
-  fill, at most four of them streamed and, while owned candidates remain,
-  never first and never adjacent: two owned tracks between streams are the
-  buffer time the single-lane fetcher needs, so a slow stream cannot starve
-  the playhead. The batch is appended in order — an owned row at once, a
-  streamed row when the proxy has buffered it; a track no provider resolved
-  is dropped, one that never buffers is skipped, and the station keeps
-  flowing. Streams resolve like any other, so the demo ledger applies: a
-  track whose full demo listen is spent arrives as its 30 s excerpt. With
-  no stream provider enabled the station is owned tracks only. The seed may
+- **Owned and streamed tracks share a batch (2026-06-29), streamed ones only
+  at the owner's word and only whole (2026-11-22, B-121).** Ten tracks per
+  fill. Streamed tracks enter a batch only while the owner's switch "Radio
+  plays tracks you don't own" (`radio.streamed`, Streaming library, under
+  Discover new; off by default for every node) is on — Play similar follows
+  the same switch — and only when their chain plays them whole: up to twelve
+  streamed candidates of the pool are resolved first, and one qualifies when
+  its chain's head is full-length (a bring-your-own full provider, or the
+  demo channel while the track's one listen is unspent — radio may spend
+  it, past 90 % heard). At most four qualify a batch and, while owned
+  candidates remain, never first and never adjacent: two owned tracks
+  between streams are the buffer time the single-lane fetcher needs. Owned
+  tracks take the places of candidates that do not qualify, so the batch
+  keeps its ten. A radio slot is `QueueItem.whole`: its chain never holds
+  the excerpt provider, so a full link that fails (or a demo listen spent
+  since the batch) makes the slot fail and be walked past, never a 30 s
+  clip. The batch is appended whole, in one mutation (since 2026-11-22,
+  QUEUE-STREAM body 1): no tap lands inside it; its streams come in the
+  queue's order through the fetch lane. With the switch off and nothing of
+  the owner's like the seed, radio's start answers in words that name the
+  switch instead of an empty station. The seed may
   itself be a streamed track (`track_uuid` in the request); a seed without
   an audio embedding is refused with 409 "isn't analysed yet" rather than
   answered with an empty station. Since 2026-09-27 "owned" in a batch means

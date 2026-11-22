@@ -1060,8 +1060,9 @@ def play_album(album: str, artist_name: str = "") -> str:
 @mcp.tool()
 def play_similar(track_id: str, limit: int = 10) -> str:
     """Play a station of tracks acoustically similar to the seed, on the user's
-    chosen output (replaces the queue). Results mix owned files with not-owned
-    tracks, which stream.
+    chosen output (replaces the queue). Owned files, and — when the owner's
+    switch "Radio plays tracks you don't own" is on — not-owned tracks, each
+    streamed whole (never a 30 s excerpt).
 
     Args:
         track_id: Track UUID of the seed (must be analysed — any owned track is,
