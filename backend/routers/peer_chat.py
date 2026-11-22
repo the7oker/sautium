@@ -800,6 +800,23 @@ async def relay_voucher(invite: str = ""):
 
 _probe_last: dict = {}         # pubkey -> monotonic seconds
 _probe_lock = threading.Lock()
+_own_addresses = frozenset     # () -> this node's own public addresses
+
+
+def set_own_addresses(source) -> None:
+    """Where the probe reads this node's own public addresses
+    (chat_client.public_addresses) — main.py's, once it has a DHT."""
+    global _own_addresses
+    _own_addresses = source
+
+
+def _same_router(source_ip: str, port: int) -> JSONResponse:
+    """No verdict: the prober reached us from our own public address, so it
+    stands behind our router, and a call-back to that address lands on the
+    router's forward of the port — ours, or nobody's — whatever the prober
+    serves (mirrors desktop/p2p/sync_server.py)."""
+    return JSONResponse({"reachable": None, "same_router": True, "observed_ip": source_ip,
+                         "tested_port": port, "error": "the address is this node's own"})
 
 
 @relay_router.post("/probe-connect")
@@ -808,7 +825,9 @@ async def probe_connect(request: Request):
     source address (never a caller-supplied IP — no reflector) on the port
     the caller claims to serve, and confirm the /health identity matches.
     A verdict exists only from an internet vantage: a source that is not
-    globally routable gets `reachable: null` and spends no cooldown
+    globally routable gets `reachable: null` and spends no cooldown, and so
+    does one behind this node's own router — known by its address, or by
+    the call-back meeting this node's own key
     (mirrors desktop/p2p/sync_server.py)."""
     svc = get_peer_chat()
     ident = resolve_identity(settings)
@@ -834,7 +853,7 @@ async def probe_connect(request: Request):
         return _err("not a friend", 403)
 
     source_ip = request.client.host if request.client else ""
-    from desktop.p2p.addrs import is_internet_vantage
+    from desktop.p2p.addrs import canon_host, is_internet_vantage
     if not is_internet_vantage(source_ip):
         # A call-back from here would test the LAN — or, for a launcher on
         # this very host, this container's own loopback (measured 2026-09-08:
@@ -846,6 +865,9 @@ async def probe_connect(request: Request):
         return JSONResponse({"reachable": None, "observed_ip": source_ip,
                              "tested_port": port,
                              "error": "source not globally routable"})
+
+    if canon_host(source_ip) in _own_addresses():
+        return _same_router(source_ip, port)
 
     now = time.monotonic()
     with _probe_lock:
@@ -861,14 +883,15 @@ async def probe_connect(request: Request):
     host = f"[{source_ip}]" if ":" in source_ip else source_ip
     reachable, error = False, None
 
+    from desktop.p2p import peer_auth
+    # Pinned to the prober's key: "reachable" must mean THE PROBER answers
+    # at that address, not whoever squats on the port.
+    channel = peer_auth.pinned_ssl_context(pubkey)
+
     async def _fetch_health():
         import httpx
-        from desktop.p2p import peer_auth
-        # Pinned to the prober's key: "reachable" must mean THE PROBER
-        # answers at that address, not whoever squats on the port. Read
-        # raw and uncompressed, to a cap: the answer is a few hundred bytes.
-        async with httpx.AsyncClient(verify=peer_auth.pinned_ssl_context(pubkey),
-                                     timeout=PROBE_TIMEOUT) as client:
+        # Read raw and uncompressed, to a cap: the answer is a few hundred bytes.
+        async with httpx.AsyncClient(verify=channel, timeout=PROBE_TIMEOUT) as client:
             async with client.stream("GET", f"https://{host}:{port}/health",
                                      headers={"Accept-Encoding": "identity"}) as resp:
                 body = bytearray()
@@ -887,6 +910,17 @@ async def probe_connect(request: Request):
             error = "identity mismatch"
     except Exception as e:
         error = type(e).__name__
+
+    if not reachable and peer_auth.seen_pubkey(channel) == ident["public_key_hex"].lower():
+        # The call-back met this node itself: no probe was made of the
+        # prober, so none is counted against it.
+        with _probe_lock:
+            if _probe_last.get(pubkey) == now:
+                if last:
+                    _probe_last[pubkey] = last
+                else:
+                    del _probe_last[pubkey]
+        return _same_router(source_ip, port)
 
     payload = {"reachable": reachable, "observed_ip": source_ip,
                "tested_port": port}

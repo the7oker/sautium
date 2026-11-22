@@ -204,6 +204,24 @@ def test_pinned_handshake_rejects_a_foreign_node(tmp_path):
     t.join(5)
 
 
+def test_a_refused_handshake_still_says_which_node_answered(tmp_path):
+    """What tells "another node holds that address" from "nothing of ours
+    answers": the key a pinned context refused, and none for an unbound cert."""
+    port, t = _serve_tls(*_make_cert(), tmp_path)   # bound to NODE
+    ctx = pa.pinned_ssl_context(OTHER_PUB)
+    assert pa.seen_pubkey(ctx) is None
+    with pytest.raises(ssl.SSLCertVerificationError):
+        _connect(port, ctx)
+    assert pa.seen_pubkey(ctx) == NODE_PUB and pa.pinned_pubkey(ctx) == OTHER_PUB
+    t.join(5)
+    port, t = _serve_tls(*_make_cert(bound=False), tmp_path)
+    unbound = pa.pinned_ssl_context(NODE_PUB)
+    with pytest.raises(ssl.SSLCertVerificationError):
+        _connect(port, unbound)
+    assert pa.seen_pubkey(unbound) is None
+    t.join(5)
+
+
 def test_pinned_handshake_rejects_an_unbound_cert(tmp_path):
     port, t = _serve_tls(*_make_cert(bound=False), tmp_path)
     with pytest.raises(ssl.SSLCertVerificationError):

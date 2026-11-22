@@ -29,7 +29,8 @@ import time
 
 from desktop.p2p.lan_discovery import LAN_DISCOVERY_PORT
 from desktop.p2p.upnp_service import (
-    HAS_UPNP, LEASE_DURATION, add_mapping, answers_as_peer_surface, discover_igd, list_mappings,
+    HAS_UPNP, LEASE_DURATION, add_mapping, answers_as_peer_surface, discover_igd, holder,
+    list_mappings,
 )
 
 # Refresh at 75% of the lease — the same margin the launcher's renewal uses.
@@ -116,6 +117,11 @@ def cmd_map(args) -> None:
         return
 
     u = _igd_or_exit()
+    held = holder(u, external, proto)
+    if held is not None and held != (u.lanaddr, port):
+        sys.exit(f"{external}/{proto} on the router leads to {held[0]}:{held[1]} - it is "
+                 f"not this port's to take. Choose another with --external, or remove "
+                 f"that mapping first.")
     lease = args.lease
     permanent = lease == 0
     if not add_mapping(u, external, port, proto, lease, args.name):

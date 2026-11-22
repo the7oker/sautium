@@ -312,9 +312,11 @@ def _start_host_network() -> None:
     # Only the port that answers peers (rule 4: never 8800, 8830, 8831), and
     # only while it answers as the peer surface — asked before every map,
     # a router's reboot's re-map included.
-    from desktop.p2p.upnp_service import answers_as_peer_surface
+    from desktop.p2p.upnp_service import answers_as_peer_surface, leads_here
     port = _listen_port()
-    _upnp = UPnPService(ports=[port], gate=lambda: answers_as_peer_surface(port))
+    _upnp = UPnPService(ports=[port], gate=lambda: answers_as_peer_surface(port),
+                        leads_here=leads_here(
+                            lambda: (resolve_identity(settings) or {}).get("public_key_hex")))
 
 
 async def _map_peer_port() -> None:
@@ -345,6 +347,13 @@ async def _map_peer_port() -> None:
 def _upnp_heuristic():
     from desktop.p2p.chat_client import upnp_heuristic
     return upnp_heuristic(_upnp, _dht_service)
+
+
+def _own_addresses() -> frozenset:
+    """This node's own public addresses, for both ends of the reachability
+    probe: a prober and its vantage behind one router tell each other nothing."""
+    from desktop.p2p.chat_client import public_addresses
+    return public_addresses(_upnp, _dht_service)
 
 
 def _default_gateway() -> Optional[str]:
@@ -941,7 +950,8 @@ async def lifespan(app: FastAPI):
             # Relay clients announce through this node whenever they
             # subscribe — a callback registration, needs no routing table.
             try:
-                from routers.peer_chat import set_client_announce_cbs
+                from routers.peer_chat import set_client_announce_cbs, set_own_addresses
+                set_own_addresses(_own_addresses)
                 set_client_announce_cbs(
                     lambda code: asyncio.get_running_loop().create_task(
                         _dht_service.announce_user_for(code)),
@@ -1039,6 +1049,7 @@ async def lifespan(app: FastAPI):
             p2p_chat.configure_client(
                 announce_port=_announce_port, dht=_dht_service, lan=_lan_discovery,
                 heuristic=_upnp_heuristic if _upnp is not None else None,
+                own_addresses=_own_addresses,
                 on_reachability=_apply_reachability)
             await p2p_chat.start_client()
         except Exception as e:
