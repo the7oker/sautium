@@ -637,6 +637,21 @@ See:
   not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
   `--music` folder on a disk such a desktop mounts). `SAUTIUM_BIRTH_PRESET`
   (`nano`) is read once per database (`db_migrate`, `birth_preset_v1`).
+  Since 2026-11-22 (PI-NODE-2C): a root's bind makes its own folder
+  (`create_host_path`), so a root that is gone never stops the node's start —
+  its library is away, and `./sautium roots --forget <folder>` takes it out
+  of the override; the automount mounts NTFS by `ntfs-3g` where it is
+  installed and writes a volume it did not mount to
+  `/media/sautium/.unread/<kernel name>` (root's file, four lines: the boot's
+  id, blkid's type, the label, the driver tried — the node reads it as a
+  stranger's text and the unit's stop removes it); an installed automount is
+  compared by its bytes and offered again as an update; the fstab line
+  carries `x-systemd.wanted-by=<the disk's device unit>`, so its mount starts
+  at every plug (the automount stands aside for a disk fstab names); a root
+  that is a mount point has its label in `SAUTIUM_LIBRARY_ROOT_LABELS`; the
+  preset reads the MEDIUM under Docker's data (`machine_tier.storage_medium`:
+  a microSD card or a USB stick is born Nano, an SSD in a USB case is not),
+  and a swap file on a card is said with its root step.
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
   names it). `config.build_identity()` is the one reader — `/config`,
@@ -894,7 +909,7 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
-| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `pair`, `update`, `remove`): standard library, never root, root steps printed and never run |
+| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`): standard library, never root, root steps printed and never run |
 | `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing, the stored choice) and the mount table's wake for a disk plugged in later |
 | `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |

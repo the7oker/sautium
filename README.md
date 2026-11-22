@@ -255,7 +255,8 @@ node — nothing analysed there, sound features taken from other nodes. It
 never calls `sudo`: a step that needs root (lingering, mounting plugged
 disks read-only) is printed whole for you to paste. The music folder, the
 assistant and the output are then chosen in the Web UI. `./sautium status`,
-`pair`, `update` and `remove` are its other commands.
+`roots` (since 2026-11-22: the folders it may read music from, and
+`--forget <folder>`), `pair`, `update` and `remove` are its other commands.
 
 The CPU image (`backend/Dockerfile.mac`) takes three build arguments, read
 from `.env` by `docker-compose.pi.yml` and by the host agent's update:
