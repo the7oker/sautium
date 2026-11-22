@@ -145,17 +145,18 @@ def test_every_container_names_its_composers_in_its_own_form(templates, tmp_path
                      "a.m4a": ["Arvo Pärt"], "a.wv": ["Steve Reich", "Philip Glass"]}
 
 
-def test_a_value_splits_on_semicolons_and_a_spaced_slash_only(templates, tmp_path):
+def test_a_value_splits_on_semicolons_and_a_spaced_slash_and_a_placeholder_is_none(templates, tmp_path):
     flac = _copy(templates, tmp_path / "a.flac")
     f = FLAC(flac)
     f["composer"] = ["Steve Reich; Philip Glass", "AC/DC", "Lennon, McCartney",
-                     "Rodgers & Hammerstein", "John Adams / Terry Riley", "AC/DC", "TONO / Manuscript"]
+                     "Rodgers & Hammerstein", "John Adams / Terry Riley", "AC/DC", "TONO / Manuscript",
+                     "Various Composers", "VARIOUS", "[unknown]; Traditional", "Anonymous"]
     f.save()
+    # each once; a publishing credit is nobody, a placeholder none (Q16); a
+    # comma list stays one value until the derive names it (Q15)
     assert scanner.composer_names(mutagen.File(flac)) == [
         "Steve Reich", "Philip Glass", "AC/DC", "Lennon, McCartney", "Rodgers & Hammerstein",
-        "John Adams", "Terry Riley"]        # each once; a publishing credit is nobody
-    from credits import NAME_MAX, split_names
-    assert split_names(["x" * (NAME_MAX + 1), "Real Name"]) == ["Real Name"]
+        "John Adams", "Terry Riley", "Traditional", "Anonymous"]
 
 
 def test_a_cue_sheet_names_a_slices_composer_as_its_performer():
@@ -445,21 +446,122 @@ def test_last_first_takes_the_dumps_name_on_a_dump_node_only(cur, library, templ
     _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G",
           ["Bach, Johann Sebastian", "Lennon, McCartney"], 1)
     _scan()
-    assert _credits(cur) == {"Aria": ["Bach, Johann Sebastian", "Lennon, McCartney"]}
+    # no dump and no performer of either name: both are lists (Q15) — the
+    # inverted name's split is the residue §12.6 accepts
+    assert _credits(cur) == {"Aria": ["Bach", "Johann Sebastian", "Lennon", "McCartney"]}
     cur.execute("INSERT INTO mb_artist (id, gid, name, sort_name) VALUES (1, %s, %s, %s)",
                 (str(uuid.uuid4()), BACH, "Bach, Johann Sebastian"))
     with get_db_context() as db:                 # slice rows alone: no dump, no rename
-        credits.rename_inverted(db)
+        credits.rederive_commas(db)
         db.commit()
-    assert _credits(cur)["Aria"][0] == "Bach, Johann Sebastian"
+    assert _credits(cur)["Aria"][:2] == ["Bach", "Johann Sebastian"]
     cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"x\"')")
     with get_db_context() as db:                 # the dump arrived after the scan (§5.3)
-        assert credits.rename_inverted(db) == 1
+        assert credits.rederive_commas(db) == 1
         db.commit()
-    assert _credits(cur) == {"Aria": [BACH, "Lennon, McCartney"]}
+    assert _credits(cur) == {"Aria": [BACH, "Lennon", "McCartney"]}
     assert _artist_id(cur, "Bach, Johann Sebastian") is None
+    assert _artist_id(cur, "Bach") is None and _artist_id(cur, "Johann Sebastian") is None
+    # the dump deleted: the written form splits again, and the turned name
+    # leaves with the credit that alone held it
     cur.execute("DELETE FROM mb_artist")
     cur.execute("DELETE FROM user_settings WHERE key = 'musicbrainz.db_version'")
+    with get_db_context() as db:
+        assert credits.rederive_commas(db) == 1
+        db.commit()
+    assert _credits(cur) == {"Aria": ["Bach", "Johann Sebastian", "Lennon", "McCartney"]}
+    assert _artist_id(cur, BACH) is None
+
+
+# -- §12.6 Q15: a comma is a list unless the node knows the whole ----------------
+
+def _known_by_an_edge(cur, name):
+    """An artist row a Last.fm similar edge holds (the phantom layer's stub)."""
+    aid, seed = str(artist_uuid(name)), str(artist_uuid(name + " seed"))
+    cur.execute("INSERT INTO artists (id, name, name_latin) VALUES (%s, %s, %s), (%s, %s, %s)",
+                (aid, name, name.lower(), seed, name + " seed", name.lower() + " seed"))
+    cur.execute("INSERT INTO similar_artists (artist_id, similar_artist_id, match_score, source) "
+                "VALUES (%s, %s, 0.5, 'lastfm')", (seed, aid))
+    return aid
+
+
+def test_a_comma_list_splits_and_a_name_the_node_knows_stays_whole(cur, library, templates):
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    # a performer here, by its own file; the phantom layer's stub (an edge),
+    # spelt otherwise in the tag (the UUID v5 rule folds typography)
+    _flac(templates, library / "EWF" / "Gratitude" / "01.flac", "Shining Star", "Earth, Wind & Fire",
+          "Gratitude", ["Maurice White; Philip Bailey; Larry Dunn"], 1)
+    stub = _known_by_an_edge(cur, "Crosby, Stills, Nash & Young")
+    # a composite row an earlier derive minted, held by its credit alone:
+    # no evidence of itself
+    composite = str(artist_uuid("Leonard Cohen, Sharon Robinson"))
+    cur.execute("INSERT INTO artists (id, name, name_latin) VALUES (%s, %s, %s)",
+                (composite, "Leonard Cohen, Sharon Robinson", "leonard cohen, sharon robinson"))
+    _flac(templates, library / "V" / "Mix" / "01.flac", "Block Rockin' Beats", "The Chemical Brothers",
+          "Mix", ["Ed Simons, Tom Rowlands"], 1)
+    _flac(templates, library / "V" / "Mix" / "02.flac", "Boogie Wonderland", "The Emotions",
+          "Mix", ["Earth, Wind & Fire"], 2)
+    _flac(templates, library / "V" / "Mix" / "03.flac", "Ohio", "Neil Young",
+          "Mix", ["crosby, stills, nash & young"], 3)
+    _flac(templates, library / "V" / "Mix" / "04.flac", "Everybody Knows", "Leonard Cohen",
+          "Mix", ["Leonard Cohen, Sharon Robinson"], 4)
+    _flac(templates, library / "V" / "Mix" / "05.flac", "Danny Boy", "Celtic Woman",
+          "Mix", ["Traditional, Unknown", "Various Composers"], 5)
+    _scan()
+    credits = _credits(cur)
+    assert credits["Block Rockin' Beats"] == ["Ed Simons", "Tom Rowlands"]
+    assert credits["Boogie Wonderland"] == ["Earth, Wind & Fire"]       # the performer's row
+    assert credits["Everybody Knows"] == ["Leonard Cohen", "Sharon Robinson"]
+    assert credits["Danny Boy"] == ["Traditional"]                       # a placeholder is none (Q16)
+    assert credits["Ohio"] == ["Crosby, Stills, Nash & Young"]          # the stub's row, folded
+    cur.execute("SELECT artist_id::text FROM track_credits tc JOIN tracks t ON t.id = tc.track_id "
+                "WHERE t.title = 'Boogie Wonderland'")
+    assert cur.fetchall() == [(str(artist_uuid("Earth, Wind & Fire")),)]
+    cur.execute("SELECT count(*) FROM track_credits WHERE artist_id = %s", (stub,))
+    assert cur.fetchone()[0] == 1
+    assert _artist_id(cur, "Ed Simons, Tom Rowlands") is None             # never minted
+    assert _scan()["reread"] == 0 and _credits(cur) == credits            # idempotent
+
+
+def test_a_comma_value_the_dump_names_is_one_name_on_a_dump_node_only(cur, library, templates):
+    import credits
+    from database import get_db_context
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    cur.execute("INSERT INTO mb_artist (id, gid, name, sort_name) VALUES (1, %s, %s, %s), (2, %s, %s, %s)",
+                (str(uuid.uuid4()), "Emerson, Lake & Palmer", "Emerson, Lake & Palmer",
+                 str(uuid.uuid4()), "Johann Strauss II", "Strauss, Johann, II"))
+    _flac(templates, library / "V" / "Mix" / "01.flac", "Lucky Man", "Greg Lake", "Mix",
+          ["Emerson, Lake & Palmer"], 1)
+    _flac(templates, library / "V" / "Mix" / "02.flac", "Blue Danube", "Wiener Philharmoniker", "Mix",
+          ["strauss, johann, ii", "Bryan Adams, Jim Vallance"], 2)
+    _scan()
+    # slice rows alone are no dump: lists
+    assert _credits(cur) == {"Lucky Man": ["Emerson", "Lake & Palmer"],
+                             "Blue Danube": ["strauss", "johann", "ii", "Bryan Adams", "Jim Vallance"]}
+    cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"x\"')")
+    with get_db_context() as db:
+        assert credits.rederive_commas(db) == 2
+        db.commit()
+    # an MB name, and a sort name compared folded, keep the value whole as
+    # written; a list MB knows no whole of still splits
+    assert _credits(cur) == {"Lucky Man": ["Emerson, Lake & Palmer"],
+                             "Blue Danube": ["strauss, johann, ii", "Bryan Adams", "Jim Vallance"]}
+    assert _artist_id(cur, "Emerson") is None and _artist_id(cur, "ii") is None
+    cur.execute("DELETE FROM mb_artist")
+    cur.execute("DELETE FROM user_settings WHERE key = 'musicbrainz.db_version'")
+
+
+def test_a_name_too_long_for_an_artist_names_nobody_and_a_long_list_its_writers(cur, library, templates):
+    from credits import NAME_MAX
+    _clean(cur)
+    a, b = "A" * (NAME_MAX - 10), "B" * (NAME_MAX - 10)
+    _flac(templates, library / "V" / "Mix" / "01.flac", "Notes", "Someone", "Mix",
+          ["x" * (NAME_MAX + 1), f"{a}, {b}", "Real Name"], 1)
+    stats = _scan()
+    assert stats["errors"] == 0
+    assert _credits(cur) == {"Notes": [a, b, "Real Name"]}
 
 
 # -- T11: the re-read under the new reader --------------------------------------
@@ -481,6 +583,28 @@ def test_a_row_read_by_the_older_reader_is_read_again_in_place(cur, library, tem
     assert cur.fetchall() == [(mf, scanner.TAGS_READ_REV, [BACH], "2020-01-01", "2020-01-01", True)]
     assert _credits(cur) == {"Aria": [BACH]}
     assert _scan()["reread"] == 0
+
+
+def test_a_file_read_by_the_older_reader_derives_again_though_its_composers_read_the_same(
+        cur, library, templates):
+    # the rev-2 reader kept a comma list whole and its derive minted it as
+    # one composer; the same raw value under rev 3 is its writers
+    _clean(cur)
+    _flac(templates, library / "V" / "Mix" / "01.flac", "Everybody Knows", "Leonard Cohen", "Mix",
+          ["Leonard Cohen, Sharon Robinson"], 1)
+    _scan()
+    composite = str(artist_uuid("Leonard Cohen, Sharon Robinson"))
+    cur.execute("DELETE FROM track_credits")
+    cur.execute("INSERT INTO artists (id, name, name_latin) VALUES (%s, %s, %s)",
+                (composite, "Leonard Cohen, Sharon Robinson", "leonard cohen, sharon robinson"))
+    cur.execute("INSERT INTO track_credits (track_id, role, artist_id, source, position) "
+                "SELECT track_id, 'composer', %s, 'tag', 0 FROM media_files", (composite,))
+    cur.execute("UPDATE media_files SET tags_read_rev = 2")
+    assert _scan()["reread"] == 1
+    assert _credits(cur) == {"Everybody Knows": ["Leonard Cohen", "Sharon Robinson"]}
+    assert _artist_id(cur, "Leonard Cohen, Sharon Robinson") is None     # swept with its credit
+    cur.execute("SELECT DISTINCT tags_read_rev FROM media_files")
+    assert cur.fetchall() == [(scanner.TAGS_READ_REV,)]
 
 
 # -- T6: the HQPlayer library's composer ----------------------------------------
@@ -525,6 +649,18 @@ def test_the_hqplayer_librarys_composer_lands_on_the_same_artist(cur, library, t
     assert _credits(cur) == {"Aria": [BACH], "Spring": ["Antonio Vivaldi", "Johann Georg Pisendel"]}
     cur.execute("SELECT library_read_rev FROM hqp_endpoints")
     assert cur.fetchone()[0] == hqp_library.LIBRARY_READ_REV
+    # read under the older reader with its composers as they read now: the
+    # comma list is its writers all the same, and a placeholder is none
+    answer["xml"] = _library("Various Composers", "Antonio Vivaldi, Johann Georg Pisendel")
+    assert hqp_library.sync(*PI)["unchanged"] is True                   # the same hash
+    cur.execute("UPDATE hqp_endpoints SET library_read_rev = 1")
+    cur.execute("UPDATE hqp_library_files SET raw_composers = ARRAY['Antonio Vivaldi, Johann Georg Pisendel'] "
+                "WHERE hqp_path LIKE %s", ("%02.flac",))
+    cur.execute("DELETE FROM track_credits tc USING tracks t WHERE t.id = tc.track_id AND t.title = 'Spring'")
+    hqp_library.sync(*PI)
+    assert _credits(cur) == {"Aria": [BACH], "Spring": ["Antonio Vivaldi", "Johann Georg Pisendel"]}
+    cur.execute("SELECT raw_composers FROM hqp_library_files ORDER BY hqp_path")
+    assert cur.fetchall() == [([],), (["Antonio Vivaldi, Johann Georg Pisendel"],)]
     # a forget of the HQPlayer's copies: the track held here keeps its local
     # file's composer; the HQP-only track goes as an orphan, its credits with it
     gone = hqp_library.forget_endpoint(*PI)

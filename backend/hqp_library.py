@@ -86,8 +86,9 @@ Entry = Tuple[str, Dict[str, Any]]
 # The revision of what a sync reads of each file (hqp_endpoints.
 # library_read_rev): a library last read under an older one is read whole by
 # its next sync, its known files included, whatever its hash says. Rev 1,
-# 2026-11-21: the composer (CREDITS-1-DESIGN §3.5).
-LIBRARY_READ_REV = 1
+# 2026-11-21: the composer (CREDITS-1-DESIGN §3.5); rev 2, 2026-11-22: a
+# placeholder composer is none, a comma list its writers (§12.6).
+LIBRARY_READ_REV = 2
 
 
 def _command(host: str, port: int, xml: str, timeout: float,
@@ -598,7 +599,10 @@ def sync(host: str, port: int, *, force: bool = False,
         """, {"ids": [i for i, _ in tagged], "titles": [t for _, t in tagged]})
         # A known file's composers as the library names them now: a tag
         # changed under HQPlayer, or a file read before the sync kept them.
-        # The tracks whose files changed derive their credits again.
+        # The tracks whose files changed derive their credits again — every
+        # known file's, when the last sync read the library under an older
+        # reader: the same composers may stand for others now (rev 2: a
+        # comma list's writers).
         with get_db_context() as db:
             lock_credits(db)
             moved = db.execute(text("""
@@ -606,11 +610,13 @@ def sync(host: str, port: int, *, force: bool = False,
                    SET raw_composers = ARRAY(SELECT jsonb_array_elements_text(x.value -> 'c'))
                   FROM jsonb_array_elements(CAST(:rows AS jsonb)) x
                  WHERE hf.id = CAST(x.value ->> 'id' AS int)
-                   AND hf.raw_composers IS DISTINCT FROM
-                       ARRAY(SELECT jsonb_array_elements_text(x.value -> 'c'))
+                   AND (CAST(:older AS boolean)
+                        OR hf.raw_composers IS DISTINCT FROM
+                           ARRAY(SELECT jsonb_array_elements_text(x.value -> 'c')))
                 RETURNING hf.track_id::text"""),
                 {"rows": json.dumps([{"id": known[md["file_path"]], "c": md["composers"]}
-                                     for _, md in entries if md["file_path"] in known])}).scalars()
+                                     for _, md in entries if md["file_path"] in known]),
+                 "older": ep["library_read_rev"] < LIBRARY_READ_REV}).scalars()
             derive_composers(db, set(moved))
             db.commit()
     if new:
