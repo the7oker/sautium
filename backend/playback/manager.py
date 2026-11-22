@@ -184,7 +184,7 @@ class PlaybackManager:
                     raise ConnectionError("HQPlayer is not the attached output")
                 self._hold = {"by": by, "label": label, "progress": None}
             from playback import hqp_link
-            link = hqp_link.selected()
+            link = hqp_link.chosen()
             # Lent first: what the backend still sends — a play press's hand-
             # over among it — is refused at its next request, so the detach
             # waits for no more than the request in flight
@@ -754,15 +754,13 @@ class PlaybackManager:
         (absent in the image), DLNA needs a renderer, HQPlayer needs HQPlayer.
         A node therefore comes up able to play instead of coming up idle.
 
-        The HQPlayer branch above it is kept for installs that predate the
-        Output picker: there was no choice to record then, so an endpoint
-        being configured IS the choice. It no longer fires for new nodes —
-        nothing configures HQPlayer unasked any more."""
+        An install older than the Output picker, where an endpoint being
+        configured WAS the choice, had that choice saved once
+        (db_migrate's hqp_choice_v1): nothing here reads "configured" as
+        "chosen" any more."""
         from routers.settings import _read
         from routers.player import _hqp_configured
-        otype = _read("output.type")
-        if otype is None:
-            otype = "hqplayer" if _hqp_configured() else "browser"
+        otype = _read("output.type") or "browser"
         if otype == "local":
             self._restore_persisted_queue()
             try:

@@ -19,12 +19,25 @@ root; a link is never followed out of one, by the picker or by the scanner
 (`within`). A volume's label and a folder's name are a stranger's text: data
 for the page to escape, never part of a decision here.
 
+What the machine's root leaves beside the disks is read here too, and
+believed only as far as it goes: a volume's label (`.names/`), and — since
+2026-11-22, PI-NODE-2C §2.3 — a volume that was plugged in and that nothing
+mounted (`.unread/`, `unread`): one small file a volume, written by the
+automount's script, whose label and filesystem type a stranger's disk chose.
+Each is read bounded, never through a link, and no path is built from what a
+file says.
+
 Every other node — a launcher's, a Docker node whose folder is named in .env
 — has no roots, and this module changes nothing there (`picks` is False).
 """
 
+import json
 import logging
 import os
+import re
+import shlex
+import stat
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from config import settings
@@ -41,6 +54,26 @@ FOLDERS_MAX = 2_000
 # (`<root>/.names/<mount point's name>`): one line, a stranger's text
 LABEL_BYTES_MAX = 128
 NAMES_DIR = ".names"
+# A volume no driver mounted, as the automount's script leaves it beside the
+# disks (`<root>/.unread/<kernel name>`): the boot it belongs to, the
+# filesystem's type as blkid names it, the label, the driver the mount was
+# tried with ("-": none, the type is one the script never mounts) — four lines
+UNREAD_DIR = ".unread"
+UNREAD_BYTES_MAX = 256
+BOOT_ID = "/proc/sys/kernel/random/boot_id"
+MOUNTINFO = "/proc/self/mountinfo"
+_KERNEL_NAME = re.compile(r"[A-Za-z0-9]+\Z")
+_FS_TYPE = re.compile(r"[a-z0-9_]{1,16}\Z")
+# The drivers the automount mounts with; anything else on the fourth line is none
+_DRIVERS = frozenset({"vfat", "exfat", "ntfs3", "ntfs-3g", "ext4"})
+# blkid's type → (the name a person knows the format by, whether the
+# automount mounts that type — so the volume is here because a mount FAILED,
+# not because the format is one Sautium does not read). Any other type is
+# "an unknown format": the page never shows a stranger's bytes as a format.
+_FORMATS = {"vfat": ("FAT", True), "exfat": ("exFAT", True), "ntfs": ("NTFS", True), "ext4": ("ext4", True),
+            "apfs": ("APFS", False), "hfsplus": ("HFS+", False), "hfs": ("HFS+", False),
+            "btrfs": ("Btrfs", False), "xfs": ("XFS", False), "ext2": ("ext2/3", False),
+            "ext3": ("ext2/3", False)}
 
 
 class Refused(ValueError):
@@ -98,6 +131,12 @@ def apply() -> None:
     # this process reads
     settings.music_host_path = None
     logger.info("music folder: %s (roots: %s)", path or "not chosen", ", ".join(roots()))
+    mounts = _mounts()
+    for root in roots():
+        if _gone(root, mounts):
+            logger.warning("music root %s is empty: its disk is not mounted, or the folder was removed; "
+                           "its albums are away. Forget it on the machine: ./sautium roots --forget %s",
+                           root, shlex.quote(root))
 
 
 def choose(path: str) -> str:
@@ -124,23 +163,100 @@ def choose(path: str) -> str:
     return real
 
 
-def _label(root: str, name: str) -> Optional[str]:
-    """The volume label the automount left for the mount point `name` under
-    `root`, if any: read bounded, one line, never through a link."""
+def _read_small(path: str, most: int) -> Optional[tuple]:
+    """(the bytes, the mtime) of a small regular file root left for the node:
+    never through a link, never waiting on a FIFO, never more than `most`
+    bytes — a longer file is not one the automount wrote."""
     try:
-        fd = os.open(os.path.join(root, NAMES_DIR, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
-        if not os.path.isfile(f"/proc/self/fd/{fd}"):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             return None
-        raw = os.read(fd, LABEL_BYTES_MAX)
+        raw = os.read(fd, most + 1)
     except OSError:
         return None
     finally:
         os.close(fd)
-    text = raw.decode("utf-8", "replace").split("\n", 1)[0].strip()
-    return text or None
+    return raw, st.st_mtime
+
+
+def _one_line(raw: bytes) -> Optional[str]:
+    """A stranger's label as the page gets it: its first line, bounded."""
+    return raw[:LABEL_BYTES_MAX].decode("utf-8", "ignore").split("\n", 1)[0].strip() or None
+
+
+def _label(root: str, name: str) -> Optional[str]:
+    """The volume label the automount left for the mount point `name` under
+    `root`, if any: read bounded, one line, never through a link."""
+    read = _read_small(os.path.join(root, NAMES_DIR, name), LABEL_BYTES_MAX)
+    if read is None:
+        return None
+    return _one_line(read[0])
+
+
+def unread_folders() -> List[str]:
+    """Where the automount says which volumes it could not mount: the folder
+    beside the disks, under each root that is the automount's."""
+    return [folder for folder in (os.path.join(root, UNREAD_DIR) for root in roots() if _disks_folder(root))
+            if os.path.isdir(folder)]
+
+
+def unread() -> List[Dict[str, Any]]:
+    """The volumes plugged into this machine that nothing mounted, as the
+    automount left them: {device (the kernel's name), format (a name from
+    the fixed map, None for a type outside it), mounts (the automount mounts
+    that type: this one failed), driver (what its mount was tried with, None
+    where none was), label, since}. A file of another boot (a
+    power cut left it) says nothing about now and is not listed; neither is
+    anything that is not the automount's small regular file."""
+    try:
+        with open(BOOT_ID) as f:
+            boot = f.read().strip()
+    except OSError:
+        return []
+    found = []
+    for folder in unread_folders():
+        try:
+            names = sorted(name for name in os.listdir(folder) if _KERNEL_NAME.match(name))
+        except OSError:
+            continue
+        for name in names:
+            read = _read_small(os.path.join(folder, name), UNREAD_BYTES_MAX)
+            if read is None or len(read[0]) > UNREAD_BYTES_MAX:
+                continue
+            lines = read[0].decode("utf-8", "replace").split("\n")
+            if not boot or lines[0].strip() != boot:
+                continue
+            fs = lines[1].strip() if len(lines) > 1 else ""
+            fmt, mounts = _FORMATS.get(fs if _FS_TYPE.match(fs) else "", (None, False))
+            label = _one_line(lines[2].encode("utf-8")) if len(lines) > 2 else None
+            driver = lines[3].strip() if len(lines) > 3 else ""
+            found.append({"device": name, "format": fmt, "mounts": mounts, "label": label,
+                          "driver": driver if driver in _DRIVERS else None,
+                          "since": datetime.fromtimestamp(read[1], timezone.utc).isoformat()})
+    return found
+
+
+def _root_labels() -> Dict[str, str]:
+    """The labels the setup read for the roots that are disks themselves (a
+    disk its fstab line mounts: no automount leaves a `.names` entry for it,
+    and a container cannot ask blkid): root → label, a stranger's text."""
+    try:
+        named = json.loads(settings.sautium_library_root_labels or "{}")
+    except ValueError:
+        logger.warning("SAUTIUM_LIBRARY_ROOT_LABELS is not JSON: the roots are listed without labels")
+        return {}
+    if not isinstance(named, dict):
+        return {}
+    labels = {}
+    for root, label in named.items():
+        text = _one_line(label.encode("utf-8")) if isinstance(label, str) else None
+        if text:
+            labels[os.path.realpath(root)] = text
+    return labels
 
 
 def _size(path: str) -> Optional[int]:
@@ -151,19 +267,66 @@ def _size(path: str) -> Optional[int]:
     return st.f_frsize * st.f_blocks
 
 
-def _mount_points() -> set:
-    """Every mount point this process sees (the mount table's fifth field)."""
+def _mounts() -> Dict[str, bool]:
+    """Every point this process sees a WHOLE filesystem mounted at → whether
+    that filesystem is mounted read-only. Whole: the mount shows the
+    filesystem's own root — in a container every root is a mount point (its
+    bind), and only a disk mounted there shows its filesystem's root. The
+    read-only word is the superblock's, the same in every namespace; the
+    mount's own flags are the bind's."""
     from library_watch import _unescape_mount
-    points = set()
+    mounts = {}
     try:
-        with open("/proc/self/mountinfo") as f:
+        with open(MOUNTINFO) as f:
             for line in f:
-                fields = line.split()
-                if len(fields) > 4:
-                    points.add(_unescape_mount(fields[4]).rstrip("/") or "/")
+                fields, _, rest = line.partition(" - ")
+                fields, rest = fields.split(), rest.split()
+                if len(fields) > 4 and fields[3] == "/":
+                    point = _unescape_mount(fields[4]).rstrip("/") or "/"
+                    mounts[point] = len(rest) > 2 and "ro" in rest[2].split(",")
     except OSError:
         pass
+    return mounts
+
+
+def _gone(root: str, mounts: Dict[str, bool]) -> bool:
+    """A root that is there, empty, and no disk: the folder Docker made for a
+    root whose own was removed, or a mount point whose disk is out."""
+    if root in mounts or _disks_folder(root):
+        return False
+    try:
+        with os.scandir(root) as it:
+            return next(it, None) is None
+    except OSError:
+        return False
+
+
+def _disk_points(mounts: Dict[str, bool]) -> List[tuple]:
+    """(path, root, name) of each disk a choice can start at: every one
+    mounted in the automount's folder, and every root that is a disk itself
+    (name None: no automount named it)."""
+    points = []
+    for root in roots():
+        if not os.path.isdir(root):
+            continue
+        if root in mounts:
+            points.append((root, root, None))
+        elif _disks_folder(root):
+            # a mount point: a disk that is there now (an unplugged one
+            # leaves at most an empty folder)
+            points.extend((path, root, name) for name in _subfolders(root)
+                          for path in [os.path.join(root, name)] if path in mounts)
     return points
+
+
+def pullable(path: Optional[str]) -> bool:
+    """Whether `path` lies on a plugged disk nothing writes to (the machine
+    mounted it read-only): pulling it cuts nothing short."""
+    if not path or not picks():
+        return False
+    mounts = _mounts()
+    return any(mounts[disk] and (path == disk or path.startswith(disk.rstrip("/") + "/"))
+               for disk, _root, _name in _disk_points(mounts))
 
 
 def _subfolders(folder: str) -> List[str]:
@@ -206,29 +369,36 @@ def _count_audio(folder: str) -> Dict[str, Any]:
 
 def folders(under: Optional[str] = None) -> Dict[str, Any]:
     """The picker's listing. With no `under`: where a choice can start — each
-    root that is a folder of music itself, and each disk mounted beneath a
-    root (the automount's folder), with its label and size. With `under`:
-    that folder's own folders, its audio count, and the way back up."""
+    root that is a folder of music itself (`empty` where its disk is out or
+    the folder was removed), each disk mounted beneath a root (the
+    automount's folder) or as a root, with its label and size — and, last,
+    each volume plugged in that nothing mounted (kind "unread": no path, a
+    row to read, never to open). With `under`: that folder's own folders,
+    its audio count, and the way back up."""
     if not picks():
         raise Refused("This node's music folder is named where the node was set up")
     if under is None:
-        points = _mount_points()
+        mounts = _mounts()
+        labels = _root_labels()
+        points = _disk_points(mounts)
         places = []
         for root in roots():
             if not os.path.isdir(root):
                 continue
-            if not _disks_folder(root):
+            if root in mounts or _disks_folder(root):
+                places.extend({"path": path, "name": name or path, "kind": "disk",
+                               "label": _label(root, name) if name else labels.get(path),
+                               "size_bytes": _size(path), "read_only": mounts[path]}
+                              for path, of, name in points if of == root)
+            else:
                 # a folder named at setup: itself the place
                 places.append({"path": root, "name": root, "kind": "folder", "label": None,
-                               "size_bytes": None})
-                continue
-            for name in _subfolders(root):
-                path = os.path.join(root, name)
-                # a mount point: a disk that is there now (an unplugged one
-                # leaves at most an empty folder)
-                if path in points:
-                    places.append({"path": path, "name": name, "kind": "disk",
-                                   "label": _label(root, name), "size_bytes": _size(path)})
+                               "size_bytes": None, "empty": _gone(root, mounts)})
+        # A volume nothing mounted is a place that cannot be opened: no path
+        places.extend({"path": None, "name": volume["device"], "kind": "unread", "label": volume["label"],
+                       "size_bytes": None, "format": volume["format"], "mounts": volume["mounts"],
+                       "driver": volume["driver"]}
+                      for volume in unread())
         return {"under": None, "places": places, "chosen": settings.music_library_path or None}
     real = within(under)
     if real is None or not os.path.isdir(real):

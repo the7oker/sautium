@@ -153,6 +153,10 @@ def node(scratch_dsn, tmp_path, monkeypatch):
     checkout = tmp_path / "sautium"
     (checkout / "host").mkdir(parents=True)
     (checkout / "host" / "agent.log").write_text("the agent's own line\n")
+    # the log the agent kept of the container an update replaced (PI-NODE-2C §12.1)
+    (checkout / "host" / "logs").mkdir()
+    (checkout / "host" / "logs" / "backend-20261120-101500-update.log").write_text(
+        "INFO before the update\nWARNING peer 192.168.1.21 asked for /home/someone/Music/B/02 Tune.flac\n")
     board = tmp_path / "model"
     board.write_bytes(b"Raspberry Pi 5 Model B Rev 1.0\0")
     monkeypatch.setattr(ha, "BOARD_MODEL", board)
@@ -289,6 +293,9 @@ def test_facts_about_the_node_alone_are_answered_at_once_with_the_machines(node)
     assert system["host"]["power"] == "throttled=0x50005"
     assert system["host"]["board"] == "Raspberry Pi 5 Model B Rev 1.0"
     assert "oom_killed=true" in system["host"]["restarts"]
+    # the kept log is named among the facts (a name and a size the agent gives); its lines are a log
+    assert system["host"]["containers"].endswith("\nkept logs: backend-20261120-101500-update.log 0 KiB")
+    assert "before the update" not in members["system.json"]
     assert "someone" not in members["system.json"]                  # df's mount point
     assert not [name for name in members if name.startswith("logs/")]
     assert node.asked == 1
@@ -309,6 +316,9 @@ def test_logs_wait_for_the_person_and_go_scrubbed_once_ticked(node):
         assert gone not in log, gone
     assert "[private address]" in log and "[name].flac" in log
     assert "logs/postgres.log" in members and "logs/host-agent.log" in members
+    kept = members["logs/backend-before-update.log"]
+    assert kept.startswith("(host/logs/backend-20261120-101500-update.log)\nINFO before the update\n")
+    assert "192.168.1.21" not in kept and "someone" not in kept and "Tune" not in kept
     assert node.asked == 1
 
 

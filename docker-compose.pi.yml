@@ -54,9 +54,11 @@ services:
     # CLAP and its passes' audio when the sonic pass runs); random reads
     # cost little more than sequential ones and the disk takes many at once.
     # synchronous_commit and fsync stay on: the identity and the registry are
-    # written here. Weaker boards override via .env, e.g. PG_SHARED_BUFFERS=512MB
-    # PG_EFFECTIVE_CACHE_SIZE=3GB. Docker on Raspberry Pi OS cannot cap a
-    # container's memory (the firmware boots the kernel with
+    # written here. A smaller board's values are lines of .env (e.g.
+    # PG_SHARED_BUFFERS=512MB PG_EFFECTIVE_CACHE_SIZE=3GB), which ./sautium and
+    # the host agent's update write by the machine's memory and remove where
+    # these defaults fit (desktop/machine_tier.py). Docker on Raspberry Pi OS
+    # cannot cap a container's memory (the firmware boots the kernel with
     # cgroup_disable=memory), so no limit is set here.
     # wal_level=minimal: single-node appliance, no replication/PITR consumers —
     # lets the MB-dump loader's TRUNCATE+COPY-in-one-txn skip WAL entirely.
@@ -180,7 +182,8 @@ services:
       # Application settings
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
-      # HQPlayer integration (an HQPlayer Embedded on this board is loopback)
+      # Read only for an install older than the Output picker (the HQPlayer a
+      # node drives is the pick saved in its database)
       HQPLAYER_HOST: ${HQPLAYER_HOST:-127.0.0.1}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}
@@ -261,7 +264,8 @@ services:
       # What a node is born with on this machine (./sautium reads the machine
       # and writes it to .env; backend/db_migrate.py reads it once, at the
       # database's first migration pass): "nano" — no models, no streaming
-      # library, nothing passed on. Each is a switch in the Web UI afterwards.
+      # library, no relaying (since 2026-11-22 it passes on what it holds,
+      # like every node). Each is a switch in the Web UI afterwards.
       SAUTIUM_BIRTH_PRESET: ${SAUTIUM_BIRTH_PRESET:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: http://127.0.0.1:8800

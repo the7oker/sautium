@@ -388,6 +388,20 @@ def _friend_row_out(row: dict) -> dict:
     return row
 
 
+def support_known() -> bool:
+    """Support answers this node: its contact is resolved to the master's key
+    and holds the grant the master signed for it. On a node with no identity
+    of its own that is one peer's memory of the account — the master met this
+    key on another machine and re-accepts a friend with no identity gate —
+    and nothing any other node can check (PI-NODE-2C §10)."""
+    import master_node
+    row = _db_query_one(
+        """SELECT EXISTS (SELECT 1 FROM friends f JOIN friend_grants g ON g.friend_id = f.id
+                           WHERE f.source = 'master' AND f.public_key_hex = %(key)s) AS known""",
+        {"key": master_node.MASTER_PUBKEY_HEX})
+    return bool(row and row["known"])
+
+
 @router.get("/friends")
 async def list_friends(cursor: str = "", limit: int = 50,
                        q: str = "") -> Dict[str, Any]:

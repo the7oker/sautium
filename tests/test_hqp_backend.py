@@ -705,6 +705,15 @@ def _queue_stays_in_memory(monkeypatch):
 
 
 @pytest.fixture
+def any_address(monkeypatch):
+    """A link made here for an address of the test's own, with no node
+    around it: these tests are about the dial itself. Whether an address may
+    be dialled at all — chosen, registered or being probed — is
+    tests/test_hqp_unchosen.py's."""
+    monkeypatch.setattr(hl.HqpLink, "_may_dial", lambda self, at: True)
+
+
+@pytest.fixture
 def fake(monkeypatch):
     f = FakeHqp()
     monkeypatch.setattr(settings, "hqplayer_host", "127.0.0.1")
@@ -1823,7 +1832,7 @@ def _ask(link) -> None:
 
 
 def test_an_hqplayer_that_cannot_be_reached_is_said_once_as_it_goes_and_once_as_it_is_back(
-        monkeypatch, caplog):
+        monkeypatch, caplog, any_address):
     """A closed control port asked as the poller asks it, at every poll (an
     ERROR line per try, every 15 s, until 2026-10-21): one warning as
     HQPlayer becomes unreachable, the OS's reason in it; the tries after it
@@ -1860,7 +1869,7 @@ def test_an_hqplayer_that_cannot_be_reached_is_said_once_as_it_goes_and_once_as_
             srv.close()
 
 
-def test_an_address_chosen_while_hqplayer_cannot_be_reached_starts_anew(monkeypatch, caplog):
+def test_an_address_chosen_while_hqplayer_cannot_be_reached_starts_anew(monkeypatch, caplog, any_address):
     """The address the link dials changes while HQPlayer cannot be reached (a
     Docker node's loopback replaced by the host's): a failure there is said
     at once, as a start of its own — not an hour later under the old
@@ -1893,7 +1902,7 @@ def test_an_address_chosen_while_hqplayer_cannot_be_reached_starts_anew(monkeypa
             srv.close()
 
 
-def test_a_dial_on_its_way_as_the_address_changes_is_said_at_the_address_it_dialled(caplog):
+def test_a_dial_on_its_way_as_the_address_changes_is_said_at_the_address_it_dialled(caplog, any_address):
     """The owner saves another alias of the same HQPlayer while the poller's
     dial is on its way to the one before: that dial's failure is said, and
     its breaker opened, at the alias it dialled — the new one is dialled at
@@ -1931,7 +1940,7 @@ def test_a_dial_on_its_way_as_the_address_changes_is_said_at_the_address_it_dial
             srv.close()
 
 
-def test_a_dial_that_goes_through_as_the_address_changes_names_the_alias_it_dialled(caplog):
+def test_a_dial_that_goes_through_as_the_address_changes_names_the_alias_it_dialled(caplog, any_address):
     """The same readdress, during a dial that goes through: the connection
     is the alias dialled's, and its line says so."""
     port = _closed_port()
@@ -6394,7 +6403,8 @@ def test_hqplayer_is_reached_by_address_by_default():
     from hqplayer_client import HQPlayerConnection
     assert HQPlayerClient().host == "127.0.0.1"
     assert HQPlayerConnection().client.host == "127.0.0.1"
-    assert Settings.model_fields["hqplayer_host"].default == "127.0.0.1"
+    # ...and no address is the node's HQPlayer until the person picks one
+    assert Settings.model_fields["hqplayer_host"].default is None
 
 
 # -- SelectTrack starts a stopped HQPlayer ------------------------------------------------
@@ -9436,7 +9446,6 @@ def test_the_scan_lists_a_busy_hqplayer_as_answering(monkeypatch):
     monkeypatch.setattr(tls_gen, "detect_private_host_ips", lambda: [])
     monkeypatch.setattr(hqp_library, "resolve_endpoint", building)
     monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 9})
-    monkeypatch.setattr(player, "_configured_hqp", lambda: None)
     monkeypatch.setattr(player, "_dlna_pins", lambda: {})
     monkeypatch.setattr(player, "_hqplayer_entries", lambda: [])
     monkeypatch.setattr(player, "_hqp_discovered", {})
@@ -11226,7 +11235,7 @@ def test_a_close_while_a_request_holds_the_connection_outside_a_wait_closes_its_
     assert c.socket is None
 
 
-def test_a_close_ends_a_connect_whose_name_the_resolver_holds(monkeypatch):
+def test_a_close_ends_a_connect_whose_name_the_resolver_holds(monkeypatch, any_address):
     """A name the resolver takes seconds over — a .local HQPlayer switched
     off — holds no node stop: the lookup is a wait the close ends, and the
     request is let go at once, no failure of HQPlayer's."""
@@ -11401,7 +11410,6 @@ def test_the_scan_reads_an_unfinished_build_as_busy(fake, monkeypatch):
     monkeypatch.setattr(player, "_unicast_sweep", sweep)
     monkeypatch.setattr(tls_gen, "detect_private_host_ips", lambda: [])
     monkeypatch.setattr(hqp_library, "endpoint_by_address", lambda host, port: {"id": 9})
-    monkeypatch.setattr(player, "_configured_hqp", lambda: None)
     monkeypatch.setattr(player, "_dlna_pins", lambda: {})
     monkeypatch.setattr(player, "_hqplayer_entries", lambda: [])
     monkeypatch.setattr(player, "_hqp_discovered", {})

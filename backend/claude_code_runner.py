@@ -578,7 +578,6 @@ def write_docker_mcp_config() -> None:
             "name": settings.postgres_db},
         backend_url=os.environ.get("BACKEND_URL", "http://localhost:8000"),
         identity_dir=Path(settings.p2p_identity_dir),
-        hqplayer_host=settings.hqplayer_host, hqplayer_port=settings.hqplayer_port,
     )
     path = Path(MCP_CONFIG_PATH)
     write_mcp_config(servers, path)

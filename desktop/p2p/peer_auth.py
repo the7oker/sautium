@@ -211,6 +211,7 @@ def _check_channel(obj) -> None:
         raise ssl.SSLCertVerificationError(
             "peer TLS cert carries no valid node-key binding")
     ctx = obj.context
+    ctx._sautium_seen = bound
     expected = getattr(ctx, "_sautium_pin", None)
     if expected is None:
         ctx._sautium_pin = bound     # lock the context on first contact
@@ -247,6 +248,14 @@ def pinned_ssl_context(expected_pubkey: Optional[str] = None) -> ssl.SSLContext:
     ctx.sslobject_class = _PinnedSSLObject
     ctx._sautium_pin = expected_pubkey.lower() if expected_pubkey else None
     return ctx
+
+
+def seen_pubkey(ctx: ssl.SSLContext) -> Optional[str]:
+    """The node whose valid binding the context's last handshake met —
+    the pinned one, or the one a pinned handshake refused. How a dial of an
+    address tells "another node answers there" (and which) from "nothing
+    of ours answers"; None while no bound certificate was met."""
+    return getattr(ctx, "_sautium_seen", None)
 
 
 def pinned_pubkey(ctx: ssl.SSLContext) -> Optional[str]:

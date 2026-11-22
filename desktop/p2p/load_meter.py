@@ -41,6 +41,8 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from desktop.machine_tier import memory_limit_kib, usable_cores
+
 logger = logging.getLogger(__name__)
 
 CEILING_CPU = {"full": 0.25, "standard": 0.25, "lite": 0.15}
@@ -70,13 +72,9 @@ def current() -> Optional["LoadMeter"]:
 def default_profile() -> str:
     """The launcher has no hardware_profile module: lite when the machine
     is small (the hardware-tiers RAM rule), standard otherwise."""
-    cores = os.cpu_count() or 1
-    try:
-        import psutil
-        ram_gb = psutil.virtual_memory().total / 1e9
-    except ImportError:
-        ram_gb = 16.0
-    return "lite" if ram_gb < 12 or cores < 4 else "standard"
+    kib = memory_limit_kib()
+    ram_gb = 16.0 if kib is None else kib * 1024 / 1e9
+    return "lite" if ram_gb < 12 or usable_cores() < 4 else "standard"
 
 
 def _tree_cpu_seconds() -> float:
@@ -119,7 +117,7 @@ class LoadMeter:
         self._interval = sample_interval
         self._cpu_seconds = cpu_seconds
         self._clock = clock
-        self._cores = cores or os.cpu_count() or 1
+        self._cores = cores or usable_cores()
         self._mem_available_kib = mem_available_kib
         self._lock = threading.Lock()
         self._subs: list = []

@@ -300,6 +300,26 @@ def address_key(host: str, port: int) -> Tuple[str, int]:
     return ("here" if is_own_address(host) else host.strip().lower(), int(port))
 
 
+def driven() -> Optional[Tuple[str, int]]:
+    """The HQPlayer this node drives: the address the person's pick saved
+    (user_settings hqplayer.host / hqplayer.port — the Output picker's tap,
+    "Add device by address"), read from the process's copy of it; None while
+    no pick was ever made. The one answer to "is an HQPlayer chosen": no
+    default address stands in for a choice, and with none nothing connects
+    (since 2026-11-22; before it the config's 127.0.0.1 was dialled by every
+    reader that fell back to it)."""
+    from config import settings
+    host = settings.hqplayer_host
+    return (host, int(settings.hqplayer_port or 4321)) if host else None
+
+
+def driven_endpoint() -> Optional[Dict[str, Any]]:
+    """The registry row of the HQPlayer this node drives, None while none is
+    chosen or its first contact has not registered it yet."""
+    address = driven()
+    return endpoint_by_address(*address) if address else None
+
+
 def endpoint_by_address(host: str, port: int) -> Optional[Dict[str, Any]]:
     """The row at this address — the alias of it another caller registered
     included: a Desktop the picker met at host.docker.internal is the one
@@ -348,9 +368,10 @@ def _this_machine() -> Dict[str, Any]:
     """The machine this node runs on, as it sees it — in Docker the CPU and
     GPU are the host's, the RAM what the VM was given."""
     import hardware_profile
+    from desktop.machine_tier import machine_cores
     from desktop.p2p.identity_pow import cpu_label
     hw = hardware_profile.resolve()
-    return {"cpu": cpu_label(), "cores": os.cpu_count(),
+    return {"cpu": cpu_label(), "cores": machine_cores(),
             "gpu": hw.accel_name, "ram_gb": round(hw.ram_gb, 1) if hw.ram_gb else None}
 
 
@@ -880,18 +901,21 @@ if __name__ == "__main__":
     ap.add_argument("--since", help="with --forget-endpoint: also drop artists minted after this ISO time")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    if args.dry_run:
-        ep, how, facts = resolve_endpoint(args.host, args.port)
-        found, found_counts = parse_library(fetch_library(args.host, args.port))
-        have = _known_paths(ep["id"]) if ep else {}
-        fresh = sum(1 for _, md in found if md["file_path"] not in have)
-        print(f"endpoint: {ep['name'] + ' (by ' + how + ')' if ep else 'new — ' + (facts['hqp_name'] or args.host)}; "
-              f"library: {found_counts['files']} files ({found_counts['unsupported']} unsupported); "
-              f"known here: {len(have)}; new: {fresh}")
-    elif args.forget_missing:
-        print(forget_missing(args.host, args.port))
-    elif args.forget_endpoint:
-        since = datetime.fromisoformat(args.since.replace("Z", "+00:00")) if args.since else None
-        print(forget_endpoint(args.host, args.port, since))
-    else:
-        print(sync(args.host, args.port, force=args.force))
+    # the address is the operator's own word: its link may dial it meanwhile (HqpLink._may_dial)
+    from playback import hqp_link
+    with hqp_link.probing(args.host, args.port):
+        if args.dry_run:
+            ep, how, facts = resolve_endpoint(args.host, args.port)
+            found, found_counts = parse_library(fetch_library(args.host, args.port))
+            have = _known_paths(ep["id"]) if ep else {}
+            fresh = sum(1 for _, md in found if md["file_path"] not in have)
+            print(f"endpoint: {ep['name'] + ' (by ' + how + ')' if ep else 'new — ' + (facts['hqp_name'] or args.host)}; "
+                  f"library: {found_counts['files']} files ({found_counts['unsupported']} unsupported); "
+                  f"known here: {len(have)}; new: {fresh}")
+        elif args.forget_missing:
+            print(forget_missing(args.host, args.port))
+        elif args.forget_endpoint:
+            since = datetime.fromisoformat(args.since.replace("Z", "+00:00")) if args.since else None
+            print(forget_endpoint(args.host, args.port, since))
+        else:
+            print(sync(args.host, args.port, force=args.force))

@@ -151,10 +151,12 @@ class QueryTranslator:
             self.tokenizer = model_cache.from_hub(AutoTokenizer.from_pretrained, MODEL_ID)
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True)
+        from desktop.machine_tier import usable_cores
+        cores = usable_cores()
         self.translator = ctranslate2.Translator(
             str(model_dir), device="cpu", compute_type="int8",
             inter_threads=1,
-            intra_threads=max(2, min(8, (os.cpu_count() or 4) // 2)),
+            intra_threads=min(cores, max(2, min(8, cores // 2))),
         )
         # ct2 mmaps model.bin lazily; on slow storage (NTFS/drvfs) the
         # first real translation page-faults the whole 3GB in (~60s

@@ -45,7 +45,7 @@ from urllib.parse import quote
 import psycopg2
 
 from desktop.p2p import chat_wire, diag_protocol, master_node, wire
-from desktop.p2p.addrs import fmt_addr, is_internet_vantage
+from desktop.p2p.addrs import canon_host, fmt_addr, is_internet_vantage
 from desktop.p2p.chat_wire import (FORWARD_ACK_TIMEOUT, RELAY_HEADER, VOUCHER_TTL,
                                    delivery_payload, voucher_payload)
 from desktop.p2p.peer_auth import pinned_pubkey, pinned_ssl_context
@@ -120,6 +120,21 @@ def upnp_heuristic(upnp, dht):
     if wan and observed and wan != observed:
         return ("cgnat", f"router WAN {wan} != observed {observed}")
     return None
+
+
+def public_addresses(upnp, dht) -> frozenset:
+    """The internet addresses this node knows as its own router's: the
+    router's WAN address (UPnP) and the one DHT peers see. A peer at one of
+    them stands behind the same router as this node."""
+    known = (upnp.external_ip if upnp else None,
+             getattr(dht, "observed_external_ip", None) if dht else None)
+    return frozenset(canon_host(a) for a in known if a and is_internet_vantage(a))
+
+
+# The verdict's detail (shown on the Sync & P2P screen's reachability row)
+# when the only node that could look stands behind this node's own router
+SAME_ROUTER_DETAIL = ("Cannot be checked from here: the only node that could look is behind "
+                      "this node's own router.")
 
 
 # What a cert-gated issuer answers a handshake whose identity lacks its
@@ -252,6 +267,7 @@ class ChatClient:
                  announce_port: Callable[[], int],
                  dht=None, lan=None,
                  heuristic: Optional[Callable[[], Optional[tuple]]] = None,
+                 own_addresses: Optional[Callable[[], frozenset]] = None,
                  on_reachability: Optional[Callable[[str, str], Awaitable[None]]] = None,
                  on_incoming: Optional[Callable[[dict], None]] = None,
                  on_warrant: Optional[Callable[[dict, tuple], None]] = None,
@@ -266,6 +282,8 @@ class ChatClient:
                 set later (`client.dht = ...`), the DHT starts after.
             lan: a LANDiscovery or None (a container on a bridge).
             heuristic: () -> (status, detail) | None, the local tells.
+            own_addresses: () -> this node's own public addresses
+                (public_addresses), where the runtime has a router to ask.
             on_reachability: the runtime's consumers of a verdict.
             on_incoming: a message stored from a relay, or a history pull
                 that imported (`history_sync`).
@@ -280,6 +298,7 @@ class ChatClient:
         self.dht = dht
         self.lan = lan
         self._heuristic = heuristic or (lambda: None)
+        self._own_addresses = own_addresses or frozenset
         self._on_reachability = on_reachability
         self._on_incoming = on_incoming
         self._on_warrant = on_warrant
@@ -938,6 +957,11 @@ class ChatClient:
                        result: dict, own_pubkey: str) -> None:
         self.store.add_friend(public_key_hex=peer_pubkey, invite_code=invite, username=username)
         self._store_incoming_grant(result, own_pubkey)
+        if peer_pubkey.lower() == master_node.MASTER_PUBKEY_HEX.lower():
+            # What a node with no identity of its own still reaches is part
+            # of the identity state its pages hold (routers.p2p.support_known)
+            with self.store.db_conn().cursor() as cur:
+                cur.execute("NOTIFY sautium_identity")
         # Mirror the recipient-side presence bump: a 200 "accepted" is proof
         # the remote node is alive. Without this update one side of a
         # freshly-paired duo always shows the other as offline because only
@@ -1624,7 +1648,12 @@ class ChatClient:
         its own container loopback and answered `false` (2026-09-08) — so
         the master refuses such a verdict (`reachable: null`) and we never
         spend its per-key cooldown on one. The Worker's address hint stands
-        in when the organic tiers know the master by LAN alone."""
+        in when the organic tiers know the master by LAN alone. A vantage at
+        this node's own public address is behind the same router and is no
+        vantage either: its call-back would land on the router's forward of
+        that port, its own or anyone's, and `false` from it wrongly silenced
+        a node whose mapping worked (PI-NODE-2B §8.3) — it is not asked, and
+        one that finds as much itself says so (`same_router`)."""
         if not master_node.master_configured():
             return _ProbeResult(None, "no master configured")
         ident = self._identity()
@@ -1634,13 +1663,17 @@ class ChatClient:
         if not master:
             return _ProbeResult(None, "master contact not resolved yet", retry_soon=True)
         peers = await self.find_friend_peers(master)
-        vantages = [p for p in peers if is_internet_vantage(p[0])]
-        if not vantages:
+        own = self._own_addresses()
+        internet = [p for p in peers if is_internet_vantage(p[0])]
+        if not internet:
             from desktop.p2p import master_hint
             hint = await asyncio.get_running_loop().run_in_executor(None, master_hint.fetch)
             if hint and is_internet_vantage(hint[0]):
-                vantages = [hint]
+                internet = [hint]
+        vantages = [p for p in internet if canon_host(p[0]) not in own]
         if not vantages:
+            if internet:
+                return _ProbeResult(None, SAME_ROUTER_DETAIL)
             if not peers:
                 return _ProbeResult(None, "master not resolved yet", retry_soon=True)
             known = ", ".join(fmt_addr(ip, p) for ip, p in peers)
@@ -1652,6 +1685,7 @@ class ChatClient:
             f"probe_request:{ts}:{master_node.MASTER_PUBKEY_HEX}:{port}".encode("utf-8")).hex()
         payload = {"public_key_hex": ident.public_key_hex, "port": port, "ts": ts, "signature": sig}
         import aiohttp
+        same_router = False
         for ip, mport in vantages:
             try:
                 async with aiohttp.ClientSession(
@@ -1673,7 +1707,9 @@ class ChatClient:
                         verdict = data.get("reachable")
                         if verdict is None:
                             # The master still saw a LAN/loopback source —
-                            # a hairpin that keeps the private address.
+                            # a hairpin that keeps the private address — or
+                            # found itself behind our router.
+                            same_router |= data.get("same_router") is True
                             logger.debug(f"Probe via {fmt_addr(ip, mport)}: "
                                          f"no vantage (seen as {seen})")
                             continue
@@ -1684,7 +1720,8 @@ class ChatClient:
                             f"{data.get('error') or 'no answer'} (seen as {seen})")
             except Exception as e:
                 logger.debug(f"Probe via {fmt_addr(ip, mport)} failed: {e}")
-        return _ProbeResult(None, "master probe: no vantage answered")
+        return _ProbeResult(None, SAME_ROUTER_DETAIL if same_router
+                            else "master probe: no vantage answered")
 
     async def _reachability_loop(self) -> None:
         """Adaptive-cadence self-check (existing cadence, moved): retry every

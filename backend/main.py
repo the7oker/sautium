@@ -4,7 +4,14 @@ Main entry point for the API server.
 """
 
 import faulthandler
+import signal
 faulthandler.enable()   # native crashes (PortAudio/ASIO AVs) leave a traceback in the log
+if hasattr(signal, "SIGUSR1"):
+    # Every thread's stack to the log on a signal, the process left running
+    # (`docker kill -s USR1 sautium-backend`): what names a backend that
+    # spins with nothing asked of it. Only the host's root or the node's own
+    # user can send it — whoever can already stop the node.
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 import asyncio
 import logging
@@ -312,9 +319,11 @@ def _start_host_network() -> None:
     # Only the port that answers peers (rule 4: never 8800, 8830, 8831), and
     # only while it answers as the peer surface — asked before every map,
     # a router's reboot's re-map included.
-    from desktop.p2p.upnp_service import answers_as_peer_surface
+    from desktop.p2p.upnp_service import answers_as_peer_surface, leads_here
     port = _listen_port()
-    _upnp = UPnPService(ports=[port], gate=lambda: answers_as_peer_surface(port))
+    _upnp = UPnPService(ports=[port], gate=lambda: answers_as_peer_surface(port),
+                        leads_here=leads_here(
+                            lambda: (resolve_identity(settings) or {}).get("public_key_hex")))
 
 
 async def _map_peer_port() -> None:
@@ -345,6 +354,13 @@ async def _map_peer_port() -> None:
 def _upnp_heuristic():
     from desktop.p2p.chat_client import upnp_heuristic
     return upnp_heuristic(_upnp, _dht_service)
+
+
+def _own_addresses() -> frozenset:
+    """This node's own public addresses, for both ends of the reachability
+    probe: a prober and its vantage behind one router tell each other nothing."""
+    from desktop.p2p.chat_client import public_addresses
+    return public_addresses(_upnp, _dht_service)
 
 
 def _default_gateway() -> Optional[str]:
@@ -649,16 +665,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Failed to overlay AI credentials at startup: {e}")
 
-    # HQPlayer host/port editable from the Web UI; same env→DB overlay
-    # so the change survives a restart and applies on next request.
+    # The HQPlayer the person chose, copied onto the runtime settings — or
+    # none: the environment's address is dropped here (hqp_library.driven).
+    # After db_migrate above, never before it: hqp_choice_v1 is the last
+    # reader of the environment's address, and saves it for an install it
+    # configured.
     try:
         from routers.settings import load_hqplayer_from_db
         load_hqplayer_from_db()
     except Exception as e:
         logger.warning(f"Failed to overlay HQPlayer settings at startup: {e}")
 
-    # Activate the persisted playback output (HQPlayer legacy default —
-    # HARDWARE-TIERS §2.6: no configured output, no status loop).
+    # Activate the persisted playback output (nothing chosen is this device:
+    # HARDWARE-TIERS §2.6 — no configured output, no status loop).
     from routers.player import stop_status_poller
     from playback.manager import manager as playback_manager
     playback_manager.init_from_settings()
@@ -941,7 +960,8 @@ async def lifespan(app: FastAPI):
             # Relay clients announce through this node whenever they
             # subscribe — a callback registration, needs no routing table.
             try:
-                from routers.peer_chat import set_client_announce_cbs
+                from routers.peer_chat import set_client_announce_cbs, set_own_addresses
+                set_own_addresses(_own_addresses)
                 set_client_announce_cbs(
                     lambda code: asyncio.get_running_loop().create_task(
                         _dht_service.announce_user_for(code)),
@@ -1039,6 +1059,7 @@ async def lifespan(app: FastAPI):
             p2p_chat.configure_client(
                 announce_port=_announce_port, dht=_dht_service, lan=_lan_discovery,
                 heuristic=_upnp_heuristic if _upnp is not None else None,
+                own_addresses=_own_addresses,
                 on_reachability=_apply_reachability)
             await p2p_chat.start_client()
         except Exception as e:
@@ -1511,6 +1532,7 @@ async def get_stats() -> Dict[str, Any]:
         "total_file_size_bytes": 0, "unique_genres": 0,
         # Enrichment coverage
         "tracks_with_features": 0, "tracks_with_instruments": 0, "analysable_tracks": 0,
+        "present_tracks": 0,
         "library_artists": 0, "artists_with_lastfm": 0,
         "library_albums": 0,
     }
@@ -1545,8 +1567,24 @@ async def get_stats() -> Dict[str, Any]:
                                   AND av.absent_since IS NULL
                                   AND (mf.duration_seconds IS NULL
                                        OR mf.duration_seconds >= :min_seconds))
+            ),
+            -- The Lyrics row's population: owned tracks with a copy that is
+            -- here — on this disk or at the HQPlayer, the lookup needs no
+            -- bytes. Against total_tracks an album that was away stayed in
+            -- the denominator ("7 / 2 186" beside analysis rows of 93); the
+            -- numerator comes from the same set (this overrides the view's
+            -- tracks_with_lyrics).
+            present AS (
+                SELECT t.id FROM tracks t
+                 WHERE EXISTS (SELECT 1 FROM owned_files f
+                                JOIN album_variants av ON av.id = f.album_variant_id
+                                WHERE f.track_id = t.id AND av.absent_since IS NULL)
             )
             SELECT
+                (SELECT COUNT(*) FROM present) as present_tracks,
+                (SELECT COUNT(*) FROM present p
+                  WHERE EXISTS (SELECT 1 FROM track_lyrics tl WHERE tl.track_id = p.id)
+                ) as tracks_with_lyrics,
                 (SELECT COUNT(*) FROM analysable) as analysable_tracks,
                 (SELECT COUNT(*) FROM analysable a
                   WHERE EXISTS (SELECT 1 FROM embeddings e WHERE e.track_id = a.id)
@@ -1739,8 +1777,13 @@ def _scan_loop() -> None:
             if req is None:
                 if not state["cancel_requested"]:
                     from canon import post_import
+                    # The canon's lines are its progress; the burst ends on
+                    # what its last round found, or the screen keeps
+                    # "Canonicalizing…" with nothing running
+                    outcome = state["progress"]
                     post_import.run(state, state["result"] or {}, burst_started,
                                     take_arriving=take_arriving)
+                    state["progress"] = outcome
                 imported = take_arriving = False
                 continue
             state["cancel_requested"] = False

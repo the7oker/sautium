@@ -346,3 +346,21 @@ def test_the_launcher_composes_the_one_diag_worker(monkeypatch, tmp_path):
     assert sources.backend._client.base_url == "http://127.0.0.1:18123"
     assert sources.extra["reachability"] == "cgnat" and sources.extra["p2p_status"]["running"] is False
     assert (collected["granted"], collected["node_pubkey"]) == (["logs"], "cd" * 32)
+
+
+def test_a_lost_mapping_is_no_longer_announced_and_the_verdict_is_asked_again():
+    """The router refused a renewal: the mapper tells its listener None. The
+    launcher's listener dropped it, so the DHT went on announcing the dead
+    external port and nothing asked the verdict before its own hour (the
+    Docker node's listener did both; PI-NODE-2C review round 1)."""
+    manager = p2p_manager.P2PManager("postgresql://unused", {})
+    announced, rechecks = [], []
+    manager._http_port = 24680
+    manager._dht_service = SimpleNamespace(set_announce_port=announced.append)
+    manager._chat_client = SimpleNamespace(recheck_reachability=lambda: rechecks.append(1))
+    manager._mapping_changed(31000)             # the router gave another external port
+    manager._mapping_changed(None)              # ...and then refused its renewal
+    assert announced == [31000, 24680] and len(rechecks) == 2
+    manager._chat_client = None                 # the master runs no client half
+    manager._mapping_changed(None)
+    assert announced[-1] == 24680

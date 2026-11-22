@@ -255,7 +255,8 @@ node — nothing analysed there, sound features taken from other nodes. It
 never calls `sudo`: a step that needs root (lingering, mounting plugged
 disks read-only) is printed whole for you to paste. The music folder, the
 assistant and the output are then chosen in the Web UI. `./sautium status`,
-`pair`, `update` and `remove` are its other commands.
+`roots` (since 2026-11-22: the folders it may read music from, and
+`--forget <folder>`), `pair`, `update` and `remove` are its other commands.
 
 The CPU image (`backend/Dockerfile.mac`) takes three build arguments, read
 from `.env` by `docker-compose.pi.yml` and by the host agent's update:
@@ -283,6 +284,13 @@ python3 -I scripts/host_agent.py install
 docker compose -f docker-compose.pi.yml up -d    # the node learns of the agent
 sudo loginctl enable-linger "$USER"              # once: the agent runs with nobody logged in
 ```
+
+An update also writes PostgreSQL's memory lines of `.env` (the five `PG_*`
+keys `docker-compose.pi.yml` reads) for the machine's memory, as `./sautium`
+does — a smaller board's values, or no line where the file's defaults fit
+(since 2026-11-22): a value of your own under one of those names is
+replaced. Before it replaces the node's container it keeps the tail of that
+container's log in `host/logs/` (the three newest stay).
 
 Run `install` again after an update whose notes say its units changed. A
 provider module you put in `backend/streaming/providers/` is named, one per

@@ -29,10 +29,9 @@ version and engine, and `hqplayer_get_status` the playback state.
 
 ```python
 from hqplayer_client import HQPlayerConnection, file_path_to_uri
-from config import settings
 
 # Connect to HQPlayer
-with HQPlayerConnection(host=settings.hqplayer_host) as hqp:
+with HQPlayerConnection(host="127.0.0.1") as hqp:
     # Read the status
     status = hqp.get_status()
     print(f"State: {status.state.name}")
@@ -57,12 +56,13 @@ off), and tapping a row makes it the output. There is no connection form.
 How files reach it follows from its address: by path on this machine,
 streamed from the media proxy anywhere else.
 
-`HQPLAYER_HOST` / `HQPLAYER_PORT` in `.env` are only the address a node
-starts from before anything was picked (three compose files default to
-`host.docker.internal:4321`; `docker-compose.pi.yml`, on the host's network,
-to `127.0.0.1:4321`); a pick in the Web UI is stored in the
-database and wins. `HQPLAYER_ENABLED` does not make HQPlayer the output —
-the pick does.
+The pick is stored in the database and is the only HQPlayer a node ever
+connects to: with none picked it connects to none (since 2026-11-22; before
+that the address in `.env` was asked by several screens whether or not
+anyone had chosen it). `HQPLAYER_HOST` / `HQPLAYER_PORT` /
+`HQPLAYER_ENABLED` in `.env` choose nothing: an install older than the
+picker, which they configured, had that saved as its pick once, at its
+first start on the release of 2026-11-22.
 
 ## Capabilities
 

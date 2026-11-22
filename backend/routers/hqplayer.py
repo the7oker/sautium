@@ -39,13 +39,23 @@ from hqp_rate_check import mode_kind
 from hqplayer_client import VOLUME_FIXED
 from playback import hqp_link
 from playback.hqp_backend import change_dsp
-from playback.hqp_link import Building, Dropped, NotAnswering
+from playback.hqp_link import Building, Dropped, NotAnswering, NotChosen
 from playback.hqp_meter import meter as hqp_meter
 from playback.manager import OutputHeld, manager
 
 router = APIRouter(prefix="/api/hqplayer", tags=["hqplayer"])
 
 _FAVORITES_KEY = "hqplayer.favorite_filters"
+
+
+def _chosen_link() -> hqp_link.HqpLink:
+    """The link of the HQPlayer the person chose — or the one refusal of a
+    route that reads or commands an HQPlayer while none is chosen: 409, and
+    nothing is asked of any address."""
+    try:
+        return hqp_link.chosen()
+    except NotChosen as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 def _load_favorites() -> List[str]:
@@ -134,6 +144,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     records what HQPlayer said of itself; the More drawer and the Output
     picker's dot ask the plain state, a connection check."""
     from playback.hqp_backend import _stream_mode, hqp_media_host
+    link = _chosen_link()
     response: Dict[str, Any] = {
         "host": settings.hqplayer_host,
         "port": settings.hqplayer_port,
@@ -149,7 +160,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
     # The row the Output picker registered for this HQPlayer — its name
     # is what the screen calls it, its id what Settings › Library keys on.
     import hqp_library
-    ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+    ep = hqp_library.driven_endpoint()
     response["endpoint_id"] = ep["id"] if ep else None
     response["name"] = ep["name"] if ep else None
     response["label"] = hqp_library.label(ep["name"], ep["product"]) if ep else None
@@ -169,7 +180,6 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         # run's Cancel must still be there.
         from playback import hqp_benchmark
         response["benchmark"] = hqp_benchmark.summary(ep)
-    link = hqp_link.selected()
     held = manager.held
     if link.lent and held is not None:
         # The benchmark drives HQPlayer on its own connection: nothing else
@@ -223,7 +233,7 @@ def get_state(dsp: bool = False) -> Dict[str, Any]:
         return response
     if ep is not None and info:
         hqp_library.note_info(ep["id"], info, here=not _stream_mode())
-        ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+        ep = hqp_library.driven_endpoint()
     response["headroom"] = _headroom(ep, state, status, lists)
     response["ab"] = _ab_block(ep, state, response["headroom"], lists)
     response["benchmark"] = _benchmark_block(ep, state, lists, volume_range)
@@ -326,7 +336,7 @@ def get_facts(kind: str, name: str) -> Dict[str, Any]:
     nothing; 503 when it cannot be reached or did not give the list."""
     if kind not in ("filter", "modulator"):
         raise HTTPException(status_code=400, detail="kind must be 'filter' or 'modulator'")
-    link = hqp_link.selected()
+    link = _chosen_link()
     try:
         link.refuse()
         with link.asking() as hqp:
@@ -511,15 +521,16 @@ def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
     block — a reading, never held at the command gate — and what the tool
     reads besides."""
     from routers.settings import _read
-    output = _read("output.type")
-    if output and output != "hqplayer":
+    # unset is this device (PlaybackManager.init_from_settings), never "HQPlayer may have it"
+    output = _read("output.type") or "browser"
+    if output != "hqplayer":
         return hqp_assistant.Read(output=output)
     hold = manager.held
     if hold is not None:
         return hqp_assistant.Read(held=hold["label"])
     needs = hqp_assistant.READS[tool]
     try:
-        with hqp_link.selected().asking() as hqp:
+        with hqp_link.chosen().asking() as hqp:
             info, state = hqp.get_info(), hqp.get_state()
             lists, refused = {}, {}
             for name in needs:
@@ -548,7 +559,7 @@ def _assistant_read(tool: str, args: Dict[str, str]) -> hqp_assistant.Read:
             read = read._replace(adaptive=queue[0], sources=queue[1], heard=heard)
     if tool == "compare":
         import hqp_library
-        ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+        ep = hqp_library.driven_endpoint()
         # This host's speeds under the engine HQPlayer reports now — the
         # endpoint's last one while it reports none — as host_fit reads them
         live = ({**ep, "hqp_engine": info.get("engine") or ep["hqp_engine"]}
@@ -565,7 +576,7 @@ def _host_records(args: Dict[str, str], read: hqp_assistant.Read) -> Dict[str, A
     host holds records at in it; or the words why there are none."""
     import hqp_library
     from playback import hqp_load
-    ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+    ep = hqp_library.driven_endpoint()
     if ep is None or not ep.get("hqp_engine"):
         return {"words": hqp_assistant.NOTHING_HERE}
     mode, why = hqp_assistant.host_ask(args, read)
@@ -594,7 +605,8 @@ def set_config(req: ConfigRequest) -> Dict[str, Any]:
     HQPlayer builds past a moment, `building` at once with the knobs still
     to go; the rest follows behind the answer. 409 while the output is lent,
     HQPlayer builds or answers nothing past a short silence, or a newer
-    intent took over; 503 when it cannot be reached."""
+    intent took over or no HQPlayer is chosen; 503 when it cannot be reached."""
+    _chosen_link()
     try:
         return change_dsp(req.model_dump())
     except (OutputHeld, Building, Dropped, NotAnswering) as e:
@@ -616,7 +628,7 @@ def nudge_volume(req: VolumeRequest) -> Dict[str, Any]:
     own answer to the Volume is a bare Error. With no range given the
     step never goes above 0 dB: a tap must not be what turns a pair of
     headphones past full scale."""
-    link = hqp_link.selected()
+    link = _chosen_link()
     try:
         with link.command():
             _refuse_while_held()
@@ -670,12 +682,12 @@ def get_benchmark() -> Dict[str, Any]:
     measured, that run's results, marked stale."""
     import hqp_library
     from playback import hqp_benchmark, hqp_load
-    ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+    ep = hqp_library.driven_endpoint()
     out = hqp_benchmark.summary(ep)
     out.update(rows=[], context=None, current=None, thresholds=None)
     if ep is None:
         return out
-    link = hqp_link.selected()
+    link = _chosen_link()
     try:
         link.refuse()
         with link.asking() as hqp:
@@ -765,7 +777,7 @@ def put_cuda(req: CudaRequest) -> Dict[str, Any]:
     from playback.hqp_backend import _stream_mode
     if req.value not in (None, "off", "full", "convolution"):
         raise HTTPException(status_code=400, detail="value must be off, full or convolution")
-    ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+    ep = hqp_library.driven_endpoint()
     if ep is None:
         raise HTTPException(status_code=409, detail="This HQPlayer is not registered yet")
     if not _stream_mode() and hqp_library.local_cuda()[0]:

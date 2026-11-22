@@ -547,7 +547,7 @@ class _Issuer:
     handshake without a certificate (in `missing_word`), a pow one without
     its proof, and accepts one that carries both."""
 
-    def __init__(self, tls_dir: Path, missing_word: str, small: bool = False):
+    def __init__(self, tls_dir: Path, missing_word: str, small: bool = False, knows: bool = False):
         import ssl
 
         import uvicorn
@@ -567,6 +567,14 @@ class _Issuer:
         async def handshake(request: Request):
             body = await request.json()
             self.seen.append((time.monotonic(), body))
+            if knows:
+                # The master's re-accept of a key it holds as a friend: no
+                # identity gate, and the grant it signs for that key
+                from desktop.p2p import invite_tokens
+                return {"accepted": True, "public_key_hex": self.pub, "username": "issuer",
+                        "invite_code": self.invite,
+                        "grant": invite_tokens.sign_grant(self.key, body["token_id"], [],
+                                                          body["public_key_hex"], self.pub)}
             if small:
                 # A node too small to check a mined proof knows an identity
                 # verified by email, and says so of any other
@@ -610,8 +618,8 @@ def parked(node, scratch_dsn, tmp_path, monkeypatch):
     from desktop.p2p import chat_client as cc
     from desktop.p2p.chat_service import ChatService
 
-    def make(missing_word="identity certificate required", small=False):
-        issuer = _Issuer(tmp_path / "tls", missing_word, small)
+    def make(missing_word="identity certificate required", small=False, knows=False):
+        issuer = _Issuer(tmp_path / "tls", missing_word, small, knows)
         made.append(issuer)
         identity = _account(node)
         with node.conn.cursor() as cur:
@@ -948,6 +956,68 @@ def _identity(method="pow"):
     return pubkey, _issue(pubkey, method, EASY)
 
 
+def _heard(conn, seconds: float = 5) -> list:
+    """The channels a listening connection was notified on, waited for (a
+    query on it since may already have read them off the socket)."""
+    conn.poll()
+    if not conn.notifies and select.select([conn], [], [], seconds)[0]:
+        conn.poll()
+    return [note.channel for note in conn.notifies]
+
+
+def test_a_node_support_met_on_another_machine_says_what_it_reaches(node, parked, scratch_dsn, monkeypatch):
+    """PI-NODE-2B §8.4, PI-NODE-2C §10: an account made on a bigger machine,
+    born again on a node that runs no model. The master holds the key as a
+    friend and re-accepts its handshake with no identity gate, so Support
+    answers; the node itself holds nothing another node can check. The state
+    stays `needs_email`, the page is told that Support knows the account, and
+    the acceptance is the event that tells it."""
+    import master_node
+    from desktop.p2p import master_node as client_master
+    from routers import settings as settings_router
+    _no_model(monkeypatch)
+    issuer, client, identity = parked(knows=True)
+    for module in (master_node, client_master):
+        monkeypatch.setattr(module, "MASTER_PUBKEY_HEX", issuer.pub)
+    with node.conn.cursor() as cur:
+        cur.execute("UPDATE friends SET source = 'master' WHERE invite_code = %s", (issuer.invite,))
+
+    async def scene():
+        await p2p_router.start_identity_worker()
+        await p2p_router._identity_worker.task
+        before = settings_router.identity_event()
+        assert (before["status"], before["support_known"]) == ("needs_email", False)
+        with node.conn.cursor() as cur:
+            cur.execute("LISTEN sautium_identity")
+        client._loop = asyncio.get_running_loop()
+        await client._do_resolve_pending()
+    asyncio.run(scene())
+    assert _resolved(node, issuer)
+    assert _heard(node.conn) == ["sautium_identity"], "the acceptance woke no page"
+    after = settings_router.identity_event()
+    assert (after["status"], after["support_known"]) == ("needs_email", True)
+    assert settings_router._identity_row()["support_known"] is True
+    # A contact that answered and holds no grant is not Support's word
+    with node.conn.cursor() as cur:
+        cur.execute("DELETE FROM friend_grants")
+    assert settings_router.identity_event()["support_known"] is False
+
+
+def test_a_friends_acceptance_is_no_news_of_the_identity(node, parked):
+    """Only the Support contact's acceptance changes what the identity state
+    says; a friend's wakes the chat's own stream."""
+    issuer, client, identity = parked(knows=True)
+
+    async def scene():
+        with node.conn.cursor() as cur:
+            cur.execute("LISTEN sautium_identity")
+        client._loop = asyncio.get_running_loop()
+        await client._do_resolve_pending()
+    asyncio.run(scene())
+    assert _resolved(node, issuer)
+    assert _heard(node.conn, 1) == []
+
+
 def test_a_machine_whose_whole_memory_is_under_the_guard_refuses_a_proof_for_good(node, scratch_dsn):
     """Not "busy, come back in 30 s" for ever: a stated refusal, with no
     Retry-After — and said before the proof is asked for."""
@@ -978,31 +1048,14 @@ def test_a_machine_that_is_only_short_of_memory_now_still_says_busy(node, scratc
         assert admission.retry_after
 
 
-def test_the_memory_limit_is_the_cgroups_where_one_is_set(tmp_path, monkeypatch):
-    import builtins
-    real = builtins.open
-    files = {}
-
-    def fake(path, *a, **kw):
-        if str(path) in files:
-            if files[str(path)] is None:
-                raise FileNotFoundError(path)
-            return real(files[str(path)], *a, **kw)
-        return real(path, *a, **kw)
-
-    def write(name, text):
-        (tmp_path / name).write_text(text)
-        return tmp_path / name
-    monkeypatch.setattr(builtins, "open", fake)
-    files["/proc/meminfo"] = write("meminfo", "MemTotal:       16000000 kB\nMemAvailable: 1 kB\n")
-    files["/sys/fs/cgroup/memory/memory.limit_in_bytes"] = None
-    files["/sys/fs/cgroup/memory.max"] = write("max", "max\n")
-    assert identity_pow.mem_limit_kib() == 16000000
-    files["/sys/fs/cgroup/memory.max"] = write("capped", f"{2 * 1024 ** 3}\n")
-    assert identity_pow.mem_limit_kib() == 2 * 1024 * 1024
-    files["/sys/fs/cgroup/memory.max"] = None
-    files["/sys/fs/cgroup/memory/memory.limit_in_bytes"] = write("v1", f"{1 << 62}\n")   # v1's "no limit"
-    assert identity_pow.mem_limit_kib() == 16000000
+def test_the_gates_memory_limit_is_the_helpers(scratch_dsn):
+    """The limit a gate decides "this node can never check a proof" from is
+    the one reading of the process's memory (tests/test_machine_cores.py)."""
+    import inspect
+    from desktop import machine_tier
+    default = inspect.signature(identity_registry.IdentityGate.__init__).parameters["mem_limit_kib"].default
+    assert default is machine_tier.memory_limit_kib
+    assert not hasattr(identity_pow, "mem_limit_kib")
 
 
 def test_a_guest_parks_on_a_node_too_small_to_check_it_until_its_identity_is_another(node, parked,

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from tqdm import tqdm
 
 from config import settings
+from desktop.machine_tier import usable_cores
 from models import (
     Artist, Album, Track, TrackArtist, AlbumArtist,
     AlbumVariant, MediaFile, HqpLibraryFile, Genre,
@@ -1895,7 +1896,7 @@ class LibraryScanner:
 
         # ── Phase 1: extract metadata in parallel ───────────────────
         metadata_results: List[Tuple[Path, Dict[str, Any]]] = []
-        num_workers = min(4, os.cpu_count() or 4)
+        num_workers = min(4, usable_cores())
         extract_done = 0
         cancelled_in_phase1 = False
 

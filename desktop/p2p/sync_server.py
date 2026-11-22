@@ -168,6 +168,9 @@ class SyncServer:
         self._client_announce_cb: Optional[Callable] = None
         self._client_withdraw_cb: Optional[Callable] = None
         self._probe_last: dict[str, float] = {}
+        # () -> this node's own public addresses (chat_client.public_addresses);
+        # the manager's, once it has a router and a DHT to ask
+        self.own_addresses: Callable[[], frozenset] = frozenset
         # In-flight forwards awaiting a receipt: uuid -> (recipient, sender,
         # Future).
         # The ONLY state a relay holds for a forwarded message, and only
@@ -1784,7 +1787,9 @@ class SyncServer:
         style: connect BACK to the request's source address (never a
         caller-supplied IP — no reflector) and confirm /health identity.
         A verdict exists only from an internet vantage: a source that is
-        not globally routable gets `reachable: null` and spends no cooldown
+        not globally routable gets `reachable: null` and spends no cooldown,
+        and so does one behind this node's own router — known by its
+        address, or by the call-back meeting this node's own key
         (mirrors backend/routers/peer_chat.py)."""
         if not self.account_info or not self._chat_service:
             return self._json_response(
@@ -1824,8 +1829,18 @@ class SyncServer:
                 "reachable": None, "observed_ip": source_ip,
                 "tested_port": port, "error": "source not globally routable"})
 
+        # The prober reached us from our own public address: it stands
+        # behind our router, and a call-back to that address lands on the
+        # router's forward of the port — ours, or nobody's — whatever the
+        # prober serves.
+        same_router = {"reachable": None, "same_router": True, "observed_ip": source_ip,
+                       "tested_port": port, "error": "the address is this node's own"}
+        if addrs.canon_host(source_ip) in self.own_addresses():
+            return self._json_response(request, same_router)
+
         now = time.monotonic()
-        if now - self._probe_last.get(pubkey, 0) < PROBE_COOLDOWN:
+        last = self._probe_last.get(pubkey, 0)
+        if now - last < PROBE_COOLDOWN:
             return self._json_response(
                 request, {"error": "probe cooldown"}, status=429)
         self._probe_last[pubkey] = now
@@ -1837,12 +1852,12 @@ class SyncServer:
         host = f"[{source_ip}]" if ":" in source_ip else source_ip
         reachable, error = False, None
         import aiohttp as _aiohttp
+        # Pinned to the prober's key: "reachable" must mean THE PROBER
+        # answers at that address, not whoever squats on the port.
+        channel = peer_auth.pinned_ssl_context(pubkey)
         try:
-            # Pinned to the prober's key: "reachable" must mean THE PROBER
-            # answers at that address, not whoever squats on the port.
             async with _aiohttp.ClientSession(
-                connector=_aiohttp.TCPConnector(
-                    ssl=peer_auth.pinned_ssl_context(pubkey)),
+                connector=_aiohttp.TCPConnector(ssl=channel),
                 timeout=_aiohttp.ClientTimeout(total=PROBE_TIMEOUT),
             ) as session:
                 async with session.get(
@@ -1854,6 +1869,15 @@ class SyncServer:
                         error = "identity mismatch"
         except Exception as e:
             error = type(e).__name__
+
+        if not reachable and peer_auth.seen_pubkey(channel) == own_pubkey.lower():
+            # The call-back met this node itself: no probe was made of the
+            # prober, so none is counted against it.
+            if last:
+                self._probe_last[pubkey] = last
+            else:
+                self._probe_last.pop(pubkey, None)
+            return self._json_response(request, same_router)
 
         payload = {"reachable": reachable, "observed_ip": source_ip,
                    "tested_port": port}

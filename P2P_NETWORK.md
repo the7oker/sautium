@@ -212,13 +212,17 @@ no peer and no DHT key and carries nothing — turned off during a peer's
 session, the pull asks nothing more and no carry follows; so do both slice
 cycles, and the DHT holds the rare-artist tail — a node that does not give
 does not take; since 2026-11-19 a second switch, `sync.pass_on` ("Pass on what
-this node holds"), splits the two sides for a node born small: off, the node
+this node holds"), splits the two sides, the owner's choice on any node: off, the node
 still asks and takes, and every peer sync route answers 403, `/health` says
 `sharing: false` and nothing of what the node holds (no dump, no slice count,
 no holdings summary), the LAN beacon and the DHT's rare-artist tail are held
 and the walk offers no carrier anything — it tells the network less, never
-more. A node born Nano also relays for nobody (`p2p.relay_enabled` off in its
-preset, the owner's switch like the rest).
+more. Since 2026-11-22 a node born Nano passes on by default, like every
+node (a pull served cost under 5 % of a core on a 2 GB board, and a sync pull
+has no stranger's proof to check); one born between 2026-11-19 and that day
+keeps the off its birth wrote until its owner turns it on. Its relay stays
+off (`p2p.relay_enabled` off in its preset, the owner's switch like the rest:
+a relay's traffic does not stop).
 What a node took without evaluating its author's proof is never passed on,
 whatever either switch says), the
 diag sink, the post-run hook (both runtimes request the MB and LB slice cycles; before
@@ -497,7 +501,29 @@ auto-add never resurrects it (re-adding the code by hand clears the flag).
   — and the prober asks only through the master's public addresses (the
   Worker's address hint stands in when it knows the master by LAN alone).
   The same rule, `addrs.is_internet_vantage`, gates the passive inbound
-  proof.
+  proof. Since 2026-11-22 a vantage behind the prober's own router is no
+  vantage either: the call-back to their shared public address lands on the
+  router's forward of the port — the vantage's own surface — and `false`
+  from it silenced a node whose mapping worked. The prober leaves out a
+  vantage at its own public address (the router's WAN address, the one DHT
+  peers see: `chat_client.public_addresses`); a vantage that is asked from
+  an address it knows as its own, or whose call-back meets its own key
+  (`peer_auth.seen_pubkey`), answers `reachable: null` with
+  `same_router: true` and spends no cooldown. The verdict is then
+  `unknown` — announces stay on, no relay is recruited — until a vantage
+  outside the router exists.
+
+The mapper never takes a port that is not its own (since 2026-11-22,
+`upnp_service.add_mapping`): it reads the router's mapping of the external
+port first and asks only where there is none or the mapping is this node's;
+a new mapping is checked once from inside — one pinned TLS handshake to the
+router's public address on that port (`upnp_service.leads_here`) — and one
+another node answers on (a static forward the router's table does not list,
+which its yes did not mention) is removed for the next port; a renewal the
+router refuses, or a port that now leads elsewhere, is a lost mapping, and
+the node announces what is left. A second node behind one router therefore
+announces the port it got (8802 beside a neighbour's 8801): the DHT
+announce and the probe have always carried the external port.
 
 An unreachable node **suppresses its own DHT announces**
 (`set_announces_enabled`): a dead address in the DHT pollutes everyone's
@@ -1629,7 +1655,11 @@ its report is JSON by section (format 2, with `made_at`), the machine's facts
 containers and their restarts and OOM kills — into `system.json`'s `host`
 through `scrub_detail`, the containers' and the agent's log tails (2 000
 lines each) into `logs/` only when ticked, through `scrub_personal`; a line a
-container logged cannot move into the facts. The container gains no Docker
+container logged cannot move into the facts. Since 2026-11-22 the agent keeps
+the outgoing backend container's log before an update, its way back or the
+setup makes the container again (`./host/logs/`, the three newest): their
+names and sizes ride with the containers' facts, the newest one's tail as one
+more log (`logs/backend-before-update.log`), ticked like the rest. The container gains no Docker
 socket, journal or host path. The manifest carries `runtime` (launcher or
 docker, with its host networking and its agent) and `unavailable` — what this
 kind of node cannot give and why: no host agent (a hand-run compose, a

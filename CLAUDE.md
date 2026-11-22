@@ -418,7 +418,15 @@ See:
   HQPlayers and renderers, HQPlayer probed first), and tapping one makes
   it the HQPlayer the node drives; its screen syncs its library. This
   machine's aliases (`localhost`, `host.docker.internal`, its LAN address)
-  are one HQPlayer (`address_key`); there is no connection editor.
+  are one HQPlayer (`address_key`); there is no connection editor. The
+  HQPlayer a node drives is ONE fact, the saved pick (`hqp_library.driven`,
+  since 2026-11-22): with none picked there is no link and no connection —
+  the environment's `HQPLAYER_HOST` and any default address are dialled by
+  nothing (an install older than the picker had its choice saved once,
+  `db_migrate`'s `hqp_choice_v1`), an unset `output.type` is this device to
+  every gate, and the link's own connect refuses an address that is neither
+  chosen, registered nor being probed by the person's own look
+  (`HqpLink._may_dial`).
 
 ---
 
@@ -497,8 +505,10 @@ See:
   from the taking side: off, the node still asks and takes, and answers no
   peer sync route, says `sharing: false` and nothing of what it holds in
   `/health`, beacons and announces no tail and offers no carrier anything;
-  default on, off in a node born Nano — whose preset also turns
-  `p2p.relay_enabled` off; shown only where it is off or the node is Nano), `sync.announce_limit` (rare
+  default on, on every node — since 2026-11-22 a node born Nano passes on
+  too, and its preset turns only `p2p.relay_enabled` off (a node born Nano
+  before that keeps the off its birth wrote); shown only where it is off or
+  the node is Nano), `sync.announce_limit` (rare
   artist DHT tail; 150 = half the traversal lane, announced only under the
   computed `p2p.rare_mode`), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
   each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
@@ -578,10 +588,15 @@ See:
   a copy of the database beside it, in its own container, and the way back
   — after any failure past the node's stop, and at the next start for an
   update a run did not finish; a release that did not start is not tried
-  again for a day),
+  again for a day; since 2026-11-22 the outgoing backend container's log is
+  kept first — its tail, `0600` under `./host/logs/`, the three newest —
+  and PostgreSQL's `PG_*` lines of `.env` follow the machine's memory by
+  the setup's own table, `machine_tier.pg_settings`: set, or removed where
+  the compose file's defaults fit),
   `diagnostics` (its report JSON by section since 2026-11-21: the machine's
   facts apart from the containers' logs by name, so a support bundle takes
-  the facts without a tick and the logs only with one) — asked by the NAME
+  the facts without a tick and the logs only with one — the newest kept
+  log among them, the kept logs' names among the facts) — asked by the NAME
   of an empty file in `./run/requests`,
   the one folder of the agent's a container writes. **The host's side never
   opens a path a container can write**: the folder is emptied by handles
@@ -637,6 +652,21 @@ See:
   not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
   `--music` folder on a disk such a desktop mounts). `SAUTIUM_BIRTH_PRESET`
   (`nano`) is read once per database (`db_migrate`, `birth_preset_v1`).
+  Since 2026-11-22 (PI-NODE-2C): a root's bind makes its own folder
+  (`create_host_path`), so a root that is gone never stops the node's start —
+  its library is away, and `./sautium roots --forget <folder>` takes it out
+  of the override; the automount mounts NTFS by `ntfs-3g` where it is
+  installed and writes a volume it did not mount to
+  `/media/sautium/.unread/<kernel name>` (root's file, four lines: the boot's
+  id, blkid's type, the label, the driver tried — the node reads it as a
+  stranger's text and the unit's stop removes it); an installed automount is
+  compared by its bytes and offered again as an update; the fstab line
+  carries `x-systemd.wanted-by=<the disk's device unit>`, so its mount starts
+  at every plug (the automount stands aside for a disk fstab names); a root
+  that is a mount point has its label in `SAUTIUM_LIBRARY_ROOT_LABELS`; the
+  preset reads the MEDIUM under Docker's data (`machine_tier.storage_medium`:
+  a microSD card or a USB stick is born Nano, an SSD in a USB case is not),
+  and a swap file on a card is said with its root step.
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
   names it). `config.build_identity()` is the one reader — `/config`,
@@ -894,8 +924,8 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
-| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `pair`, `update`, `remove`): standard library, never root, root steps printed and never run |
-| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing, the stored choice) and the mount table's wake for a disk plugged in later |
+| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`): standard library, never root, root steps printed and never run |
+| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
 | `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
 | `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8) |

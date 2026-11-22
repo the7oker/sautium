@@ -68,9 +68,13 @@ class Settings(BaseSettings):
     genius_access_token: Optional[str] = None
 
     # HQPlayer Integration (Phase 3.2)
-    # An address, never "localhost": Windows resolves it to ::1 first and
-    # HQPlayer listens on IPv4 only, a refused attempt on every connect.
-    hqplayer_host: str = "127.0.0.1"
+    # At a start these are the environment's (HQPLAYER_HOST / _PORT /
+    # _ENABLED): the choice of an install older than the Output picker, read
+    # once by db_migrate's hqp_choice_v1 and never dialled. From the overlay
+    # on (routers.settings.load_hqplayer_from_db) host and port are the
+    # process's copy of the person's saved pick — None while none was made;
+    # "is an HQPlayer chosen" is hqp_library.driven().
+    hqplayer_host: Optional[str] = None
     hqplayer_port: int = 4321
     hqplayer_enabled: bool = False
     # Where an HQPlayer Desktop on this machine keeps its log
@@ -165,6 +169,9 @@ class Settings(BaseSettings):
     # them in the Web UI and music_library_path is that stored choice; unset,
     # the folder is the one MUSIC_LIBRARY_PATH names.
     sautium_library_roots: str = ""
+    # The labels of the roots that are disks themselves, as the setup read
+    # them (a JSON object, root → label; library_root._root_labels)
+    sautium_library_root_labels: str = ""
     p2p_username: str = ""
     p2p_password: str = ""
 

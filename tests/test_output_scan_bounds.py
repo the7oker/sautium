@@ -8,6 +8,7 @@ HQPlayer answers is that box's failure alone. The attach reads a renderer's
 every answer by the same rule (playback/dlna_backend.py _BoundedRequester)."""
 
 import asyncio
+import contextlib
 import gzip
 import socket
 import sys
@@ -217,7 +218,7 @@ def quiet_scan(monkeypatch):
     import tls_gen
     from routers import settings as settings_router
     monkeypatch.setattr(tls_gen, "detect_private_host_ips", lambda: [])
-    monkeypatch.setattr(player, "_configured_hqp", lambda: None)
+    monkeypatch.setattr(player.settings, "hqplayer_host", None)
     monkeypatch.setattr(player, "_dlna_pins", lambda: {})
     monkeypatch.setattr(player, "_hqplayer_entries", lambda: [])
     monkeypatch.setattr(player, "_hqp_discovered", {})
@@ -261,7 +262,7 @@ def test_what_one_hqplayer_answers_is_its_failure_alone(quiet_scan, monkeypatch)
             return None
     monkeypatch.setattr(quiet_scan, "async_search", no_search)
     monkeypatch.setattr(player, "_unicast_sweep", sweep)
-    monkeypatch.setattr(player.hqp_link, "link_for", lambda host, port: Link())
+    monkeypatch.setattr(player.hqp_link, "probing", lambda host, port: contextlib.nullcontext(Link()))
     monkeypatch.setattr(hqp_library, "resolve_endpoint", resolve)
     asyncio.run(player._scan_run())
     assert player._hqp_discovered[("192.0.2.7", 4321)]["control"] is False

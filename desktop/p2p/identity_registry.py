@@ -67,6 +67,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
+from desktop import machine_tier
 from desktop.p2p import identity_pow, identity_proof
 
 logger = logging.getLogger(__name__)
@@ -557,7 +558,7 @@ class IdentityGate:
 
     def __init__(self, conn_factory: Callable, verify_certificate: Callable[[dict], bool], *,
                  mem_available_kib: Callable[[], Optional[int]] = identity_pow.mem_available_kib,
-                 mem_limit_kib: Callable[[], Optional[int]] = identity_pow.mem_limit_kib,
+                 mem_limit_kib: Callable[[], Optional[int]] = machine_tier.memory_limit_kib,
                  mem_guard_kib: int = identity_proof.MEM_GUARD_KIB):
         """`conn_factory()` returns a context manager yielding a psycopg2
         connection; `verify_certificate` is the surface's authority mirror."""

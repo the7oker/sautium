@@ -995,7 +995,9 @@ def _pg_memory_tier() -> str:
     thresholds; psutil is a desktop-venv dependency so it's always present
     here."""
     import psutil
-    ram_gb = psutil.virtual_memory().total / 1e9
+    from desktop.machine_tier import memory_limit_kib
+    kib = memory_limit_kib()
+    ram_gb = (kib * 1024 if kib is not None else psutil.virtual_memory().total) / 1e9
     if ram_gb >= 24:
         return ("shared_buffers = '1GB'\n"
                 "effective_cache_size = '6GB'\n"

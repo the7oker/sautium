@@ -43,10 +43,12 @@ DEFAULT_CONFIG = {
         "name": None,
     },
     "hqplayer": {
-        # Off until the owner picks HQPlayer in the Output picker. Setup used to
-        # ask with the box pre-ticked, which made _hqp_configured() true and let
-        # manager's legacy branch hand a brand-new node to HQPlayer — an output
-        # most people do not own. Existing installs keep their saved value.
+        # Nothing here chooses an output: the HQPlayer a node drives is the
+        # person's pick in the Output picker, saved in the database. Setup
+        # used to ask with the box pre-ticked, and an install from then
+        # (`enabled` true, no pick) had that saved as its pick once
+        # (backend/db_migrate.py hqp_choice_v1, 2026-11-22); since then these
+        # three reach the backend's environment and are dialled by nothing.
         "enabled": False,
         "host": LOOPBACK,
         "port": 4321,
@@ -329,7 +331,7 @@ def generate_env_file(config: dict, env_path: Path) -> None:
 
 
 def mcp_servers(python: str, mcp_dir: Path, backend_dir: Path, *, db: dict, backend_url: str,
-                identity_dir: Path, hqplayer_host: str, hqplayer_port: int) -> dict:
+                identity_dir: Path) -> dict:
     """The MCP servers an agent turn starts — the SQL tool and the assistant —
     as both runtimes name them (the launcher's generate_mcp_config, the Docker
     backend's claude_code_runner.write_docker_mcp_config): Python from the
@@ -363,8 +365,6 @@ def mcp_servers(python: str, mcp_dir: Path, backend_dir: Path, *, db: dict, back
                 "args": [str(mcp_dir / "assistant_server.py")],
                 "env": {
                     **db_env,
-                    "HQPLAYER_HOST": hqplayer_host,
-                    "HQPLAYER_PORT": str(hqplayer_port),
                     "BACKEND_URL": backend_url,
                     # Where the server finds shared backend code — explicit,
                     # not derived from the script's own location.
@@ -398,7 +398,6 @@ def write_mcp_config(servers: dict, output_path: Path) -> None:
 def generate_mcp_config(config: dict, output_path: Path) -> None:
     """Generate MCP config (mcp-windows.json) for Claude Code with loopback values."""
     ports = config.get("ports", {})
-    hqp = config.get("hqplayer", {})
     from desktop.db_init import ASSISTANT_ROLE, assistant_password
     from desktop.python_env import get_backend_python
     backend_dir = output_path.parent          # the runner reads the file from backend/
@@ -411,7 +410,6 @@ def generate_mcp_config(config: dict, output_path: Path) -> None:
             "name": "sautium"},
         backend_url=f"http://{LOOPBACK}:{ports.get('web', 8000)}",
         identity_dir=get_config_dir() / "node_identity",
-        hqplayer_host=hqp.get("host", LOOPBACK), hqplayer_port=hqp.get("port", 4321),
     )
     try:
         write_mcp_config(servers, output_path)

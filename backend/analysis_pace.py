@@ -175,34 +175,34 @@ def reserve_gb(kinds) -> float:
     return sum(MODEL_RAM_GB[m][device] for m in models if not resident(m))
 
 
-_CGROUPS = (("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current",
-             "/sys/fs/cgroup/memory.stat", "inactive_file"),
-            ("/sys/fs/cgroup/memory/memory.limit_in_bytes",
-             "/sys/fs/cgroup/memory/memory.usage_in_bytes",
-             "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"))
+# Per hierarchy version: the group's use, its statistics, the statistic that
+# counts the page cache it may drop
+_CGROUP_USE = {2: ("memory.current", "memory.stat", "inactive_file"),
+               1: ("memory.usage_in_bytes", "memory.stat", "total_inactive_file")}
 
 
 def _cgroup_room_bytes() -> Optional[int]:
-    """What the process's control group still allows — a container's memory
-    limit less its use, the page cache it may drop not counted as use — or
-    None where no limit is set. Only the inactive cache counts as droppable:
-    the active cache can be dropped too, so this errs on the side of less
-    room."""
-    for limit_path, used_path, stat_path, reclaimable in _CGROUPS:
-        try:
-            limit = open(limit_path).read().strip()
-            used = int(open(used_path).read().strip())
-        except (OSError, ValueError):
-            continue
-        if limit == "max" or int(limit) >= 1 << 60:
-            return None
-        try:
-            stat = dict(line.split() for line in open(stat_path))
-            used -= int(stat.get(reclaimable, 0))
-        except (OSError, ValueError):
-            pass
-        return int(limit) - used
-    return None
+    """What the process's control group still allows — the tightest memory
+    limit on it or above it, less that group's use, the page cache it may
+    drop not counted as use — or None where no limit is set. Only the
+    inactive cache counts as droppable: the active cache can be dropped too,
+    so this errs on the side of less room."""
+    from desktop.machine_tier import cgroup_memory_limit
+    found = cgroup_memory_limit()
+    if found is None:
+        return None
+    limit, directory, version = found
+    used_name, stat_name, reclaimable = _CGROUP_USE[version]
+    try:
+        used = int(open(os.path.join(directory, used_name)).read().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        stat = dict(line.split() for line in open(os.path.join(directory, stat_name)))
+        used -= int(stat.get(reclaimable, 0))
+    except (OSError, ValueError):
+        pass
+    return limit - used
 
 
 def available_memory_gb() -> float:

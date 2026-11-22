@@ -100,7 +100,7 @@ def change_dsp(knobs: Dict[str, Any]) -> Dict[str, Any]:
     is not ours to resume. Raises OutputHeld or Dropped while the output is
     lent (or its link let go), Building while HQPlayer builds, NotAnswering
     while it answers nothing past a short silence."""
-    return _DspChange(hqp_link.selected(),
+    return _DspChange(hqp_link.chosen(),
                       {k: v for k, v in knobs.items() if v is not None}).answer()
 
 
@@ -1174,7 +1174,7 @@ class HqpBackend(PlayerBackend):
 
     def __init__(self, emit, queue: CanonicalQueue):
         super().__init__(emit)
-        self._link: HqpLink = hqp_link.selected()
+        self._link: HqpLink = hqp_link.chosen()
         self._queue = queue
         self._endpoint_row: dict = {}
         self._wake = threading.Event()
