@@ -14,10 +14,22 @@ mount_watch.py; PI-NODE-2B §4.3).
   reads under roots a link that leaves them is not followed. A scanner with
   no folder refuses rather than walk the working directory.
 - The mount table's wake, through its seam (a POLLPRI no pipe can fake).
+- Since PI-NODE-2C (§2.3, §6.3, §9, §13): a volume plugged in that nothing
+  mounted is the automount's small file, believed only as far as it goes
+  (its boot, a type from a fixed map, a bounded label; never a link, a FIFO
+  or a long file), a place that cannot be opened and a notice that leaves
+  with the disk; its folder is watched by inotify, on a real folder here. A
+  disk is a point a WHOLE filesystem is mounted at — in a container every
+  root is a mount point, its bind — and "safe to pull" is the superblock's
+  read-only word. A root that is a disk goes by the label the setup read; a
+  root that is an empty folder and no disk is said at the start and listed
+  as empty.
 On a real PostgreSQL where a row is read or written; skipped without one.
 """
 
+import json
 import os
+import select
 import sys
 from pathlib import Path
 
@@ -61,7 +73,7 @@ def tree(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "sautium_library_roots", f"{music}:{disks}")
     monkeypatch.setattr(settings, "music_library_path", "")
     monkeypatch.setattr(settings, "music_host_path", None)
-    monkeypatch.setattr(library_root, "_mount_points", lambda: {str(disks / "4A21-0000")})
+    monkeypatch.setattr(library_root, "_mounts", lambda: {str(disks / "4A21-0000"): True})
     return type("Tree", (), {"music": music, "disks": disks, "outside": outside, "top": tmp_path})
 
 
@@ -375,8 +387,255 @@ def test_the_mount_table_is_read_as_the_kernel_writes_it():
 
     import library_watch
     import mount_watch
-    points = library_root._mount_points()
+    points = library_root._mounts()
     assert "/" in points and "/proc" in points
     assert library_watch._unescape_mount("/media/My\\040Disk") == "/media/My Disk"
     with open(mount_watch.MOUNTINFO, "rb", buffering=0) as f:
         select.poll().register(f, select.POLLERR | select.POLLPRI)
+
+
+# -- a volume nothing mounted (PI-NODE-2C §2.3) -------------------------------------------------
+
+BOOT = "0b5c7a1e-3f0d-4c55-9a53-6f5a4f0f2a11"
+
+
+@pytest.fixture
+def unread(tree, tmp_path, monkeypatch):
+    """The automount's folder of volumes it could not mount, and this boot."""
+    folder = tree.disks / ".unread"
+    folder.mkdir()
+    boot = tmp_path / "boot_id"
+    boot.write_text(BOOT + "\n")
+    monkeypatch.setattr(library_root, "BOOT_ID", str(boot))
+    return folder
+
+
+def _volume(folder: Path, name: str, fs: str, label: str = "", boot: str = BOOT) -> Path:
+    """As the automount writes it: beside, then renamed in."""
+    tmp = folder / f".{name}.tmp"
+    tmp.write_text(f"{boot}\n{fs}\n{label}\n")
+    tmp.rename(folder / name)
+    return folder / name
+
+
+def test_a_volume_nothing_mounted_is_read_from_the_automounts_file(tree, unread):
+    _volume(unread, "sda1", "ntfs", "Elements <b>")
+    _volume(unread, "sdb1", "apfs", "Mac disk")
+    _volume(unread, "mmcblk0p3", "ext3")
+    found = {v["device"]: v for v in library_root.unread()}
+    assert list(found) == ["mmcblk0p3", "sda1", "sdb1"]
+    # a type the automount mounts: this mount failed; one it never mounts
+    assert (found["sda1"]["format"], found["sda1"]["mounts"], found["sda1"]["label"]) == (
+        "NTFS", True, "Elements <b>")
+    assert (found["sdb1"]["format"], found["sdb1"]["mounts"]) == ("APFS", False)
+    assert (found["mmcblk0p3"]["format"], found["mmcblk0p3"]["mounts"], found["mmcblk0p3"]["label"]) == (
+        "ext2/3", False, None)
+    # the onset is the file's own time
+    assert found["sda1"]["since"].startswith("20") and found["sda1"]["since"].endswith("+00:00")
+
+
+@pytest.mark.parametrize("fs", ["zfs_member", "NTFS", "ntfs; rm -rf /", "<script>", "", "x" * 17, "ntfs\x00"])
+def test_a_type_outside_the_map_is_never_shown_as_the_stick_wrote_it(tree, unread, fs):
+    (unread / "sda1").write_bytes(f"{BOOT}\n{fs}\nLabel\n".encode())
+    (volume,) = library_root.unread()
+    assert (volume["format"], volume["mounts"], volume["label"]) == (None, False, "Label")
+
+
+def test_only_the_automounts_own_small_file_of_this_boot_is_believed(tree, unread):
+    _volume(unread, "sda1", "ntfs", "Here")
+    _volume(unread, "sdb1", "ntfs", "A power cut left this", boot="another-boot")
+    (unread / "sdc1").symlink_to(tree.outside / "secret.flac")
+    os.mkfifo(unread / "sdd1")                       # a read that waited here would hang the test
+    (unread / "sde1").write_text(f"{BOOT}\nntfs\n" + "L" * 400)
+    (unread / "sdf1").mkdir()
+    (unread / ".sdg1.tmp").write_text(f"{BOOT}\nntfs\nhalf written\n")
+    (unread / "sd-h1").write_text(f"{BOOT}\nntfs\nnot a kernel name\n")
+    (unread / "sdi1").write_text("")
+    assert [v["device"] for v in library_root.unread()] == ["sda1"]
+    # a label is cut where the automount would have cut it, on a character
+    (unread / "sdj1").write_text(f"{BOOT}\nexfat\n" + "é" * 100)
+    labels = {v["device"]: v["label"] for v in library_root.unread()}
+    assert labels["sdj1"] == "é" * (library_root.LABEL_BYTES_MAX // 2)
+
+
+def test_no_boot_to_compare_with_believes_nothing(tree, unread, monkeypatch):
+    _volume(unread, "sda1", "ntfs")
+    monkeypatch.setattr(library_root, "BOOT_ID", str(tree.top / "absent"))
+    assert library_root.unread() == []
+
+
+def test_a_node_with_no_automount_folder_has_no_unread_volume(tree):
+    assert library_root.unread_folders() == [] and library_root.unread() == []
+
+
+def test_an_unread_volume_is_a_place_that_cannot_be_opened(tree, unread):
+    _volume(unread, "sda1", "ntfs", "Elements")
+    places = library_root.folders()["places"]
+    assert [p["kind"] for p in places] == ["folder", "disk", "unread"]
+    assert places[-1] == {"path": None, "name": "sda1", "kind": "unread", "label": "Elements",
+                          "size_bytes": None, "format": "NTFS", "mounts": True}
+
+
+def _readable(fd: int, seconds: float) -> bool:
+    return bool(select.select([fd], [], [], seconds)[0])
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux's")
+def test_the_unread_folder_wakes_on_a_file_moved_in_and_on_one_removed(tree, unread):
+    import mount_watch
+    fd = mount_watch.unread_watch(library_root.unread_folders())
+    try:
+        assert not _readable(fd, 0.2)
+        tmp = unread / ".sda1.tmp"
+        tmp.write_text(f"{BOOT}\nntfs\nElements\n")
+        assert not _readable(fd, 0.2)                # a file still being written is no event
+        tmp.rename(unread / "sda1")
+        assert _readable(fd, 5) and os.read(fd, 65536)
+        assert [v["device"] for v in library_root.unread()] == ["sda1"]
+        assert not _readable(fd, 0.2)                # one read took every queued event
+        (unread / "sda1").unlink()
+        assert _readable(fd, 5) and os.read(fd, 65536)
+        assert library_root.unread() == []
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux's")
+def test_the_watch_is_armed_at_the_start_only_where_the_folder_is(tree, monkeypatch, caplog):
+    import logging
+
+    import mount_watch
+    started = []
+    monkeypatch.setattr(mount_watch.threading, "Thread", lambda **kw: started.append(kw) or type(
+        "T", (), {"start": lambda self: None})())
+    with caplog.at_level(logging.INFO, logger="mount_watch"):
+        assert mount_watch.start() is True
+    assert [kw["name"] for kw in started] == ["mount-watch"]
+    (tree.disks / ".unread").mkdir()
+    started.clear()
+    assert mount_watch.start() is True
+    assert [kw["name"] for kw in started] == ["unread-watch", "mount-watch"]
+    os.close(started[0]["args"][0])
+    assert f"watching {tree.disks / '.unread'} for disks nothing mounted" in caplog.text
+
+
+def test_a_change_of_the_unread_volumes_wakes_the_notices_and_the_library_stream(db, scratch_dsn, monkeypatch):
+    import mount_watch
+    from routers import settings as settings_router
+    woken = []
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: woken.append(1))
+    listener = psycopg2.connect(scratch_dsn)
+    listener.autocommit = True
+    with listener.cursor() as c:
+        c.execute("LISTEN sautium_notices")
+    mount_watch._unread_changed()
+    assert select.select([listener], [], [], 5)[0]
+    listener.poll()
+    assert [n.channel for n in listener.notifies] == ["sautium_notices"]
+    assert woken == [1]
+    listener.close()
+
+
+def test_an_unread_volume_is_a_notice_that_leaves_with_its_file(tree, unread, db):
+    from routers import settings as settings_router
+
+    def notices():
+        return {n["key"]: n for n in settings_router._notice_items() if n["key"].startswith("disk.unread.")}
+    assert notices() == {}
+    path = _volume(unread, "sda1", "ntfs", "Elements <b>")
+    (item,) = notices().values()
+    assert (item["key"], item["kind"], item["until"]) == ("disk.unread.sda1", "warning", None)
+    assert item["data"] == {"label": "Elements <b>", "format": "NTFS", "mounts": True}
+    onset = item["since"]
+    # plugged in again: another file, another onset — news for the toast
+    path.unlink()
+    assert notices() == {}
+    os.utime(_volume(unread, "sda1", "ntfs", "Elements <b>"), (1_800_000_000, 1_800_000_000))
+    assert notices()["disk.unread.sda1"]["since"] != onset
+
+
+# -- what a disk is, and what can be pulled (§9, §13) ---------------------------------------------
+
+MOUNTINFO = """\
+22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/root rw
+61 22 259:2 /home/pi/Music /home/pi/Music ro,relatime master:1 - ext4 /dev/root rw
+62 22 259:2 /media/sautium /media/sautium ro,relatime master:1 - ext4 /dev/root rw
+63 62 8:1 / /media/sautium/4A21-0000 ro,nosuid,nodev,noexec master:9 - exfat /dev/sda1 ro,uid=1000
+64 62 8:17 / /media/sautium/My\\040Disk ro,nosuid,nodev,noexec master:10 - fuseblk /dev/sdb1 ro,user_id=0
+65 22 259:2 /mnt/sautium-5678-EF01 /mnt/sautium-5678-EF01 ro,relatime master:1 - ext4 /dev/root rw
+66 65 8:33 / /mnt/sautium-5678-EF01 ro,relatime master:11 - vfat /dev/sdc1 ro,fmask=0133
+67 22 8:49 / /srv/music ro,relatime master:12 - ext4 /dev/sdd1 rw,errors=remount-ro
+"""
+
+
+def test_a_disk_is_a_whole_filesystem_and_read_only_is_the_superblocks_word(tmp_path, monkeypatch):
+    table = tmp_path / "mountinfo"
+    table.write_text(MOUNTINFO)
+    monkeypatch.setattr(library_root, "MOUNTINFO", str(table))
+    assert library_root._mounts() == {
+        "/": False,
+        # a root's bind and the automount's folder are no disks: a part of the machine's own filesystem
+        "/media/sautium/4A21-0000": True, "/media/sautium/My Disk": True,
+        # the fstab line's disk over the bind of its empty mount point
+        "/mnt/sautium-5678-EF01": True,
+        # a disk the machine mounted to write: read-only here is only the bind
+        "/srv/music": False}
+
+
+def test_a_root_that_is_a_disk_goes_by_the_label_the_setup_read(tree, monkeypatch, caplog):
+    disk = str(tree.disks / "4A21-0000")
+    monkeypatch.setattr(library_root, "_mounts", lambda: {str(tree.music): True, disk: False})
+    monkeypatch.setattr(settings, "sautium_library_root_labels", json.dumps(
+        {str(tree.music): "My <Music>\nsecond line", "/elsewhere": "x", disk: 7}))
+    places = {p["path"]: p for p in library_root.folders()["places"]}
+    root = places[str(tree.music)]
+    assert (root["kind"], root["name"], root["label"], root["read_only"]) == (
+        "disk", str(tree.music), "My <Music>", True)
+    assert root["size_bytes"] > 0
+    # the automount's disk keeps the automount's label
+    assert (places[disk]["label"], places[disk]["read_only"]) == ("Elements <b>", False)
+    monkeypatch.setattr(settings, "sautium_library_root_labels", json.dumps({str(tree.music): "L" * 5000}))
+    assert library_root.folders()["places"][0]["label"] == "L" * library_root.LABEL_BYTES_MAX
+    for broken in ("{not json", json.dumps(["a list"]), ""):
+        monkeypatch.setattr(settings, "sautium_library_root_labels", broken)
+        assert library_root.folders()["places"][0]["label"] is None
+    assert "SAUTIUM_LIBRARY_ROOT_LABELS is not JSON" in caplog.text
+
+
+def test_only_a_folder_on_a_disk_mounted_read_only_can_be_pulled(tree, monkeypatch):
+    disk = tree.disks / "4A21-0000"
+    assert library_root.pullable(str(disk / "Rock")) and library_root.pullable(str(disk))
+    assert not library_root.pullable(str(tree.music / "Jazz"))          # a folder of the machine's own
+    assert not library_root.pullable(str(disk) + "-beside")
+    assert not library_root.pullable("") and not library_root.pullable(None)
+    monkeypatch.setattr(library_root, "_mounts", lambda: {str(disk): False})
+    assert not library_root.pullable(str(disk / "Rock"))                # mounted to write by someone
+    monkeypatch.setattr(settings, "sautium_library_roots", "")
+    assert not library_root.pullable(str(disk / "Rock"))
+
+
+# -- a root that is gone (§6.3) -------------------------------------------------------------------
+
+def test_a_root_that_is_an_empty_folder_and_no_disk_lists_as_empty(tree, monkeypatch):
+    gone = tree.top / "mnt" / "sautium-5678-EF01"
+    gone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "sautium_library_roots", f"{tree.music}:{tree.disks}:{gone}")
+    places = {p["path"]: p for p in library_root.folders()["places"]}
+    assert places[str(gone)]["kind"] == "folder" and places[str(gone)]["empty"] is True
+    assert places[str(tree.music)]["empty"] is False
+    # its disk mounted: a disk, whatever it holds
+    monkeypatch.setattr(library_root, "_mounts", lambda: {str(gone): True})
+    assert library_root.folders()["places"][-1]["kind"] == "disk"
+    assert not library_root._gone(str(gone), {str(gone): True})
+    # the automount's folder with no disk in it is not a gone root
+    assert not library_root._gone(str(tree.disks), {})
+
+
+def test_the_start_says_which_root_is_gone_and_how_to_forget_it(tree, db, monkeypatch, caplog):
+    gone = tree.top / "mnt" / "sautium-5678-EF01"
+    gone.mkdir(parents=True)
+    monkeypatch.setattr(settings, "sautium_library_roots", f"{tree.music}:{tree.disks}:{gone}")
+    library_root.apply()
+    said = [r.getMessage() for r in caplog.records if "is empty" in r.getMessage()]
+    assert said == [f"music root {gone} is empty: its disk is not mounted, or the folder was removed; "
+                    f"its albums are away. Forget it on the machine: ./sautium roots --forget {gone}"]

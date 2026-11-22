@@ -13717,6 +13717,10 @@
                text: `Asked on ${fmtDayHm((n.data && n.data.issued_at) || n.since)} — nothing goes until you review it.`,
                action: { label: 'Review', run: () => openSupportRequestSheet(n.data) } };
     }
+    if (n.key.startsWith('disk.unread.')) {
+      const c = unreadDiskCopy(n.data || {});
+      return { title: c.title, text: c.text };
+    }
     if (n.key.startsWith('streaming.silent.')) {
       const name = (n.data && (n.data.name || n.data.provider)) || n.key.slice(17);
       const reason = (n.data && n.data.reason) ? ` (${escapeHtml(n.data.reason)})` : '';
@@ -18215,14 +18219,76 @@
     launcher: 'Configured in the launcher.',
     setup: 'Named where this node was set up (MUSIC_LIBRARY_PATH in its .env).',
   };
+  // Under a disk the machine mounted read-only — in the folder sheet, and
+  // under the chosen folder while it is on one (lib.music_folder_pullable).
+  // Draft words for the owner's words review.
+  const SAFE_TO_PULL = 'Sautium only reads this disk and writes nothing to it. '
+    + 'You can unplug it at any time: its albums are away until it is back.';
   function paintMusicPathRow(row, missing) {
     row.classList.toggle('notice-row', missing);
     row.classList.toggle('kind-error', missing);
     const sub = row.querySelector('.row-stack-sub');
-    sub.textContent = missing
+    const line = missing
       ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
+      : row.dataset.musicPullable ? SAFE_TO_PULL
       : MUSIC_FOLDER_LINES[row.dataset.musicFolder] || '';
-    sub.hidden = !sub.textContent;
+    if (sub.textContent !== line) sub.textContent = line;
+    sub.hidden = !line;
+  }
+
+  // A volume plugged into the machine that nothing mounted (backend
+  // library_root.unread: `d` is {label, format, mounts}): the toast's words
+  // and the folder sheet's row, from one place. `mounts` — the format is one
+  // the machine mounts, so this mount failed; otherwise the format is one
+  // Sautium does not read. A failed NTFS mount cannot say here which driver
+  // refused it, so its line holds with NTFS support there or missing. The
+  // label is a stranger's text: escaped, as every string returned is HTML.
+  // Draft words for the owner's words review.
+  function unreadDiskCopy(d) {
+    const title = 'A disk could not be read';
+    const name = d.label ? escapeHtml(d.label) : 'This disk';
+    const format = d.format ? escapeHtml(d.format) : null;
+    if (!d.mounts) {
+      const reads = 'Sautium reads FAT, exFAT, NTFS and ext4 disks.';
+      return { title,
+               text: `${name} is ${format ? `formatted as ${format}` : 'in a format this machine does not know'}. ${reads}`,
+               row: format || 'an unknown format', sub: reads };
+    }
+    if (d.format === 'NTFS') {
+      const how = 'On the machine, run ./sautium setup: if NTFS support is missing, it shows how to add it. '
+        + 'Then plug the disk in again.';
+      return { title, text: `${name} is an NTFS disk this machine could not open. ${how}`,
+               row: 'NTFS, could not be read', sub: how };
+    }
+    return { title,
+             text: `${name} is formatted as ${format}, which this machine could not open. It is not in your library.`,
+             row: `${format}, could not be read`, sub: 'It is not in your library.' };
+  }
+
+  // One row of the folder sheet's places (backend library_root.folders): a
+  // disk or a folder to open — a button carrying the path the server gave —
+  // or a volume nothing mounted, a row to read with no path and no tap.
+  function _folderPlaceRow(p) {
+    const dim = text => `<span style="color:var(--color-text-dim);">${text}</span>`;
+    const under = text => `<span style="display:block;margin-top:calc(4*var(--px));font-size:calc(12*var(--px));line-height:1.45;color:var(--color-text-muted);">${text}</span>`;
+    if (p.kind === 'unread') {
+      const c = unreadDiskCopy(p);
+      return `
+      <div class="manage-tokens-row" data-unread style="cursor:default;">
+        <span style="text-align:left;">${escapeHtml(p.label || 'Disk')} ${dim(`— ${c.row}`)}${under(c.sub)}</span>
+      </div>`;
+    }
+    const disk = p.kind === 'disk';
+    // a disk no automount named (a root that is a disk itself) goes by its
+    // label, else by its path
+    const label = disk ? (p.label || (p.name === p.path ? fmtPathForDisplay(p.path) : 'Disk')) : p.name;
+    const size = disk && p.size_bytes ? ` ${dim(`— ${escapeHtml(fmtBytes(p.size_bytes))}`)}` : '';
+    const line = disk && p.read_only ? SAFE_TO_PULL
+      : p.empty ? 'Empty — its disk is not mounted, or the folder was removed.' : '';
+    return `
+      <button class="manage-tokens-row" type="button" data-path="${escapeHtml(p.path)}">
+        <span style="text-align:left;">${escapeHtml(label)}${size}${line ? under(line) : ''}</span><span class="chev">›</span>
+      </button>`;
   }
 
   /* The folder sheet of a node that reads its music under roots (backend
@@ -18262,6 +18328,7 @@
     const use = overlay.querySelector('[data-use]');
     const msg = overlay.querySelector('[data-msg]');
     let at = null;                       // the folder shown, null = the places
+    let drawnPlaces = null;              // the places' rows as drawn, null = a folder is shown
     let seq = 0;
     const row = (label, path, sub) => `
       <button class="manage-tokens-row" type="button" data-path="${escapeProfileHtml(path)}">
@@ -18288,18 +18355,20 @@
       at = data.under;
       msg.textContent = '';
       if (!at) {
-        crumb.textContent = data.places.length
+        crumb.textContent = data.places.some(p => p.kind !== 'unread')
           ? 'Where is your music?'
           : 'No disk is plugged in, and no folder was named when this node was set up. Plug a disk with music into this machine: it appears here.';
-        list.innerHTML = data.places.map(p => row(
-          p.kind === 'disk' ? (p.label || 'Disk') : p.name, p.path,
-          p.kind === 'disk' && p.size_bytes ? `— ${fmtBytes(p.size_bytes)}` : '')).join('');
+        // The stream wakes on much that is no change here: the rows are
+        // written only when they differ
+        const places = data.places.map(_folderPlaceRow).join('');
+        if (places !== drawnPlaces) list.innerHTML = drawnPlaces = places;
         use.hidden = true;
         return;
       }
       const count = `${fmtNum(data.folders.length)} folder${data.folders.length === 1 ? '' : 's'} · `
         + `${fmtNum(data.audio_files)}${data.capped ? '+' : ''} audio file${data.audio_files === 1 ? '' : 's'}`;
       crumb.textContent = `${fmtPathForDisplay(at)} — ${count}`;
+      drawnPlaces = null;
       list.innerHTML = `
         <button class="manage-tokens-row" type="button" data-up><span>‹ Back</span><span></span></button>`
         + data.folders.map(f => row(f.name, f.path, '')).join('');
@@ -18505,7 +18574,7 @@
         ${_settingsHeader('Library')}
 
         <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}" data-library-drawn="${_libraryDrawn(lib)}">
+          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}" data-music-pullable="${lib.music_folder_pullable ? '1' : ''}" data-library-drawn="${_libraryDrawn(lib)}">
             ${picksFolder ? `
             <div class="row-stack">
               <div class="row-stack-pair">
@@ -18713,6 +18782,12 @@
         enrichLine.textContent = enrichProgress;
       }
       _refreshLibraryNumbers(root, lib, scanRunning);
+      // The folder's disk plugged in or pulled: its line, in place
+      const pathRow = root.querySelector('[data-music-path-row]');
+      if (pathRow && pathRow.dataset.musicPullable !== (lib.music_folder_pullable ? '1' : '')) {
+        pathRow.dataset.musicPullable = lib.music_folder_pullable ? '1' : '';
+        paintMusicPathRow(pathRow, !!notices.get('library.mount_missing'));
+      }
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
       _refreshEnrichRow(root, 'instruments', lib.instruments_done, lib.analysable_tracks);

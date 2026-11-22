@@ -169,6 +169,9 @@ class Settings(BaseSettings):
     # them in the Web UI and music_library_path is that stored choice; unset,
     # the folder is the one MUSIC_LIBRARY_PATH names.
     sautium_library_roots: str = ""
+    # The labels of the roots that are disks themselves, as the setup read
+    # them (a JSON object, root → label; library_root._root_labels)
+    sautium_library_root_labels: str = ""
     p2p_username: str = ""
     p2p_password: str = ""
 
