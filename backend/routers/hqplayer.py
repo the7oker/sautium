@@ -817,7 +817,8 @@ class AbClose(BaseModel):
 
 
 def _ab_refused(e: Exception) -> HTTPException:
-    return HTTPException(status_code=409, detail={"message": str(e), "code": getattr(e, "code", None)})
+    return HTTPException(status_code=409, detail={"message": str(e), "code": getattr(e, "code", None),
+                                                  "way": getattr(e, "way", None)})
 
 
 @router.get("/ab")

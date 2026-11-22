@@ -80,3 +80,63 @@ process.stdout.write(JSON.stringify([
     assert out == ["Added music? Scan in HQPlayer's web interface first, then Sync library.",
                    "Added music? Scan in HQPlayer first, then Sync library.",
                    "Added music? Scan in HQPlayer first, then Sync library."]
+
+
+DIAG_DRIVER = r"""
+'use strict';
+%(escape)s
+%(consts)s
+let hqpDiagAllOpen = false;
+%(block)s
+const a = (id, code, title) => ({ id, started: '2026-11-22T10:00:00Z', artist: 'A', title: 'T' + id,
+                                  intent: 'play', verdict: { code, title } });
+process.stdout.write(JSON.stringify({
+  failed: hqpDiagnosticsBlock({ attempts: [a(3, 'played', 'Played'), a(2, 'refused_rate', 'Refused'),
+                                           a(1, 'interrupted', 'Stopped')], log_source: { kind: 'local' } }),
+  played: hqpDiagnosticsBlock({ attempts: [a(2, 'played', 'Played'), a(1, 'interrupted', 'Stopped')],
+                                log_source: { kind: 'local' } }),
+  none: hqpDiagnosticsBlock({ attempts: [], log_source: { kind: 'none' } }),
+}));
+"""
+
+
+def test_diagnostics_lists_the_plays_that_did_not_play_and_folds_the_rest():
+    """B-125: the block's rows are the attempts that did not play; with none,
+    one line; every attempt folded under one quiet "All plays" link."""
+    consts = "\n".join(_const(n) for n in ("HQP_INTENTS", "HQP_LOG_SOURCES", "HQP_CHEVRON", "fmtClock"))
+    out = _run(DIAG_DRIVER % {"escape": _function("escapeHtml(s)"), "consts": consts,
+                              "block": _function("hqpDiagnosticsBlock(d)")})
+    head, _, folded = out["failed"].partition('<details class="hqp-diag-all">')
+    assert head.count('data-attempt=') == 1 and 'data-attempt="2"' in head
+    assert folded.count('data-attempt=') == 3 and "<summary>All plays ›</summary>" in folded
+    head, _, folded = out["played"].partition('<details class="hqp-diag-all">')
+    assert 'data-attempt=' not in head
+    assert "Every play since the node started reached HQPlayer." in head
+    assert folded.count('data-attempt=') == 2
+    assert "hqp-diag-all" not in out["none"]
+    assert "none yet since the node started" in out["none"]
+
+
+MARK_DRIVER = r"""
+'use strict';
+%(escape)s
+%(range)s
+const fmtRateLabel = (hz) => (hz / 1000) + ' kHz';
+%(mark)s
+process.stdout.write(JSON.stringify({
+  swung: hqpHeadroomMark({ class: 'ok', speed: 21.29, n: 1, settled: true, lo: 21.0, hi: 33.46 }),
+  steady: hqpHeadroomMark({ class: 'ok', speed: 10.49, n: 1, settled: true, lo: 10.41, hi: 10.6 }),
+  near: hqpHeadroomMark({ class: 'tight', speed: 1.28, n: 1, settled: false, lo: 1.08, hi: 1.71 }),
+  implied: hqpHeadroomMark({ class: 'no', speed: null, n: 0, settled: true, implied_from: 352800 }),
+}));
+"""
+
+
+def test_a_mark_shows_its_range_where_the_readings_swung_and_a_word_where_a_neighbour_answered():
+    out = _run(MARK_DRIVER % {"escape": _function("escapeHtml(s)"),
+                              "range": _function("hqpSpeedRange(lo, hi)"),
+                              "mark": _function("hqpHeadroomMark(entry, { onlyShort = false } = {})")})
+    assert out["swung"].endswith("21–33×</span>")
+    assert out["steady"].endswith("10.5×</span>")
+    assert out["near"].endswith("~1.1–1.7×</span>")
+    assert "too slow</span>" in out["implied"] and "slower than at 352.8 kHz" in out["implied"]

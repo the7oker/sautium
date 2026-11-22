@@ -93,8 +93,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- 'convolution' = only convolution), where a DSP sample came from, how a
 -- benchmark run ended ('interrupted' = the process died mid-run), and how
 -- one of its points did ('unstarted' = HQPlayer still building it past the
--- run's build limit, once a setting that started earlier in the run started
--- again: this host does not get it going, or hung).
+-- run's build limit, answering all through, once a setting that started
+-- earlier in the run started again: this host does not get it going;
+-- 'hung' = silent past that limit: it stopped HQPlayer).
 DO $$ BEGIN
     CREATE TYPE hqp_cuda AS ENUM ('off', 'full', 'convolution');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -109,7 +110,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
     CREATE TYPE hqp_point_result AS ENUM ('measured', 'unsettled', 'dropout', 'refused',
-                                          'unstarted', 'failed');
+                                          'unstarted', 'hung', 'implied', 'failed');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -573,10 +574,12 @@ CREATE TABLE IF NOT EXISTS hqp_dsp_samples (
     settled BOOLEAN,                        -- benchmark only: FALSE = the readings never settled within 15 s, recorded anyway
     init_s REAL,                            -- benchmark only: Play until the position moved
     settle_s REAL,                          -- benchmark only: the position moving until the readings settled
+    speed_lo REAL,                          -- benchmark only: the lowest and the highest of its readings
+    speed_hi REAL,
     CONSTRAINT chk_hqp_dsp_samples_benchmark CHECK (
         source = 'benchmark'
         OR (run_id IS NULL AND dropout IS NULL AND settled IS NULL
-            AND init_s IS NULL AND settle_s IS NULL))
+            AND init_s IS NULL AND settle_s IS NULL AND speed_lo IS NULL AND speed_hi IS NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_dsp_samples_key
     ON hqp_dsp_samples(hqp_endpoint_id, hqp_engine, mode, rate_out, filter, shaper, src_rate);
@@ -586,7 +589,10 @@ CREATE INDEX IF NOT EXISTS idx_hqp_dsp_samples_sampled_at ON hqp_dsp_samples(sam
 -- the filter and modulator by name, the source — and how it ended. A
 -- repeat run skips what was asked before: a combination HQPlayer refuses,
 -- or an adaptive rate that plays another one, never shows up as a sample
--- of the asked key.
+-- of the asked key. 'hung': HQPlayer stopped answering while it prepared
+-- it (silent past the run's build limit; only a restart ended it) — never
+-- asked again on that engine, CUDA state and mode; 'implied': a rung of a
+-- ladder never asked, a neighbour answering for it (HQP-BENCH-63).
 CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     id BIGSERIAL PRIMARY KEY,
     run_id INTEGER NOT NULL REFERENCES hqp_benchmark_runs(id) ON DELETE CASCADE,
@@ -598,7 +604,15 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     result hqp_point_result NOT NULL,
     note TEXT,                              -- HQPlayer's refusal, or why it did not play
     sample_id BIGINT REFERENCES hqp_dsp_samples(id) ON DELETE SET NULL,
-    at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- An implied rung (never asked: a neighbour on its ladder answers for
+    -- it): the rate of that neighbour, and whether it keeps up — as this
+    -- rung does (the neighbour above it keeps up) or does not (the one
+    -- below it does not)
+    implied_from INTEGER,
+    implied_ok BOOLEAN,
+    CONSTRAINT chk_hqp_benchmark_points_implied CHECK (
+        (result::text = 'implied') = (implied_from IS NOT NULL AND implied_ok IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_points_run ON hqp_benchmark_points(run_id);
 
@@ -623,6 +637,8 @@ CREATE TABLE IF NOT EXISTS hqp_dsp_speed (
     bench_settled BOOLEAN,
     bench_init_s REAL,
     bench_settle_s REAL,
+    bench_lo REAL,                          -- the newest benchmark point's lowest and highest reading
+    bench_hi REAL,
     dropout BOOLEAN NOT NULL DEFAULT FALSE,
     CONSTRAINT uq_hqp_dsp_speed_key UNIQUE NULLS NOT DISTINCT
         (hqp_endpoint_id, hqp_engine, cuda, mode, rate_out, filter, shaper,
