@@ -86,20 +86,61 @@ def test_an_analysis_no_row_can_show_never_asks_for_a_redraw():
                  {"shown": ["EMPTY"], "tracks": 0, "enrich": True}]) == [False, False]
 
 
-def test_a_scan_too_short_to_be_seen_running_still_redraws_what_it_changed():
-    """The folder watcher's scan of a folder that left, then came back: over
-    before the wake's read, it changes only what the screen drew once — the
-    counts, the last scan's time, what is away (PI-NODE-2B item 8: the owner
-    watched the screen stand still through both)."""
+def test_a_redraw_follows_structure_and_never_the_numbers():
+    """What moves the screen's structure with no worker running: the folder,
+    an Away block to add or take away, a first scan's time. The counts, the
+    size and a later scan's time are written in place — they also move under
+    an HQPlayer library's import and a background pass, whose wakes must not
+    redraw the screen (review round 3)."""
     assert _run([
-        {"shown": [], "tracks": 8187, "was": 10187},                              # 2 000 tracks' folder left
-        {"shown": [], "tracks": 93, "now": {"away": {"albums": 200, "copies": 200}}, "was": 93},
-        {"shown": [], "tracks": 93, "now": {"last_scan_at": "now"}, "was": 93},   # a scan that found nothing new
+        {"shown": [], "tracks": 93, "now": {"away": {"albums": 200, "copies": 200}}, "was": 93},   # the Away block comes
         {"shown": [], "tracks": 93, "now": {"music_path": "/media/sautium/X/Music"}, "was": 93},
-        {"shown": [], "tracks": 93, "was": 93},                                    # nothing moved
-        # while a scan runs its line is updated in place: the numbers wait for its end
-        {"shown": ["SCAN"], "tracks": 2093, "scan": True, "was": 93},
-    ]) == [True, True, True, True, False, False]
+        {"shown": [], "tracks": 93, "now": {"last_scan_at": ""}, "was": 93},                        # no scan on record
+        {"shown": [], "tracks": 8187, "was": 10187},                              # only the counts moved
+        {"shown": [], "tracks": 93, "now": {"last_scan_at": "now"}, "was": 93},   # a later scan's time
+        {"shown": [], "tracks": 93, "now": {"total_size_bytes": "7"}, "was": 93},
+        {"shown": [], "tracks": 93, "was": 93},
+        {"shown": ["SCAN"], "tracks": 2093, "scan": True, "now": {"away": {"albums": 1, "copies": 1}}, "was": 93},
+    ]) == [True, True, True, False, False, False, False, False]
+
+
+NUMBERS = r"""
+'use strict';
+const fmtNum = n => String(n), fmtBytes = n => n + ' B', fmtRelative = t => 'rel:' + t, fmtAbs = t => 'abs:' + t;
+const escapeProfileHtml = s => String(s);
+const _count = (n, one, many) => `${n || 0} ${n === 1 ? one : many}`;
+const _statCell = (label, value) => `[${label}=${value}]`;
+%(cells)s
+%(numbers)s
+const made = sel => ({ textContent: 'old', innerHTML: 'old', dataset: {}, sel });
+const els = {};
+const root = { querySelector: sel => (els[sel] = els[sel] || made(sel)) };
+const lib = { total_tracks: 8187, total_artists: 58, total_albums: 223, total_genres: 13, total_size_bytes: 4096,
+              last_scan_at: 'T1', away: { albums: 200, copies: 200 } };
+_refreshLibraryNumbers(root, lib, false);
+const first = { stats: els['[data-library-stats]'].innerHTML, size: els['[data-library-size]'].textContent,
+                scan: els['[data-library-last-scan]'].textContent, at: els['[data-library-last-scan-at]'].textContent,
+                away: els['[data-library-away]'].textContent };
+// the same numbers again: nothing is written
+els['[data-library-stats]'].innerHTML = 'untouched';
+_refreshLibraryNumbers(root, lib, false);
+// a scan runs: its "running…" stays
+els['[data-library-last-scan]'].textContent = 'running…';
+_refreshLibraryNumbers(root, Object.assign({}, lib, { last_scan_at: 'T2' }), true);
+console.log(JSON.stringify({ first, again: els['[data-library-stats]'].innerHTML,
+                             running: els['[data-library-last-scan]'].textContent }));
+"""
+
+
+def test_the_numbers_are_written_where_they_stand_and_only_when_they_moved():
+    script = NUMBERS % {"cells": _function("_libraryStatCells(lib)"),
+                        "numbers": _function("_refreshLibraryNumbers(root, lib, scanRunning)")}
+    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == {
+        "first": {"stats": "[Tracks=8187][Artists=58][Albums=223][Genres=13]", "size": "4096 B",
+                  "scan": "rel:T1", "at": "abs:T1", "away": "200 albums"},
+        "again": "untouched", "running": "running…"}
 
 
 def test_an_empty_librarys_first_scan_is_shown_with_its_cancel_and_no_run_first_scan():

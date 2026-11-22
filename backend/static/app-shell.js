@@ -18188,7 +18188,7 @@
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Away</span>
-            <span class="row-stack-value">${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
+            <span class="row-stack-value" data-library-away>${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
           </div>
           <div class="row-stack-sub">Their files were not found at the last Rescan. They stay in your library until you remove them, and come back by themselves when a scan finds their files.</div>
         </div>
@@ -18222,10 +18222,7 @@
       <div class="profile-group-label">Library</div>
       <div class="form-group">
         <div class="stats-grid">
-          ${_statCell('Tracks',  fmtNum(lib.total_tracks))}
-          ${_statCell('Artists', fmtNum(lib.total_artists))}
-          ${_statCell('Albums',  fmtNum(lib.total_albums))}
-          ${_statCell('Genres',  fmtNum(lib.total_genres))}
+          <div data-library-stats style="display:contents">${_libraryStatCells(lib)}</div>
         </div>
       </div>
       ${scanActions}
@@ -18316,15 +18313,15 @@
           ${isEmpty ? '' : `
             <div class="form-row">
               <span class="form-label">Storage</span>
-              <span class="form-value mono">${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
+              <span class="form-value mono" data-library-size>${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
             </div>
             <div class="form-row stacked">
               <div class="row-stack">
                 <span class="row-stack-label">Last scan</span>
-                <span class="row-stack-value">${scanRunning ? 'running…' : escapeProfileHtml(fmtRelative(lib.last_scan_at))}</span>
+                <span class="row-stack-value" data-library-last-scan>${scanRunning ? 'running…' : escapeProfileHtml(fmtRelative(lib.last_scan_at))}</span>
               </div>
               ${(!scanRunning && lib.last_scan_at)
-                ? `<div class="row-stack-sub" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lib.last_scan_at))}</div>`
+                ? `<div class="row-stack-sub" data-library-last-scan-at style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lib.last_scan_at))}</div>`
                 : ''}
             </div>
           `}
@@ -18414,23 +18411,53 @@
      same in-place targets that the old poll used. */
   let _libraryStreamCtrl = null;
 
-  // What the Library screen draws once and does not update in place: the
-  // folder, the library's counts and size, the last scan's time, what is
-  // away. Kept on the drawn screen (data-library-drawn) so a wake can tell.
-  function _libraryDrawn(lib) {
-    const away = lib.away || {};
-    return encodeURIComponent(JSON.stringify([
-      lib.music_path || '', lib.total_tracks || 0, lib.total_artists || 0, lib.total_albums || 0,
-      lib.total_genres || 0, String(lib.total_size_bytes || 0), lib.last_scan_at || '',
-      away.albums || 0, away.copies || 0]));
+  function _libraryStatCells(lib) {
+    return _statCell('Tracks',  fmtNum(lib.total_tracks))
+         + _statCell('Artists', fmtNum(lib.total_artists))
+         + _statCell('Albums',  fmtNum(lib.total_albums))
+         + _statCell('Genres',  fmtNum(lib.total_genres));
   }
 
-  // Whether the Library screen as drawn (`root`) no longer says what `lib`
-  // is: another structure (a scan or an analysis it does not show, or shows
-  // and is over; empty against not), or — with no worker running — other
-  // numbers than it drew: a scan too short to be seen running changes only
-  // those. While a worker runs its line is updated in place and the numbers
-  // wait for its end. Pure: the DOM is read, nothing is written.
+  // The Library screen's numbers, written where they stand whenever a wake
+  // finds them moved — the counts, the size, the last scan's time, how much
+  // is away. A scan too short to be seen running changes only these (the
+  // folder watcher's, of a folder that left or came back), and so do other
+  // producers of the Library stream's wakes while no worker of this screen
+  // runs (an HQPlayer library's import, a background pass): never a redraw.
+  // While a scan runs, "Last scan" keeps its "running…".
+  function _refreshLibraryNumbers(root, lib, scanRunning) {
+    const set = (sel, text) => {
+      const el = root.querySelector(sel);
+      if (el && el.textContent !== text) el.textContent = text;
+    };
+    const stats = root.querySelector('[data-library-stats]');
+    if (stats) {
+      const cells = _libraryStatCells(lib);
+      if (stats.dataset.drawn !== cells) { stats.innerHTML = cells; stats.dataset.drawn = cells; }
+    }
+    set('[data-library-size]', fmtBytes(lib.total_size_bytes));
+    if (!scanRunning) {
+      set('[data-library-last-scan]', fmtRelative(lib.last_scan_at));
+      if (lib.last_scan_at) set('[data-library-last-scan-at]', fmtAbs(lib.last_scan_at));
+    }
+    set('[data-library-away]', _count((lib.away || {}).albums, 'album', 'albums'));
+  }
+
+  // What decides the Library screen's structure beyond its workers and its
+  // emptiness: the folder, whether anything is away (the Away block and its
+  // button), whether a scan ever ran (the line under "Last scan"). Kept on
+  // the drawn screen (data-library-drawn) so a wake can tell.
+  function _libraryDrawn(lib) {
+    return encodeURIComponent(JSON.stringify([
+      lib.music_path || '', ((lib.away || {}).copies || 0) > 0, !!lib.last_scan_at]));
+  }
+
+  // Whether the Library screen as drawn (`root`) shows another structure
+  // than `lib` asks for: a scan or an analysis it does not show, or shows
+  // and is over; empty against not; or — with no worker running — another
+  // folder, an Away block to add or take away, a first scan's time. Its
+  // numbers are no structure (_refreshLibraryNumbers). Pure: the DOM is
+  // read, nothing is written.
   function _libraryStructureStale(root, lib, scanRunning, enrichRunning) {
     const shownScan   = !!root.querySelector('[data-cancel-scan]');
     const shownEnrich = !!root.querySelector('[data-cancel-enrich]');
@@ -18475,6 +18502,7 @@
       if (enrichLine && enrichProgress && enrichLine.textContent !== enrichProgress) {
         enrichLine.textContent = enrichProgress;
       }
+      _refreshLibraryNumbers(root, lib, scanRunning);
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
       _refreshEnrichRow(root, 'instruments', lib.instruments_done, lib.analysable_tracks);
