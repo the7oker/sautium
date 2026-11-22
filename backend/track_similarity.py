@@ -78,7 +78,10 @@ W_TAG = 0.08            # × weighted tag Jaccard. Sized on the Smooth Operator
 # The recall arms' side of `served=True`: a track with a copy here or at the
 # HQPlayer that is the output — a superset of the pool's exact `playable`
 # (its representative copy, owned_rank's pick), which still decides. The
-# ANN arm keeps walking under hnsw.iterative_scan until its LIMIT is met.
+# ANN arm walks on under hnsw.iterative_scan past the rows it filters out —
+# up to hnsw.max_scan_tuples (20 000 by default): where the owner's tracks
+# are very sparse among the embeddings it returns fewer than its LIMIT,
+# still the nearest of them; the kin arm is exact.
 _SERVED_RECALL = """(%(served)s::boolean IS NOT TRUE
                    OR EXISTS (SELECT 1 FROM media_files rmf
                               JOIN album_variants rav ON rav.id = rmf.album_variant_id
