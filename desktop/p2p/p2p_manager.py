@@ -21,7 +21,7 @@ import psycopg2.extensions
 from desktop.api_client import BackendAPIClient
 from desktop.p2p import lb_slice_cycle, mb_slice_queries, sync_walk
 from desktop.p2p.chat_client import (ChatClient, ClientIdentity, master_runs_none,
-                                     replied_friends, upnp_heuristic)
+                                     public_addresses, replied_friends, upnp_heuristic)
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
 from desktop.p2p.diag_worker import DiagIdentity, DiagWorker, seal_with
@@ -31,7 +31,7 @@ from desktop.p2p.lb_slice_cycle import LbSliceCycle
 from desktop.p2p.mb_slice_cycle import MbSliceCycle
 from desktop.p2p.sync_walk import SyncWalk
 from desktop.p2p.sync_server import SyncServer
-from desktop.p2p.upnp_service import UPnPService
+from desktop.p2p.upnp_service import UPnPService, leads_here
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +203,9 @@ class P2PManager:
         # ports here — the backend has no app-level auth (see CLAUDE.md
         # "Security Posture"). docker_ports above is for LAN-discovery
         # probing of localhost only.
-        self._upnp = UPnPService(ports=[http_port])
+        self._upnp = UPnPService(ports=[http_port], leads_here=leads_here(
+            lambda: (account_info or {}).get("public_key_hex")))
+        self._sync_server.own_addresses = lambda: public_addresses(self._upnp, self._dht_service)
         # The pull side, shared with the Docker backend: this runtime's
         # services go in as dependencies (desktop/p2p/sync_walk.py).
         self._walk = SyncWalk(
@@ -281,6 +283,7 @@ class P2PManager:
                         dht=self._dht_service,
                         lan=self._lan_discovery,
                         heuristic=lambda: upnp_heuristic(self._upnp, self._dht_service),
+                        own_addresses=lambda: public_addresses(self._upnp, self._dht_service),
                         on_reachability=self._apply_reachability,
                         on_incoming=self._chat_incoming,
                         on_warrant=lambda warrant, addr: self._diag.warrant(warrant, addr),

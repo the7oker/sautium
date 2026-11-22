@@ -290,6 +290,104 @@ async def _no_sleep(_s):
     return None
 
 
+class _Vantages:
+    """aiohttp.ClientSession for the probe: which addresses were asked, and
+    one answer for all of them."""
+
+    def __init__(self, answer=None):
+        self.asked, self.answer = [], answer
+
+    def __call__(self, **_kw):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_a):
+        return False
+
+    def post(self, url, json=None):
+        self.asked.append(url)
+        return _Answer(200, self.answer)
+
+
+def _prober(scratch_dsn, monkeypatch, master_at, own, answer=None, hint=None):
+    """A client whose master contact is known at `master_at`, with `own` as
+    this node's public addresses; the vantages asked are recorded. The
+    addresses are well-known public ones (a documentation range is not
+    globally routable, so it is no vantage), and none is dialled."""
+    import aiohttp
+    from desktop.p2p import master_hint
+    client = _client(scratch_dsn, own_addresses=lambda: frozenset(own))
+
+    async def contact():
+        return {"id": 1, "public_key_hex": MASTER.pub}
+
+    async def peers(_friend, **_kw):
+        return list(master_at)
+
+    async def alive(*_a):
+        return None
+
+    async def read_json(resp, _cap):
+        return resp._body
+    client.master_contact, client.find_friend_peers, client._note_peer_alive = contact, peers, alive
+    vantages = _Vantages(answer)
+    monkeypatch.setattr(aiohttp, "ClientSession", vantages)
+    monkeypatch.setattr(cc.wire, "read_json", read_json)
+    monkeypatch.setattr(master_hint, "fetch", lambda: hint)
+    return client, vantages
+
+
+def test_a_vantage_behind_this_nodes_own_router_is_not_asked(scratch_dsn, master, monkeypatch):
+    """The master at this node's own public address would dial its own
+    forward of the port and answer `false` for a node whose mapping works
+    (PI-NODE-2B §8.3): it is no vantage, and the verdict stays unknown."""
+    client, vantages = _prober(scratch_dsn, monkeypatch, [("8.8.8.8", 8801)], {"8.8.8.8"},
+                               answer={"reachable": False, "error": "ConnectError"})
+    probe = asyncio.run(client._probe_reachability_via_master())
+    assert vantages.asked == []
+    assert probe == cc._ProbeResult(None, cc.SAME_ROUTER_DETAIL, False)
+    # ... and so for the Worker's hint, when the master is known by the LAN alone
+    client, vantages = _prober(scratch_dsn, monkeypatch, [("192.168.7.9", 8801)], {"8.8.8.8"},
+                               hint=("8.8.8.8", 8801))
+    assert asyncio.run(client._probe_reachability_via_master()).detail == cc.SAME_ROUTER_DETAIL
+    assert vantages.asked == []
+
+
+def test_a_vantage_elsewhere_is_asked_as_before(scratch_dsn, master, monkeypatch):
+    client, vantages = _prober(scratch_dsn, monkeypatch, [("9.9.9.9", 8801)], {"8.8.8.8"},
+                               answer={"reachable": False, "error": "ConnectError",
+                                       "observed_ip": "8.8.8.8"})
+    probe = asyncio.run(client._probe_reachability_via_master())
+    assert vantages.asked == ["https://9.9.9.9:8801/api/relay/probe-connect"]
+    assert probe.verdict is False
+    # with no router to ask (no UPnP, no DHT yet) nothing is left out
+    client, vantages = _prober(scratch_dsn, monkeypatch, [("8.8.8.8", 8801)], set(),
+                               answer={"reachable": True})
+    assert asyncio.run(client._probe_reachability_via_master()).verdict is True
+
+
+def test_a_vantage_that_found_itself_behind_our_router_gives_no_verdict(scratch_dsn, master, monkeypatch):
+    """A node that knows no public address of its own asks; the vantage
+    that met its own key on the call-back says so, and the detail names it."""
+    client, vantages = _prober(scratch_dsn, monkeypatch, [("8.8.8.8", 8801)], set(),
+                               answer={"reachable": None, "same_router": True,
+                                       "error": "the address is this node's own"})
+    probe = asyncio.run(client._probe_reachability_via_master())
+    assert len(vantages.asked) == 1
+    assert probe == cc._ProbeResult(None, cc.SAME_ROUTER_DETAIL, False)
+
+
+def test_a_node_knows_its_public_addresses_from_its_router_and_the_dht():
+    upnp = SimpleNamespace(external_ip="8.8.8.8")
+    dht = SimpleNamespace(observed_external_ip="2A00:1450:4001:0::1")
+    assert cc.public_addresses(upnp, dht) == {"8.8.8.8", "2a00:1450:4001::1"}      # one spelling each
+    assert cc.public_addresses(SimpleNamespace(external_ip="100.64.0.9"), None) == frozenset()
+    assert cc.public_addresses(None, SimpleNamespace(observed_external_ip="9.9.9.9")) == {"9.9.9.9"}
+    assert cc.public_addresses(None, None) == frozenset()
+
+
 def test_a_docker_nodes_relay_role_and_own_announces_follow_the_verdict(monkeypatch):
     monkeypatch.chdir(REPO / "backend")              # main mounts static/ from its folder
     import main
@@ -455,6 +553,33 @@ def test_a_mapping_of_the_peer_port_asks_the_verdict_again(monkeypatch):
         await main._map_peer_port()
     asyncio.run(scene())
     assert ports == [28801, 28802] and rechecks == [1, 1]
+
+
+def test_a_lost_mapping_announces_the_local_port_and_asks_the_verdict_again(monkeypatch):
+    """A renewal the router refused (upnp_service.renew_ports): the external
+    port is gone, so the DHT names the port the node listens on."""
+    monkeypatch.chdir(REPO / "backend")
+    import main
+    import p2p_chat
+    rechecks, ports = [], []
+    monkeypatch.setattr(p2p_chat, "_client", SimpleNamespace(recheck_reachability=lambda: rechecks.append(1)))
+    monkeypatch.setattr(main, "_dht_service", SimpleNamespace(set_announce_port=ports.append))
+    upnp = SimpleNamespace(is_available=True, open_ports=lambda: "198.51.100.1",
+                           get_external_port=lambda p: 8802)
+
+    async def keep(port, on_external):
+        on_external(None)
+    upnp.keep_mapped = keep
+    monkeypatch.setattr(main, "_upnp", upnp)
+    monkeypatch.setattr(main.settings, "p2p_sync_port", 8801)
+    monkeypatch.setattr(main.settings, "p2p_announce_port", 0)
+
+    async def scene():
+        main._peer_ready = asyncio.Event()
+        main._peer_ready.set()
+        await main._map_peer_port()
+    asyncio.run(scene())
+    assert ports == [8802, 8801] and rechecks == [1, 1]
 
 
 def test_the_masters_stream_leaves_an_address_that_failed_to_connect_for_the_next(master):

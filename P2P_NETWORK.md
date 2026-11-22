@@ -497,7 +497,29 @@ auto-add never resurrects it (re-adding the code by hand clears the flag).
   — and the prober asks only through the master's public addresses (the
   Worker's address hint stands in when it knows the master by LAN alone).
   The same rule, `addrs.is_internet_vantage`, gates the passive inbound
-  proof.
+  proof. Since 2026-11-22 a vantage behind the prober's own router is no
+  vantage either: the call-back to their shared public address lands on the
+  router's forward of the port — the vantage's own surface — and `false`
+  from it silenced a node whose mapping worked. The prober leaves out a
+  vantage at its own public address (the router's WAN address, the one DHT
+  peers see: `chat_client.public_addresses`); a vantage that is asked from
+  an address it knows as its own, or whose call-back meets its own key
+  (`peer_auth.seen_pubkey`), answers `reachable: null` with
+  `same_router: true` and spends no cooldown. The verdict is then
+  `unknown` — announces stay on, no relay is recruited — until a vantage
+  outside the router exists.
+
+The mapper never takes a port that is not its own (since 2026-11-22,
+`upnp_service.add_mapping`): it reads the router's mapping of the external
+port first and asks only where there is none or the mapping is this node's;
+a new mapping is checked once from inside — one pinned TLS handshake to the
+router's public address on that port (`upnp_service.leads_here`) — and one
+another node answers on (a static forward the router's table does not list,
+which its yes did not mention) is removed for the next port; a renewal the
+router refuses, or a port that now leads elsewhere, is a lost mapping, and
+the node announces what is left. A second node behind one router therefore
+announces the port it got (8802 beside a neighbour's 8801): the DHT
+announce and the probe have always carried the external port.
 
 An unreachable node **suppresses its own DHT announces**
 (`set_announces_enabled`): a dead address in the DHT pollutes everyone's
