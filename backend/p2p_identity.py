@@ -262,9 +262,10 @@ def master_refusal(settings) -> Optional[str]:
                 "P2P_PASSWORD give one. Check both in .env.")
     elif folder is not None and (folder / "node_ed25519.key").exists():
         try:
-            name = json.loads((folder / "node_info.json").read_text(encoding="utf-8")).get("username")
+            info = json.loads((folder / "node_info.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            name = None
+            info = None
+        name = info.get("username") if isinstance(info, dict) else None
         code = make_invite_code(name, bytes.fromhex(pubkey)) if name else f"the key {pubkey[:16]}…"
         held = f"but its identity folder holds {code}. Check that the folder is the master's."
     else:

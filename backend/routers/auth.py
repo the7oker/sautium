@@ -271,9 +271,12 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
     from routers import p2p as p2p_router
     # The role follows the identity this process now holds (its start decided
     # it on none): the master's own account made here builds no client and
-    # seeds no Support contact to itself; its paths as the master begin at
-    # the next start.
-    master_node.decide(info["public_key_hex"])
+    # seeds no Support contact to itself, and its routes answer as the
+    # master's at once; what the start arms — the mailbox, the warrants'
+    # dispatch, the relay announce — waits for the next start.
+    if master_node.decide(info["public_key_hex"]):
+        logger.info("The master's account is made: restart the backend to arm its mailbox, "
+                    "its warrants' dispatch and its relay announce")
     p2p_chat.soon(p2p_chat.start_client())
     p2p_chat.soon(p2p_router.start_identity_worker())
     return reply({"token": device_auth.current_token(_secret()),

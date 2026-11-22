@@ -162,6 +162,15 @@ def test_a_name_the_nickname_rule_refuses_is_named_not_raised(db, pin, tmp_path)
     assert f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD" in words
 
 
+def test_a_folder_whose_info_names_no_one_is_named_by_its_key(db, pin, tmp_path):
+    other = _Node(Ed25519PrivateKey.generate())
+    d = other.place(tmp_path / "id")
+    (d / "node_info.json").write_text("[]")
+    _record(db, pin.pub)
+    assert (f"but its identity folder holds the key {other.pub[:16]}…."
+            in p2p_identity.master_refusal(_settings(d)))
+
+
 def test_a_master_with_no_key_at_all_is_refused(db, pin, tmp_path):
     _record(db, pin.pub)
     (tmp_path / "id").mkdir()
