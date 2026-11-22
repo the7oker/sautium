@@ -223,7 +223,7 @@ class DiagWorker:
         if not master_node.master_configured():
             return None
         ident = self._identity()
-        if ident is None or ident.public_key_hex == master_node.MASTER_PUBKEY_HEX:
+        if ident is None or master_node.is_master():
             return None
         enabled, removed, blocked = await self._db(self._gate_row)
         if enabled is False or removed or blocked is None or blocked:

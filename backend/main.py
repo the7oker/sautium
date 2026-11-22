@@ -39,6 +39,7 @@ import csp
 import device_auth
 import lastfm_auth
 from desktop.p2p.dht_service import DHTService, HAS_LIBTORRENT
+from desktop.p2p.master_node import is_master
 
 _API_SECRET_PATH = _secret_path()
 _INDEX_HTML_PATH = _Path(__file__).parent / "static" / "index.html"
@@ -235,19 +236,13 @@ async def _relay_cap_loop() -> None:
             logger.debug(f"relay cap loop: {e}")
 
 
-def _is_master() -> bool:
-    from desktop.p2p.chat_client import master_runs_none
-    from p2p_identity import resolve_identity
-    return master_runs_none((resolve_identity(settings) or {}).get("public_key_hex"))
-
-
 def _relays() -> bool:
     """Whether this node may serve as a relay: the master — relay #0, its
     peer port reachable by deployment (a forward or a trusted front) — always;
     any other node while its chat client's verdict says `reachable` (the
     launcher's rule; until 2026-11-17 every Docker node took itself for
     reachable by definition)."""
-    if _is_master():
+    if is_master():
         return True
     from p2p_chat import chat_client
     client = chat_client()
@@ -570,6 +565,19 @@ async def lifespan(app: FastAPI):
     # (2026-09-22).
     test_db_connection()
     logger.info("Database connection successful")
+    # A backend meant to be the master under another key refuses here, before
+    # the migrations and record_identity_state write anything — so every
+    # restart refuses again (B-113). The process ends at once: uvicorn logs
+    # an exception out of a lifespan with its traceback, and a refusal is a
+    # state, not a crash; nothing has started that would need a stop.
+    from p2p_identity import master_refusal
+    refusal = await asyncio.to_thread(master_refusal, settings)
+    if refusal:
+        import os
+        from uvicorn.main import STARTUP_FAILURE
+        logger.error(refusal)
+        logging.shutdown()
+        os._exit(STARTUP_FAILURE)
     # Bring the schema and the data to this code's version before
     # anything writes: pending desktop/migrations/NNN_*.sql deltas and
     # the Python data migrations (identity rule). One place for every
@@ -823,7 +831,7 @@ async def lifespan(app: FastAPI):
     # offline are drained on the wake socket — only the shipped master has one.
     try:
         from master_node import MASTER_PUBKEY_HEX
-        if _p2p_identity and _p2p_identity.get("public_key_hex") == MASTER_PUBKEY_HEX:
+        if is_master():
             from desktop.p2p import mailbox_client
             from p2p_identity import load_signing_key
             from routers.peer_chat import mailbox_import
@@ -1011,7 +1019,7 @@ async def lifespan(app: FastAPI):
                     try:
                         from routers.settings import _read
                         if _read("p2p.relay_enabled"):
-                            if _is_master():
+                            if is_master():
                                 await _dht_service.announce_capability("relay")
                             asyncio.create_task(_relay_cap_loop())
                     except Exception as e:

@@ -110,9 +110,9 @@ def test_no_support_contact_once_removed_nor_on_the_master(conn, scratch_dsn, ma
     assert _rows(conn, "SELECT 1 FROM friends") == []
     with conn.cursor() as cur:
         cur.execute("DELETE FROM user_settings WHERE key = 'p2p.master_removed'")
+    master_node.decide(MASTER.pub)
     asyncio.run(_client(scratch_dsn, MASTER)._ensure_master_contact())
     assert _rows(conn, "SELECT 1 FROM friends") == []
-    assert cc.master_runs_none(MASTER.pub) and not cc.master_runs_none(ME.pub)
 
 
 def test_the_backend_builds_one_client_where_it_owns_the_peer_surface(conn, scratch_dsn, master,
@@ -140,6 +140,7 @@ def test_the_backend_builds_one_client_where_it_owns_the_peer_surface(conn, scra
     async def scene(port, who):
         monkeypatch.setattr(settings, "p2p_sync_port", port)
         keys["who"] = who
+        master_node.decide(who.pub)
         client = await p2p_chat.start_client()
         again = await p2p_chat.start_client()
         await p2p_chat.stop_client()

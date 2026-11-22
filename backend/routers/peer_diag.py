@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 from config import settings
 from db_pool import db_execute, db_query, db_query_one, get_conn, in_chat_lane
 from desktop.p2p import diag_protocol, peer_auth
+from desktop.p2p.master_node import is_master
 from p2p_chat import get_peer_chat
 from p2p_identity import load_signing_key, resolve_identity
 from serving import request_target
@@ -69,9 +70,7 @@ async def _read_capped(request: Request, cap: int) -> Optional[bytes]:
 def _is_master() -> bool:
     """Only the master reads reports and bundles — a node never serves a
     diag route (P2P_NETWORK.md § "Support diagnostics")."""
-    from master_node import MASTER_PUBKEY_HEX
-    ident = resolve_identity(settings)
-    return bool(ident) and ident.get("public_key_hex") == MASTER_PUBKEY_HEX
+    return is_master()
 
 
 def _signer_is_friend(pubkey: str) -> bool:

@@ -19,8 +19,8 @@ import psycopg2
 import psycopg2.extensions
 
 from desktop.api_client import BackendAPIClient
-from desktop.p2p import lb_slice_cycle, mb_slice_queries, sync_walk
-from desktop.p2p.chat_client import (ChatClient, ClientIdentity, master_runs_none,
+from desktop.p2p import lb_slice_cycle, master_node, mb_slice_queries, sync_walk
+from desktop.p2p.chat_client import (ChatClient, ClientIdentity,
                                      public_addresses, replied_friends, upnp_heuristic)
 from desktop.p2p.chat_service import ChatService
 from desktop.p2p.dht_service import DHTService
@@ -136,6 +136,7 @@ class P2PManager:
         # Load account info for chat
         from desktop.node_identity import get_account_info
         account_info = get_account_info()
+        master_node.decide((account_info or {}).get("public_key_hex"))
 
         # Identity certificate: silent fetch when missing (idempotent issuance —
         # a re-fetch after moving devices returns the original birth date;
@@ -284,8 +285,8 @@ class P2PManager:
                 self._sync_server.set_pickup(self._pick_up)
                 # The client works through a store of its own: its calls run
                 # on the client's store thread, the sync server's on this loop.
-                # The master runs no client half (chat_client.master_runs_none).
-                if not master_runs_none(account_info["public_key_hex"]):
+                # The master runs no client half (p2p_chat.start_client says why)
+                if not master_node.is_master():
                     self._chat_client = ChatClient(
                         chat_service(),
                         identity=self._client_identity,
@@ -970,12 +971,11 @@ class P2PManager:
         disappear on its own."""
         from desktop.node_identity import get_account_info, sign_message
         from desktop.p2p import node_hints
-        from desktop.p2p.master_node import MASTER_PUBKEY_HEX
         while self._running:
             try:
                 account = get_account_info()
                 if (account and self._reachability_status == "reachable"
-                        and account["public_key_hex"] != MASTER_PUBKEY_HEX):
+                        and not master_node.is_master()):
                     caps = ["sync"]
                     if self._mb_dump_version:
                         caps.append("mbdump")

@@ -102,6 +102,8 @@ IDENTITY_PREFIX = "identity/"
 # would read as somewhere else.
 IDENTITY_FILES = frozenset({"node_info.json", "birth_certificate.json",
                             "identity_proof.json", ".api_secret"})
+# The identity documents, written by node_identity.write_identity_document alone
+DOCUMENT_FILES = frozenset({"birth_certificate.json", "identity_proof.json"})
 ARCHIVE_FILES = frozenset({"node_info.json", "birth_certificate.json",
                            "identity_proof.json", ROTATION_FILENAME})
 ARCHIVE_DIR = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
@@ -1052,6 +1054,15 @@ def restore_database(reader: BackupReader, target: PgTarget, *, manifest: Option
             "manifest": manifest}
 
 
+def _subject(data: bytes) -> str:
+    """The key an identity document in a backup names, "" for none."""
+    try:
+        doc = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return ""
+    return str(doc.get("pubkey", "")).lower() if isinstance(doc, dict) else ""
+
+
 def write_identity(identity_dir: Path, files: Dict[str, bytes], *, username: str,
                    password: Optional[str]) -> dict:
     """Make this machine the node the backup came from. Identity files that
@@ -1097,6 +1108,12 @@ def write_identity(identity_dir: Path, files: Dict[str, bytes], *, username: str
 
     for rel, data in files.items():
         path = targets[rel]
+        if rel in DOCUMENT_FILES:
+            # An env-derived node keeps no node_info.json, so nothing above
+            # moved a live document of another key: the one writer does
+            node_identity.write_identity_document(identity_dir, rel, data,
+                                                  incoming_pub or _subject(data))
+            continue
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         if rel == ".api_secret":

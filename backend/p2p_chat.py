@@ -457,19 +457,27 @@ async def start_client():
     """Build and start the client — at the lifespan's start and the moment
     an account exists (routers/auth.create_account). Only where this backend
     owns the peer surface: in launcher mode (P2P_SYNC_PORT=0) the launcher's
-    client owns this database, and one database has one deliverer. Never on
-    the master (chat_client.master_runs_none). The support worker comes up
-    with it and goes down with it (diag_node): one shipper per database."""
+    client owns this database, and one database has one deliverer. The
+    support worker comes up with it and goes down with it (diag_node): one
+    shipper per database.
+
+    Never on the master, on either runtime (master_node.is_master): every
+    node holds a wake stream to it (relay #0), so a reply is a ping down that
+    stream and the node's pull; it holds no stream to anyone — it IS relay #0
+    — and it deposits nothing, the mailbox is its own. Pushing to the whole
+    network would cost a DHT lookup per friend and dials at addresses behind
+    NAT that never answer, the work relay #0 exists to avoid."""
     global _client
     import diag_node
     from config import settings
-    from desktop.p2p.chat_client import ChatClient, master_runs_none
+    from desktop.p2p import master_node
+    from desktop.p2p.chat_client import ChatClient
     from desktop.p2p.chat_service import ChatService
     async with _client_lock:
         if _client is not None or not settings.serves_peer_surface:
             return _client
         keys = await asyncio.to_thread(_keys)
-        if keys is None or master_runs_none(keys[0]["public_key_hex"]):
+        if keys is None or master_node.is_master():
             return None
         identity, seed, previous = keys
         diag = diag_node.worker(find_master=lambda master: client.find_friend_peers(master))

@@ -13,6 +13,8 @@ import logging
 import re
 from typing import Optional
 
+from desktop.node_identity import CERT_FILENAME
+
 logger = logging.getLogger(__name__)
 
 # Same parameters as desktop/node_identity.py
@@ -206,6 +208,66 @@ def resolve_identity(settings) -> Optional[dict]:
     return _identity_cache
 
 
+def _recorded_signing_key() -> Optional[str]:
+    """The database's signing key of record (node_identity.SIGNING_KEY_SETTING)
+    as the previous start left it: read before the migrations, so a database
+    without `user_settings` (a new one) has none."""
+    from db_pool import db_query_one
+    from desktop.node_identity import SIGNING_KEY_SQL
+    if not db_query_one("SELECT to_regclass('user_settings') IS NOT NULL AS present")["present"]:
+        return None
+    return db_query_one(f"SELECT {SIGNING_KEY_SQL} AS key")["key"]
+
+
+def master_refusal(settings) -> Optional[str]:
+    """The start's one decision about the master (MASTER-FAILCLOSED §1–§3):
+    this process's role, decided from the key it signs with
+    (desktop/p2p/master_node.decide), and — for a backend meant to be the
+    master whose key is not the pin — the words of its refusal to start.
+    Meant to be the master: its database records the pin as its signing key
+    of record (a start the pin made here, or its restored backup), or its
+    configuration says SAUTIUM_MASTER=1 (a master on a new database). The
+    trusted front and the username are no signal: a person may hold either.
+    None: the start goes on."""
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives import serialization
+
+    import master_node
+    from desktop.p2p import master_node as role
+
+    key = load_signing_key(settings)
+    pubkey = None if key is None else key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw).hex()
+    if role.decide(pubkey) or not master_node.master_configured():
+        return None
+    recorded = _recorded_signing_key() == master_node.MASTER_PUBKEY_HEX
+    if not (recorded or settings.sautium_master):
+        return None
+
+    pin = master_node.MASTER_INVITE_CODE
+    if recorded and settings.sautium_master:
+        meant = f"its database records {pin} as its key; SAUTIUM_MASTER=1"
+    elif recorded:
+        meant = f"its database records {pin} as its key"
+    else:
+        meant = f"SAUTIUM_MASTER=1: its key is {pin}"
+    if pubkey is None:
+        held = ("but it has no key: neither its identity folder nor P2P_USERNAME and "
+                "P2P_PASSWORD give one. Check both in .env.")
+    else:
+        ident = resolve_identity(settings)
+        code = (ident["invite_code"] if ident and ident["public_key_hex"].lower() == pubkey
+                else f"the key {pubkey[:16]}…")
+        if settings.p2p_identity_dir and (Path(settings.p2p_identity_dir) / "node_ed25519.key").exists():
+            held = f"but its identity folder holds {code}. Check that the folder is the master's."
+        else:
+            held = (f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD "
+                    f"in .env — one changed character is another key.")
+    return (f"This backend is the Sautium master ({meant}), {held} "
+            f"Nothing was written, signed or announced; not starting.")
+
+
 # ---------------------------------------------------------------------------
 # Identity documents on disk: certificate + proof
 # ---------------------------------------------------------------------------
@@ -214,8 +276,6 @@ def resolve_identity(settings) -> Optional[dict]:
 # is a bind mount (./data/node_identity), so both survive container
 # recreation and the node never re-mines. Same file names as the launcher —
 # the export/import bundle moves between the two unchanged.
-
-CERT_FILENAME = "birth_certificate.json"
 
 
 def identity_dir(settings):
@@ -256,7 +316,9 @@ def save_certificate(settings, cert: dict) -> bool:
         return False
     if cert["pubkey"] != identity["public_key_hex"].lower():
         return False
-    (d / CERT_FILENAME).write_text(json.dumps(cert, indent=2), encoding="utf-8")
+    from desktop.node_identity import write_identity_document
+    write_identity_document(d, CERT_FILENAME, json.dumps(cert, indent=2).encode("utf-8"),
+                            cert["pubkey"])
     logger.info("identity cert stored (issued_at=%s method=%s)",
                 cert["issued_at"], cert["method"])
     return True

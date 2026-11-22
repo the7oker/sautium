@@ -66,22 +66,66 @@ def _identity_dir() -> Path:
     return d
 
 
-def _move_info_aside(d: Path) -> Optional[Path]:
-    """The info of an identity whose key is gone, moved to replaced-<when>/ —
-    beside a new key it would name the identity that is gone. Returns the
-    folder it went to, or None when there was none."""
-    info = d / "node_info.json"
-    if not info.exists():
+def _move_aside(d: Path, name: str) -> Optional[Path]:
+    """The identity folder's file `name`, moved whole to replaced-<when>/.
+    Returns the folder it went to, or None when there was none."""
+    path = d / name
+    if not path.exists():
         return None
     aside = d / ("replaced-" + datetime.datetime.now(datetime.timezone.utc)
                  .strftime("%Y%m%dT%H%M%S%fZ"))
     aside.mkdir()
     try:
-        info.rename(aside / info.name)
+        path.rename(aside / name)
     except OSError:
         aside.rmdir()
         raise
     return aside
+
+
+def _move_info_aside(d: Path) -> Optional[Path]:
+    """The info of an identity whose key is gone, moved aside — beside a new
+    key it would name the identity that is gone."""
+    return _move_aside(d, "node_info.json")
+
+
+CERT_FILENAME = "birth_certificate.json"
+
+
+def _document_key(path: Path) -> Optional[str]:
+    """The key (lower-case hex) an identity document on disk is of: a
+    certificate whose signature verifies, or a proof of the proof format;
+    None for no file, or one that is neither."""
+    from desktop.p2p.birth_cert import verify_certificate
+    from desktop.p2p.identity_proof import PROOF_VERSION
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("pubkey"), str):
+        return None
+    if path.name == CERT_FILENAME:
+        held = verify_certificate(doc)
+    else:
+        held = doc.get("v") == PROOF_VERSION and bool(_PUBKEY_RE.fullmatch(doc["pubkey"].lower()))
+    return doc["pubkey"].lower() if held else None
+
+
+def write_identity_document(d: Path, name: str, data: bytes, pubkey: str) -> None:
+    """The one writer of the identity folder `d`'s certificate
+    (birth_certificate.json) and proof (identity_proof.json), on either
+    runtime: `data`, the document of the key `pubkey`. A document there of
+    another key is never written over — it is moved whole to replaced-<when>/
+    with an error naming both keys, and `data` written as if no file had been
+    there (B-113: a start under another key got its own certificate stored
+    over the master's). This key's document, or a file that is none, is
+    written over in place."""
+    held = _document_key(d / name)
+    if held is not None and held != pubkey.lower():
+        aside = _move_aside(d, name)
+        logger.error("The identity folder's %s was of the key %s…, not of this one (%s…): "
+                     "moved whole to %s", name, held[:16], pubkey.lower()[:16], aside.name)
+    (d / name).write_bytes(data)
 
 
 def _sync(fd: int) -> None:
