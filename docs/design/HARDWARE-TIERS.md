@@ -308,8 +308,10 @@ Hardware profile; `compute.models`, applied at a restart), or an image built
 without the model stack (`backend/Dockerfile.mac`, `MODELS=0`). A node the
 console setup (`./sautium`) makes is born so on a machine with under 8 GB of
 memory, or whose Docker data sits on a card or has under 25 GB free
-(`desktop/machine_tier.py`), with the streaming library off, passing
-nothing on and relaying for nobody; each is a switch afterwards. It analyses nothing and embeds no
+(`desktop/machine_tier.py`), with the streaming library off and relaying
+for nobody; each is a switch afterwards. Since 2026-11-22 it passes on what
+it holds, like every node (a node born Nano before that keeps the off its
+birth wrote, the owner's switch in More › Sync & P2P). It analyses nothing and embeds no
 query: sound features and artist recognition arrive from other nodes, and
 Sound, Bio and Lyrics search are not offered. Its identity comes from a
 verified email, never a mined proof. Measured at rest on a 16 GB Raspberry

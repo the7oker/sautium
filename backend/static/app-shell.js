@@ -16197,8 +16197,9 @@
         </div>` : ''}`;
 
     // "Pass on what this node holds": the serving side of sharing, a switch
-    // of its own on a node born small — shown only where it is off or the
-    // node is Nano, so no other node's screen grows a row. Draft words.
+    // of its own — shown only where it is off or the node is Nano (born with
+    // it on since 2026-11-22), so no other node's screen grows a row. Draft
+    // words.
     const passOnRow = (sync.pass_on && !sync.nano) ? '' : `
         <div class="form-row">
           <span class="form-label">Pass on what this node holds</span>

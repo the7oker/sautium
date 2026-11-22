@@ -1,6 +1,8 @@
 """The smallest node, "Nano" (PI-NODE-2B): no model runs, the streaming
-library is off, nothing is passed on — three owner's switches a small board
-is born with.
+library is off, it relays for nobody — three owner's switches a small board
+is born with. Since 2026-11-22 it passes on what it holds, like every node
+(PI-NODE-2C §11): "pass on what this node holds" is the owner's switch, no
+longer a small board's birth.
 
 - The birth preset (db_migrate): written once, before the seed step, only
   where the owner's row does not exist; a node born Nano downloads no seed.
@@ -101,11 +103,14 @@ def test_a_node_born_nano_gets_its_switches_before_the_seed_and_downloads_none(d
 
     out = db_migrate.apply_pending()
     assert out["birth_preset"] == {"preset": "nano", "written": [
-        "compute.models", "discovery.phantom_layer", "sync.pass_on", "p2p.relay_enabled"]}
+        "compute.models", "discovery.phantom_layer", "p2p.relay_enabled"]}
     assert out["seed"] == {"complete": False, "skipped": "phantom_layer_off"}
+    # No row for "pass on": the default (on) holds, and the owner's switch writes the first one
     assert _settings(db) == {"compute.models": False, "discovery.phantom_layer": False,
-                             "sync.pass_on": False, "p2p.relay_enabled": False,
-                             "node.birth_preset": "nano"}
+                             "p2p.relay_enabled": False, "node.birth_preset": "nano"}
+    sync_router = pytest.importorskip("routers.sync")
+    sync_router.sharing_changed()
+    assert (sync_router.sharing_enabled(), sync_router.serving_enabled()) == (True, True)
     assert hardware_profile.models_switch() is False
 
     # The owner turns the models on; no later start writes the preset again
@@ -121,7 +126,7 @@ def test_the_preset_keeps_a_row_the_owner_already_has(db, scratch_dsn, monkeypat
     conn = psycopg2.connect(scratch_dsn)
     try:
         assert db_migrate._apply_birth_preset(conn) == {
-            "preset": "nano", "written": ["compute.models", "sync.pass_on", "p2p.relay_enabled"]}
+            "preset": "nano", "written": ["compute.models", "p2p.relay_enabled"]}
     finally:
         conn.close()
     assert _settings(db)["discovery.phantom_layer"] is True

@@ -57,8 +57,8 @@ SYNC_CAPABILITIES = ["segments"]
 # sync.p2p_enabled alone; `serving_enabled` is the PASSING-ON side — every
 # route below, what /health says, the LAN beacon, the DHT's tail, the
 # carry this node offers — and holds only while sync.pass_on is on too. A
-# node born small takes without passing on (db_migrate's birth preset) until
-# its owner says otherwise; it tells the network less, never more: asking is
+# node whose owner turned that off takes without passing on (no birth preset
+# does since 2026-11-22); it tells the network less, never more: asking is
 # unchanged, and what it holds is told to nobody.
 _SHARING_TTL = 10.0
 _sharing_cache: tuple[float, tuple[bool, bool]] = (0.0, (True, True))

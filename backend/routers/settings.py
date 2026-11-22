@@ -322,8 +322,9 @@ _DEFAULTS: Dict[str, Any] = {
     # "Pass on what this node holds": the serving side of sharing — the peer
     # routes, what /health says, the LAN beacon, the DHT's tail, the carry
     # this node offers (routers/sync.serving_enabled). Off, the node still
-    # asks and takes. A node born small starts with it off (db_migrate's
-    # birth preset); everywhere else it is on and not shown.
+    # asks and takes. On by default on every node, a node born Nano included
+    # since 2026-11-22 (one born before keeps the off its birth wrote); the
+    # row is shown only where it is off or the node is Nano.
     "sync.pass_on":              True,
     "sync.auto_interval_min":    30,
     # Size of the rare-artist DHT announce tail (0/null = node key only).

@@ -497,8 +497,10 @@ See:
   from the taking side: off, the node still asks and takes, and answers no
   peer sync route, says `sharing: false` and nothing of what it holds in
   `/health`, beacons and announces no tail and offers no carrier anything;
-  default on, off in a node born Nano — whose preset also turns
-  `p2p.relay_enabled` off; shown only where it is off or the node is Nano), `sync.announce_limit` (rare
+  default on, on every node — since 2026-11-22 a node born Nano passes on
+  too, and its preset turns only `p2p.relay_enabled` off (a node born Nano
+  before that keeps the off its birth wrote); shown only where it is off or
+  the node is Nano), `sync.announce_limit` (rare
   artist DHT tail; 150 = half the traversal lane, announced only under the
   computed `p2p.rare_mode`), `sync.carry_limit` (foreign TRACKS carried, ~46 KB
   each), `p2p.relay_enabled` (relay role), `enrichment.reanalyze_imported`
