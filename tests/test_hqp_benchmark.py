@@ -429,10 +429,11 @@ def test_a_setting_that_never_starts_fails_at_the_deadline():
 
 def test_a_build_hqplayer_answers_all_through_is_not_held_against_the_start():
     # Embedded on a Pi 5: playing, position 0, speed 0, nothing out — for
-    # longer than a start may take — then it plays
+    # longer than a start may take — then it plays (a bound longer than the
+    # benchmark's minute, as a control re-check has)
     building = [(t, _st(position=0.0, speed=0.0, out=0.0)) for t in range(1, 80)]
     trace = building + [(80 + t, _st(position=float(t), speed=2.0)) for t in range(1, 30)]
-    t, v = _feed(bench.Settle(0.0), trace)
+    t, v = _feed(bench.Settle(0.0, build_limit=600.0), trace)
     assert "speed" in v and v["settled"], v
     assert v["init_s"] >= 80
 
@@ -460,7 +461,8 @@ def test_a_silent_build_is_held_off_the_start_once_not_twice():
     # Desktop silent 100 s building, then answering that it plays with
     # nothing out yet: the silence is the build's (paused), and the first
     # answer after it must not count the same gap again from the tick before
-    s = bench.Settle(0.0)
+    # (a bound longer than the benchmark's minute)
+    s = bench.Settle(0.0, build_limit=600.0)
     assert s.feed(1.0, _st(position=0.0, speed=0.0, out=0.0)) is None
     s.paused(100.0)                                       # _outlast, after the silence
     assert s.feed(102.0, _st(position=0.0, speed=0.0, out=0.0)) is None
@@ -1457,11 +1459,11 @@ def test_a_point_hqplayer_is_silent_in_past_the_bound_is_a_slow_start_and_ends_t
         "some filters take a very long time to prepare — hours, for some. While your processor stays "
         "busy, HQPlayer is still working on it; if it sits idle, HQPlayer has stopped. Either way, "
         "restarting HQPlayer ends it. Sautium puts your filter, rate and volume back as soon as "
-        "HQPlayer answers. This combination is now marked as taking over 10 minutes to start here and "
+        "HQPlayer answers. This combination is now marked as taking over a minute to start here and "
         "is not tested again."), st["note"]
     (note,), = run.q("""SELECT note FROM hqp_benchmark_points
                          WHERE filter = 'sinc-L' AND rate_hz = 11289600 AND result = 'slow_start'""")
-    assert note.endswith("min after Play — still preparing it, or stopped"), note
+    assert note.endswith("s after Play — still preparing it, or stopped"), note
     assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
         [(True, True)]
     assert run.q("SELECT count(*) FROM hqp_dsp_samples WHERE filter = 'sinc-L'") == [(0,)]
@@ -1505,14 +1507,14 @@ def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run
     (failed, asked again by a later run, no mark), the run ends saying so,
     and HQPlayer — answering again — is put back at once."""
     fake = run.fake
-    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.2)
-    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.5)
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.3)
     before = fake.settings()
     fake.builds[("sinc-L", 11289600)] = 999.0
     bench.start()
     assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
                  .startswith("HQPlayer is preparing"), 30)
-    time.sleep(0.5)                     # the silence past LONG_BUILD_S, as the person waited it
+    time.sleep(0.4)                     # the silence past LONG_BUILD_S, as the person waited it
     fake.builds.clear()
     fake.restart()
     assert _wait(lambda: not bench.running(), 60)
@@ -1531,14 +1533,14 @@ def test_a_cancel_in_a_long_silent_build_marks_hqplayer_lost(run, monkeypatch):
     silent — the restart that follows is no one's change: the run is marked
     lost and put back whole over it."""
     fake = run.fake
-    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.2)
-    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.5)
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.3)
     monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
     fake.builds[("sinc-L", 11289600)] = 999.0
     bench.start()
     assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
                  .startswith("HQPlayer is preparing"), 30)
-    time.sleep(0.5)                     # the silence past LONG_BUILD_S, as the person waited it
+    time.sleep(0.4)                     # the silence past LONG_BUILD_S, as the person waited it
     bench.cancel()
     assert _wait(lambda: not bench.running(), 60)
     assert bench.state()["outcome"] == "cancelled"
@@ -1549,17 +1551,19 @@ def test_a_cancel_in_a_long_silent_build_marks_hqplayer_lost(run, monkeypatch):
 def test_a_connection_flapping_in_a_long_build_is_waited_through(run, monkeypatch):
     """Round 2 M-A: the hop drops the run's connection past LONG_BUILD_S of a
     build HQPlayer goes on with (the WSL2 hop flaps for seconds) — at the
-    production ratio of the answer wait to LONG_BUILD_S (45 : 60). What
-    HQPlayer answers on the new connection says what it was: still silent,
-    then playing — the point is measured, the run goes on."""
+    production ratio of the answer wait, LONG_BUILD_S and the bound (20 :
+    20 : 60 s). What HQPlayer answers on the new connection says what it
+    was: still silent, then playing — the point is measured, the run goes
+    on."""
     fake = run.fake
-    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
-    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.4)
-    fake.builds[("sinc-L", 11289600)] = 3.0
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.8)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.8)
+    monkeypatch.setattr(bench, "BUILD_LIMIT_S", 2.4)
+    fake.builds[("sinc-L", 11289600)] = 1.8
     bench.start()
     assert _wait(lambda: ((run.mgr.held or {}).get("progress") or {}).get("point_label", "")
                  .startswith("HQPlayer is preparing"), 30)
-    time.sleep(0.5)
+    time.sleep(0.2)
     with fake._lock:
         conns = list(fake._conns)
     for c in conns:                     # the hop drops them; HQPlayer builds on
@@ -1589,11 +1593,11 @@ def test_a_rung_answered_for_alike_again_is_not_written_twice(run):
 
 
 def test_a_long_silent_build_says_hqplayer_is_still_preparing_it(run, monkeypatch):
-    """HQP-BENCH-63 Q2: past LONG_BUILD_S of silence the run's line says
-    HQPlayer is preparing that filter at that rate and that some take
-    minutes here, and goes back to the point once HQPlayer answers."""
+    """HQP-BENCH-63 Q2, §12.2 item 8: at LONG_BUILD_S of silence the run's
+    line says HQPlayer is preparing that filter at that rate, and goes back
+    to the point once HQPlayer answers (the production ratio, 20 : 20 s)."""
     monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.2)
-    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.3)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.2)
     run.fake.builds[("sinc-L", 11289600)] = 2.0
     seen = []
     real = bench._progress
@@ -1608,7 +1612,7 @@ def test_a_long_silent_build_says_hqplayer_is_still_preparing_it(run, monkeypatc
     assert bench.state()["outcome"] == "done", bench.state()["note"]
     said = [i for i, x in enumerate(seen) if x.startswith("HQPlayer is preparing")]
     assert said and seen[said[0]] == ("HQPlayer is preparing sinc-L at DSD256 — between rate families "
-                                      "some filters take minutes here, some much longer."), seen
+                                      "some filters take long to prepare."), seen
     assert "sinc-L" in seen[said[0] + 1] and not seen[said[0] + 1].startswith("HQPlayer"), seen
 
 

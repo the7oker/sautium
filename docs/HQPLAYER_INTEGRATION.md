@@ -514,7 +514,8 @@ comes after the control port answers again — so neither can end the wait.
   about six in SDM at the highest rate with the longest filters; a
   short silence, never a build: a command behind it waits, and past it
   HQPlayer is "not answering" (people's commands refused with that line,
-  questions go on until it answers) — and `BUILD_LIMIT_S` (10 min) for what may set off a build or meet
+  questions go on until it answers) — and `BUILD_LIMIT_S` (10 min; the
+  benchmark's own bound is a minute since 2026-11-22) for what may set off a build or meet
   one: the Set* commands, Play, SelectTrack, Seek, Next, Previous.
 - **The build watch** (`hqp_link.BuildWatch`, one per link). An answer
   later than `BUILDING_AFTER_S` (1 s) is HQPlayer building: the player
@@ -1197,7 +1198,7 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   the Benchmark, then compare", the Benchmark's row as the way), every other
   one too slow here, and so on; only when the answers emptied it does it say
   every kind of difference was heard as none. A filter that stopped HQPlayer
-  here within 10 minutes (`slow_start`) is left out as that.
+  here within a minute (`slow_start`) is left out as that.
 - **The fragment** is a FLAC cut of the track's own file — the passage the
   person chose on the sheet, 20 ms fades, after a lead of digital silence
   (`transcode.flac_fragment_path_for_file`) — handed to HQPlayer through
@@ -2294,7 +2295,7 @@ cooling — so Sautium measures it instead of predicting it
   setting (`headroom.setting`). A key a benchmark asked for that HQPlayer
   refused, never got going, or stopped answering in here (its newest answer,
   `headroom.refused`) says "HQPlayer refuses it at this setting", "HQPlayer
-  never got it going on this computer" or "Over 10 min to start here" instead,
+  never got it going on this computer" or "Over 1 min to start here" instead,
   with nothing to run — choosing a filter that stopped HQPlayer asks first
   (since 2026-11-22) — (a point is keyed by the
   rate it asked — 0 at the automatic rate slot — a mark by the rate that
@@ -2458,13 +2459,15 @@ cooling — so Sautium measures it instead of predicting it
   first build is a start time (`init_s`), not a setting the host cannot
   run. A point starts at the SelectTrack (a stopped HQPlayer plays the slot
   it is given — "GoTo 1", then "Play (1/0)" in its log), and from there the
-  run asks for `<Status/>` again on a new connection every 45 s until
+  run asks for `<Status/>` again on a new connection every 20 s (45 s
+  until 2026-11-22) until
   HQPlayer answers, then watches the point on — the silence is not held
   against its start and point deadlines. The second live run gave up after
   10 s instead and set HQPlayer up again: its Stop arrived right after the
   build and stopped what had just been built, and a build it interrupted
   failed inside HQPlayer (`ThreadPoolCreate(): lThreadCntr != 0`, `Stop
-  request (reset)`). A point still building after 10 minutes, HQPlayer
+  request (reset)`). A point still building after a minute (10 minutes
+  until 2026-11-22), HQPlayer
   answering all through (Embedded), never started on this host
   (`unstarted`): not asked again by a later run, which would only take the
   machine back where the build took it (the second run met HQPlayer grown
@@ -2500,15 +2503,19 @@ cooling — so Sautium measures it instead of predicting it
   then ran it at 21×, and between rate families some filters take hours to
   build (the two silences of 2026-11-20,
   with the CUDA resampler, were most likely builds the owner ended after about half an
-  hour) — so the bound stays 10 min, and the run ends at it: HQPlayer
-  answers nothing while it builds. Before a minute of silence is out the
-  run's line says HQPlayer is still preparing that filter at that rate and
-  that between rate families some take minutes here, some much longer.
-  Restarted by the person out of a silence past that minute,
-  HQPlayer is not asked the point again in that run: the run ends there
-  (the point failed, asked again by a later run) and puts HQPlayer back at
-  once; cancelled past that minute, the run is marked as having lost
-  HQPlayer, so the restart that follows is put back whole.
+  hour). The bound is a minute (the owner, 2026-11-22: a person does not
+  wait minutes for the music to start, and the same filter at the same
+  ratio is built again at every album of another rate; of 1 451 builds in
+  the lab's HQPlayer log, every one within a rate family took ≤ 10 s, and
+  between families all but four ≤ 10 s), and the run ends at it: HQPlayer
+  answers nothing while it builds. At 20 s of silence the run's line says
+  HQPlayer is still preparing that filter at that rate and that between
+  rate families some filters take long to prepare. Restarted by the person
+  out of a silence past those 20 s, HQPlayer is not asked the point again
+  in that run: the run ends there (the point failed, asked again by a
+  later run) and puts HQPlayer back at once; cancelled past them, the run
+  is marked as having lost HQPlayer, so the restart that follows is put
+  back whole.
   A `slow_start` point is not asked again on that engine, CUDA state and
   mode; the run ends at once and says HQPlayer is still preparing it or has
   stopped — busy cores, still working; idle, stopped; either way a restart
