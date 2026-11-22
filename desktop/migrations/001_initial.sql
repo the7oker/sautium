@@ -3517,6 +3517,9 @@ CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_name_prefix ON mb_artist_alias(lo
 CREATE INDEX IF NOT EXISTS idx_mb_artist_unaccent        ON mb_artist(f_unaccent(name));
 CREATE INDEX IF NOT EXISTS idx_mb_artist_alias_unaccent  ON mb_artist_alias(f_unaccent(name));
 CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_lower  ON mb_artist(lower(sort_name));
+-- A composer value the dump knows whole by its sort name stays one name
+-- (credits._known_whole), compared accent-folded as names are.
+CREATE INDEX IF NOT EXISTS idx_mb_artist_sortname_unaccent ON mb_artist(f_unaccent(sort_name));
 CREATE INDEX IF NOT EXISTS idx_mb_track_credit           ON mb_track(artist_credit);
 CREATE INDEX IF NOT EXISTS idx_mb_acn_artist            ON mb_artist_credit_name(artist);
 CREATE INDEX IF NOT EXISTS idx_mb_rg_credit             ON mb_release_group(artist_credit);

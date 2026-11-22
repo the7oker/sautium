@@ -5893,7 +5893,7 @@
         ].filter(Boolean).join(' · ');
         // the track's own composers, beyond the album line's (albums.py
         // _composer_lines); names only — the row is the play control
-        // " · " between names: a name keeps its own comma ("Lennon, McCartney")
+        // " · " between names: a name keeps its own comma ("Earth, Wind & Fire")
         const composers = (t.composers || []).map(c => c.name).join(' · ');
         const composersLine = composers
           ? `<div class="track-artist-line track-composers">${escapeHtml(composers)}</div>` : '';
