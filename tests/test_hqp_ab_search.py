@@ -292,15 +292,15 @@ def test_the_dominant_reason_left_out_the_most_ties_in_its_order():
     assert s.dominant() == "too_slow"
     s.leave("not_measured_here", "d")
     assert s.dominant() == "not_measured_here"          # a tie: the earlier reason
-    s.leave("hung", "e")
-    s.leave("hung", "f")
-    s.leave("hung", "g")
-    assert s.dominant() == "hung"
+    s.leave("slow_start", "e")
+    s.leave("slow_start", "f")
+    s.leave("slow_start", "g")
+    assert s.dominant() == "slow_start"
 
 
 def test_a_filter_asked_and_answered_without_a_speed_is_left_out_as_its_answer():
     champion = S.Filter("own", 0, 2.0, "ok", at={"phase": 0.0, "cutoff": 0.9, "ringing": 300.0})
-    hung = S.Filter("h", 1, None, None, asked="hung")
+    slow = S.Filter("h", 1, None, None, asked="slow_start")
     never = S.Filter("n", 2, None, None)
-    out = S.screen([champion, hung, never], champion, atlas=False)
-    assert out.left_out == {"hung": ["h"], "not_measured_here": ["n"]}
+    out = S.screen([champion, slow, never], champion, atlas=False)
+    assert out.left_out == {"slow_start": ["h"], "not_measured_here": ["n"]}

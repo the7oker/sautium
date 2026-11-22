@@ -9980,7 +9980,7 @@
     if (!row) return '<td class="hqp-bench-none">—</td>';
     if (row.class === 'refused') return '<td class="hqp-bench-none" title="HQPlayer refuses this combination">⊘</td>';
     if (row.class === 'unstarted') return '<td class="hqp-bench-none" title="HQPlayer never got it going on this host (still building it 10 minutes after Play)">○</td>';
-    if (row.class === 'hung') return '<td class="hqp-bench-none is-hung" title="Stops HQPlayer here: it stopped responding while preparing it">⊗</td>';
+    if (row.class === 'slow_start') return '<td class="hqp-bench-none" title="Over 10 minutes to start here: HQPlayer answered nothing that long after Play">⊗</td>';
     if (row.speed == null) {
       const title = `${row.class === 'ok' ? 'Keeps up here (faster than' : 'Too slow here (slower than'} at ${fmtRateLabel(row.implied_from)})`;
       return `<td title="${escapeHtml(title)}"><span class="hqp-hr is-${row.class}"><span class="hqp-hr-dot"></span></span></td>`;
@@ -10070,7 +10070,7 @@
         <p class="hqp-diag-note"><span class="hqp-hr is-ok"><span class="hqp-hr-dot"></span></span> from ${th.ok}× ·
           <span class="hqp-hr is-tight"><span class="hqp-hr-dot"></span></span> tight ·
           <span class="hqp-hr is-no"><span class="hqp-hr-dot"></span></span> under ${th.no}×${
-          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer · ○ never started here · ⊗ stopped HQPlayer here · a dot alone: a rate next to it on its ladder answers for it · — not measured</p>
+          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer · ○ never started here · ⊗ over 10 minutes to start here · a dot alone: a rate next to it on its ladder answers for it · — not measured</p>
         <div class="confirm-actions single">
           <button class="profile-btn primary" type="button" data-close>Close</button>
         </div>
@@ -10761,11 +10761,11 @@
   // together.
   // A row without a mark that a benchmark asked for all the same
   // (hqp_load.headroom's `refused`): Test speed would end alike — and on a
-  // combination that stopped HQPlayer, would stop it again
+  // combination that took over 10 minutes to start, hold HQPlayer silent again
   const HQP_UNMEASURED = {
     refused: 'HQPlayer refuses it at this setting',
     unstarted: 'HQPlayer never got it going on this computer',
-    hung: 'Stops HQPlayer here',
+    slow_start: 'Over 10 min to start here',
   };
   // With the two filter slots apart, `slot` ('1x' | 'nx') is the one the
   // picker chooses for. "your pick · N" (AB-1 §14.5) counts the person's own
@@ -10798,7 +10798,7 @@
     const currentIdx = (slot === '1x' ? st.filter1x : (filter ? st.filterNx : st.shaper)) ?? -1;
     const hr = state.headroom || {};
     const measured = hr[filter ? 'filters' : 'shapers'] || {};
-    // Asked here and refused, never got going, or stopped HQPlayer:
+    // Asked here and refused, never got going, or over 10 minutes to start:
     // measured, with no speed
     const refused = (hr.refused || {})[filter ? 'filters' : 'shapers'] || {};
     // An earlier engine's mark where this one has none (C1): a hint in the
@@ -10904,13 +10904,13 @@
           const f = entries.find(x => x.index === idx);
           close();
           if (!f) return;
-          // A combination that stopped HQPlayer before on this engine: asked first (Q4)
-          if (refused[f.name] === 'hung') {
-            const cuda = bench.cuda && bench.cuda !== 'off' ? 'CUDA on' : 'CUDA off';
+          // A combination that took over 10 minutes to start here on this engine: asked first (Q4)
+          if (refused[f.name] === 'slow_start') {
+            const cuda = bench.cuda && bench.cuda !== 'off' ? 'on' : 'off';
             const ok = await window.confirmDestructive({
               title: `Choose ${f.name}?`,
-              message: `HQPlayer stopped responding the last time it prepared this here (HQPlayer ${
-                escapeHtml((state.info && state.info.engine) || '')}, ${cuda}). Choose it anyway?`,
+              message: `This took more than 10 minutes to start here last time (HQPlayer ${
+                escapeHtml((state.info && state.info.engine) || '')}, CUDA ${cuda}), and HQPlayer answers nothing while it prepares. Choose it anyway?`,
               confirmText: 'Choose it',
             });
             if (!ok) return;
@@ -13358,7 +13358,8 @@
     };
   };
   // A benchmark run HQPlayer went away under — it closed, reset or refused
-  // the connection, or stopped answering in a point (`hung`: restarted) —
+  // the connection, or answered nothing past the build limit in a point
+  // (`slow_start`: restarted, or the build ended) —
   // put back whole when it answered again
   // (playback/hqp_benchmark.py): a report, gone once seen. The run's date
   // keeps a put-back days later from reading as a change made on its own.
@@ -13371,7 +13372,7 @@
     const run = `${escapeHtml(at.toLocaleDateString([], { month: 'short', day: 'numeric' }))} at <span class="num">${escapeHtml(at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>`;
     const volume = d.volume_left == null ? ''
       : ` Its volume was left as it is — ${db(d.volume_left)}; yours was ${db(d.volume_before)}.`;
-    if (d.hung) {
+    if (d.slow_start) {
       return {
         title: 'HQPlayer is back',
         text: d.volume_left == null

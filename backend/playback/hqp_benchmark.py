@@ -37,7 +37,7 @@ after weeks of listening takes minutes. The grid (build_grid):
 
 Each point leaves a row in hqp_benchmark_points by what it ASKED — measured,
 unsettled, dropped out, refused by HQPlayer, never started here, stopped
-HQPlayer (hung), or failed — and so does each rung a neighbour on its
+HQPlayer within the build limit (slow_start), or failed — and so does each rung a neighbour on its
 ladder answers for (implied: for the sheet, never read by a plan) — and a
 later run skips every point asked before that did not fail
 (hqp_load.covered): a combination HQPlayer refuses
@@ -48,11 +48,11 @@ a combination either at the Set* command or at Play, stopping at once
 a point stopped again after its one re-Play, never having moved, is refused
 too. HQPlayer builds a setting in silence, for minutes at times: a point
 waits it out and is measured, the build counted into its start; one that
-keeps HQPlayer silent past BUILD_LIMIT_S is a combination that stops
-HQPlayer here (`hung`: a live build and a hang look the same from outside,
-6.3.3 built one for 6 minutes in silence) — not asked again on that engine,
-CUDA state and mode — and the run ends at once, says so, and knows it lost
-HQPlayer: what HQPlayer shows when it answers again is a restart's, put
+keeps HQPlayer silent past BUILD_LIMIT_S did not start here within it
+(`slow_start`: between rate families a build can take hours, and a long
+build and a stopped HQPlayer look the same from outside) — not asked again
+on that engine, CUDA state and mode — and the run ends at once, says so,
+and knows it lost HQPlayer: what HQPlayer shows when it answers again is a restart's, put
 back whole (recover). Three points of one source in a row that do not
 play end that source's points; the others go on.
 
@@ -167,15 +167,16 @@ START_DEADLINE_S = 60.0
 # keeps a design it built, and the same setting starts in a second after.
 ANSWER_WAIT_S = 45.0
 # Building this long — silent, or answering that it plays with nothing out
-# yet (_building, Embedded) — this host does not get the setting going: the
-# point is `unstarted`; one silent all through is `hung` — it stopped
-# HQPlayer — and the run ends. 1.7 × the longest live build seen (358 s,
-# 6.3.3 Desktop, 44.1 → 768 kHz, silent throughout): nothing shorter tells a
-# hang from a build (HQP-BENCH-63 Q2).
+# yet (_building, Embedded) — this host does not get the setting going in
+# time: the point is `unstarted`; one silent all through is `slow_start` —
+# the run cannot go on with an HQPlayer that answers nothing — and the run
+# ends. 1.7 × the longest live build seen (358 s, 6.3.3 Desktop, 44.1 →
+# 768 kHz, silent throughout); between rate families a build can take hours
+# (HQP-BENCH-63 Q2, §12.2): what is measured is no start within the bound.
 BUILD_LIMIT_S = 600.0
 # A silent build this long has the run's line say HQPlayer is still building
-# it, and that some take minutes here: the person is not left guessing
-# through what can be a hang (HQP-BENCH-63 Q2)
+# it, and that some take minutes here, some much longer: the person is not
+# left guessing through the silence (HQP-BENCH-63 Q2, §12.2)
 LONG_BUILD_S = 60.0
 # A point that has not decided by then never will (a frozen output that
 # still says it plays).
@@ -929,41 +930,67 @@ class _Silent(_Reopened):
     anywhere else a _Reopened like any other."""
 
 
-class _Hung(_Lost):
-    """HQPlayer stayed silent past BUILD_LIMIT_S."""
+class _Silenced(_Lost):
+    """HQPlayer answered nothing past BUILD_LIMIT_S."""
 
 
-class _Restarted(_Hung):
+class _Restarted(_Silenced):
     """HQPlayer came back stopped on a new connection after LONG_BUILD_S of
-    silence in a point: the person restarted what they took for hung."""
+    silence in a point: the person restarted it out of the build."""
 
 
 class _BuildCancelled(_Lost):
-    """A cancel past LONG_BUILD_S of silence: HQPlayer may be hung and
-    restarted next — what it shows then is no one's change."""
+    """A cancel past LONG_BUILD_S of silence: HQPlayer may be restarted next
+    — what it shows then is no one's change."""
 
 
-class _HungRun(_Lost):
-    """HQPlayer stopped answering in a point, or was restarted out of a long
-    silence in one: the run ends at once, knowing it lost HQPlayer — what
-    HQPlayer shows when it answers again is a restart's, put back whole
-    (_recover), never a person's change. `head`: what happened; `marked`:
-    the combination is ledgered as one that stops HQPlayer."""
+class _SlowStartRun(_Lost):
+    """HQPlayer answered nothing past BUILD_LIMIT_S in a point — still
+    preparing it (between rate families a build can take hours),
+    or stopped; from outside the two look the same — or
+    was restarted out of a long silence in one: the run ends at once,
+    knowing it lost HQPlayer — what HQPlayer shows when it answers again is
+    a restart's, put back whole (_recover), never a person's change. `verb`:
+    what HQPlayer was doing ('prepared', 'played', 'started' — the control,
+    again); `marked`: the combination is ledgered `slow_start`."""
 
-    def __init__(self, head: str, *, marked: bool = False):
-        self.head, self.marked = head, marked
+    def __init__(self, p: "Point", verb: str, *, restarted: bool = False, marked: bool = False):
+        rate_hz, filt, _, src_rate, _ = p.key
+        rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
+        self.what = (f"{filt} at {rate} from a {rate_name(src_rate)} source"
+                     + (" again" if verb == "started" else ""))
+        self.verb, self.restarted, self.marked = verb, restarted, marked
         super().__init__(self.words(reached=False))
 
     def words(self, *, reached: bool) -> str:
-        """The run's note: what happened, then what the person does — or, put
-        back already (HQPlayer answered the restore), that it was."""
-        words = self.head + (" It answered again, and your filter, rate and volume were put back."
-                             if reached else " Restart HQPlayer: Sautium puts your filter, rate and "
-                                             "volume back as soon as it answers.")
+        """The run's note: what happened, what the person can tell and do —
+        or, HQPlayer answering the restore, that everything was put back."""
+        back = " It answered again, and your filter, rate and volume were put back."
+        later = " Sautium puts your filter, rate and volume back as soon as HQPlayer answers."
+        test = (" While your processor stays busy, HQPlayer is still working on it; if it sits "
+                "idle, HQPlayer has stopped. Either way, restarting HQPlayer ends it.")
+        if self.restarted:
+            words = f"HQPlayer was restarted while it {self.verb} {self.what}." + (back if reached else later)
+        elif self.verb == "prepared" and reached:
+            words = f"HQPlayer took over 10 minutes to prepare {self.what}." + back
+        elif self.verb == "prepared":
+            words = (f"HQPlayer is still preparing {self.what}. Between rate families some filters take "
+                     "a very long time to prepare — hours, for some." + test + later)
+        elif reached:
+            words = f"HQPlayer answered nothing for over 10 minutes while it {self.verb} {self.what}." + back
+        else:
+            words = f"HQPlayer stopped answering while it {self.verb} {self.what}." + test + later
         if self.marked:
-            words += (" This combination is now marked as one that stops HQPlayer and is not tried "
-                      "again.")
+            words += (" This combination is now marked as taking over 10 minutes to start here and is "
+                      "not tested again.")
         return words
+
+
+# How a run's note begins when HQPlayer answered nothing past the build
+# limit in it, or was restarted out of a long silence (_SlowStartRun)
+_SLOW_NOTES = ("HQPlayer is still preparing", "HQPlayer took over 10 minutes",
+               "HQPlayer answered nothing for over", "HQPlayer stopped answering while",
+               "HQPlayer was restarted while")
 
 
 class _Link:
@@ -1358,7 +1385,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
                                  "unstarted": 0, "failed": 0, "implied": 0, "deferred": 0,
                                  "stopped": []}
         outcome, note = "failed", None
-        hung = lost_build = False
+        silenced = lost_build = False
         try:
             st, filters, shapers, rates = _again(lambda: _enter_mode(link, mode_index, switched))
             if switched:
@@ -1394,8 +1421,8 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
                                     stats, replan)
         except _Abort as e:
             outcome, note = "failed", str(e)
-        except _HungRun as e:
-            outcome, note, hung = "failed", e, True
+        except _SlowStartRun as e:
+            outcome, note, silenced = "failed", e, True
         except _Lost as e:
             outcome, note = ("cancelled", None) if _cancel.is_set() else ("failed", str(e))
             # a cancel in a long silence: the restart that may follow is no one's change
@@ -1407,7 +1434,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             _live = None                # a second cancel must not cut the put-back
             reached, restore_note, gone, measured_left = _restore(link, pre, own, mute,
                                                                   switched)
-            if hung:
+            if silenced:
                 # its words say what the restore did, or that it is owed
                 note = "; ".join(x for x in (note.words(reached=reached),
                                              restore_note if reached else None) if x)
@@ -1417,13 +1444,14 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             # open: the next attach, or its next answer, puts it back
             # (recover) — unless the owner changes it first. One that went
             # away — it closed, reset or refused the connection, the app not
-            # stopping — or hung under a point, which only a restart ends,
+            # stopping — or silent past the build limit in a point, which only
+            # a restart ends sooner,
             # may come back with what it booted with (lost_at); one that
             # stayed silent, busy, did not.
             if not reached:
                 _owe(run_id)
             _close_run(run_id, outcome, note, stats, finished=reached,
-                       lost=(gone or hung or lost_build) and not _halt.is_set(),
+                       lost=(gone or silenced or lost_build) and not _halt.is_set(),
                        unchecked=reached and measured_left)
         return outcome, note
     finally:
@@ -1611,7 +1639,7 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                 result = {"failed": f"HQPlayer dropped the connection during it twice ({e})"}
         if result.get("cancelled"):
             return "cancelled", None
-        if result.get("at_play") or ("unstarted" in result and not result.get("hung")):
+        if result.get("at_play") or ("unstarted" in result and not result.get("silenced")):
             # A stop at Play and a build past the limit are kept for good
             # ("refused", "never started here"), so HQPlayer must still
             # start what it started earlier in this run: an Embedded whose
@@ -1641,11 +1669,10 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                     continue              # it says nothing of this point: asked next run
                 if again.get("cancelled"):
                     return "cancelled", None
-                if again.get("hung"):
-                    # silent, starting the control again: HQPlayer stopped
-                    # answering, or was restarted out of it — no mark on
-                    # either point
-                    raise _HungRun(_hung_head(c, "started", restarted=again.get("restarted", False)))
+                if again.get("silenced"):
+                    # silent past the limit starting the control again, or
+                    # restarted out of it — no mark on either point
+                    raise _SlowStartRun(c, "started", restarted=again.get("restarted", False))
                 if not again.get("started"):
                     raise _Abort(f"HQPlayer stopped starting anything: {c.label} started "
                                  f"earlier in this run and did not start again within "
@@ -1665,18 +1692,19 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
         # Not played: measured again next run when it failed, not asked again
         # when this host did not get it going. HQPlayer silent past
         # BUILD_LIMIT_S ends the run: never started, it is a combination that
-        # stops HQPlayer (`hung`), kept as its own answer.
+        # took over the bound to start here (`slow_start`), kept as its own
+        # answer.
         missed = "unstarted" if "unstarted" in result else "failed" if "failed" in result else None
         if missed is not None:
             logger.info(line + result[missed])
-            if result.get("hung"):
-                # never started and silent past the bound: it stops HQPlayer;
-                # silent once it played, or restarted out of a long silence:
-                # failed, asked again next run
+            if result.get("silenced"):
+                # never started and silent past the bound: it takes over the
+                # bound to start here; silent once it played, or restarted
+                # out of a long silence: failed, asked again next run
                 marked = missed == "unstarted" and not result.get("restarted")
-                _ledger(run_id, p, "hung" if marked else "failed", result[missed])
-                raise _HungRun(_hung_head(p, "played" if missed == "failed" else "prepared",
-                                          restarted=result.get("restarted", False)), marked=marked)
+                _ledger(run_id, p, "slow_start" if marked else "failed", result[missed])
+                raise _SlowStartRun(p, "played" if missed == "failed" else "prepared",
+                                    restarted=result.get("restarted", False), marked=marked)
             _ledger(run_id, p, missed, result[missed])
             stats[missed] += 1
             if not result.get("outran"):            # that one played
@@ -1758,21 +1786,6 @@ SOURCE_WORDS = {"pcm44": "The 44.1 kHz signal", "pcm96": "The 96 kHz signal", "d
                 "signal": "The test signal"}
 
 
-# How a run's note begins when HQPlayer stopped answering in it (_hung_head)
-_HUNG_NOTES = ("HQPlayer stopped responding while", "HQPlayer was restarted while")
-
-
-def _hung_head(p: Point, verb: str, *, restarted: bool = False) -> str:
-    """What happened in a point HQPlayer stopped answering in, or was
-    restarted out of (`restarted`) while it `verb`: 'prepared' it, 'played'
-    it, or 'started' it again (the control)."""
-    rate_hz, filt, _, src_rate, _ = p.key
-    rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
-    what = f"{filt} at {rate} from a {rate_name(src_rate)} source" + (" again" if verb == "started" else "")
-    return (f"HQPlayer was restarted while it {verb} {what}." if restarted
-            else f"HQPlayer stopped responding while it {verb} {what}.")
-
-
 def _verdict(r: dict) -> str:
     """The per-point log line's verdict: the speed, how the readings went,
     how long the setting took to start."""
@@ -1820,31 +1833,21 @@ def _point(link: _Link, p: Point, slots: Dict[str, int], applied: Dict[str, Any]
     def building(long: bool) -> None:
         # The run's line while HQPlayer builds this point in silence: past
         # LONG_BUILD_S it says so, and back to the point once it answers
-        _progress(point_label=_preparing(p, run_id) if long else p.label)
+        _progress(point_label=_preparing(p) if long else p.label)
     verdict = _play(link, slot, src_rate, len(slots), building=building, **watch)
     if verdict.get("elsewhere"):
         verdict = _play(link, slot, src_rate, len(slots), building=building, **watch)
     return verdict
 
 
-def _preparing(p: Point, run_id: int) -> str:
-    """The run's line through a long silent build: what HQPlayer prepares,
-    and the longest build this HQPlayer took so far on its engine — Desktop
-    answers nothing while it builds, a live build and a hang alike (6.3.3: a
-    358 s build at 44.1 → 768 kHz, HQP-BENCH-63 F5)."""
-    row = db_query_one("""
-        SELECT max(s.init_s) AS longest
-          FROM hqp_benchmark_runs r
-          JOIN hqp_dsp_samples s ON s.hqp_endpoint_id = r.hqp_endpoint_id
-                                AND s.hqp_engine = r.hqp_engine AND s.source = 'benchmark'
-         WHERE r.id = %(run)s
-    """, {"run": run_id})
+def _preparing(p: Point) -> str:
+    """The run's line through a long silent build: what HQPlayer prepares —
+    Desktop answers nothing while it builds, and between rate families some
+    builds take far longer than minutes."""
     rate_hz, filt = p.key[0], p.key[1]
     rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
-    longest = row["longest"] if row else None
-    so_far = (f" (the longest so far: {round(longest / 60):.0f} min)"
-              if longest is not None and longest >= 60 else "")
-    return f"HQPlayer is preparing {filt} at {rate} — some take minutes here{so_far}."
+    return (f"HQPlayer is preparing {filt} at {rate} — between rate families some filters take "
+            "minutes here, some much longer.")
 
 
 def _start(send: Callable[..., Any], read: Callable[[], Optional[TrackStatus]],
@@ -1888,7 +1891,8 @@ def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int, *,
     asked from the select on may meet the silence of a build: it is waited
     out (_outlast; `building` told when it has lasted LONG_BUILD_S, and when
     it ends) and the point watched on; past the build limit the point is
-    `unstarted` (`failed` once it had moved) and `hung` ends the run."""
+    `unstarted` (`failed` once it had moved), and silent all that while
+    (`silenced`) it ends the run."""
     settle = Settle(time.monotonic(), build_limit=build_limit, start_only=start_only, line=line)
 
     def read() -> Optional[TrackStatus]:
@@ -1966,8 +1970,8 @@ def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int, *,
                         return {"cancelled": True}
                     read()
                 return verdict
-    except _Hung as e:
-        return {"failed" if settle.moved else "unstarted": str(e), "hung": True,
+    except _Silenced as e:
+        return {"failed" if settle.moved else "unstarted": str(e), "silenced": True,
                 "restarted": isinstance(e, _Restarted)}
 
 
@@ -1980,11 +1984,11 @@ def _outlast(link: _Link, settle: Settle,
     the next answer cannot come before LONG_BUILD_S, `building` is told
     (True) — the person reads that it is a long build — and again (False)
     once HQPlayer answers. A cancel ends the wait at the next ask; past
-    BUILD_LIMIT_S, _Hung. Past LONG_BUILD_S of silence a cancel is
+    BUILD_LIMIT_S, _Silenced. Past LONG_BUILD_S of silence a cancel is
     _BuildCancelled, and a connection HQPlayer closed, reset or refused
     under the wait is read by what HQPlayer answers on the next one: stopped
-    — restarted by the person who took it for hung — is _Restarted, and the
-    point is not made again on the HQPlayer that hung in it; silent, or
+    — restarted by the person out of the build — is _Restarted, and the
+    point is not made again on the HQPlayer that sat silent in it; silent, or
     playing, it was the hop flapping (the WSL2 one does, for seconds), and
     the wait goes on."""
     began = time.monotonic() - ANSWER_WAIT_S          # the ask that met the silence
@@ -2003,8 +2007,8 @@ def _outlast(link: _Link, settle: Settle,
             raise (_BuildCancelled if long() else _Lost)(
                 "cancelled while HQPlayer was still building a setting")
         if time.monotonic() - began >= settle.build_limit:
-            raise _Hung(f"HQPlayer stayed silent {settle.build_limit / 60:.0f} min building it — "
-                        "this host does not get it going, or HQPlayer hung")
+            raise _Silenced(f"HQPlayer answered nothing {settle.build_limit / 60:.0f} min after Play — "
+                            "still preparing it, or stopped")
         # Said before the ask whose answer can only come past LONG_BUILD_S: a
         # silent read waits ANSWER_WAIT_S whole
         if not said and time.monotonic() - began + ANSWER_WAIT_S >= LONG_BUILD_S:
@@ -2923,19 +2927,18 @@ def restored_notice() -> Optional[dict]:
     notices channel drops it then). Its onset is `restored_at`; `run_at`
     dates the run, so a put-back days later does not read as a change made
     on its own; `volume_left`, with the owner's level, when the put-back
-    left HQPlayer's volume as it came back; `hung`, when HQPlayer stopped
-    answering in one of its points, or was restarted out of a long silence
-    in one (its note says so: _hung_head) — not a connection lost."""
-    run = db_query_one("""SELECT r.restored_at, r.started_at, r.volume_left, r.pre_volume,
-                                 (r.note LIKE 'HQPlayer stopped responding while%%'
-                                  OR r.note LIKE 'HQPlayer was restarted while%%') AS hung
-                            FROM hqp_benchmark_runs r
-                           WHERE r.restored_at IS NOT NULL ORDER BY r.restored_at DESC LIMIT 1""")
+    left HQPlayer's volume as it came back; `slow_start`, when HQPlayer
+    answered nothing past the build limit in one of its points, or was
+    restarted out of a long silence in one (its note says so: _SLOW_NOTES)
+    — not a connection lost."""
+    run = db_query_one("""SELECT restored_at, started_at, volume_left, pre_volume, note
+                            FROM hqp_benchmark_runs
+                           WHERE restored_at IS NOT NULL ORDER BY restored_at DESC LIMIT 1""")
     if run is None:
         return None
     return {"since": run["restored_at"], "run_at": run["started_at"],
             "volume_left": run["volume_left"], "volume_before": run["pre_volume"],
-            "hung": run["hung"]}
+            "slow_start": (run["note"] or "").startswith(_SLOW_NOTES)}
 
 
 def unchecked_notice() -> Optional[dict]:
@@ -3130,8 +3133,8 @@ def _recover(link: _Link, run: dict,
             else unset["pre"] and run["last_rate"] is not None):
         unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
     if whole:
-        how = ("stopped responding during the run" if (run["note"] or "").startswith(_HUNG_NOTES)
-               else "went away under the run")
+        how = ("answered nothing past the build limit during the run"
+               if (run["note"] or "").startswith(_SLOW_NOTES) else "went away under the run")
         note = f"cut short; HQPlayer {how} — its settings were put back when it answered again"
         if left_at is not None:
             note += f" (its volume left as it is, {left_at:g} dB)"

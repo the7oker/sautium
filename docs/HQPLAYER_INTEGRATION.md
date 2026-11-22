@@ -1197,7 +1197,7 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   the Benchmark, then compare", the Benchmark's row as the way), every other
   one too slow here, and so on; only when the answers emptied it does it say
   every kind of difference was heard as none. A filter that stopped HQPlayer
-  here (`hung`) is left out as that.
+  here within 10 minutes (`slow_start`) is left out as that.
 - **The fragment** is a FLAC cut of the track's own file — the passage the
   person chose on the sheet, 20 ms fades, after a lead of digital silence
   (`transcode.flac_fragment_path_for_file`) — handed to HQPlayer through
@@ -2294,7 +2294,7 @@ cooling — so Sautium measures it instead of predicting it
   setting (`headroom.setting`). A key a benchmark asked for that HQPlayer
   refused, never got going, or stopped answering in here (its newest answer,
   `headroom.refused`) says "HQPlayer refuses it at this setting", "HQPlayer
-  never got it going on this computer" or "Stops HQPlayer here" instead,
+  never got it going on this computer" or "Over 10 min to start here" instead,
   with nothing to run — choosing a filter that stopped HQPlayer asks first
   (since 2026-11-22) — (a point is keyed by the
   rate it asked — 0 at the automatic rate slot — a mark by the rate that
@@ -2326,8 +2326,9 @@ cooling — so Sautium measures it instead of predicting it
   within 90 days: a benchmark sample or three listens of the key, or an
   earlier run's point that ASKED for it and ended in an answer
   (`hqp_benchmark_points`: measured, unsettled, dropped out, refused, never
-  started on this host, stopped HQPlayer (`hung`, since 2026-11-22;
-  migration 072 named the two silent builds of 2026-11-20 so) — not one that
+  started on this host, no start within the build limit (`slow_start`,
+  since 2026-11-22; migration 072 named the two silent builds of 2026-11-20
+  so) — not one that
   failed to run, nor a rung a neighbour on its ladder answered for
   (`implied`: written for the sheet, read afresh by every plan)). A repeat run fills gaps: a combination HQPlayer refuses
   ("…512+fs" below 512×) and an adaptive output rate that plays another rate
@@ -2492,26 +2493,32 @@ cooling — so Sautium measures it instead of predicting it
   `FLAC__STREAM_DECODER_SEEK_ERROR`) and stop — after which its output
   engine may not start again until HQPlayer restarts (2026-10-04): a DAC
   as its output is what the benchmark should run against.
-  An HQPlayer silent that long, from the point's Play on, is a combination
-  that stops HQPlayer here (`hung`, since 2026-11-22): a live build and a
-  hang look the same from outside — 6.3.3 Desktop built poly-sinc-hb-xs at
-  44.1 → 768 kHz for 6 min in silence and then ran it at 21×, and hung twice
-  at that conversion with the CUDA resampler (2026-11-20) — so the bound
-  stays 10 min. Before a minute of silence is out the run's line says
-  HQPlayer is still preparing that filter at that rate and that some take
-  minutes here. Restarted by the person out of a silence past that minute,
+  An HQPlayer silent that long, from the point's Play on, did not start the
+  combination here within the bound (`slow_start`, since 2026-11-22): a
+  long build and a stopped HQPlayer look the same from outside — 6.3.3
+  Desktop built poly-sinc-hb-xs at 44.1 → 768 kHz for 6 min in silence and
+  then ran it at 21×, and between rate families some filters take hours to
+  build (the two silences of 2026-11-20,
+  with the CUDA resampler, were most likely builds the owner ended after about half an
+  hour) — so the bound stays 10 min, and the run ends at it: HQPlayer
+  answers nothing while it builds. Before a minute of silence is out the
+  run's line says HQPlayer is still preparing that filter at that rate and
+  that between rate families some take minutes here, some much longer.
+  Restarted by the person out of a silence past that minute,
   HQPlayer is not asked the point again in that run: the run ends there
   (the point failed, asked again by a later run) and puts HQPlayer back at
   once; cancelled past that minute, the run is marked as having lost
   HQPlayer, so the restart that follows is put back whole.
-  A `hung` point is not asked again on that engine, CUDA state and mode;
-  the run ends at once, says HQPlayer needs restarting and that Sautium puts
-  everything back when it answers, and marks itself as having lost HQPlayer
-  (`lost_at`): what the restart leaves — HQPlayer's own saved settings — is
-  no one's change, and the run is put back whole over it. The points at a
+  A `slow_start` point is not asked again on that engine, CUDA state and
+  mode; the run ends at once and says HQPlayer is still preparing it or has
+  stopped — busy cores, still working; idle, stopped; either way a restart
+  ends it — and that Sautium puts everything back when it answers, and
+  marks itself as having lost HQPlayer (`lost_at`): what a restart leaves —
+  HQPlayer's own saved settings — is no one's change, and the run is put
+  back whole over it. The points at a
   rate of another family than their source's (only the owner's rate makes
   one) go after every ladder point, before the closing drift check: every
-  slow build and both hangs were that conversion. At an automatic output
+  slow build and both ten-minute silences were that conversion. At an automatic output
   rate the owner's setting plays first on each source, and the rest is
   planned at the rates it played (asked as Auto plays it where HQPlayer's
   list does not hold that rate), so the rows the sheet reads there are

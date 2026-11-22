@@ -95,7 +95,9 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- one of its points did ('unstarted' = HQPlayer still building it past the
 -- run's build limit, answering all through, once a setting that started
 -- earlier in the run started again: this host does not get it going;
--- 'hung' = silent past that limit: it stopped HQPlayer).
+-- 'slow_start' = silent past that limit: no start within it — between
+-- rate families a build can take hours, and a long build and a stopped
+-- HQPlayer answer alike: nothing).
 DO $$ BEGIN
     CREATE TYPE hqp_cuda AS ENUM ('off', 'full', 'convolution');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -110,7 +112,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
     CREATE TYPE hqp_point_result AS ENUM ('measured', 'unsettled', 'dropout', 'refused',
-                                          'unstarted', 'hung', 'implied', 'failed');
+                                          'unstarted', 'slow_start', 'implied', 'failed');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
@@ -589,10 +591,10 @@ CREATE INDEX IF NOT EXISTS idx_hqp_dsp_samples_sampled_at ON hqp_dsp_samples(sam
 -- the filter and modulator by name, the source — and how it ended. A
 -- repeat run skips what was asked before: a combination HQPlayer refuses,
 -- or an adaptive rate that plays another one, never shows up as a sample
--- of the asked key. 'hung': HQPlayer stopped answering while it prepared
--- it (silent past the run's build limit; only a restart ended it) — never
--- asked again on that engine, CUDA state and mode; 'implied': a rung of a
--- ladder never asked, a neighbour answering for it (HQP-BENCH-63).
+-- of the asked key. 'slow_start': HQPlayer answered nothing past the run's
+-- build limit after its Play — never asked again on that engine, CUDA
+-- state and mode; 'implied': a rung of a ladder never asked, a neighbour
+-- answering for it, for the sheet (HQP-BENCH-63).
 CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     id BIGSERIAL PRIMARY KEY,
     run_id INTEGER NOT NULL REFERENCES hqp_benchmark_runs(id) ON DELETE CASCADE,
