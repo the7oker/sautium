@@ -6687,7 +6687,7 @@ class _GatedStream(StreamProvider):
         return FetchedAudio(data=self.data, mime="audio/flac", lossless=True)
 
 
-def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int):
+def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int, lane: bool = False):
     """HQPlayer playing slot 1 of four — owned, then three streams fetched
     through the media proxy — with the bytes of slot `dropped` alone dropped
     by the RAM budget, every fetch's end told to the manager as the node's
@@ -6706,8 +6706,10 @@ def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int):
     monkeypatch.setattr(proxy, "track_ready_hooks", [lambda e: mgr.stream_landed(e.token, e.reshaped)])
     monkeypatch.setattr(proxy, "track_failed_hooks", [lambda e: mgr.stream_failed(e.token)],
                         raising=False)
-    # the fetch lane: the window's refetch of bytes the budget dropped
-    mgr.lane.attach(proxy)
+    if lane:
+        # the fetch lane: the window's refetch of bytes the budget dropped
+        # (without it a test says when the bytes come back)
+        mgr.lane.attach(proxy)
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1)] + [
         QueueItem(track_id=f"stream-{i}", media_file_id=None, source={"kind": "proxy", "token": tok},
                   title=f"Stream {i}", artist="Artist", album="Album", duration_seconds=300.0,
@@ -7244,7 +7246,7 @@ def test_previous_onto_a_stream_reshaped_behind_the_entry_read_takes_the_queue_a
     it stands, so the start goes as a play press that hands HQPlayer the
     queue afresh — never SelectTrack onto the entry it holds in the old
     shape."""
-    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=4)
+    mgr, b, prov, toks = _streams_on_hqplayer(fake, monkeypatch, dropped=4, lane=True)
     proxy = streaming_service.get_proxy()
     try:
         assert b.select(3, "stream-3")
