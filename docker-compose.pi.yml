@@ -264,7 +264,8 @@ services:
       # What a node is born with on this machine (./sautium reads the machine
       # and writes it to .env; backend/db_migrate.py reads it once, at the
       # database's first migration pass): "nano" — no models, no streaming
-      # library, nothing passed on. Each is a switch in the Web UI afterwards.
+      # library, no relaying (since 2026-11-22 it passes on what it holds,
+      # like every node). Each is a switch in the Web UI afterwards.
       SAUTIUM_BIRTH_PRESET: ${SAUTIUM_BIRTH_PRESET:-}
       # Intra-container backend self-calls (Claude Code tools, MCP server).
       BACKEND_URL: http://127.0.0.1:8800

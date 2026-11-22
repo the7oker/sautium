@@ -424,8 +424,8 @@ class SyncWalk:
             stops.
         passing_on: sharing AND "pass on what this node holds" — off while
             sharing is on, the walk still asks and takes, and offers no
-            carrier anything of this node's (a node born small; its owner's
-            switch). Unset, it is the sharing switch.
+            carrier anything of this node's (its owner's switch). Unset, it
+            is the sharing switch.
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
         skip_addrs: () -> addresses the DHT may list that are not peers

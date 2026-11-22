@@ -113,7 +113,8 @@ rule. Two layers, one tracking table (`_schema_migrations`):
 Right after the schema deltas, once per database, the birth preset
 (`birth_preset_v1`, _apply_birth_preset): the switches a node's setup chose
 for the machine it read (SAUTIUM_BIRTH_PRESET=nano — no models, no streaming
-library, nothing passed on), written only where the owner's row does not
+library, no relaying; since 2026-11-22 a node born Nano passes on what it
+holds, like every node), written only where the owner's row does not
 exist, before the seed step reads the streaming library's switch.
 
 Then, once per database, the HQPlayer an install older than the Output
@@ -166,12 +167,14 @@ def _mark(conn, name: str) -> None:
 
 # What a node is born with, by the name its setup read off the machine and
 # wrote to .env (SAUTIUM_BIRTH_PRESET; PI-NODE-2B). "nano": no model runs, the
-# streaming library is off, and the node passes nothing on and relays for
-# nobody — each an owner's switch from then on, changed in its own place in
-# the Web UI.
+# streaming library is off, and the node relays for nobody (a relay's traffic
+# does not stop) — each an owner's switch from then on, changed in its own
+# place in the Web UI. It passes on what it holds, as every node does, since
+# 2026-11-22 (the owner's decision: serving measured under 5 % of a core on a
+# 2 GB board, and a sync pull has no stranger's proof to check); a node born
+# before that keeps the `sync.pass_on` row its birth wrote.
 BIRTH_PRESETS = {
-    "nano": {"compute.models": False, "discovery.phantom_layer": False, "sync.pass_on": False,
-             "p2p.relay_enabled": False},
+    "nano": {"compute.models": False, "discovery.phantom_layer": False, "p2p.relay_enabled": False},
 }
 
 

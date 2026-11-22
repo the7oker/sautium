@@ -210,12 +210,21 @@ def identity_event() -> Dict[str, Any]:
     its status and detail, the lottery's progress, and whether the account's
     email is verified — the other way to an identity, offered beside a proof
     that is still being mined or waits for memory. No status while no
-    worker ever published (no account yet, P2P off)."""
+    worker ever published (no account yet, P2P off). `support_known`: what a
+    node with no identity can still reach (routers.p2p.support_known)."""
+    from routers.p2p import support_known
     state = _read("p2p.identity") or {}
     row = db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
     return {"status": state.get("status"), "detail": state.get("detail"),
             "attempts": state.get("attempts"), "p_done": state.get("p_done"),
-            "email_verified": bool(row and row.get("email_verified"))}
+            "email_verified": bool(row and row.get("email_verified")),
+            "support_known": support_known()}
+
+
+def _identity_row() -> Dict[str, Any]:
+    """The worker's state as the Sync & P2P Identity row shows it."""
+    from routers.p2p import support_known
+    return {**(_read("p2p.identity") or {}), "support_known": support_known()}
 
 
 def notify_library_subscribers() -> None:
@@ -313,8 +322,9 @@ _DEFAULTS: Dict[str, Any] = {
     # "Pass on what this node holds": the serving side of sharing — the peer
     # routes, what /health says, the LAN beacon, the DHT's tail, the carry
     # this node offers (routers/sync.serving_enabled). Off, the node still
-    # asks and takes. A node born small starts with it off (db_migrate's
-    # birth preset); everywhere else it is on and not shown.
+    # asks and takes. On by default on every node, a node born Nano included
+    # since 2026-11-22 (one born before keeps the off its birth wrote); the
+    # row is shown only where it is off or the node is Nano.
     "sync.pass_on":              True,
     "sync.auto_interval_min":    30,
     # Size of the rare-artist DHT announce tail (0/null = node key only).
@@ -725,6 +735,9 @@ async def _library_state() -> Dict[str, Any]:
         "embeddings_done":    stats.get("tracks_with_embeddings", 0),
         "features_done":      stats.get("tracks_with_features", 0),
         "instruments_done":   stats.get("tracks_with_instruments", 0),
+        # The Lyrics row reads against the tracks with a copy that is here;
+        # the Tracks cell above counts the library, away albums included
+        "present_tracks":     stats.get("present_tracks", 0),
         "lyrics_done":        stats.get("tracks_with_lyrics", 0),
         "lastfm_done":        stats.get("artists_with_lastfm", 0),
         "lastfm_total":       stats.get("library_artists", 0),
@@ -1021,7 +1034,7 @@ def _sync_state() -> Dict[str, Any]:
         # announced and searched only past the threshold.
         "network_estimate":        _read("p2p.network_estimate"),
         "rare_mode":               bool(_read("p2p.rare_mode")),
-        "identity":                _read("p2p.identity"),
+        "identity":                _identity_row(),
         "load":                    _read("p2p.load"),
         "gate":                    _gate_snapshot(),
         "support":                 _support_state(),
@@ -2380,6 +2393,9 @@ def _hardware_state() -> Dict[str, Any]:
         state["models_cache_bytes"] = model_cache.store_bytes()
     state["machine"] = _machine_name()
     state["software"] = _software()
+    # What the setup made this node at its birth ("nano", or None): the
+    # models row says what the node is where it was set up without them
+    state["birth_preset"] = _read("node.birth_preset")
     # A node a restart policy holds (the image) can be restarted from here
     from claude_code_runner import IN_DOCKER
     state["restartable"] = IN_DOCKER

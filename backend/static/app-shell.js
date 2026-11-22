@@ -7875,13 +7875,21 @@
   // and Support cannot connect — Friends and every chat header say why, and
   // what the person can do. A state is shown where it is; its two events are
   // toasts: the identity ready, and the first message written while it is
-  // not. Draft words for the owner's words review.
+  // not. A node that waits for a verified email may still be known to
+  // Support (support_known: the master met this account on another machine
+  // and answers it — one peer's memory, not an identity): the line says what
+  // the node reaches and what it does not. Draft words for the owner's words
+  // review.
   const nodeIdentity = {
     state: null,
     _saidWaiting: false,
     waiting() {
       const s = this.state;
       return !!(s && ['mining', 'paused', 'needs_email'].includes(s.status));
+    },
+    supportOnly() {
+      const s = this.state;
+      return !!(s && s.status === 'needs_email' && s.support_known);
     },
     apply(d) {
       const was = this.state;
@@ -7894,9 +7902,10 @@
         }
       }
     },
-    // Once per waiting period, not per message
-    wroteWhileWaiting() {
-      if (!this.waiting() || this._saidWaiting) return;
+    // Once per waiting period, not per message; what is written to Support
+    // on a node Support knows goes at once
+    wroteWhileWaiting(toSupport) {
+      if (!this.waiting() || this._saidWaiting || (toSupport && this.supportOnly())) return;
       this._saidWaiting = true;
       notices.toast({ kind: 'info', title: 'Saved',
                       text: 'It will be sent once your node\'s identity is ready.',
@@ -7909,6 +7918,11 @@
     line() {
       const s = this.state;
       if (!this.waiting()) return '';
+      if (this.supportOnly()) {
+        return 'This node has no network identity of its own yet. Support answers, because it met this '
+          + 'account on another machine. Other Sautium nodes will not know this one until you verify '
+          + 'your email (More › Profile).';
+      }
       if (s.status === 'needs_email') {
         return 'This node has no network identity yet. Verify your email to connect with friends and Support.';
       }
@@ -9038,7 +9052,7 @@
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({content: text}),
         });
-        nodeIdentity.wroteWhileWaiting();
+        nodeIdentity.wroteWhileWaiting(friend.source === 'master');
         // SSE will refresh; refetch immediately for snappy feel.
         loadMessages();
       } catch (err) { console.warn('Send failed', err); }
@@ -9070,8 +9084,9 @@
     function paintIdentity() {
       const text = nodeIdentity.line();
       identityEl.hidden = !text;
+      // (the line of a node Support knows names the place itself)
       identityEl.textContent = text
-        + (text && nodeIdentity.offersEmail() ? ' Verify it in More › Profile.' : '');
+        + (text && nodeIdentity.offersEmail() && !nodeIdentity.supportOnly() ? ' Verify it in More › Profile.' : '');
     }
     paintIdentity();
     window.addEventListener('sautium:chat-changed', onChat);
@@ -12411,7 +12426,14 @@
     const verified = !!(emailStatus && emailStatus.verified);
     line.hidden = verified || emailStatus === null;
     if (line.hidden) return;
-    line.querySelector('.row-stack-sub').textContent = line.dataset.nano === '1'
+    line.querySelector('.row-stack-sub').textContent = emailLineWords(line.dataset.nano === '1');
+  }
+  function emailLineWords(nano) {
+    if (nodeIdentity.supportOnly()) {
+      return 'Not verified. Support works; connections from outside your network and invites by email '
+        + 'wait for a verified email.';
+    }
+    return nano
       ? 'Not verified. This node has no network identity yet: no Support, no connections from '
         + 'outside your network, no invites by email.'
       // (a second sentence, of small nodes that cannot check an identity
@@ -16179,8 +16201,9 @@
         </div>` : ''}`;
 
     // "Pass on what this node holds": the serving side of sharing, a switch
-    // of its own on a node born small — shown only where it is off or the
-    // node is Nano, so no other node's screen grows a row. Draft words.
+    // of its own — shown only where it is off or the node is Nano (born with
+    // it on since 2026-11-22), so no other node's screen grows a row. Draft
+    // words.
     const passOnRow = (sync.pass_on && !sync.nano) ? '' : `
         <div class="form-row">
           <span class="form-label">Pass on what this node holds</span>
@@ -16668,7 +16691,9 @@
       const odds = Math.round((st.p_done || 0) * 100);
       return `securing… ${fmtNum(st.attempts || 0)} tries · ${odds}% odds`;
     }
-    if (st.status === 'needs_email') return 'needs a verified email';
+    if (st.status === 'needs_email') {
+      return st.support_known ? 'needs a verified email · Support knows this account' : 'needs a verified email';
+    }
     if (st.status === 'paused') {
       // The memory pause may never end on a small board: the other way is said with it
       if (st.detail === 'memory') return 'paused · not enough free memory — or verify your email';
@@ -16682,7 +16707,12 @@
     const parts = [];
     if (st.method) parts.push(`method: ${st.method}`);
     if (st.difficulty) parts.push(`E = ${st.difficulty} attempts expected`);
-    if (st.status === 'needs_email') parts.push('Verify your email in More › Profile: this node does not earn its identity by computing');
+    if (st.status === 'needs_email') {
+      parts.push(st.support_known
+        ? 'This node has no network identity of its own yet. Support answers, because it met this account on '
+          + 'another machine. Other Sautium nodes will not know this one until you verify your email (More › Profile).'
+        : 'Verify your email in More › Profile: this node does not earn its identity by computing');
+    }
     if (st.proof_mined_at) parts.push(`proof mined ${st.proof_mined_at}`);
     if (st.started_at && st.status !== 'ready') parts.push(`since ${st.started_at}`);
     return parts.join(' · ');
@@ -17565,12 +17595,19 @@
   }
 
   // The "AI models" row: the owner's switch, or why there is none to move.
-  // Draft words for the owner's words review.
+  // A node the setup made Nano is told what it is and that nothing is
+  // missing before how to change it (the figures: the image and the models
+  // of desktop/machine_tier.py's NANO_BELOW_* rule, the disk the setup asks
+  // for the full node). Draft words for the owner's words review.
   function hwModelsRow(hw) {
     if (hw.models === 'absent') {
-      const why = hw.restartable
-        ? 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full'
-        : 'Not available: no AI models exist for this machine.';
+      const why = !hw.restartable ? 'Not available: no AI models exist for this machine.'
+        : hw.birth_preset === 'nano'
+          ? 'Off — this node was set up as Nano, without the AI models: sound features arrive from other '
+            + 'Sautium nodes, and nothing is missing from your library. To analyse music on this machine '
+            + 'instead, run on it: ./sautium setup --preset full (it downloads about 10 GB, and needs '
+            + '25 GB of free disk and 8 GB of memory to work well).'
+          : 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full';
       return `<div class="form-row stacked"><div class="row-stack"><span class="row-stack-label">AI models</span></div>
         <div class="row-stack-sub">${escapeProfileHtml(why)}</div></div>`;
     }
@@ -18513,7 +18550,7 @@
         ${_enrichRow('features',   'Features',   lib.features_done,   lib.analysable_tracks)}
         ${_enrichRow('instruments', 'Instruments', lib.instruments_done, lib.analysable_tracks)}
         ${_enrichRow('lastfm',     'Last.fm',    lib.lastfm_done,     lib.lastfm_total)}
-        ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.total_tracks)}
+        ${_enrichRow('lyrics',     'Lyrics',     lib.lyrics_done,     lib.present_tracks)}
         <div class="form-row stacked"><div class="row-stack-sub">${localAnalysis
           ? 'Analyse library computes embeddings and features on this machine, and instruments while Recognise instruments is on.'
           : 'This machine does not analyse audio locally, so embeddings, features and instruments arrive from peers over P2P.'} Last.fm, lyrics and the text embeddings are handled on their own by Background enrichment (Sync &amp; P2P).</div></div>
@@ -18800,7 +18837,7 @@
         }
       }
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
-      _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
+      _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.present_tracks);
       _askPrunePlan(lib.scan && lib.scan.prune_plan);
 
       // The screen is drawn again only where its structure no longer says

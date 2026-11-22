@@ -32,7 +32,7 @@ const toasts = [];
 const notices = { toast: t => toasts.push(t.key + ': ' + t.title + ' — ' + t.text) };
 const fmtNum = n => String(n);
 %(fns)s
-const out = { lines: {}, offers: {}, labels: {}, details: {} };
+const out = { lines: {}, offers: {}, labels: {}, details: {}, emails: {} };
 for (const [name, st] of Object.entries(%(states)s)) {
   nodeIdentity.state = null;
   nodeIdentity.apply(st);
@@ -40,6 +40,7 @@ for (const [name, st] of Object.entries(%(states)s)) {
   out.offers[name] = nodeIdentity.offersEmail();
   out.labels[name] = identityLabel(st);
   out.details[name] = identityDetail(st);
+  out.emails[name] = [emailLineWords(true), emailLineWords(false)];
 }
 // The events, in the order a tab sees them
 toasts.length = 0;
@@ -56,6 +57,11 @@ nodeIdentity.apply({status: 'ready', detail: 'proof'});                    // al
 nodeIdentity.apply({status: 'needs_email'});
 nodeIdentity.wroteWhileWaiting();
 nodeIdentity.apply({status: 'ready', detail: 'email'});
+// A node Support knows: what is written to Support goes at once, to a friend it waits
+nodeIdentity.apply({status: 'needs_email', support_known: true});
+nodeIdentity.wroteWhileWaiting(true);
+out.toasts_support = toasts.length;
+nodeIdentity.wroteWhileWaiting(false);
 out.toasts = toasts;
 process.stdout.write(JSON.stringify(out));
 """
@@ -69,6 +75,8 @@ STATES = {
     "paused_memory": {"status": "paused", "detail": "memory", "email_verified": False},
     "paused_playback": {"status": "paused", "detail": "playback", "email_verified": True},
     "needs_email": {"status": "needs_email", "email_verified": False},
+    "needs_email_support": {"status": "needs_email", "email_verified": False, "support_known": True},
+    "mining_support": {"status": "mining", "p_done": 0.1, "email_verified": False, "support_known": True},
     "stopped": {"status": "stopped"},
 }
 
@@ -76,7 +84,8 @@ STATES = {
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_line_the_toasts_and_the_identity_rows_states():
     fns = "\n".join([_block("const nodeIdentity = {", "\n  };\n"),
-                     _block("function identityLabel(st) {"), _block("function identityDetail(st) {")])
+                     _block("function identityLabel(st) {"), _block("function identityDetail(st) {"),
+                     _block("function emailLineWords(nano) {")])
     proc = subprocess.run([NODE, "-e", DRIVER % {"fns": fns, "states": json.dumps(STATES)}],
                           capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
@@ -93,9 +102,28 @@ def test_the_line_the_toasts_and_the_identity_rows_states():
     assert "verify your email" not in lines["paused_playback"]
     assert lines["needs_email"] == ("This node has no network identity yet. Verify your email to "
                                     "connect with friends and Support.")
+    # PI-NODE-2C §10: Support met this account on another machine — the
+    # state is the same, the words say what the node reaches (§18.3's drafts)
+    known = ("This node has no network identity of its own yet. Support answers, because it met this "
+             "account on another machine. Other Sautium nodes will not know this one until you verify "
+             "your email (More › Profile).")
+    assert lines["needs_email_support"] == known
+    assert out["details"]["needs_email_support"] == known
+    assert out["labels"]["needs_email_support"] == "needs a verified email · Support knows this account"
+    assert out["emails"]["needs_email_support"] == [
+        "Not verified. Support works; connections from outside your network and invites by email "
+        "wait for a verified email."] * 2
+    assert out["emails"]["needs_email"] == [
+        "Not verified. This node has no network identity yet: no Support, no connections from "
+        "outside your network, no invites by email.",
+        "Not verified. Needed to invite friends by email."]
+    # … and only of a node that waits for the email: a mining one says its own line
+    assert lines["mining_support"].startswith("Your node is proving it is a real new node")
+    assert out["emails"]["mining_support"] == out["emails"]["needs_email"]
     assert out["offers"] == {"none": False, "ready": False, "checking": False, "mining": True,
                              "mining_verified": False, "paused_memory": True,
-                             "paused_playback": False, "needs_email": True, "stopped": False}
+                             "paused_playback": False, "needs_email": True,
+                             "needs_email_support": True, "mining_support": True, "stopped": False}
     assert out["labels"]["needs_email"] == "needs a verified email"
     assert out["labels"]["paused_memory"] == "paused · not enough free memory — or verify your email"
     assert out["labels"]["paused_playback"] == "paused · while music plays"     # was "low memory"
@@ -105,7 +133,9 @@ def test_the_line_the_toasts_and_the_identity_rows_states():
         "identity.waiting: Saved — It will be sent once your node's identity is ready.",
         "identity.ready: Your node is ready — Friends and Support can connect now.",
         "identity.waiting: Saved — It will be sent once your node's identity is ready.",
-        "identity.ready: Your node is ready — Friends and Support can connect now."]
+        "identity.ready: Your node is ready — Friends and Support can connect now.",
+        "identity.waiting: Saved — It will be sent once your node's identity is ready."]
+    assert out["toasts_support"] == 4                # the message to Support said nothing
 
 
 def test_the_page_is_sent_the_workers_state_and_the_emails(scratch_dsn, monkeypatch):
@@ -122,7 +152,7 @@ def test_the_page_is_sent_the_workers_state_and_the_emails(scratch_dsn, monkeypa
             cur.execute("DELETE FROM user_settings")
             assert settings_router.identity_event() == {
                 "status": None, "detail": None, "attempts": None, "p_done": None,
-                "email_verified": False}
+                "email_verified": False, "support_known": False}
             cur.execute("INSERT INTO user_settings (key, value) VALUES ('p2p.identity', %s::jsonb)",
                         (json.dumps({"status": "mining", "detail": None, "attempts": 7,
                                      "p_done": 0.2, "difficulty": 32, "method": "pow"}),))
@@ -130,7 +160,7 @@ def test_the_page_is_sent_the_workers_state_and_the_emails(scratch_dsn, monkeypa
                            ON CONFLICT (id) DO UPDATE SET email_verified = TRUE""")
             assert settings_router.identity_event() == {
                 "status": "mining", "detail": None, "attempts": 7, "p_done": 0.2,
-                "email_verified": True}
+                "email_verified": True, "support_known": False}
             cur.execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
     finally:
         conn.close()

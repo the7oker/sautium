@@ -957,6 +957,11 @@ class ChatClient:
                        result: dict, own_pubkey: str) -> None:
         self.store.add_friend(public_key_hex=peer_pubkey, invite_code=invite, username=username)
         self._store_incoming_grant(result, own_pubkey)
+        if peer_pubkey.lower() == master_node.MASTER_PUBKEY_HEX.lower():
+            # What a node with no identity of its own still reaches is part
+            # of the identity state its pages hold (routers.p2p.support_known)
+            with self.store.db_conn().cursor() as cur:
+                cur.execute("NOTIFY sautium_identity")
         # Mirror the recipient-side presence bump: a 200 "accepted" is proof
         # the remote node is alive. Without this update one side of a
         # freshly-paired duo always shows the other as offline because only
