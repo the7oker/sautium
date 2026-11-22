@@ -45,7 +45,7 @@ from abc import abstractmethod
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
-from .base import (FetchedAudio, ProviderError, ProviderUnavailable, ResolvedSource,
+from .base import (FetchedAudio, ProviderError, ProviderUnavailable, Refused, ResolvedSource,
                    StreamProvider, TrackQuery, attested_lengths, fits_length,
                    length_offset, norm_key, other_recording_words, tokens_shared,
                    version_claims_same)
@@ -192,7 +192,7 @@ class DeezerCatalog:
         data = self._get(_TRACK_API.format(urllib.parse.quote(str(track_id))))
         url = self._note_preview(data)
         if not url:
-            raise ProviderError(f"deezer: no preview clip for {track_id}")
+            raise Refused("no_clip", f"deezer: no preview clip for {track_id}")
         return url
 
     def _note_preview(self, track: dict) -> str:
@@ -439,14 +439,14 @@ class DeezerCatalog:
                 if fit:
                     break
         if not listed:
-            raise ProviderError("deezer: no results")
+            raise Refused("not_found", "deezer: no results")
         if not fit:
             top = listed[0]
             logger.debug("deezer: top hit for %s - %s is %r - %r%s",
                          query.artist, query.title, top["artist"], top["title"],
                          self._refused_note(refused))
-            raise ProviderError(
-                f"deezer: nothing attested (catalog "
+            raise Refused(
+                "no_match", f"deezer: nothing attested (catalog "
                 f"{'/'.join(f'{w:.0f}s' for w in attested_lengths(query)) or '?'}; "
                 f"top hit {top['duration']}s)")
         best = max(fit, key=lambda c: self._score(c, query))

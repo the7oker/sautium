@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import unicodedata
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -140,10 +142,13 @@ def tokens_shared(a: str, b: str) -> float:
 # The version a module is built against. 2 (2026-11-14) adds a provider's own
 # live state — StreamProvider.stepped_aside / check_again / aside_changed,
 # all optional — and changes nothing a version 1 module implements, so the
-# host warns only about a module built for a contract newer than its own. A
-# breaking change to TrackQuery / FetchedAudio / fetch() bumps it too, and
-# then names the oldest version still served.
-CONTRACT_VERSION = 2
+# host warns only about a module built for a contract newer than its own. 3
+# (2026-11-22) adds the fetch's context — fetching(): a cancel to stop on and
+# a progress to report — and a refusal's reason (Refused), both optional to
+# read and raise: a version 2 module is served unchanged. A breaking change to
+# TrackQuery / FetchedAudio / fetch() bumps it too, and then names the oldest
+# version still served.
+CONTRACT_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -248,6 +253,101 @@ class ProviderError(Exception):
 class ProviderUnavailable(ProviderError):
     """The provider could not be consulted — timeout, network, quota. Says
     nothing about the track, so the host must not remember it as a miss."""
+
+
+# A refusal's reasons, as the host reads them (contract 3): what a person is
+# told on the row, and what the host remembers beside the resolve's answers.
+REFUSAL_CODES = ("region", "no_match", "no_clip", "not_found")
+
+
+class Refused(ProviderError):
+    """The provider knows why it cannot serve the track, and says it with a
+    code of REFUSAL_CODES: `region` — not available in this region; `no_match`
+    — no recording of that length (or by that artist) on this service;
+    `no_clip` — no 30 s clip; `not_found` — the service has nothing under that
+    name. A fact of the catalog, not of the hour: the host remembers it for
+    the track and this provider, and leaves the provider out of the track's
+    next resolve. Anything else stays a plain ProviderError — a cut connection
+    is not remembered."""
+
+    def __init__(self, code: str, message: str = ""):
+        if code not in REFUSAL_CODES:
+            raise ValueError(f"unknown refusal code {code!r}")
+        super().__init__(message or code)
+        self.code = code
+
+
+class FetchCancelled(ProviderError):
+    """Raised by a provider that stopped on its fetch's cancel (fetching())."""
+
+
+class FetchContext:
+    """The fetch a provider runs, as the host sees it (contract 3): `cancelled`
+    is set when nobody wants the bytes any more — the slot was removed — and a
+    provider that can stop (a child process it may kill) stops and raises
+    FetchCancelled; `progress(fraction)` reports how far its download is, 0..1,
+    where it knows. Both optional: a provider that reads neither is waited out
+    and its bytes discarded."""
+
+    def __init__(self, on_progress=None):
+        self.cancelled = threading.Event()
+        self._on_progress = on_progress
+        self._lock = threading.Lock()
+        self._on_cancel: list = []
+
+    def progress(self, fraction: float) -> None:
+        if self._on_progress is not None:
+            self._on_progress(min(1.0, max(0.0, float(fraction))))
+
+    def on_cancel(self, fn):
+        """Call `fn` (no arguments) when the fetch is cancelled — at once if it
+        is already. Returns the call that takes it back, for when the work it
+        would stop is over."""
+        with self._lock:
+            if not self.cancelled.is_set():
+                self._on_cancel.append(fn)
+                return lambda: self._forget(fn)
+        fn()
+        return lambda: None
+
+    def _forget(self, fn) -> None:
+        with self._lock:
+            if fn in self._on_cancel:
+                self._on_cancel.remove(fn)
+
+    def cancel(self) -> None:
+        """The host's: nobody wants these bytes any more."""
+        with self._lock:
+            if self.cancelled.is_set():
+                return
+            self.cancelled.set()
+            calls, self._on_cancel = self._on_cancel, []
+        for fn in calls:
+            try:
+                fn()
+            except Exception:
+                logger.exception("a fetch's cancel hook failed")
+
+
+_IDLE = FetchContext()
+_context = threading.local()
+
+
+def fetching() -> FetchContext:
+    """The context of the fetch running on this thread — an idle one outside a
+    fetch, never cancelled, its progress going nowhere."""
+    return getattr(_context, "current", None) or _IDLE
+
+
+@contextmanager
+def fetch_context(ctx: FetchContext) -> Iterator[FetchContext]:
+    """The host's side: `ctx` is what fetching() returns on this thread while
+    the provider runs."""
+    _context.current = ctx
+    try:
+        yield ctx
+    finally:
+        _context.current = None
 
 
 # The host's ears for a provider's aside_changed(): registered where the
