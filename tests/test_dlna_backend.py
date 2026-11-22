@@ -1850,11 +1850,36 @@ def test_a_track_change_the_renderer_never_takes_is_left_at_its_own_start(tmp_pa
     assert manager.latest_status["resume"] == {"index": 3, "position": 0.0}
 
 
-def test_a_play_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path, proxy, renderers, nodes, quality):
+def _commands_sent(monkeypatch) -> list:
+    """Every command future the backend hands its loop, in order."""
+    import playback.dlna_backend as dlna_mod
+    sent, real = [], dlna_mod.asyncio.run_coroutine_threadsafe
+
+    def spy(coro, loop):
+        fut = real(coro, loop)
+        sent.append(fut)
+        return fut
+    monkeypatch.setattr(dlna_mod.asyncio, "run_coroutine_threadsafe", spy)
+    return sent
+
+
+def _through(futs, timeout=5.0) -> None:
+    """Wait until every one of these commands is over, its own done callback
+    (the backend's, registered first: a command that went through clears the
+    status error) run too — a callback added after it is invoked after it."""
+    for fut in list(futs):
+        over = threading.Event()
+        fut.add_done_callback(lambda _f, over=over: over.set())
+        assert over.wait(timeout), "a command never ended"
+
+
+def test_a_play_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path, proxy, renderers, nodes, quality,
+                                                            monkeypatch):
     """A slot only a stream can serve here (a copy in an HQPlayer's own
     library) is `pending` while its stream is fetched: the play waits on it
     and goes when it lands — at the second it was asked at — and a slot
     found unplayable sends it on to the next. It used to be walked past."""
+    sent = _commands_sent(monkeypatch)
     r = renderers(sink=PHONE_SINK)
     q = CanonicalQueue()
     waiting, after = track(tmp_path, 1, seconds=40.0), track(tmp_path, 2, seconds=40.0)
@@ -1862,6 +1887,7 @@ def test_a_play_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path, proxy, rend
     q.replace([waiting, after])
     n = nodes(q, r)
     n.backend.resume_at(1, 12.0)
+    first = len(sent)                              # the commands from here on, not the attach's
     assert n.backend.play()
     wait_for(lambda: n.last.state == "loading" and n.last.queue_index == 1, what="waiting on slot 1")
     assert not r.called("SetAVTransportURI")
@@ -1873,9 +1899,13 @@ def test_a_play_waits_on_a_slot_whose_stream_is_on_its_way(tmp_path, proxy, rend
     assert n.last.state == "loading"
     assert n.backend.seek(14) and not r.called("Seek")
     assert n.last.state == "loading" and n.last.position == 14
+    # The Plays' commands end first (one that went through clears the error)
+    _through(sent[first:])
     n.backend._error = "an earlier word"
+    told = len(sent)
     n.backend.slot_ready(2)                        # a slot nobody waits on
-    time.sleep(0.3)
+    _through(sent[told:])
+    assert len(sent) > told
     assert n.backend._error == "an earlier word"
     n.backend._error = None
     landed = streamed(proxy, 1, cover_url="")

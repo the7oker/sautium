@@ -67,6 +67,7 @@ REASONS = {
     "no_clip": "no 30-second clip",
     "not_found": "no streaming source has it",
     "nowhere": "no streaming source has it",
+    "excerpt_only": "only a 30-second excerpt streams here",
     "unknown": "couldn't be fetched",
     "off": "streaming is off on this node",
 }
@@ -410,10 +411,19 @@ class Lane:
             if not chain:
                 self._fail(it, marked, _refused_code(it.track_id) or "nowhere")
                 continue
-            # A track queued twice waits for one fetch
-            tok = by_track.get(it.track_id)
+            if it.whole:
+                # Radio's: a full-length link or nothing — a demo listen spent
+                # since the batch was built leaves the excerpt alone, and that
+                # is no way in for this slot
+                chain = [(p, sid) for p, sid in chain if not p.manifest.excerpt]
+                if not chain:
+                    self._fail(it, marked, "excerpt_only")
+                    continue
+            # A track queued twice waits for one fetch — of the same chain
+            key = (it.track_id, it.whole)
+            tok = by_track.get(key)
             if tok is None:
-                tok = by_track[it.track_id] = proxy.mint(q, chain)
+                tok = by_track[key] = proxy.mint(q, chain)
             # Named and kept under the lane's lock: a prune between the two
             # would cancel a token a slot names
             with self._lock:
@@ -522,7 +532,8 @@ class Lane:
 
     def slots(self) -> list:
         """Every streamed slot's state, in queue order: {index, track_id,
-        album_id (the album it was queued from), state, progress?, reason?} — `waiting` (its fetch not begun: beyond the
+        album_id (the album it was queued from), whole? (radio's: never an excerpt),
+        state, progress?, reason?} — `waiting` (its fetch not begun: beyond the
         window, behind another in the lane, unresolved, its bytes dropped by
         the budget), `buffering` (its fetch runs; progress where the provider
         gives it), `ready`, `failed` (reason: the code). "Found in the
@@ -534,6 +545,8 @@ class Lane:
                 continue
             src = it.opener()
             row = {"index": index, "track_id": it.track_id, "album_id": it.album_id}
+            if it.whole:
+                row["whole"] = True
             if src.get("kind") == "unplayable":
                 row.update(state="failed", reason=src.get("code") or "unknown")
             else:

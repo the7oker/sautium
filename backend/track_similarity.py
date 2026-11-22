@@ -54,6 +54,8 @@ whose items are whole coherent tracks; chamfer is right for a single track's
 autocorrelated windows.
 """
 
+from typing import Optional
+
 from db_pool import db_query_with_ef_search
 from sql_queries import best_rip_order, owned_rank
 
@@ -73,9 +75,26 @@ W_TAG = 0.08            # × weighted tag Jaccard. Sized on the Smooth Operator
                         # never gate)
 
 
+# The recall arms' side of `served=True`: a track with a copy here or at the
+# HQPlayer that is the output — a superset of the pool's exact `playable`
+# (its representative copy, owned_rank's pick), which still decides. The
+# ANN arm walks on under hnsw.iterative_scan past the rows it filters out —
+# up to hnsw.max_scan_tuples (20 000 by default): where the owner's tracks
+# are very sparse among the embeddings it returns fewer than its LIMIT,
+# still the nearest of them; the kin arm is exact.
+_SERVED_RECALL = """(%(served)s::boolean IS NOT TRUE
+                   OR EXISTS (SELECT 1 FROM media_files rmf
+                              JOIN album_variants rav ON rav.id = rmf.album_variant_id
+                              WHERE rmf.track_id = e.track_id AND rav.location = 'local')
+                   OR EXISTS (SELECT 1 FROM hqp_library_files rhf
+                              JOIN album_variants rav ON rav.id = rhf.album_variant_id
+                              WHERE rhf.track_id = e.track_id
+                                AND rav.hqp_endpoint_id = %(hqp_id)s))"""
+
+
 def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                    artist_cap: int = 2, jitter: float = 0.0,
-                   pool: int = POOL) -> list:
+                   pool: int = POOL, served: Optional[bool] = None) -> list:
     """Mixed (owned + phantom) two-tier similar tracks for a seed track UUID.
 
     Every row carries identity + display fields (album, year, cover_url,
@@ -84,7 +103,14 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     phantom_album/length_ms for phantom).
     `artist_cap` keeps each artist to its best N rows (raw KNN clusters hard);
     `jitter` reshuffles near-ties for radio so the same seed never yields the
-    same station twice — 0 gives a deterministic shelf. Excludes the seed and
+    same station twice — 0 gives a deterministic shelf. `served` keeps only
+    the rows the active output opens itself (True — the owner's own, a local
+    file or one held at the HQPlayer that is the output) or only the others
+    (False — they stream), BEFORE the artist cap and the LIMIT: radio's
+    owned-only station and its streamed candidates are each a full top-N of
+    their own, never what a mixed top-N left of them. For True the recall
+    arms walk the owner's tracks alone too (_SERVED_RECALL): on a node whose
+    embeddings are mostly imported ones, a mixed 600-NN would hold few. Excludes the seed and
     `exclude` UUIDs; empty when the seed has no embedding (a NULL target would
     otherwise order arbitrarily). Every embeddings row has segments (written
     atomically since v2), so the chamfer join never drops a pool row.
@@ -126,6 +152,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             (SELECT e.track_id FROM embeddings e
              WHERE e.track_id != %(seed)s::uuid
                AND e.track_id <> ALL(%(exclude)s::uuid[])
+               AND {_SERVED_RECALL}
              ORDER BY e.vector <=> (SELECT vector FROM target)
              LIMIT %(pool)s)
             UNION
@@ -139,6 +166,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
              JOIN kin k ON k.artist_id = kta.artist_id
              WHERE e.track_id != %(seed)s::uuid
                AND e.track_id <> ALL(%(exclude)s::uuid[])
+               AND {_SERVED_RECALL}
              ORDER BY (e.vector <=> (SELECT vector FROM target)) + 0
              LIMIT %(kin_cap)s)
         ),
@@ -194,6 +222,9 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             ) ph_rep ON true
             WHERE (mf_rep.id IS NOT NULL OR ph_rep.album IS NOT NULL)
               AND EXISTS (SELECT 1 FROM target)
+              AND (%(served)s::boolean IS NULL
+                   OR COALESCE(mf_rep.location = 'local'
+                               OR mf_rep.hqp_endpoint_id = %(hqp_id)s, false) = %(served)s::boolean)
         ),
         rescored AS (
             SELECT pool.*,
@@ -234,6 +265,6 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         ORDER BY score * (1 + %(jitter)s * random())
         LIMIT %(limit)s
     """, {"hqp_id": hqp_id, "seed": seed_uuid, "exclude": list(exclude), "limit": limit,
-          "pool": pool, "artist_cap": artist_cap, "jitter": jitter,
+          "pool": pool, "artist_cap": artist_cap, "jitter": jitter, "served": served,
           "kin_cap": KIN_ARM_CAP, "w_tag": W_TAG},
         ef_search=max(pool, 500))

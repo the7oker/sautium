@@ -79,6 +79,10 @@ class QueueItem:
     # A 30 s excerpt, not the recording: shown as [30s], never a listen, and
     # `duration_seconds` is the clip's own length.
     excerpt: bool = False
+    # Played whole or not at all: a radio slot (radio.streamed) streams only
+    # from a full-length link — the excerpt is never in its chain, so a slot
+    # no full link serves fails and is walked past, never a 30 s clip.
+    whole: bool = False
     # How the ACTIVE output opens this slot when that differs from `source`
     # (playback.substitute, recomputed on every output switch): a `file` /
     # `hqp` copy the new output opens itself, a `proxy` stream that stands
@@ -651,7 +655,7 @@ def items_for_file_spans(spans: list[tuple]) -> dict[tuple, QueueItem]:
     return out
 
 
-def items_for_streamed(queries: list) -> list[QueueItem]:
+def items_for_streamed(queries: list, whole: bool = False) -> list[QueueItem]:
     """QueueItems for streamed tracks — one per TrackQuery (streaming.base),
     in order: the track itself (`{"kind": "track"}`), its way in a stream to
     come — what a tap on a not-owned album or track commits, all its slots in
@@ -660,7 +664,8 @@ def items_for_streamed(queries: list) -> list[QueueItem]:
     that holds one reads it again as it mirrors, playback.substitute), which
     the fetch lane brings in the queue's order. `duration_seconds` is the
     catalog's length on the album it was queued from, else the one the
-    resolve recovered for a track the catalog gives none (display only)."""
+    resolve recovered for a track the catalog gives none (display only).
+    `whole`: streamed from a full-length link or not at all (radio's)."""
     return [QueueItem(
         track_id=q.track_id,
         media_file_id=None,
@@ -672,6 +677,7 @@ def items_for_streamed(queries: list) -> list[QueueItem]:
         album_id=q.album_id,
         duration_seconds=q.duration or resolved_durations.get(q.track_id),
         cover_url=q.cover_url,
+        whole=whole,
     ) for q in queries if q.track_id]
 
 

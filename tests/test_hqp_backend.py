@@ -7922,6 +7922,9 @@ def test_a_radio_start_while_hqplayer_builds_is_busy_and_splits_no_history(fake,
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
     monkeypatch.setattr(player_router, "_db_query_one", lambda sql, params: {"artist": "Artist"})
+    # owned only (no streaming here): the first batch is built before the clear
+    monkeypatch.setattr(player_router, "_radio_build_batch",
+                        lambda seed, played, prev: ([object()], set()))
     rotated = []
     monkeypatch.setattr(player_router.sessions, "rotate_session",
                         lambda *a, **k: rotated.append(k))
@@ -8897,7 +8900,9 @@ def test_the_radio_rotates_history_under_the_command_hold_before_the_clear(fake,
     mgr, b = output
     player_router = _routes_on(monkeypatch, mgr)
     monkeypatch.setattr(player_router, "_db_query_one", lambda sql, params: {"artist": "Artist"})
-    monkeypatch.setattr(player_router, "_radio_fill", lambda seed, gen: None)
+    monkeypatch.setattr(player_router, "_radio_build_batch",
+                        lambda seed, played, prev: ([object()], set()))
+    monkeypatch.setattr(player_router, "_radio_fill", lambda seed, gen, built=None: None)
     order = []
 
     def rotate(queue, origin, **k):

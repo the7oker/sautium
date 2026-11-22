@@ -150,7 +150,9 @@ A **bottom-up sheet** with a vertical list of entries:
   functions — `BACKUP.md`; the Web UI has no backup surface.)
 - Streaming library (`#more/phantoms`) — the catalog the node knows but
   does not own; its own screen because it is its own catalog, with the
-  owner's `discovery.phantom_layer` switch and the one explicit removal.
+  owner's `discovery.phantom_layer` switch ("Discover new"), under it — since
+  2026-11-22 — radio's `radio.streamed` ("Radio plays tracks you don't own",
+  disabled while Discover new is off), and the one explicit removal.
   **"Streaming library" is the user-facing name only** — "phantom" stays
   the internal term in the route, the API, the settings key and the CSS,
   and everywhere else in the docs
@@ -387,7 +389,7 @@ streamed.
 
 | Action | What happens to the queue |
 |--------|---------------------------|
-| **Radio on** | The playing track plays on, uninterrupted. Every other slot of the queue, before it and behind it, is replaced by similar tracks, which arrive in the background: owned ones at once, streamed ones as they buffer. When more than the current track would be lost, a confirm asks first ("Start radio?" — the replaced queue is archived to Listening history like any replace). |
+| **Radio on** | The playing track plays on, uninterrupted. Every other slot of the queue, before it and behind it, is replaced by similar tracks, which arrive in the background a batch of ten at a time: the owner's own and — while "Radio plays tracks you don't own" (Streaming library) is on — a few streamed ones, each played whole, whose rows show their state as their streams come. When more than the current track would be lost, a confirm asks first ("Start radio?" — the replaced queue is archived to Listening history like any replace). |
 | **While on** | Three or fewer tracks ahead of the playhead, another batch is appended, seeded from the track playing at that moment — the station drifts and never repeats a track. |
 | **"+" / Queue album while on** | Appends as usual; radio stays on. |
 | **Any "play now, replace queue"** (a track, an album, a session, the assistant's pick) | Replaces the queue and turns radio off. |

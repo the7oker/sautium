@@ -68,7 +68,7 @@ LIFE_TABLES = (
 # secrets, tokens, nor anything a node computes about itself (`sync.last_at`,
 # `p2p.load`, the reachability verdict). A key already set here wins.
 SETTINGS_ALLOWLIST = frozenset({
-    "discovery.phantom_layer",
+    "discovery.phantom_layer", "radio.streamed",
     "sync.p2p_enabled", "sync.auto_interval_min", "sync.announce_limit", "sync.carry_limit",
     "p2p.gate_mode",
     "enrichment.background_enabled", "enrichment.reanalyze_imported",

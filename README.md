@@ -69,8 +69,10 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
   lossless provider plugs into the same registry.
 - **Radio and similar tracks** — the Radio toggle on Now Playing starts a
   station from the track that is playing, and the station drifts: each
-  refill is seeded from what plays at that moment, mixes owned files with a
-  few streamed tracks, and never repeats a track. One scorer ranks every
+  refill is seeded from what plays at that moment, is the owner's own files —
+  mixed with a few streamed tracks, each played whole, while the switch
+  "Radio plays tracks you don't own" is on (off by default since
+  2026-11-22) — and never repeats a track. One scorer ranks every
   "similar" — radio, the Now Playing shelf, Discovery's "Similar to now
   playing" and the assistant's `play_similar`: CLAP segment matching (for
   each 10 s window of the seed, the candidate's best window) plus the

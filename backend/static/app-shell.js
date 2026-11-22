@@ -87,6 +87,7 @@
     no_clip: 'no 30-second clip',
     not_found: 'no streaming source has it',
     nowhere: 'no streaming source has it',
+    excerpt_only: 'only a 30-second excerpt streams here',
     unknown: "couldn't be fetched",
     off: 'streaming is off on this node',
   };
@@ -6984,6 +6985,9 @@
     const albumId = screen.dataset.phantomAlbumId;
     const byTrack = new Map();
     for (const st of ((window.streamSlots && window.streamSlots.slots) || [])) {
+      // a radio slot (played whole or not at all) says nothing of how a tap
+      // on this album streams the track — it may well play as its excerpt
+      if (st.whole) continue;
       if (st.album_id === albumId && !byTrack.has(st.track_id)) byTrack.set(st.track_id, st);
     }
     const unavailable = screen._unavailable || new Map();
@@ -18036,9 +18040,37 @@
         <div class="form-row"><span class="form-label">Storage</span><span class="form-value mono">${empty ? 'Empty' : escapeProfileHtml(fmtBytes(ph.size_bytes))}</span></div>
         <div class="form-row"><span class="form-label">Discover new</span><button class="toggle ${ph.enabled ? 'on' : ''}" data-action="phantom-toggle" aria-pressed="${ph.enabled ? 'true' : 'false'}"><span class="knob"></span></button></div>
         <div class="form-row stacked"><div class="row-stack-sub">Off: nothing new is added and nothing streams; what is here stays until you remove it.</div></div>
+        <div class="form-row"><span class="form-label">Radio plays tracks you don't own</span>${_radioStreamedToggleHTML(ph)}</div>
+        <div class="form-row stacked"><div class="row-stack-sub" data-radio-streamed-line>${_radioStreamedLine(!!ph.enabled)}</div></div>
         ${ph.demo_runtime === false ? `<div class="form-row stacked"><div class="row-stack-sub">This install was set up without the full-length channel's runtime: tracks stream as 30-second excerpts. On the machine, run ./sautium setup --preset full</div></div>` : ''}
       </div>
       <div data-phantom-actions>${actions}</div>`;
+  }
+
+  /* "Radio plays tracks you don't own" (radio.streamed, QUEUE-STREAM Q12):
+     under Discover new, which it needs — off there, it is shown off and
+     disabled, its line saying why. Painted in place when Discover new flips
+     (no render, as that toggle's own flip). Drafts for the words sitting
+     (QUEUE-STREAM-DESIGN §7, with Q11's consequence). */
+  function _radioStreamedToggleHTML(ph) {
+    const on = !!ph.enabled && !!ph.radio_streamed;
+    return `<button class="toggle ${on ? 'on' : ''}${ph.enabled ? '' : ' disabled'}" data-action="radio-streamed-toggle" data-want="${ph.radio_streamed ? '1' : ''}" aria-pressed="${on ? 'true' : 'false'}"${ph.enabled ? '' : ' disabled'}><span class="knob"></span></button>`;
+  }
+  function _radioStreamedLine(layerOn) {
+    return layerOn
+      ? "Off: radio and Play similar play your own tracks. On: they mix in tracks from the Streaming library — always whole, never a 30-second excerpt. A demo track radio plays to its end has had its one full listen: from then on it plays as a 30-second excerpt, and radio leaves it out."
+      : 'Streaming is off — turn on Discover new above.';
+  }
+  function _paintRadioStreamed(block, layerOn) {
+    const el = block.querySelector('[data-action="radio-streamed-toggle"]');
+    if (!el) return;
+    const on = layerOn && el.dataset.want === '1';
+    el.classList.toggle('on', on);
+    el.classList.toggle('disabled', !layerOn);
+    el.disabled = !layerOn;
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    const line = block.querySelector('[data-radio-streamed-line]');
+    if (line) line.textContent = _radioStreamedLine(layerOn);
   }
 
   // Latest phantoms payload — the confirm dialog quotes its numbers.
@@ -18059,7 +18091,14 @@
         const want = !el.classList.contains('on');
         el.classList.toggle('on', want);                 // optimistic flip, no render
         el.setAttribute('aria-pressed', want ? 'true' : 'false');
+        _paintRadioStreamed(block, want);
         await serialized('phantom.layer', () => fetch('/api/settings/phantoms', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: want }) }));
+      } else if (action === 'radio-streamed-toggle') {
+        const want = !el.classList.contains('on');
+        el.dataset.want = want ? '1' : '';
+        el.classList.toggle('on', want);                 // optimistic flip, no render
+        el.setAttribute('aria-pressed', want ? 'true' : 'false');
+        await serialized('radio.streamed', () => fetch('/api/settings/phantoms', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ radio_streamed: want }) }));
       } else if (action === 'phantom-prune') {
         await onceInFlight(el, async () => {
         const ph = _phantomsLast || {};

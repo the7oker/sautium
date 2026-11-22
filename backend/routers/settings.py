@@ -371,6 +371,12 @@ _DEFAULTS: Dict[str, Any] = {
     # exists stays. Removal is the explicit Settings action
     # (POST /phantoms/prune) — no startup job ever drops it.
     "discovery.phantom_layer":   True,
+    # "Radio plays tracks you don't own": off, radio and Play similar are the
+    # owner's own tracks alone; on, they mix in streamed ones — each played
+    # whole (a full-length link, the demo channel's one listen included),
+    # never a 30 s excerpt. Moot while the streaming library is off. Off by
+    # default for every node (the owner, 2026-11-22, QUEUE-STREAM Q12).
+    "radio.streamed":            False,
     # "AI models on this machine" (hardware_profile.MODELS_SETTING): off, the
     # node loads no model and analyses nothing — the state a small board is
     # born with (db_migrate's birth preset). Read once at the process's
@@ -636,6 +642,7 @@ def _phantom_section() -> Dict[str, Any]:
     from streaming import service as streaming_service
     return {
         "enabled":    bool(_read("discovery.phantom_layer")),
+        "radio_streamed": bool(_read("radio.streamed")),
         # False on an install set up without the demo channel's runtime
         # (deno): what streams there is the 30 s excerpt
         "demo_runtime": streaming_service.demo_runtime(),
@@ -3031,7 +3038,8 @@ def put_library_root(req: LibraryRootChoice) -> Dict[str, Any]:
 
 
 class PhantomPrefs(BaseModel):
-    enabled: bool
+    enabled:        Optional[bool] = None
+    radio_streamed: Optional[bool] = None
 
 
 @router.get("/phantoms")
@@ -3045,6 +3053,11 @@ def get_phantom_state() -> Dict[str, Any]:
 
 @router.put("/phantoms")
 def put_phantom_prefs(req: PhantomPrefs) -> Dict[str, Any]:
+    if req.radio_streamed is not None:
+        # Read at each radio batch: a station playing takes it at its next fill
+        _write("radio.streamed", bool(req.radio_streamed))
+    if req.enabled is None:
+        return _phantom_section()
     _write("discovery.phantom_layer", bool(req.enabled))
     # Streaming follows the library: its providers, yt-dlp's build and the
     # refresh loop start and stop here

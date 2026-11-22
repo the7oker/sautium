@@ -675,7 +675,7 @@ of the queue with each slot's track UUID — the only source of what plays.
 - **play_track(track_id)**: Play a single track by UUID. A track with no file streams instead.
 - **play_album(album, artist_name)**: Play a whole album — pass its UUID (works owned or not), or a \
 title to fuzzy-match among owned albums.
-- **play_similar(track_id, limit)**: Play a station similar to the seed track UUID (mixed owned + streamed).
+- **play_similar(track_id, limit)**: Play a station similar to the seed track UUID: owned tracks, and streamed ones (each whole) only while the owner's switch "Radio plays tracks you don't own" is on.
 - **build_playlist(ids)**: Assemble a NEW queue from these tracks and/or albums, in order, and \
 leave it ready without playing — this is "put together a playlist". ids are track/album UUIDs.
 - **play_all(ids)**: The same new queue, started — for "play these".
