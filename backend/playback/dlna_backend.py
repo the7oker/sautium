@@ -862,7 +862,10 @@ class DlnaBackend(PlayerBackend):
         loop, where the park is made."""
         async def _parked_start():
             parked = self._parked
-            if parked is None or self._queue.index_of(parked[0]) != index:
+            # The slot told, or the one parked on whose way in is no longer
+            # to come (an edit moved it between the lane's word and this one)
+            if parked is None or (self._queue.index_of(parked[0]) != index
+                                  and parked[0].opener().get("kind") == "pending"):
                 return
             item = parked[0]
             if not self._external:

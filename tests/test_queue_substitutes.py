@@ -128,7 +128,7 @@ def lane(monkeypatch):
     q = CanonicalQueue()
     told = {"ready": [], "failed": [], "changed": 0}
     anchor = {"slot": 1}
-    ln = Lane(q, told["ready"].append, lambda: anchor["slot"],
+    ln = Lane(q, lambda item: told["ready"].append(q.index_of(item)), lambda: anchor["slot"],
               lambda: told.__setitem__("changed", told["changed"] + 1),
               lambda item, index, code: told["failed"].append((index, code)))
     ln.attach(proxy)
@@ -307,6 +307,7 @@ def test_a_browser_start_waiting_on_its_stream_follows_its_slot_through_queue_ed
     monkeypatch.setattr(settings_router, "_read", lambda key: None)
     mgr = PlaybackManager()
     monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
+    monkeypatch.setattr(mgr.lane, "maintain", lambda: None)   # the stream lands when the test says
     b = BrowserBackend(emit=mgr._on_backend_status, queue=mgr.queue)
     mgr._active = b
     b._channel = object()                     # a tab holds the output

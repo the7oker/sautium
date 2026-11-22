@@ -195,10 +195,14 @@ class CanonicalQueue:
                 if not any(s.get("kind") in ("proxy", "pending") and s.get("token") == token
                            for s in (it.source, it.play or {})):
                     continue
-                new = (provider, excerpt, duration_seconds)
+                new = (provider, excerpt,
+                       duration_seconds if duration_seconds is not None else it.duration_seconds)
                 if new != (it.provider, it.excerpt, it.duration_seconds):
+                    first = (it.play or {}).get("kind") == "pending"
                     it.provider, it.excerpt, it.duration_seconds = new
-                    changed = True
+                    # A first landing is the `slots` message's to tell; a
+                    # refetch that lands otherwise changes what a row shows
+                    changed = changed or not first
             if changed:
                 self._version += 1
             return changed
@@ -243,7 +247,7 @@ class CanonicalQueue:
             return moved
 
     def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
-                  bump: bool = True) -> bool:
+                  bump: bool = True, before=None) -> bool:
         """This very item's way in becomes `play` — if it still is `expected`
         (the same dict) and the item is still queued: a stream that landed, or
         failed, on a slot whose way in nothing re-read meanwhile. `bump`: a
@@ -252,6 +256,8 @@ class CanonicalQueue:
         with self._lock:
             if item.play is not expected or not any(it is item for it in self._items):
                 return False
+            if before is not None:
+                before(item)        # told under the same lock, just before (Lane._settle)
             _set_play(item, play)
             if bump:
                 self._version += 1

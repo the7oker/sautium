@@ -360,3 +360,30 @@ def test_a_tap_on_a_slot_still_on_its_way_behind_the_playhead_waits_and_plays_it
     finally:
         prov.land("stream-2")
         b.shutdown()
+
+
+def test_a_new_order_behind_a_late_slot_removes_none_of_what_hqplayer_holds(fake, lane, monkeypatch):
+    """A slot left behind the playhead whose stream came since (late) is no
+    entry HQPlayer holds: a new order of what follows the playing slot keeps
+    every entry before it, and the layout stays HQPlayer's playlist."""
+    import routers.player as player
+    prov, _proxy = lane
+    mgr, b = _playing((lane, monkeypatch), fake, monkeypatch,
+                      [_streamed(1)] + [_item(f"E:/Music/A/0{i}.flac", i) for i in (2, 3, 4, 5)])
+    monkeypatch.setattr(player, "manager", mgr)
+    try:
+        assert b.select(3, "track-3")
+        assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and len(fake.playlist) == 4
+                     and fake.track == 2), (fake.state, fake.track, fake.playlist)
+        assert _wait(lambda: mgr._latest_status.get("track_index") == 3)
+        prov.land("stream-1")
+        assert _wait(lambda: mgr.queue.item_at(1).opener()["kind"] == "proxy")
+        player.reorder(player.ReorderRequest(order=["stream-1", "track-2", "track-3", "track-5",
+                                                    "track-4"]))
+        assert fake.playlist == ["file:///E:/Music/A/02.flac", "file:///E:/Music/A/03.flac",
+                                 "file:///E:/Music/A/05.flac", "file:///E:/Music/A/04.flac"]
+        assert len(b._layout().handed) == len(fake.playlist)
+        assert fake.track == 2 and fake.state == int(PlaybackState.PLAYING)
+    finally:
+        prov.land("stream-1")
+        b.shutdown()

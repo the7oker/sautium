@@ -82,6 +82,9 @@ def mgr(conn):
     from playback.manager import PlaybackManager
     m = PlaybackManager()
     m.persisted = 0
+    # what a slot's stream does is the lane's, tested on its own
+    # (test_queue_substitutes): here the way in stays as the re-bind left it
+    m.lane.maintain = lambda: None
 
     def persist():
         m.persisted += 1

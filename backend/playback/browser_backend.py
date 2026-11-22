@@ -441,6 +441,7 @@ class BrowserBackend(PlayerBackend):
         if index != first:
             position = 0.0      # the second asked for was the first slot's
         self._unplayable = None
+        self._waiting_on = None
         self._index = index
         self._current_ident = self._item_ident(item)
         self._position = position
@@ -565,7 +566,8 @@ class BrowserBackend(PlayerBackend):
         # so a duplicate of the playing track elsewhere in the queue can't
         # drag the slot to the wrong copy.
         snapshot = self._queue.snapshot()
-        if self._current_ident is None and self._pending_play_index is not None:
+        if (self._current_ident is None and self._pending_play_index is not None
+                and self._waiting_on is not None):
             # A start waiting on its slot's stream follows that slot — an
             # append, a removal before it, a new order — and still plays
             # when the stream lands; one whose slot left the queue goes on
@@ -580,6 +582,10 @@ class BrowserBackend(PlayerBackend):
             if at != self._index:
                 self._index = self._pending_play_index = at
                 self._emit_now()
+            if self._waiting_on.opener().get("kind") != "pending":
+                # it landed as the edit went: the lane's word named its old slot
+                self._start_at(at, play=True, position=self._position)
+                return
             self._push({"cmd": "queue", "queue": self._queue_tail(self._index)})
             return
         best = None

@@ -633,9 +633,13 @@ class PlaybackManager:
         if pending:
             logger.info("%d queued slot(s) need a stream on %s", pending, backend.id)
 
-    def _slot_ready(self, index: int) -> None:
+    def _slot_ready(self, item: QueueItem) -> None:
+        """The lane settled `item`'s way in: the output hears it at the slot
+        the item holds as it is told — read now, never before the lane's own
+        work, so an edit meanwhile names the right one."""
         b = self._active
-        if b is not None:
+        index = self.queue.index_of(item)
+        if b is not None and index is not None:
             b.slot_ready(index)
 
     def _stream_arriving(self, item: QueueItem) -> None:
@@ -693,8 +697,9 @@ class PlaybackManager:
             if run is None or run["generation"] != self.queue.generation or run["played"]:
                 return
             run["failed"][id(item)] = code
+            from playback.substitute import streamed
             items = [it for it in self.queue.snapshot()
-                     if it.media_file_id is None and it.source.get("kind") == "track"]
+                     if it.source.get("kind") == "track" and streamed(it)]
             failed = [it for it in items if id(it) in run["failed"]]
             firsts = items[:2]
             event = None
@@ -1194,6 +1199,21 @@ class PlaybackManager:
         self.lane.maintain()
         self._slots_changed()
 
+    @staticmethod
+    def _read_ways_in(backend: Optional[PlayerBackend], items: list) -> None:
+        """The way in of every new slot that is the track itself, for an output
+        that reads none as it mirrors (every one but HQPlayer, whose own
+        mirror reads each slot's): a copy here opens as a file — a streamed
+        album may list a track owned on another album — else its stream."""
+        if backend is None or backend.id == "hqplayer":
+            return
+        tracks = [it for it in items if it.source.get("kind") == "track"]
+        if not tracks:
+            return
+        from playback.substitute import native_plays
+        for it, play in zip(tracks, native_plays(tracks, backend.id, None)):
+            it.play = play
+
     def replace_queue(self, items: list[QueueItem], *, play: bool,
                       archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
         """Replace the queue (and start playback, once the queue lock is let
@@ -1214,6 +1234,7 @@ class PlaybackManager:
             gated = self.ensure_active()
             pick = lambda: gated if self._active is gated and gated.healthy() else self._gate_once()  # noqa: E731
         with self._output_mutation(pick) as backend:
+            self._read_ways_in(backend, items)
             accepted = backend.queue_replace(items, play=play)
             added = len(accepted)
             if items and not added:
@@ -1259,6 +1280,7 @@ class PlaybackManager:
         with self._output_mutation(lambda: self._active) as backend:
             if generation is not None and self.queue.generation != generation:
                 return None
+            self._read_ways_in(backend, items)
             if position == "next":
                 anchor = self._latest_status.get("track_index")
                 anchor = anchor if (isinstance(anchor, int)

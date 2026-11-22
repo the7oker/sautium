@@ -129,6 +129,9 @@ def _start(settings) -> None:
         _wired = True
     # From here the subsystem is up (is_enabled): the resolve finds providers
     _registry = registry
+    # Queued slots said "streaming is off" while it came up ask again
+    from playback.manager import manager as playback_manager
+    playback_manager.lane.revive()
     if demo and _loop is not None:
         # yt-dlp's stable build, put in place at start and kept current for
         # the life of the subsystem (see the loop's own note on why

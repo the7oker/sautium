@@ -212,6 +212,8 @@ def streamed(item) -> bool:
     if item.media_file_id is not None or item.source.get("kind") == "file":
         return False
     play = item.opener()
+    if play.get("prepare") or play.get("transcode") or play.get("cut") or play.get("kind") == "file":
+        return False                # a copy here, prepared for HQPlayer: no stream
     kind = play.get("kind")
     return kind in ("pending", "proxy") or (kind == "unplayable" and bool(play.get("lane")))
 
@@ -220,7 +222,7 @@ class Lane:
     """The fetch lane's queue side: what the proxy's one worker takes next
     (pick), the window's resolve, what landed or failed on which slot, the
     tokens nobody wants any more (prune), and what each streamed row shows
-    (slots). `notify(index)` reaches the active output (slot_ready);
+    (slots). `notify(item)` reaches the active output (slot_ready);
     `anchor()` is the slot the output plays or Play would start; `changed()`
     says the rows' states moved; `failed(item, index, code)` hears a slot
     that failed; `arriving(item)` is told just before a slot's stream (or
@@ -228,7 +230,7 @@ class Lane:
     as it was handed it (HQPlayer) marks one it does not hold before any
     reader can count it."""
 
-    def __init__(self, queue, notify: Callable[[int], None], anchor: Callable[[], int],
+    def __init__(self, queue, notify: Callable[[object], None], anchor: Callable[[], int],
                  changed: Callable[[], None], failed: Callable[[object, int, str], None],
                  arriving: Callable[[object], None] = lambda item: None):
         self._queue = queue
@@ -266,32 +268,30 @@ class Lane:
         resolved (off the lane, one waterfall pass), and the lane, if idle,
         looks again. Cheap on the status thread: a snapshot of LEAD slots."""
         proxy = self._proxy
-        if proxy is None:
-            return
         from streaming import service as streaming_service
         up = streaming_service.is_enabled()
-        if up and not streaming_service.providers_preferred():
+        if up and (proxy is None or not streaming_service.providers_preferred()):
             # every provider aside or cooling down for now: the window waits,
             # asked again at the next look (the status tick)
-            proxy.wake()
+            if proxy is not None:
+                proxy.wake()
             return
         todo = []
         for _s, it in self._window(self._queue.snapshot()):
             play = it.play
             if (play is not None and play.get("kind") == "pending" and not play.get("prepare")
                     and not play.get("token") and not play.get("resolving")):
-                if not up:
-                    # Said on the row; never kept past a re-read of the way in,
-                    # nor past streaming coming up (revive)
-                    self._fail(it, play, "off")
-                    continue
                 marked = {"kind": "pending", "resolving": True}
                 if self._queue.swap_play(it, play, marked, bump=False):
                     todo.append((it, marked))
         if todo:
+            # Off the status thread, as every settle is: with streaming off
+            # the resolve says so on the rows ("off", never kept: a re-read of
+            # the way in, or streaming coming up — revive — asks again)
             threading.Thread(target=self._resolve, args=(todo,), daemon=True,
                              name="queue-resolve").start()
-        proxy.wake()
+        if proxy is not None:
+            proxy.wake()
 
     def revive(self) -> None:
         """Streaming came up (streaming.service): the slots it failed as off
@@ -337,11 +337,13 @@ class Lane:
         tok = self._proxy.mint(q, [(_local_transcoder(),
                                     settings.translate_to_local_path(src["path"]))])
         new = {**play, "token": tok, "transcode": True}
-        if not self._queue.swap_play(item, play, new, bump=False):
+        with self._lock:
+            swapped = self._queue.swap_play(item, play, new, bump=False)
+            if swapped:
+                self._minted.add(tok)
+        if not swapped:
             self._proxy.cancel(tok)
             return None
-        with self._lock:
-            self._minted.add(tok)
         return tok
 
     def _cut(self, item, play: dict) -> None:
@@ -379,8 +381,12 @@ class Lane:
         from streaming import service as streaming_service
         # The resolve and the query builders live with the play endpoints.
         from routers.player import _phantom_track_query, _refused_code, _resolve_waterfall
-        if not streaming_service.is_enabled() or not streaming_service.providers_preferred():
-            # gone off since the look that marked them: to come again
+        if not streaming_service.is_enabled():
+            for it, marked in todo:
+                self._fail(it, marked, "off")
+            return
+        if not streaming_service.providers_preferred():
+            # every provider aside since the look that marked them: to come again
             for it, marked in todo:
                 self._queue.swap_play(it, marked, {"kind": "pending"}, bump=False)
             return
@@ -406,12 +412,12 @@ class Lane:
             tok = by_track.get(it.track_id)
             if tok is None:
                 tok = by_track[it.track_id] = proxy.mint(q, chain)
-            if self._queue.swap_play(it, marked, {"kind": "pending", "token": tok}, bump=False):
-                named.add(tok)
-        with self._lock:
-            # Kept only once a slot names it: a prune meanwhile would cancel a
-            # token no slot named yet
-            self._minted |= named
+            # Named and kept under the lane's lock: a prune between the two
+            # would cancel a token a slot names
+            with self._lock:
+                if self._queue.swap_play(it, marked, {"kind": "pending", "token": tok}, bump=False):
+                    named.add(tok)
+                    self._minted.add(tok)
         for tok in set(by_track.values()) - named:
             proxy.cancel(tok)       # every slot it was for left, or its way in changed
         for tok in named:
@@ -438,7 +444,7 @@ class Lane:
             self._queue.refresh_proxy_items(
                 e.token, provider=e.provider.manifest.id if e.provider else None, excerpt=excerpt,
                 duration_seconds=(e.audio.seconds if excerpt and e.audio.seconds
-                                  else e.query.duration))
+                                  else e.query.duration))     # None keeps the slot's own
         for it, play in self._pending_on(e.token):
             land = {"kind": "proxy", "token": e.token, "lane": True}
             if play.get("transcode"):
@@ -470,11 +476,12 @@ class Lane:
         """The slot's way in is `play` now — if it still was `expected`: the
         output that parked on it hears so (slot_ready). Its 1-based slot, or
         None when it left the queue or moved on meanwhile."""
-        if play["kind"] != "unplayable" and item.play is expected:
-            self._arriving(item)
-        # The row's state is the `slots` message's, never a queue version:
-        # a landing repaints no sheet
-        if not self._queue.swap_play(item, expected, play, bump=False):
+        # The output's mark (`arriving`) and the swap are one step under the
+        # queue's lock: no reader — an HQPlayer mirror, a canary tick — sees
+        # the slot landed and unmarked. The row's state is the `slots`
+        # message's, never a queue version: a landing repaints no sheet
+        before = self._arriving if play["kind"] != "unplayable" else None
+        if not self._queue.swap_play(item, expected, play, bump=False, before=before):
             return None
         index = self._queue.index_of(item)
         if index is None:
@@ -483,8 +490,8 @@ class Lane:
             logger.info("queue slot %d unplayable here: %s", index, play["reason"])
         else:
             logger.debug("queue slot %d ready — %s — %s", index, item.artist, item.title)
+        self._notify(item)
         self._changed()
-        self._notify(index)
         return index
 
     # -- tokens nobody wants -----------------------------------------------
@@ -496,12 +503,14 @@ class Lane:
         proxy = self._proxy
         if proxy is None:
             return
-        named = set()
-        for it in self._queue.snapshot():
-            for d in (it.source, it.play or {}):
-                if d.get("token"):
-                    named.add(d["token"])
+        # The lane's lock across the read and the subtraction: a resolve names
+        # its tokens on their slots and keeps them under the same lock
         with self._lock:
+            named = set()
+            for it in self._queue.snapshot():
+                for d in (it.source, it.play or {}):
+                    if d.get("token"):
+                        named.add(d["token"])
             gone = self._minted - named
             self._minted &= named
         for tok in gone:
