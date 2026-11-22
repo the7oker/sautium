@@ -17390,7 +17390,11 @@
   // refusal are the agent's own, shown as text. Draft words for the review.
   function hwSoftwareRow(hw, host) {
     const sw = hw.software || {};
-    const what = [sw.version, sw.commit || sw.build].filter(Boolean).join(' · ') || '—';
+    // The release's version is what a person reads. The commit is support's
+    // (the diagnostics carry it): it rides in the value's title, and stands
+    // in the row only where the tree states no version.
+    const build = sw.commit || sw.build || '';
+    const what = sw.version || build || '—';
     let control = '', sub = '';
     if (hw.restartable && !host.available) {
       sub = 'Updates: on the machine, run ./sautium update';
@@ -17424,7 +17428,7 @@
         <div class="row-stack">
           <div class="row-stack-pair">
             <span class="row-stack-label">Sautium</span>
-            <span class="row-stack-value mono">${escapeProfileHtml(what)}</span>
+            <span class="row-stack-value mono"${sw.version && build ? ` title="${escapeProfileHtml(build)}"` : ''}>${escapeProfileHtml(what)}</span>
           </div>
           ${control}
         </div>${sub ? `<div class="row-stack-sub">${escapeProfileHtml(sub)}</div>` : ''}</div>`;
