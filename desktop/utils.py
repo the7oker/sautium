@@ -605,12 +605,13 @@ def detect_hardware_profile() -> HardwareProfile:
     gpu_available, accel_name, vram_gb = detect_gpu()
     apple_silicon = sys.platform == "darwin" and platform.machine() == "arm64"
     device = "mps" if apple_silicon else "cuda" if gpu_available else "cpu"
-    ram_gb = psutil.virtual_memory().total / 1024 ** 3
-    cores = os.cpu_count() or 4
+    from desktop.machine_tier import auto_tier, memory_limit_kib, usable_cores
+    kib = memory_limit_kib()
+    ram_gb = (kib * 1024 if kib is not None else psutil.virtual_memory().total) / 1024 ** 3
+    cores = usable_cores()
     # Unified memory IS system RAM, and a CPU node works out of RAM anyway.
     accel_gb = vram_gb if device == "cuda" else ram_gb
 
-    from desktop.machine_tier import auto_tier
     name = auto_tier(device, accel_gb, ram_gb)
 
     # PyTorch stopped at 2.2.2 for macOS x86_64 — service_manager skips the

@@ -1605,15 +1605,33 @@ def test_the_longest_track_follows_what_is_available(monkeypatch, name, availabl
 
 
 def test_a_containers_limit_bounds_what_is_available(monkeypatch, tmp_path):
-    (tmp_path / "max").write_text("4294967296\n")
-    (tmp_path / "current").write_text("3221225472\n")
-    (tmp_path / "stat").write_text("anon 1\ninactive_file 1073741824\n")
-    monkeypatch.setattr(analysis_pace, "_CGROUPS", (
-        (str(tmp_path / "max"), str(tmp_path / "current"), str(tmp_path / "stat"), "inactive_file"),))
+    from desktop import machine_tier
+    (tmp_path / "memory.max").write_text("4294967296\n")
+    (tmp_path / "memory.current").write_text("3221225472\n")
+    (tmp_path / "memory.stat").write_text("anon 1\ninactive_file 1073741824\n")
+    (tmp_path / "membership").write_text("0::/\n")
+    monkeypatch.setattr(machine_tier, "CGROUP_ROOT", str(tmp_path))
+    monkeypatch.setattr(machine_tier, "CGROUP_MEMBERSHIP", str(tmp_path / "membership"))
     assert analysis_pace._cgroup_room_bytes() == 2 * 1073741824     # the dropped cache is room
     assert analysis_pace.available_memory_gb() <= 2 * 1073741824 / 1e9
-    (tmp_path / "max").write_text("max\n")
+    (tmp_path / "memory.max").write_text("max\n")
     assert analysis_pace._cgroup_room_bytes() is None
+
+
+def test_the_room_is_read_where_the_tightest_limit_is_set(monkeypatch, tmp_path):
+    """A limit one group up (a slice's) is the limit, and the use counted
+    against it is that group's — not the process's own leaf."""
+    from desktop import machine_tier
+    (tmp_path / "s" / "leaf").mkdir(parents=True)
+    (tmp_path / "s" / "leaf" / "memory.max").write_text("max\n")
+    (tmp_path / "s" / "leaf" / "memory.current").write_text("1\n")
+    (tmp_path / "s" / "memory.max").write_text("4294967296\n")
+    (tmp_path / "s" / "memory.current").write_text("1073741824\n")
+    (tmp_path / "s" / "memory.stat").write_text("inactive_file 0\n")
+    (tmp_path / "membership").write_text("0::/s/leaf\n")
+    monkeypatch.setattr(machine_tier, "CGROUP_ROOT", str(tmp_path))
+    monkeypatch.setattr(machine_tier, "CGROUP_MEMBERSHIP", str(tmp_path / "membership"))
+    assert analysis_pace._cgroup_room_bytes() == 3 * 1073741824
 
 
 def _flac(seconds, rate, subtype, channels=2) -> bytes:

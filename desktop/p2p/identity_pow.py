@@ -39,6 +39,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from desktop.machine_tier import machine_cores
+
 try:
     from argon2.exceptions import HashingError
 except ImportError:      # the launcher installs argon2-cffi on first run
@@ -157,34 +159,6 @@ def attempts_for_quantile(q: float, difficulty: int) -> int:
 # ----------------------------------------------------------------------------
 # Benchmark — `python -m desktop.p2p.identity_pow --bench`
 # ----------------------------------------------------------------------------
-
-def mem_limit_kib() -> Optional[int]:
-    """The most memory this process may ever have: its cgroup's limit where
-    one is set (a capped container), else the machine's total; None if
-    unknown. What "this node can never run an evaluation" is decided from —
-    mem_available_kib is one moment's reading."""
-    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
-        try:
-            with open(path) as f:
-                limit = f.read().strip()
-        except OSError:
-            continue
-        if limit != "max" and int(limit) < 1 << 60:
-            return int(limit) // 1024
-        break
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    return int(line.split()[1])
-    except OSError:
-        pass
-    try:
-        import psutil
-        return psutil.virtual_memory().total // 1024
-    except ImportError:
-        return None
-
 
 def mem_available_kib() -> Optional[int]:
     """Free-for-allocation memory (MemAvailable / psutil), None if unknown."""
@@ -307,7 +281,7 @@ def _difficulty_table(seconds_per_call: float) -> None:
 
 def _bench(repeats: int) -> None:
     challenge = os.urandom(64)
-    print(f"identity_pow bench — {cpu_label()}, {os.cpu_count()} threads, "
+    print(f"identity_pow bench — {cpu_label()}, {machine_cores()} threads, "
           f"MemAvailable "
           f"{(mem_available_kib() or 0) // 1024} MiB")
     print(f"  {'warm-up (64 MiB)':<28} {_time_call(PowParams(0, 64 * 1024, 1, 1), challenge):.3f}s")

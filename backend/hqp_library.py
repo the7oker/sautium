@@ -348,9 +348,10 @@ def _this_machine() -> Dict[str, Any]:
     """The machine this node runs on, as it sees it — in Docker the CPU and
     GPU are the host's, the RAM what the VM was given."""
     import hardware_profile
+    from desktop.machine_tier import machine_cores
     from desktop.p2p.identity_pow import cpu_label
     hw = hardware_profile.resolve()
-    return {"cpu": cpu_label(), "cores": os.cpu_count(),
+    return {"cpu": cpu_label(), "cores": machine_cores(),
             "gpu": hw.accel_name, "ram_gb": round(hw.ram_gb, 1) if hw.ram_gb else None}
 
 

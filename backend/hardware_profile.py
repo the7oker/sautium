@@ -153,12 +153,12 @@ class HardwareProfile:
         if self.device == "cuda":
             return None
         if self.name == "lite":
-            return max(2, self.cores // 2)
-        return max(2, self.cores - 2)
+            return min(self.cores, max(2, self.cores // 2))
+        return min(self.cores, max(2, self.cores - 2))
 
     @property
     def io_workers(self) -> int:
-        return max(2, min(_IO_WORKER_CAP[self.name], self.cores))
+        return min(self.cores, max(2, min(_IO_WORKER_CAP[self.name], self.cores)))
 
     @property
     def prefetch_workers(self) -> int:
@@ -205,40 +205,15 @@ def cap_torch_threads(profile: Optional["HardwareProfile"] = None) -> Optional[i
 
 
 def _total_ram_gb() -> float:
-    """Total system RAM without hard-requiring psutil (the Docker image
-    doesn't ship it; the desktop venv does)."""
-    try:
-        import psutil
-        return psutil.virtual_memory().total / _GIB
-    except ImportError:
-        pass
-    try:
-        # POSIX (Linux container, macOS)
-        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / _GIB
-    except (ValueError, OSError, AttributeError):
-        pass
-    try:
-        # Windows without psutil
-        import ctypes
-
-        class _MemStatus(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_ulong),
-                        ("dwMemoryLoad", ctypes.c_ulong),
-                        ("ullTotalPhys", ctypes.c_ulonglong),
-                        ("ullAvailPhys", ctypes.c_ulonglong),
-                        ("ullTotalPageFile", ctypes.c_ulonglong),
-                        ("ullAvailPageFile", ctypes.c_ulonglong),
-                        ("ullTotalVirtual", ctypes.c_ulonglong),
-                        ("ullAvailVirtual", ctypes.c_ulonglong),
-                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-        status = _MemStatus()
-        status.dwLength = ctypes.sizeof(_MemStatus)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-        return status.ullTotalPhys / _GIB
-    except Exception:
+    """The memory this node may have, in GiB: its container's limit where
+    one is set, else the machine's (a container capped at 4 GiB on a 16 GiB
+    host is a 4 GiB node)."""
+    from desktop.machine_tier import memory_limit_kib
+    kib = memory_limit_kib()
+    if kib is None:
         logger.warning("RAM detection failed — assuming 16 GB")
         return 16.0
+    return kib * 1024 / _GIB
 
 
 def models_switch() -> bool:
@@ -251,8 +226,9 @@ def models_switch() -> bool:
 def _detect_hardware() -> tuple:
     """(device, accelerator name, total accel memory GiB, total RAM GiB,
     cores, models: on | off | absent)."""
+    from desktop.machine_tier import usable_cores
     ram_gb = _total_ram_gb()
-    cores = os.cpu_count() or 4
+    cores = usable_cores()
     # The switch before the import: an off node never loads torch
     if importlib.util.find_spec("torch") is None:
         return "cpu", None, ram_gb, ram_gb, cores, "absent"

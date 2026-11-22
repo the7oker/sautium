@@ -51,6 +51,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from config import settings
+from desktop.machine_tier import usable_cores
 from desktop.p2p import material
 
 logger = logging.getLogger(__name__)
@@ -616,7 +617,7 @@ def _relink(files, cancel_check, progress_cb) -> int:
                                    f.cue_start_seconds, f.cue_end_seconds)
 
     linked = done = 0
-    with ThreadPoolExecutor(max_workers=min(4, os.cpu_count() or 4)) as pool:
+    with ThreadPoolExecutor(max_workers=min(4, usable_cores())) as pool:
         for start in range(0, len(files), _RELINK_CHUNK):
             if cancel_check and cancel_check():
                 break

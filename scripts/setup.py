@@ -172,7 +172,7 @@ def machine() -> dict:
         free_gb = shutil.disk_usage(where).free / 1e9
     except OSError:
         free_gb = None
-    return {"ram_gib": ram_gib, "cores": os.cpu_count() or 1, "arch": platform.machine(),
+    return {"ram_gib": ram_gib, "cores": machine_tier.machine_cores(), "arch": platform.machine(),
             "docker_root": docker_root, "docker_root_removable": removable,
             "docker_root_free_gb": free_gb}
 

@@ -978,31 +978,14 @@ def test_a_machine_that_is_only_short_of_memory_now_still_says_busy(node, scratc
         assert admission.retry_after
 
 
-def test_the_memory_limit_is_the_cgroups_where_one_is_set(tmp_path, monkeypatch):
-    import builtins
-    real = builtins.open
-    files = {}
-
-    def fake(path, *a, **kw):
-        if str(path) in files:
-            if files[str(path)] is None:
-                raise FileNotFoundError(path)
-            return real(files[str(path)], *a, **kw)
-        return real(path, *a, **kw)
-
-    def write(name, text):
-        (tmp_path / name).write_text(text)
-        return tmp_path / name
-    monkeypatch.setattr(builtins, "open", fake)
-    files["/proc/meminfo"] = write("meminfo", "MemTotal:       16000000 kB\nMemAvailable: 1 kB\n")
-    files["/sys/fs/cgroup/memory/memory.limit_in_bytes"] = None
-    files["/sys/fs/cgroup/memory.max"] = write("max", "max\n")
-    assert identity_pow.mem_limit_kib() == 16000000
-    files["/sys/fs/cgroup/memory.max"] = write("capped", f"{2 * 1024 ** 3}\n")
-    assert identity_pow.mem_limit_kib() == 2 * 1024 * 1024
-    files["/sys/fs/cgroup/memory.max"] = None
-    files["/sys/fs/cgroup/memory/memory.limit_in_bytes"] = write("v1", f"{1 << 62}\n")   # v1's "no limit"
-    assert identity_pow.mem_limit_kib() == 16000000
+def test_the_gates_memory_limit_is_the_helpers(scratch_dsn):
+    """The limit a gate decides "this node can never check a proof" from is
+    the one reading of the process's memory (tests/test_machine_cores.py)."""
+    import inspect
+    from desktop import machine_tier
+    default = inspect.signature(identity_registry.IdentityGate.__init__).parameters["mem_limit_kib"].default
+    assert default is machine_tier.memory_limit_kib
+    assert not hasattr(identity_pow, "mem_limit_kib")
 
 
 def test_a_guest_parks_on_a_node_too_small_to_check_it_until_its_identity_is_another(node, parked,
