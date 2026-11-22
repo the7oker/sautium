@@ -7624,7 +7624,7 @@ html { -webkit-tap-highlight-color: transparent; }
    the tail visible (it's the user-meaningful folder name). CSS styles
    the font and sets no max-width / text-overflow: the string the renderer
    produces is the string the user sees — but beside the folder button
-   (.path-stack, below), where a string that still does not fit loses its
+   (.row-stack-pair, below), where a string that still does not fit loses its
    head. */
 .path-value {
   font-family: var(--font-mono);
@@ -7633,11 +7633,13 @@ html { -webkit-tap-highlight-color: transparent; }
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
-/* With the folder button the label and the path stand one above the other
-   and the button beside both. The path gives way, never the button or the
-   label: what still does not fit is cut at its head, where the JS put the
-   ellipsis, so the folder's own name stays in sight. */
-.path-stack {
+/* A row with a button: the label and its value stand one above the other
+   and the button beside both, on one line of its own words — three things
+   on one line do not fit a phone's sheet (the Music path's Change, the
+   Hardware profile's Turn off / Check for updates / Restart Sautium were
+   cut off or broken over three lines). The value gives way, never the
+   button or the label. */
+.row-stack-pair {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -7645,14 +7647,24 @@ html { -webkit-tap-highlight-color: transparent; }
   flex: 1 1 auto;
   min-width: 0;
 }
-.path-stack .row-stack-label { white-space: nowrap; }
-.path-stack .path-value {
+.row-stack-pair .row-stack-label { white-space: nowrap; }
+.row-stack-pair .row-stack-value {
+  margin-top: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.row-stack-pair + .profile-btn {
+  flex: none;
+  white-space: nowrap;
+}
+/* The path is cut at its head, where the JS put the ellipsis, so the
+   folder's own name stays in sight. */
+.row-stack-pair .path-value {
   max-width: 100%;
   overflow: hidden;
   display: flex;
   justify-content: flex-end;
 }
-[data-music-path-row] .profile-btn { flex: none; }
 
 /* A start in flight on a slow output (DLNA: SOAP round-trips + the
    renderer buffering the new file; HQPlayer: a filter built before any

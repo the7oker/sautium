@@ -17377,8 +17377,10 @@
       ? `<div class="row-stack-sub">${on ? 'On' : 'Off'} from the next start of Sautium.</div>` : '';
     return `<div class="form-row stacked">
         <div class="row-stack">
-          <span class="row-stack-label">AI models</span>
-          <span class="form-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
+          <div class="row-stack-pair">
+            <span class="row-stack-label">AI models</span>
+            <span class="row-stack-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
+          </div>
           <button class="profile-btn secondary" type="button" data-action="models-switch" data-on="${on ? '0' : '1'}">${on ? 'Turn off' : 'Turn on'}</button>
         </div>${pending}</div>`;
   }
@@ -17420,8 +17422,10 @@
     }
     return `<div class="form-row stacked">
         <div class="row-stack">
-          <span class="row-stack-label">Sautium</span>
-          <span class="form-value mono">${escapeProfileHtml(what)}</span>
+          <div class="row-stack-pair">
+            <span class="row-stack-label">Sautium</span>
+            <span class="row-stack-value mono">${escapeProfileHtml(what)}</span>
+          </div>
           ${control}
         </div>${sub ? `<div class="row-stack-sub">${escapeProfileHtml(sub)}</div>` : ''}</div>`;
   }
@@ -17479,17 +17483,21 @@
             ? 'Nothing is analysed here: sound features arrive from other Sautium nodes.'
             : 'Scales analysis, model pre-warm and background load.'}</div></div>
           ${hwModelsRow(hw)}
-          ${cache ? `<div class="form-row">
-            <span class="form-label">Downloaded models</span>
-            <span class="form-value mono">${escapeProfileHtml(fmtBytes(cache))}</span>
+          ${cache ? `<div class="form-row stacked"><div class="row-stack">
+            <div class="row-stack-pair">
+              <span class="row-stack-label">Downloaded models</span>
+              <span class="row-stack-value mono">${escapeProfileHtml(fmtBytes(cache))}</span>
+            </div>
             <button class="profile-btn secondary" type="button" data-action="models-cache-remove">Remove</button>
-          </div>` : ''}
+          </div></div>` : ''}
           ${hwSoftwareRow(hw, host)}
-          ${hw.restartable ? `<div class="form-row">
-            <span class="form-label">This machine</span>
-            <span class="form-value">${escapeProfileHtml(hw.machine || '—')}</span>
+          ${hw.restartable ? `<div class="form-row stacked"><div class="row-stack">
+            <div class="row-stack-pair">
+              <span class="row-stack-label">This machine</span>
+              <span class="row-stack-value">${escapeProfileHtml(hw.machine || '—')}</span>
+            </div>
             <button class="profile-btn secondary" type="button" data-action="restart-node">Restart Sautium</button>
-          </div>` : ''}
+          </div></div>` : ''}
         </div>`;
       wire(hw);
       // Shown: the one-time mark of a node born with a preset is retired,
@@ -18298,7 +18306,7 @@
           <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}" data-library-drawn="${_libraryDrawn(lib)}">
             ${picksFolder ? `
             <div class="row-stack">
-              <div class="path-stack">
+              <div class="row-stack-pair">
                 <span class="row-stack-label">Music path</span>
                 <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
               </div>
