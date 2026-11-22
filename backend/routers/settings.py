@@ -210,12 +210,21 @@ def identity_event() -> Dict[str, Any]:
     its status and detail, the lottery's progress, and whether the account's
     email is verified — the other way to an identity, offered beside a proof
     that is still being mined or waits for memory. No status while no
-    worker ever published (no account yet, P2P off)."""
+    worker ever published (no account yet, P2P off). `support_known`: what a
+    node with no identity can still reach (routers.p2p.support_known)."""
+    from routers.p2p import support_known
     state = _read("p2p.identity") or {}
     row = db_query_one("SELECT email_verified FROM user_profile WHERE id = 1")
     return {"status": state.get("status"), "detail": state.get("detail"),
             "attempts": state.get("attempts"), "p_done": state.get("p_done"),
-            "email_verified": bool(row and row.get("email_verified"))}
+            "email_verified": bool(row and row.get("email_verified")),
+            "support_known": support_known()}
+
+
+def _identity_row() -> Dict[str, Any]:
+    """The worker's state as the Sync & P2P Identity row shows it."""
+    from routers.p2p import support_known
+    return {**(_read("p2p.identity") or {}), "support_known": support_known()}
 
 
 def notify_library_subscribers() -> None:
@@ -1026,7 +1035,7 @@ def _sync_state() -> Dict[str, Any]:
         # announced and searched only past the threshold.
         "network_estimate":        _read("p2p.network_estimate"),
         "rare_mode":               bool(_read("p2p.rare_mode")),
-        "identity":                _read("p2p.identity"),
+        "identity":                _identity_row(),
         "load":                    _read("p2p.load"),
         "gate":                    _gate_snapshot(),
         "support":                 _support_state(),
