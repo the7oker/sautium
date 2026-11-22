@@ -55,13 +55,16 @@ LABEL_BYTES_MAX = 128
 NAMES_DIR = ".names"
 # A volume no driver mounted, as the automount's script leaves it beside the
 # disks (`<root>/.unread/<kernel name>`): the boot it belongs to, the
-# filesystem's type as blkid names it, the label — three lines
+# filesystem's type as blkid names it, the label, the driver the mount was
+# tried with ("-": none, the type is one the script never mounts) — four lines
 UNREAD_DIR = ".unread"
 UNREAD_BYTES_MAX = 256
 BOOT_ID = "/proc/sys/kernel/random/boot_id"
 MOUNTINFO = "/proc/self/mountinfo"
 _KERNEL_NAME = re.compile(r"[A-Za-z0-9]+\Z")
 _FS_TYPE = re.compile(r"[a-z0-9_]{1,16}\Z")
+# The drivers the automount mounts with; anything else on the fourth line is none
+_DRIVERS = frozenset({"vfat", "exfat", "ntfs3", "ntfs-3g", "ext4"})
 # blkid's type → (the name a person knows the format by, whether the
 # automount mounts that type — so the volume is here because a mount FAILED,
 # not because the format is one Sautium does not read). Any other type is
@@ -204,7 +207,8 @@ def unread() -> List[Dict[str, Any]]:
     """The volumes plugged into this machine that nothing mounted, as the
     automount left them: {device (the kernel's name), format (a name from
     the fixed map, None for a type outside it), mounts (the automount mounts
-    that type: this one failed), label, since}. A file of another boot (a
+    that type: this one failed), driver (what its mount was tried with, None
+    where none was), label, since}. A file of another boot (a
     power cut left it) says nothing about now and is not listed; neither is
     anything that is not the automount's small regular file."""
     try:
@@ -228,7 +232,9 @@ def unread() -> List[Dict[str, Any]]:
             fs = lines[1].strip() if len(lines) > 1 else ""
             fmt, mounts = _FORMATS.get(fs if _FS_TYPE.match(fs) else "", (None, False))
             label = _one_line(lines[2].encode("utf-8")) if len(lines) > 2 else None
+            driver = lines[3].strip() if len(lines) > 3 else ""
             found.append({"device": name, "format": fmt, "mounts": mounts, "label": label,
+                          "driver": driver if driver in _DRIVERS else None,
                           "since": datetime.fromtimestamp(read[1], timezone.utc).isoformat()})
     return found
 
@@ -389,7 +395,8 @@ def folders(under: Optional[str] = None) -> Dict[str, Any]:
                                "size_bytes": None, "empty": _gone(root, mounts)})
         # A volume nothing mounted is a place that cannot be opened: no path
         places.extend({"path": None, "name": volume["device"], "kind": "unread", "label": volume["label"],
-                       "size_bytes": None, "format": volume["format"], "mounts": volume["mounts"]}
+                       "size_bytes": None, "format": volume["format"], "mounts": volume["mounts"],
+                       "driver": volume["driver"]}
                       for volume in unread())
         return {"under": None, "places": places, "chosen": settings.music_library_path or None}
     real = within(under)

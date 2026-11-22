@@ -18274,12 +18274,13 @@
   }
 
   // A volume plugged into the machine that nothing mounted (backend
-  // library_root.unread: `d` is {label, format, mounts}): the toast's words
-  // and the folder sheet's row, from one place. `mounts` — the format is one
-  // the machine mounts, so this mount failed; otherwise the format is one
-  // Sautium does not read. A failed NTFS mount cannot say here which driver
-  // refused it, so its line holds with NTFS support there or missing. The
-  // label is a stranger's text: escaped, as every string returned is HTML.
+  // library_root.unread: `d` is {label, format, mounts, driver}): the toast's
+  // words and the folder sheet's row, from one place. `mounts` — the format
+  // is one the machine mounts, so this mount failed; otherwise the format is
+  // one Sautium does not read. NTFS tried with the kernel's driver (`ntfs3`)
+  // is a machine without ntfs-3g, which opens what Windows formats: the
+  // setup shows how to add it. The label is a stranger's text: escaped, as
+  // every string returned is HTML.
   // Draft words for the owner's words review.
   function unreadDiskCopy(d) {
     const title = 'A disk could not be read';
@@ -18291,8 +18292,8 @@
                text: `${name} is ${format ? `formatted as ${format}` : 'in a format this machine does not know'}. ${reads}`,
                row: format || 'an unknown format', sub: reads };
     }
-    if (d.format === 'NTFS') {
-      const how = 'On the machine, run ./sautium setup: if NTFS support is missing, it shows how to add it. '
+    if (d.format === 'NTFS' && d.driver === 'ntfs3') {
+      const how = 'On the machine, run ./sautium setup: it shows how to add NTFS support. '
         + 'Then plug the disk in again.';
       return { title, text: `${name} is an NTFS disk this machine could not open. ${how}`,
                row: 'NTFS, could not be read', sub: how };

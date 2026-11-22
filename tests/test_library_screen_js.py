@@ -194,18 +194,21 @@ def _disks(volumes=(), places=()):
 def test_an_unread_disk_is_said_by_what_it_is_and_its_label_is_a_strangers_text():
     copies = _disks(volumes=[
         {"label": "Elements <img src=x onerror=alert(1)>", "format": "exFAT", "mounts": True},
-        {"label": "Win", "format": "NTFS", "mounts": True},
+        {"label": "Win", "format": "NTFS", "mounts": True, "driver": "ntfs3"},
         {"label": "Mac", "format": "APFS", "mounts": False},
         {"label": None, "format": None, "mounts": False},
+        {"label": "Win", "format": "NTFS", "mounts": True, "driver": "ntfs-3g"},
     ])["copies"]
     assert {c["title"] for c in copies} == {"A disk could not be read"}
     assert copies[0]["text"] == ("Elements &lt;img src=x onerror=alert(1)&gt; is formatted as exFAT, which this "
                                  "machine could not open. It is not in your library.")
     assert copies[0]["row"] == "exFAT, could not be read"
-    # NTFS: the node cannot tell which driver refused it — the line holds either way
+    # NTFS the kernel's driver refused: the machine has no ntfs-3g, and the setup shows how to add it
     assert copies[1]["text"] == ("Win is an NTFS disk this machine could not open. On the machine, run "
-                                 "./sautium setup: if NTFS support is missing, it shows how to add it. "
-                                 "Then plug the disk in again.")
+                                 "./sautium setup: it shows how to add NTFS support. Then plug the disk in again.")
+    # ...and one ntfs-3g itself refused is said as any failed mount
+    assert copies[4]["text"] == ("Win is formatted as NTFS, which this machine could not open. "
+                                 "It is not in your library.")
     assert copies[2]["text"] == f"Mac is formatted as APFS. {READS}"
     assert (copies[2]["row"], copies[2]["sub"]) == ("APFS", READS)
     assert copies[3]["text"] == f"This disk is in a format this machine does not know. {READS}"

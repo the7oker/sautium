@@ -410,20 +410,22 @@ def unread(tree, tmp_path, monkeypatch):
     return folder
 
 
-def _volume(folder: Path, name: str, fs: str, label: str = "", boot: str = BOOT) -> Path:
+def _volume(folder: Path, name: str, fs: str, label: str = "", boot: str = BOOT, driver: str = "-") -> Path:
     """As the automount writes it: beside, then renamed in."""
     tmp = folder / f".{name}.tmp"
-    tmp.write_text(f"{boot}\n{fs}\n{label}\n")
+    tmp.write_text(f"{boot}\n{fs}\n{label}\n{driver}\n")
     tmp.rename(folder / name)
     return folder / name
 
 
 def test_a_volume_nothing_mounted_is_read_from_the_automounts_file(tree, unread):
-    _volume(unread, "sda1", "ntfs", "Elements <b>")
+    _volume(unread, "sda1", "ntfs", "Elements <b>", driver="ntfs3")
     _volume(unread, "sdb1", "apfs", "Mac disk")
-    _volume(unread, "mmcblk0p3", "ext3")
+    _volume(unread, "mmcblk0p3", "ext3", driver="rm -rf /")
     found = {v["device"]: v for v in library_root.unread()}
     assert list(found) == ["mmcblk0p3", "sda1", "sdb1"]
+    # the driver its mount was tried with, from the automount's own five; anything else is none
+    assert [found[d]["driver"] for d in ("sda1", "sdb1", "mmcblk0p3")] == ["ntfs3", None, None]
     # a type the automount mounts: this mount failed; one it never mounts
     assert (found["sda1"]["format"], found["sda1"]["mounts"], found["sda1"]["label"]) == (
         "NTFS", True, "Elements <b>")
@@ -473,7 +475,7 @@ def test_an_unread_volume_is_a_place_that_cannot_be_opened(tree, unread):
     places = library_root.folders()["places"]
     assert [p["kind"] for p in places] == ["folder", "disk", "unread"]
     assert places[-1] == {"path": None, "name": "sda1", "kind": "unread", "label": "Elements",
-                          "size_bytes": None, "format": "NTFS", "mounts": True}
+                          "size_bytes": None, "format": "NTFS", "mounts": True, "driver": None}
 
 
 def _readable(fd: int, seconds: float) -> bool:
@@ -542,10 +544,10 @@ def test_an_unread_volume_is_a_notice_that_leaves_with_its_file(tree, unread, db
     def notices():
         return {n["key"]: n for n in settings_router._notice_items() if n["key"].startswith("disk.unread.")}
     assert notices() == {}
-    path = _volume(unread, "sda1", "ntfs", "Elements <b>")
+    path = _volume(unread, "sda1", "ntfs", "Elements <b>", driver="ntfs-3g")
     (item,) = notices().values()
     assert (item["key"], item["kind"], item["until"]) == ("disk.unread.sda1", "warning", None)
-    assert item["data"] == {"label": "Elements <b>", "format": "NTFS", "mounts": True}
+    assert item["data"] == {"label": "Elements <b>", "format": "NTFS", "mounts": True, "driver": "ntfs-3g"}
     onset = item["since"]
     # plugged in again: another file, another onset — news for the toast
     path.unlink()
