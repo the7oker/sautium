@@ -86,10 +86,21 @@ class Filter:
     reaches: bool = True               # its ratio class converts the source to the output rate
     group: Optional[str] = None        # the atlas's identical group
     at: Optional[Mapping[str, float]] = None   # axis → value; None: not measured in the context
+    # Asked by a benchmark and answered with no speed: 'refused' | 'unstarted'
+    # | 'hung' (hqp_load.headroom's `refused`); None: not asked, or measured
+    asked: Optional[str] = None
+    # Never asked, a neighbour on its ladder answering for it: that rate (Hz)
+    implied_from: Optional[int] = None
 
     @property
     def runs(self) -> bool:
         return self.klass in ("ok", "tight")
+
+
+# The reasons a filter is left out, in the order a tie between them goes
+# (dominant)
+REASONS = ("not_measured_here", "too_slow", "rate", "not_in_atlas", "hung", "refused",
+           "unstarted", "identical", "other_rate", "late", "listed")
 
 
 @dataclass
@@ -100,6 +111,14 @@ class Screened:
 
     def leave(self, reason: str, name: str) -> None:
         self.left_out.setdefault(reason, []).append(name)
+
+    def dominant(self) -> Optional[str]:
+        """The reason that left out the most filters, ties in REASONS's
+        order; None when none was left out."""
+        if not self.left_out:
+            return None
+        order = {r: i for i, r in enumerate(REASONS)}
+        return min(self.left_out, key=lambda r: (-len(self.left_out[r]), order.get(r, len(order))))
 
 
 def _num(x: Any) -> Optional[float]:
@@ -173,7 +192,7 @@ def seconds(filters: Sequence[Filter], champion: Filter, *, atlas: bool) -> Scre
 
 def _refusal(f: Filter, atlas: bool) -> Optional[str]:
     if f.klass is None:
-        return "not_measured_here"
+        return f.asked or "not_measured_here"
     if not f.runs:
         return "too_slow"
     if not f.reaches:

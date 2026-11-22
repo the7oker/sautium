@@ -167,6 +167,8 @@ class Sample:
     settled: Optional[bool] = None
     init_s: Optional[float] = None
     settle_s: Optional[float] = None
+    speed_lo: Optional[float] = None         # benchmark only: the lowest and highest reading
+    speed_hi: Optional[float] = None
 
     @classmethod
     def of(cls, status, state: dict, *, endpoint_id: int) -> "Sample":
@@ -190,13 +192,15 @@ _INSERT_SQL = """
     INSERT INTO hqp_dsp_samples
         (hqp_endpoint_id, hqp_engine, cuda, source, run_id, mode, rate_out, filter, shaper,
          matrix_profile, convolution, adaptive, src_rate, src_bits, src_channels, src_sdm,
-         process_speed, input_fill, output_fill, dropout, settled, init_s, settle_s)
+         process_speed, input_fill, output_fill, dropout, settled, init_s, settle_s,
+         speed_lo, speed_hi)
     SELECT e.id, e.hqp_engine, e.cuda, %(source)s::hqp_sample_source, %(run_id)s,
            %(mode)s, %(rate_out)s, %(filter)s, %(shaper)s,
            %(matrix_profile)s, %(convolution)s, %(adaptive)s,
            %(src_rate)s, %(src_bits)s, %(src_channels)s, %(src_sdm)s,
            %(process_speed)s, %(input_fill)s, %(output_fill)s,
-           %(dropout)s, %(settled)s, %(init_s)s, %(settle_s)s
+           %(dropout)s, %(settled)s, %(init_s)s, %(settle_s)s,
+           %(speed_lo)s, %(speed_hi)s
       FROM hqp_endpoints e
      WHERE e.id = %(endpoint_id)s AND e.hqp_engine IS NOT NULL
     RETURNING id, hqp_engine, cuda::text
@@ -214,7 +218,8 @@ _RUN_KEY = """r.hqp_endpoint_id = %(endpoint_id)s AND r.hqp_engine = %(engine)s
 
 _ROLLUP_SQL = f"""
     WITH s AS (
-        SELECT process_speed, source, sampled_at, dropout, settled, init_s, settle_s
+        SELECT process_speed, source, sampled_at, dropout, settled, init_s, settle_s,
+               speed_lo, speed_hi
           FROM hqp_dsp_samples
          WHERE {_KEY}
            AND rate_out = %(rate_out)s AND filter = %(filter)s AND shaper = %(shaper)s
@@ -225,7 +230,7 @@ _ROLLUP_SQL = f"""
     INSERT INTO hqp_dsp_speed
         (hqp_endpoint_id, hqp_engine, cuda, mode, rate_out, filter, shaper, matrix_profile,
          convolution, src_rate, src_channels, n, speed_p10, speed_median, last_seen,
-         bench_at, bench_settled, bench_init_s, bench_settle_s, dropout)
+         bench_at, bench_settled, bench_init_s, bench_settle_s, bench_lo, bench_hi, dropout)
     SELECT %(endpoint_id)s, %(engine)s, %(cuda)s::hqp_cuda, %(mode)s, %(rate_out)s,
            %(filter)s, %(shaper)s, %(matrix_profile)s, %(convolution)s,
            %(src_rate)s, %(src_channels)s,
@@ -235,6 +240,7 @@ _ROLLUP_SQL = f"""
            max(sampled_at),
            (SELECT sampled_at FROM bench), (SELECT settled FROM bench),
            (SELECT init_s FROM bench), (SELECT settle_s FROM bench),
+           (SELECT speed_lo FROM bench), (SELECT speed_hi FROM bench),
            COALESCE((SELECT dropout FROM bench), FALSE)
       FROM s
      WHERE sampled_at >= COALESCE((SELECT sampled_at FROM bench), '-infinity')
@@ -242,7 +248,8 @@ _ROLLUP_SQL = f"""
         n = EXCLUDED.n, speed_p10 = EXCLUDED.speed_p10, speed_median = EXCLUDED.speed_median,
         last_seen = EXCLUDED.last_seen, bench_at = EXCLUDED.bench_at,
         bench_settled = EXCLUDED.bench_settled, bench_init_s = EXCLUDED.bench_init_s,
-        bench_settle_s = EXCLUDED.bench_settle_s, dropout = EXCLUDED.dropout
+        bench_settle_s = EXCLUDED.bench_settle_s, bench_lo = EXCLUDED.bench_lo,
+        bench_hi = EXCLUDED.bench_hi, dropout = EXCLUDED.dropout
 """
 
 
@@ -316,15 +323,19 @@ def keeps_up(ctx: Dict[str, Any]) -> Dict[tuple, bool]:
     integrator, "FIR2/XFi", whatever filter was asked) and by what HQPlayer
     PLAYED (the keys covered() counts as measured, listens included — what
     played outweighs what was asked); a point that never started
-    (unstarted) does not keep up. The benchmark's ladders climb by it."""
+    (unstarted), or stopped HQPlayer (hung), does not keep up, and a rung a
+    neighbour answered for (implied) as that neighbour said. The benchmark's
+    ladders climb by it."""
     rows = db_query(f"""
         SELECT 0 AS prio, p.at, p.rate_hz AS rate, p.filter, p.shaper, p.src_rate,
-               p.src_channels, (p.result <> 'unstarted' AND s.process_speed >= %(ok)s
-                                AND NOT s.dropout) AS ok
+               p.src_channels,
+               CASE WHEN p.result = 'implied' THEN p.implied_ok
+                    ELSE p.result NOT IN ('unstarted', 'hung') AND s.process_speed >= %(ok)s
+                         AND NOT s.dropout END AS ok
           FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
           LEFT JOIN hqp_dsp_samples s ON s.id = p.sample_id
          WHERE {_RUN_KEY}
-           AND (s.id IS NOT NULL OR p.result = 'unstarted')
+           AND (s.id IS NOT NULL OR p.result IN ('unstarted', 'hung', 'implied'))
            AND p.at >= now() - make_interval(days => %(days)s)
         UNION ALL
         SELECT 1, last_seen, rate_out, filter, shaper, src_rate, src_channels,
@@ -337,6 +348,23 @@ def keeps_up(ctx: Dict[str, Any]) -> Dict[tuple, bool]:
     """, {**ctx, **thresholds(ctx), "days": RETENTION_DAYS, "cover": PASSIVE_COVER})
     return {(r["rate"], r["filter"], r["shaper"], r["src_rate"], r["src_channels"]): r["ok"]
             for r in rows}
+
+
+def auto_rates(ctx: Dict[str, Any]) -> Dict[tuple, int]:
+    """What an automatic output rate played in this context, by the key a
+    benchmark point asked there less its rate — (filter, shaper, src_rate,
+    src_channels) → the rate its sample played, the newest within the
+    retention: a run at Auto plans the rest at those rates."""
+    rows = db_query(f"""
+        SELECT DISTINCT ON (p.filter, p.shaper, p.src_rate, p.src_channels)
+               p.filter, p.shaper, p.src_rate, p.src_channels, s.rate_out
+          FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
+          JOIN hqp_dsp_samples s ON s.id = p.sample_id
+         WHERE {_RUN_KEY} AND p.rate_hz = 0
+           AND p.at >= now() - make_interval(days => %(days)s)
+         ORDER BY p.filter, p.shaper, p.src_rate, p.src_channels, p.at DESC, p.id DESC
+    """, {**ctx, "days": RETENTION_DAYS})
+    return {(r["filter"], r["shaper"], r["src_rate"], r["src_channels"]): r["rate_out"] for r in rows}
 
 
 def thresholds(ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -376,16 +404,25 @@ def thresholds(ctx: Dict[str, Any]) -> Dict[str, Any]:
 _CLASS = "CASE WHEN speed_p10 < %(no)s THEN 'no' WHEN speed_p10 < %(ok)s THEN 'tight' ELSE 'ok' END"
 
 
+# An engine's build as PostgreSQL compares it — "6.3.3" → {6,3,3} — NULL for
+# one that starts with no number (build() in SQL)
+_BUILD = r"string_to_array(substring({col} from '^[0-9]+(?:\.[0-9]+)*'), '.')::int[]"
+
+
 def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
              src_rate: int, src_channels: int, asked_rate: Optional[int] = None) -> Dict[str, Any]:
     """How each entry of the three pickers runs here, next to the current
     setting: every filter at the current shaper and rate, every shaper at
     the current filter and rate, every rate at the current filter and shaper
     — for the source the owner hears. A key never measured is absent:
-    unmarked, never guessed."""
+    unmarked, never guessed — unless a benchmark's ladder answered for it
+    (`implied`: its class, no speed, the rate that answers for it). Beside
+    them, for a key this engine has not measured, the newest earlier
+    engine's mark in the same context (`earlier`): a hint, never a class."""
     th = thresholds(ctx)
     rows = db_query(f"""
-        SELECT filter, shaper, rate_out, n, speed_p10, bench_settled, {_CLASS} AS class
+        SELECT filter, shaper, rate_out, n, speed_p10, bench_settled, bench_lo, bench_hi,
+               {_CLASS} AS class
           FROM hqp_dsp_speed
          WHERE {_KEY}
            AND src_rate = %(src_rate)s AND src_channels = %(src_channels)s
@@ -397,60 +434,111 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
                            "source": {"rate": src_rate, "channels": src_channels}}
     for r in rows:
         entry = {"class": r["class"], "speed": round(r["speed_p10"], 2), "n": r["n"],
-                 "settled": r["bench_settled"] is not False}
+                 "settled": r["bench_settled"] is not False,
+                 "lo": None if r["bench_lo"] is None else round(r["bench_lo"], 2),
+                 "hi": None if r["bench_hi"] is None else round(r["bench_hi"], 2)}
         if r["rate_out"] == rate_out and r["shaper"] == shaper:
             out["filters"][r["filter"]] = entry
         if r["rate_out"] == rate_out and r["filter"] == filter:
             out["shapers"][r["shaper"]] = entry
         if r["filter"] == filter and r["shaper"] == shaper:
             out["rates"][str(r["rate_out"])] = entry
-    # What a benchmark ASKED at a picker entry's key and HQPlayer refused or
-    # never got going here — its newest answer there within the retention, a
-    # sample of the key aside: no speed, so no mark, yet measured all the
-    # same ("refused" | "unstarted"); a row says so instead of offering a run
-    # that ends alike. A point is keyed by the rate it asked — the owner's
-    # rate slot, 0 at an automatic one (`asked_rate`) — a mark by the rate
-    # that plays.
+    # What a benchmark ASKED at a picker entry's key with no sample there:
+    # HQPlayer refused it, never got it going, or stopped answering in it
+    # ("refused" | "unstarted" | "hung") — no speed, so no mark, yet
+    # measured all the same: a row says so instead of offering a run that
+    # ends alike — or a neighbour on its ladder answered for it ("implied":
+    # a mark of its class, no speed). Its newest answer there within the
+    # retention, a sample of the key aside. A point is keyed by the rate it
+    # asked — the owner's rate slot, 0 at an automatic one (`asked_rate`) — a
+    # mark by the rate that plays.
     asked = db_query(f"""
-        SELECT filter, shaper, result FROM (
-            SELECT DISTINCT ON (p.filter, p.shaper) p.filter, p.shaper, p.result::text AS result
+        SELECT * FROM (
+            SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper)
+                   p.rate_hz, p.filter, p.shaper, p.result::text AS result, p.implied_from,
+                   p.implied_ok, p.at, p.id
               FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
              WHERE {_RUN_KEY} AND p.result <> 'failed'
-               AND p.rate_hz IN (%(rate_out)s, %(asked)s) AND p.src_rate = %(src_rate)s
-               AND p.src_channels = %(src_channels)s
-               AND (p.shaper = %(shaper)s OR p.filter = %(filter)s)
+               AND p.src_rate = %(src_rate)s AND p.src_channels = %(src_channels)s
+               AND ((p.rate_hz IN (%(rate_out)s, %(asked)s)
+                     AND (p.shaper = %(shaper)s OR p.filter = %(filter)s))
+                    OR (p.filter = %(filter)s AND p.shaper = %(shaper)s))
                AND p.at >= now() - make_interval(days => %(days)s)
-             ORDER BY p.filter, p.shaper, p.at DESC, p.id DESC) newest
-         WHERE result IN ('refused', 'unstarted')
+             ORDER BY p.rate_hz, p.filter, p.shaper, p.at DESC, p.id DESC) newest
+         WHERE result IN ('refused', 'unstarted', 'hung', 'implied')
+         ORDER BY at DESC, id DESC
     """, {**ctx, "rate_out": rate_out, "filter": filter, "shaper": shaper,
           "src_rate": src_rate, "src_channels": src_channels, "days": RETENTION_DAYS,
           "asked": rate_out if asked_rate is None else asked_rate})
     out["refused"] = {"filters": {}, "shapers": {}}
     for r in asked:
+        here = r["rate_hz"] in (rate_out, asked_rate if asked_rate is not None else rate_out)
+        if r["result"] == "implied":
+            mark = {"class": "ok" if r["implied_ok"] else "no", "speed": None, "n": 0,
+                    "settled": True, "lo": None, "hi": None, "implied_from": r["implied_from"]}
+            if here and r["shaper"] == shaper:
+                out["filters"].setdefault(r["filter"], mark)
+            if here and r["filter"] == filter:
+                out["shapers"].setdefault(r["shaper"], mark)
+            if r["filter"] == filter and r["shaper"] == shaper:
+                out["rates"].setdefault(str(r["rate_hz"]), mark)
+            continue
+        if not here:
+            continue
         if r["shaper"] == shaper:
-            out["refused"]["filters"][r["filter"]] = r["result"]
+            out["refused"]["filters"].setdefault(r["filter"], r["result"])
         if r["filter"] == filter:
-            out["refused"]["shapers"][r["shaper"]] = r["result"]
+            out["refused"]["shapers"].setdefault(r["shaper"], r["result"])
+    for knob in ("filters", "shapers"):
+        for name in list(out["refused"][knob]):
+            if name in out[knob]:
+                del out["refused"][knob][name]      # measured: its mark says it
+    earlier = db_query(f"""
+        SELECT DISTINCT ON (filter, shaper) filter, shaper, hqp_engine AS engine,
+               round(speed_p10::numeric, 2)::float AS speed
+          FROM hqp_dsp_speed
+         WHERE hqp_endpoint_id = %(endpoint_id)s
+           AND {_BUILD.format(col="hqp_engine")} < {_BUILD.format(col="%(engine)s")}
+           AND cuda IS NOT DISTINCT FROM %(cuda)s::hqp_cuda AND mode = %(mode)s
+           AND matrix_profile IS NOT DISTINCT FROM %(matrix_profile)s
+           AND convolution = %(convolution)s
+           AND src_rate = %(src_rate)s AND src_channels = %(src_channels)s
+           AND rate_out = %(rate_out)s AND (shaper = %(shaper)s OR filter = %(filter)s)
+         ORDER BY filter, shaper, {_BUILD.format(col="hqp_engine")} DESC
+    """, {**ctx, "rate_out": rate_out, "filter": filter, "shaper": shaper,
+          "src_rate": src_rate, "src_channels": src_channels})
+    out["earlier"] = {"filters": {}, "shapers": {}}
+    for r in earlier:
+        hint = {"engine": r["engine"], "speed": r["speed"]}
+        if r["shaper"] == shaper and r["filter"] not in out["filters"]:
+            out["earlier"]["filters"][r["filter"]] = hint
+        if r["filter"] == filter and r["shaper"] not in out["shapers"]:
+            out["earlier"]["shapers"][r["shaper"]] = hint
     return out
 
 
 # Every key measured in a context, classed at its thresholds, and every
-# combination a run asked for that HQPlayer refused or never got going here
-# (class 'refused' / 'unstarted', no speed; the newest answer) — unordered.
+# combination a run asked for that HQPlayer refused, never got going or
+# stopped answering in (class 'refused' / 'unstarted' / 'hung', no speed),
+# or that a neighbour on its ladder answered for (its class, no speed, the
+# rate that answered: `implied_from`) — the newest answer — unordered.
 _RESULTS_SQL = f"""
         SELECT filter, shaper, rate_out, src_rate, src_channels, n,
                round(speed_p10::numeric, 2)::float AS speed, {_CLASS} AS class,
-               bench_settled, round(bench_init_s::numeric, 1)::float AS init_s, dropout
+               bench_settled, round(bench_init_s::numeric, 1)::float AS init_s, dropout,
+               round(bench_lo::numeric, 2)::float AS lo, round(bench_hi::numeric, 2)::float AS hi,
+               NULL::integer AS implied_from
           FROM hqp_dsp_speed
          WHERE {_KEY}
         UNION ALL
-        SELECT filter, shaper, rate_hz, src_rate, src_channels, 0, NULL::float, result,
-               NULL::boolean, NULL::float, FALSE
+        SELECT filter, shaper, rate_hz, src_rate, src_channels, 0, NULL::float,
+               CASE WHEN result <> 'implied' THEN result WHEN implied_ok THEN 'ok' ELSE 'no' END,
+               NULL::boolean, NULL::float, FALSE, NULL::float, NULL::float, implied_from
           FROM (SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels)
                        p.filter, p.shaper, p.rate_hz, p.src_rate, p.src_channels,
-                       p.result::text AS result
+                       p.result::text AS result, p.implied_from, p.implied_ok
                   FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
-                 WHERE p.result IN ('refused', 'unstarted') AND {_RUN_KEY}
+                 WHERE p.result IN ('refused', 'unstarted', 'hung', 'implied') AND {_RUN_KEY}
                    AND NOT EXISTS (
                        SELECT 1 FROM hqp_dsp_speed s
                         WHERE s.hqp_endpoint_id = r.hqp_endpoint_id AND s.hqp_engine = r.hqp_engine
@@ -469,9 +557,10 @@ FIT_ROWS = 24
 
 def results(ctx: Dict[str, Any]) -> list:
     """Every key measured in this context, classed, and every combination a
-    run asked for that HQPlayer refused or never got going here
-    (class 'refused' / 'unstarted', no speed; the newest answer) — the
-    benchmark's results sheet lays them out per axis."""
+    run asked for that HQPlayer refused, never got going or stopped
+    answering in here (class 'refused' / 'unstarted' / 'hung', no speed), or
+    that a neighbour answered for (its class, no speed; the newest answer) —
+    the benchmark's results sheet lays them out per axis."""
     return db_query(f"{_RESULTS_SQL} ORDER BY src_rate, rate_out, shaper, filter", {**ctx, **thresholds(ctx)})
 
 
@@ -498,8 +587,9 @@ def fit(ctx: Dict[str, Any], *, filter: Optional[str] = None, shaper: Optional[s
 
 def names(ctx: Dict[str, Any]) -> Dict[str, list]:
     """The filters, the shapers and the output rates this context holds a key
-    of, or a combination a run asked for that HQPlayer refused or never got
-    going — every name and rate fit() finds rows of; the rates in order."""
+    of, or a combination a run asked for that HQPlayer refused, never got
+    going or stopped answering in, or that a neighbour answered for — every
+    name and rate fit() finds rows of; the rates in order."""
     row = db_query_one(f"""
         SELECT coalesce(array_agg(DISTINCT filter), '{{}}') AS filters,
                coalesce(array_agg(DISTINCT shaper), '{{}}') AS shapers,
@@ -508,7 +598,7 @@ def names(ctx: Dict[str, Any]) -> Dict[str, list]:
                 UNION ALL
                 SELECT p.filter, p.shaper, p.rate_hz
                   FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
-                 WHERE p.result IN ('refused', 'unstarted') AND {_RUN_KEY}) k
+                 WHERE p.result IN ('refused', 'unstarted', 'hung', 'implied') AND {_RUN_KEY}) k
     """, ctx)
     return {"filters": row["filters"], "shapers": row["shapers"], "rates": row["rates"]}
 

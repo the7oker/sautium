@@ -4609,6 +4609,16 @@ a.am-kind { text-decoration: none; }
 }
 .hqp-diag-row.is-failed .hqp-diag-verdict { color: var(--color-negative); }
 .hqp-row-hint.hqp-diag-empty { margin-top: calc(4 * var(--px)); }
+/* Every play the Diagnostics block watched, folded under one quiet link
+   below the ones that did not play (B-125) */
+.hqp-diag-all > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: calc(8 * var(--px)) calc(16 * var(--px));
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+}
+.hqp-diag-all > summary::-webkit-details-marker { display: none; }
 
 /* ---- How a setting runs on this HQPlayer (hqpHeadroomMark): the class
    in the dot, the measured speed in mono — technical blue while it keeps
@@ -4823,8 +4833,9 @@ a.am-kind { text-decoration: none; }
   padding-right: calc(4 * var(--px));
 }
 /* A row never measured on this computer (hqp_load's marks): a muted line
-   under its facts, outside the pick button, with "Measure" at its end —
-   the benchmark for that entry alone. */
+   under its facts, outside the pick button, with "Test speed" at its end —
+   the benchmark for that entry alone — and, beside the words, an earlier
+   engine's mark of it as a hint, dimmer, no class colour (HQP-BENCH-63 C1). */
 .hqp-sheet-row.is-unmeasured .hqp-sheet-row-name { padding-bottom: calc(4 * var(--px)); }
 .hqp-sheet-unmeasured {
   grid-column: 1 / -1;
@@ -4840,6 +4851,7 @@ a.am-kind { text-decoration: none; }
   color: var(--color-text-muted);
 }
 .hqp-sheet-unmeasured .hqp-chip-btn { flex: none; }
+.hqp-sheet-earlier { margin-right: auto; color: var(--color-text-dim); white-space: nowrap; }
 .hqp-sheet-info {
   width: calc(44 * var(--px));
   height: calc(44 * var(--px));
