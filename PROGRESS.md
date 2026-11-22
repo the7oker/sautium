@@ -3541,12 +3541,13 @@ took the block with it.
 
 `POST /api/player/queue-tracks` takes `position` (`next` | `end`) like the
 phantom, entity and session endpoints already did, and `manager.append`
-places the block behind the playing slot in one step. A block that rolls in
-track by track (a CUE image, an m4a set) extends its own run:
-`_owned_filler` passes each track the one before it as its anchor, the way
-`_phantom_insert_next` does for streams — before that only the first track
-went Next and the rest to the end, on every endpoint that offered Next for
-owned music. The Queue sheet's drag is the one caller `/reorder` has left.
+places the block behind the playing slot in one step. A block that rolled in
+track by track (a CUE image, an m4a set) extended its own run, each track
+anchored on the one before it — before that only the first track went Next
+and the rest to the end, on every endpoint that offered Next for owned
+music. Since 2026-11-22 nothing rolls in ("A streamed track takes its place at the tap", below): every block,
+owned or streamed, is committed whole at the tap. The Queue sheet's drag is
+the one caller `/reorder` has left.
 
 ### A queued file that leaves the library (2026-09-30)
 
@@ -4487,6 +4488,49 @@ parked for a proof nothing mined (B-110).
   15 s for the same answer; and an issuer says an absent certificate is
   *required*, not *invalid* (the Pi's log pointed at a bad certificate that
   was never sent).
+
+### A streamed track takes its place at the tap (2026-11-22)
+
+"Add to end" of a streamed album, then of an owned one: the owned album
+landed inside the streamed one (B-124). Every path that queued a stream put
+its slot in only once the fetch landed (`_phantom_filler`, ~8 s a track),
+so the queue's order was the fetches' timing whenever anything was tapped
+meanwhile — and on HQPlayer an m4a or a CUE album rolled in the same way,
+one transcode or cut at a time. Now a streamed track is the track itself
+(`source` kind `track`), committed by the tap in one mutation with every
+other slot, before any provider is asked: a tap that resolved first would
+let a later tap commit first, the same bug with the resolve's timing.
+QUEUE-STREAM-DESIGN (private) holds the reading and the answers.
+
+- **The fetch lane follows the queue.** The media proxy keeps no list of its
+  own: its one serial worker asks the queue side (`playback/substitute.Lane`)
+  what it wants next, in the queue's order from the playing slot through
+  `LEAD` = 4 slots after it — one number for what is fetched ahead and what
+  the RAM budget never evicts. A slot moved nearer is fetched sooner; a
+  removed one cancels its own fetch at the source (provider contract 3:
+  `fetching()` gives a provider its cancel and a progress to report — yt-dlp
+  and ffmpeg run as children killed on it; a provider that reads neither is
+  waited out and its bytes discarded, never run beside another fetch).
+- **HQPlayer holds the queue up to its horizon** — the first slot after the
+  one it was handed the queue from whose stream (or an owned file's
+  preparation) is still on its way. It probes an http entry when it is added,
+  so a stream it has not got cannot sit in its playlist; a gap (handed later
+  by a tail repair) would be skipped by its own advance when late — the
+  option QUEUE-1 turned down. A landing at the horizon is a PlaylistAdd at
+  the playlist's end, gapless while it plays; an HQPlayer that plays out the
+  last slot it holds waits on the horizon in the node, said as loading.
+- **What a streamed row shows is a message of its own** (`slots` on
+  `/api/events`): waiting, buffering with its progress, ready, failed with
+  why — never a queue version, which repaints the queue sheet. "Found in the
+  catalog" is waiting, never buffering; a failure no longer reads as success.
+- **A refusal with a reason is remembered** beside the resolve's answers
+  (`_refusals`, a day, in memory): a provider that said "not available in
+  this region" for a track is left out of that track's next chain, and an
+  album none of whose tracks streams here says so before Play. A plain
+  failure (a cut connection) says nothing of the track and is not kept.
+- **The demo ledger reads the way in** (`QueueItem.stream_token`), never how
+  a slot was queued: a demo-channel listen through a slot that streams for a
+  copy this output cannot reach was never spent before (since 2026-11-01).
 
 ## Known Gotchas
 
