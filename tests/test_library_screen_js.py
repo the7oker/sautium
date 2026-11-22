@@ -26,15 +26,32 @@ def _function(head: str) -> str:
 
 DRIVER = r"""
 'use strict';
+%(drawn)s
 %(stale)s
-const drawn = shown => ({ querySelector: sel => shown.includes(sel) ? {} : null });
 const SCAN = '[data-cancel-scan]', ENRICH = '[data-cancel-enrich]', EMPTY = '.empty-library';
-const lib = (tracks, analysis = true) => ({ total_tracks: tracks, analysis_available: analysis });
+const lib = (tracks, analysis = true, more = {}) => Object.assign(
+  { total_tracks: tracks, analysis_available: analysis, last_scan_at: 'then' }, more);
+// The screen as drawn: which marks it shows, and the numbers it was drawn with
+const drawn = (shown, was) => ({ querySelector: sel =>
+  sel === '[data-library-drawn]' ? { getAttribute: () => _libraryDrawn(was) }
+  : shown.includes(sel) ? {} : null });
 const cases = %(cases)s;
-console.log(JSON.stringify(cases.map(c =>
-  _libraryStructureStale(drawn(c.shown.map(s => ({ SCAN, ENRICH, EMPTY })[s])), lib(c.tracks, c.analysis !== false),
-                         !!c.scan, !!c.enrich))));
+console.log(JSON.stringify(cases.map(c => {
+  const now = lib(c.tracks, c.analysis !== false, c.now || {});
+  const was = c.was === undefined ? now : lib(c.was, true, {});
+  return _libraryStructureStale(drawn(c.shown.map(s => ({ SCAN, ENRICH, EMPTY })[s]), was), now, !!c.scan, !!c.enrich);
+})));
 """
+
+
+def _run(cases):
+    script = DRIVER % {"drawn": _function("_libraryDrawn(lib)"),
+                       "stale": _function("_libraryStructureStale(root, lib, scanRunning, enrichRunning)"),
+                       "cases": json.dumps(cases)}
+    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
 
 CASES = [
     # (what the screen shows, the library's tracks, scan running, analysis running, stale?)
@@ -54,26 +71,35 @@ CASES = [
 
 
 def test_the_library_screen_is_drawn_again_only_where_its_structure_is_stale():
-    cases = [{"shown": shown, "tracks": tracks, "scan": scan, "enrich": enrich}
+    cases = [{"shown": shown, "tracks": tracks, "scan": scan, "enrich": enrich,
+              # the screen was drawn with whatever made it show what it shows
+              "was": 0 if "EMPTY" in shown else (tracks or 93)}
              for shown, tracks, scan, enrich, _ in CASES]
-    script = DRIVER % {"stale": _function("_libraryStructureStale(root, lib, scanRunning, enrichRunning)"),
-                       "cases": json.dumps(cases)}
-    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
-    assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout) == [stale for *_, stale in CASES]
+    assert _run(cases) == [stale for *_, stale in CASES]
 
 
 def test_an_analysis_no_row_can_show_never_asks_for_a_redraw():
     """A node with no analysis of its own, or an empty library, draws no
     analysis row: a redraw could not show the run, and would be asked for at
     every wake."""
-    cases = [{"shown": [], "tracks": 93, "enrich": True, "analysis": False},
-             {"shown": ["EMPTY"], "tracks": 0, "enrich": True}]
-    script = DRIVER % {"stale": _function("_libraryStructureStale(root, lib, scanRunning, enrichRunning)"),
-                       "cases": json.dumps(cases)}
-    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
-    assert out.returncode == 0, out.stderr
-    assert json.loads(out.stdout) == [False, False]
+    assert _run([{"shown": [], "tracks": 93, "enrich": True, "analysis": False},
+                 {"shown": ["EMPTY"], "tracks": 0, "enrich": True}]) == [False, False]
+
+
+def test_a_scan_too_short_to_be_seen_running_still_redraws_what_it_changed():
+    """The folder watcher's scan of a folder that left, then came back: over
+    before the wake's read, it changes only what the screen drew once — the
+    counts, the last scan's time, what is away (PI-NODE-2B item 8: the owner
+    watched the screen stand still through both)."""
+    assert _run([
+        {"shown": [], "tracks": 8187, "was": 10187},                              # 2 000 tracks' folder left
+        {"shown": [], "tracks": 93, "now": {"away": {"albums": 200, "copies": 200}}, "was": 93},
+        {"shown": [], "tracks": 93, "now": {"last_scan_at": "now"}, "was": 93},   # a scan that found nothing new
+        {"shown": [], "tracks": 93, "now": {"music_path": "/media/sautium/X/Music"}, "was": 93},
+        {"shown": [], "tracks": 93, "was": 93},                                    # nothing moved
+        # while a scan runs its line is updated in place: the numbers wait for its end
+        {"shown": ["SCAN"], "tracks": 2093, "scan": True, "was": 93},
+    ]) == [True, True, True, True, False, False]
 
 
 def test_an_empty_librarys_first_scan_is_shown_with_its_cancel_and_no_run_first_scan():

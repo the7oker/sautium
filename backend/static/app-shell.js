@@ -18158,9 +18158,10 @@
     const isPathSet     = !!(lib.music_path && (lib.music_path !== '/music' || lib.music_folder === 'setup'));
     const pathFull      = !isPathSet ? ''
       : lib.music_path === '/music' ? 'The folder named at setup' : fmtPathForDisplay(lib.music_path);
-    // Beside the folder button (Change / Choose) the row has room for fewer
-    // characters: the button is never the part that gives way.
-    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull, picksFolder ? 16 : 27)
+    // With the folder button (Change / Choose) the label and the path stand
+    // one above the other and the button beside both: a few characters fewer
+    // fit, and the button is never the part that gives way.
+    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull, picksFolder ? 24 : 27)
       : picksFolder ? 'Not chosen' : 'Not set';
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
@@ -18297,12 +18298,19 @@
         ${_settingsHeader('Library')}
 
         <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}">
+          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}" data-library-drawn="${_libraryDrawn(lib)}">
+            ${picksFolder ? `
+            <div class="row-stack">
+              <div class="path-stack">
+                <span class="row-stack-label">Music path</span>
+                <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
+              </div>
+              <button class="profile-btn secondary" type="button" data-action="choose-folder" data-guide="music_folder">${isPathSet ? 'Change' : 'Choose'}</button>
+            </div>` : `
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
               <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
-              ${picksFolder ? `<button class="profile-btn secondary" type="button" data-action="choose-folder" data-guide="music_folder">${isPathSet ? 'Change' : 'Choose'}</button>` : ''}
-            </div>
+            </div>`}
             <div class="row-stack-sub"></div>
           </div>
           ${isEmpty ? '' : `
@@ -18406,17 +18414,35 @@
      same in-place targets that the old poll used. */
   let _libraryStreamCtrl = null;
 
-  // Whether the Library screen as drawn (`root`) shows another structure
-  // than `lib` asks for. Pure: the DOM is read, nothing is written.
+  // What the Library screen draws once and does not update in place: the
+  // folder, the library's counts and size, the last scan's time, what is
+  // away. Kept on the drawn screen (data-library-drawn) so a wake can tell.
+  function _libraryDrawn(lib) {
+    const away = lib.away || {};
+    return encodeURIComponent(JSON.stringify([
+      lib.music_path || '', lib.total_tracks || 0, lib.total_artists || 0, lib.total_albums || 0,
+      lib.total_genres || 0, String(lib.total_size_bytes || 0), lib.last_scan_at || '',
+      away.albums || 0, away.copies || 0]));
+  }
+
+  // Whether the Library screen as drawn (`root`) no longer says what `lib`
+  // is: another structure (a scan or an analysis it does not show, or shows
+  // and is over; empty against not), or — with no worker running — other
+  // numbers than it drew: a scan too short to be seen running changes only
+  // those. While a worker runs its line is updated in place and the numbers
+  // wait for its end. Pure: the DOM is read, nothing is written.
   function _libraryStructureStale(root, lib, scanRunning, enrichRunning) {
     const shownScan   = !!root.querySelector('[data-cancel-scan]');
     const shownEnrich = !!root.querySelector('[data-cancel-enrich]');
     const shownEmpty  = !!root.querySelector('.empty-library');
     const isEmpty     = (lib.total_tracks || 0) === 0;
+    const drawn       = root.querySelector('[data-library-drawn]');
     return shownScan !== scanRunning
         || (shownEnrich && !enrichRunning)
         || (!shownEnrich && enrichRunning && !!lib.analysis_available && !isEmpty)
-        || shownEmpty !== isEmpty;
+        || shownEmpty !== isEmpty
+        || (!scanRunning && !enrichRunning && !!drawn
+            && drawn.getAttribute('data-library-drawn') !== _libraryDrawn(lib));
   }
 
   function _subscribeLibraryStream(root) {

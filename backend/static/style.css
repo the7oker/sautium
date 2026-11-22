@@ -7623,8 +7623,9 @@ html { -webkit-tap-highlight-color: transparent; }
 /* Music path — JS-side truncation in fmtPathTruncatedFromStart keeps
    the tail visible (it's the user-meaningful folder name). CSS styles
    the font and sets no max-width / text-overflow: the string the renderer
-   produces is the string the user sees — but for the row with the folder
-   button, below, where a string that still does not fit loses its head. */
+   produces is the string the user sees — but beside the folder button
+   (.path-stack, below), where a string that still does not fit loses its
+   head. */
 .path-value {
   font-family: var(--font-mono);
   font-size: calc(12.5 * var(--px));
@@ -7632,13 +7633,21 @@ html { -webkit-tap-highlight-color: transparent; }
   letter-spacing: 0.02em;
   white-space: nowrap;
 }
-/* Beside the folder button the path gives way, never the button or the
+/* With the folder button the label and the path stand one above the other
+   and the button beside both. The path gives way, never the button or the
    label: what still does not fit is cut at its head, where the JS put the
    ellipsis, so the folder's own name stays in sight. */
-[data-music-path-row] .row-stack-label { white-space: nowrap; }
-[data-music-path-row] .path-value {
-  flex: 0 1 auto;
+.path-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(4 * var(--px));
+  flex: 1 1 auto;
   min-width: 0;
+}
+.path-stack .row-stack-label { white-space: nowrap; }
+.path-stack .path-value {
+  max-width: 100%;
   overflow: hidden;
   display: flex;
   justify-content: flex-end;
