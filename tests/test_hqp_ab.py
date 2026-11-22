@@ -1112,16 +1112,17 @@ def test_the_answers_emptying_the_pool_keep_their_own_words(ab, monkeypatch):
                                    "was heard as none") and e.value.way is None
 
 
-def test_a_filter_that_stopped_hqplayer_is_left_out_with_its_reason(ab, monkeypatch):
-    """HQP-BENCH-63 §3.2: a combination that stopped HQPlayer here is left
-    out of both forms, said as that — never "not measured"; a rung its
+def test_a_filter_over_10_minutes_to_start_is_left_out_with_its_reason(ab, monkeypatch):
+    """HQP-BENCH-63 §3.2, §12.2: a combination that took over 10 minutes to
+    start here is left out of both forms, said as that — never "not
+    measured"; a rung its
     ladder answered for reads as its class (too slow: slower than at a
     rate)."""
     marks = {n: {"class": "ok", "speed": 2.0} for n in TimedHqp.FILTERS if n not in ("ringy", "mp")}
     marks["mp"] = {"class": "no", "speed": None, "implied_from": 352800}
-    _marks(monkeypatch, marks, refused={"ringy": "hung"})
+    _marks(monkeypatch, marks, refused={"ringy": "slow_start"})
     v = hqp_ab.open_sitting("chain")
     why = {r["name"]: r["why"] for r in v["chain"]["left_out"]}
-    assert why["ringy"] == "Stops HQPlayer here: it stopped responding while preparing it"
+    assert why["ringy"] == "Over 10 minutes to start here"
     assert why["mp"] == "Too slow here: slower than at 352.8 kHz"
     assert {r["name"] for r in v["seconds"]["left_out"]} >= {"ringy", "mp"}

@@ -736,15 +736,16 @@ def _bench_point(conn, run_id, speed, *, rate=11289600, shaper="ASDM7ECv3", drop
                                %s, %s)""", (run_id, rate, shaper, "dropout" if dropout else "measured", sid))
 
 
-def test_a_hung_combination_and_an_implied_rung_are_answers_of_their_own(db):
-    """HQP-BENCH-63 §3.2, §5.2: a point that stopped HQPlayer (`hung`) is
+def test_a_slow_start_and_an_implied_rung_are_answers_of_their_own(db):
+    """HQP-BENCH-63 §3.2, §5.2, §12.2: a point that did not start within the
+    build limit (`slow_start`) is
     covered and does not keep up, and reads as its own class. A rung a
     neighbour on its ladder answered for (`implied`) reads as a mark of that
     class with no speed — never as not measured — while the neighbour still
     says so; planning never reads it (covered and keeps_up are the
     measurements'), and a neighbour measured again takes it back."""
     run = _run_row(db)
-    _asked(db, run, "hung", rate=11289600, shaper="H")
+    _asked(db, run, "slow_start", rate=11289600, shaper="H")
     _bench_point(db, run, 0.8)                         # too slow at DSD256 …
     _implied(db, run, 22579200, False)               # … so at DSD512 too
     _bench_point(db, run, 2.0, shaper="K")           # keeps up at DSD256 …
@@ -759,14 +760,14 @@ def test_a_hung_combination_and_an_implied_rung_are_answers_of_their_own(db):
     assert hqp_load.implied(ctx) == {(22579200, "poly-sinc-gauss-xla", "ASDM7ECv3", 44100, 2): (11289600, False),
                                      (5644800, "poly-sinc-gauss-xla", "K", 44100, 2): (11289600, True)}
     rows = {(r["rate_out"], r["shaper"]): r for r in hqp_load.results(ctx)}
-    assert rows[(11289600, "H")]["class"] == "hung" and rows[(11289600, "H")]["speed"] is None
+    assert rows[(11289600, "H")]["class"] == "slow_start" and rows[(11289600, "H")]["speed"] is None
     assert (rows[(22579200, "ASDM7ECv3")]["class"], rows[(22579200, "ASDM7ECv3")]["implied_from"]) == \
         ("no", 11289600)
     assert rows[(5644800, "K")]["class"] == "ok"
     assert "H" in hqp_load.names(ctx)["shapers"]
     hr = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-xla", shaper="ASDM7ECv3",
                            src_rate=44100, src_channels=2)
-    assert hr["refused"]["shapers"] == {"H": "hung"}
+    assert hr["refused"]["shapers"] == {"H": "slow_start"}
     assert hr["rates"]["22579200"] == {"class": "no", "speed": None, "n": 0, "settled": True,
                                        "lo": None, "hi": None, "implied_from": 11289600}
     at_k = hqp_load.headroom(ctx, rate_out=5644800, filter="poly-sinc-gauss-xla", shaper="K",
@@ -817,9 +818,9 @@ def test_a_points_range_rides_its_mark_and_an_earlier_engines_mark_is_only_a_hin
     assert (rows["B"]["lo"], rows["B"]["hi"]) == (21.0, 33.46)
 
 
-def test_072_names_the_points_hqplayer_stopped_answering_in_hung(db):
+def test_072_names_the_points_hqplayer_answered_nothing_in_slow_start(db):
     """The two real hangs of 2026-11-20 were ledgered 'unstarted' with the
-    silent-build note; 072 makes them 'hung', leaves a build HQPlayer
+    silent-build note; 072 makes them 'slow_start', leaves a build HQPlayer
     answered through as it was, and a second run changes nothing."""
     run = _run_row(db)
     with db.cursor() as cur:
@@ -830,8 +831,8 @@ def test_072_names_the_points_hqplayer_stopped_answering_in_hung(db):
             cur.execute("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate,
                              src_channels, result, note)
                            VALUES (%s, 11289600, 'f', %s, 44100, 2, 'unstarted', %s)""", (run, shaper, note))
-        delta = Path(__file__).resolve().parent.parent / "desktop" / "migrations" / "072_hqp_bench_63_hung.sql"
+        delta = Path(__file__).resolve().parent.parent / "desktop" / "migrations" / "072_hqp_bench_63_slow_start.sql"
         for _ in range(2):
             cur.execute(delta.read_text())
     assert _q(db.conn, "SELECT shaper, result::text FROM hqp_benchmark_points ORDER BY shaper") == \
-        [("A", "hung"), ("B", "unstarted")]
+        [("A", "slow_start"), ("B", "unstarted")]

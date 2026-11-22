@@ -1430,7 +1430,7 @@ def test_a_build_hqplayer_answers_through_is_waited_out_and_measured(run):
     assert len(rows) == 1 and rows[0][0] in ("measured", "unsettled") and rows[0][1] >= 3.0, rows
 
 
-def _hung(run, monkeypatch, seconds=999.0):
+def _silent_past_the_bound(run, monkeypatch, seconds=999.0):
     """A run whose sinc-L point at DSD256 silences HQPlayer past the build
     limit (scaled down): over, HQPlayer still silent."""
     monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.2)
@@ -1442,21 +1442,26 @@ def _hung(run, monkeypatch, seconds=999.0):
     return bench.state()
 
 
-def test_a_point_that_silences_hqplayer_past_the_bound_is_hung_and_ends_the_run(run, monkeypatch):
-    """HQP-BENCH-63 §3: HQPlayer silent past the bound (a live build and a
-    hang look the same from outside) is a combination that stops HQPlayer —
-    a result of its own — the run ends at once, says what happened and what
-    the person does, and knows it lost HQPlayer (lost_at). A later run on
-    that engine, CUDA state and mode does not ask it again; another does."""
-    st = _hung(run, monkeypatch)
+def test_a_point_hqplayer_is_silent_in_past_the_bound_is_a_slow_start_and_ends_the_run(run, monkeypatch):
+    """HQP-BENCH-63 §3, §12.2: HQPlayer silent past the bound after a point's
+    Play — still preparing it (between rate families a build can take
+    hours) or stopped: from outside the two look the same — is a slow start,
+    a result of its own; the run ends at once, says what happened and how
+    the person tells the two apart, and knows it lost HQPlayer (lost_at). A
+    later run on that engine, CUDA state and mode does not ask it again;
+    another does."""
+    st = _silent_past_the_bound(run, monkeypatch)
     assert st["outcome"] == "failed", st
-    assert st["note"] == ("HQPlayer stopped responding while it prepared sinc-L at DSD256 from a "
-                          "44.1 kHz source. Restart HQPlayer: Sautium puts your filter, rate and volume "
-                          "back as soon as it answers. This combination is now marked as one that stops "
-                          "HQPlayer and is not tried again."), st["note"]
+    assert st["note"] == (
+        "HQPlayer is still preparing sinc-L at DSD256 from a 44.1 kHz source. Between rate families "
+        "some filters take a very long time to prepare — hours, for some. While your processor stays "
+        "busy, HQPlayer is still working on it; if it sits idle, HQPlayer has stopped. Either way, "
+        "restarting HQPlayer ends it. Sautium puts your filter, rate and volume back as soon as "
+        "HQPlayer answers. This combination is now marked as taking over 10 minutes to start here and "
+        "is not tested again."), st["note"]
     (note,), = run.q("""SELECT note FROM hqp_benchmark_points
-                         WHERE filter = 'sinc-L' AND rate_hz = 11289600 AND result = 'hung'""")
-    assert "stayed silent" in note, note
+                         WHERE filter = 'sinc-L' AND rate_hz = 11289600 AND result = 'slow_start'""")
+    assert note.endswith("min after Play — still preparing it, or stopped"), note
     assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
         [(True, True)]
     assert run.q("SELECT count(*) FROM hqp_dsp_samples WHERE filter = 'sinc-L'") == [(0,)]
@@ -1465,20 +1470,20 @@ def test_a_point_that_silences_hqplayer_past_the_bound_is_hung_and_ends_the_run(
     key = (11289600, "sinc-L", "ASDM7EC", 44100, 2)
     assert key in hqp_load.covered(ctx) and hqp_load.keeps_up(ctx)[key] is False
     assert [(r["filter"], r["rate_out"]) for r in hqp_load.results(ctx)
-            if r["class"] == "hung"] == [("sinc-L", 11289600)]
+            if r["class"] == "slow_start"] == [("sinc-L", 11289600)]
     assert key not in hqp_load.covered({**ctx, "cuda": "off"})
     assert key not in hqp_load.covered({**ctx, "engine": "6.3.3"})
 
 
 def test_hqplayer_restarted_after_a_hang_is_put_back_whole_over_what_it_saved(run, monkeypatch):
-    """HQP-BENCH-63 §3.3: the owner restarts the HQPlayer the run hung —
+    """HQP-BENCH-63 §3.3: the owner restarts the HQPlayer silent in the run —
     it comes back with what it saved (another filter, Auto, the run's own
     low volume), its playlist empty — and that is no one's change: the
     owner's mode, rate, filters, shaper and volume go back over it, and the
     run closes as restored, never as left to the owner."""
     fake, mgr = run.fake, run.mgr
     before = fake.settings()
-    _hung(run, monkeypatch)
+    _silent_past_the_bound(run, monkeypatch)
     fake.boot_sel = {1: [2, 1, 1, 1], 2: [0, 1, 0, 1]}      # its SDM selection as it saved it
     fake.builds.clear()
     fake.restart()
@@ -1491,12 +1496,12 @@ def test_hqplayer_restarted_after_a_hang_is_put_back_whole_over_what_it_saved(ru
     assert run.q("SELECT outcome::text, left_at IS NULL, restored_at IS NOT NULL "
                  "FROM hqp_benchmark_runs") == [("interrupted", True, True)]
     restored = _run_restored()
-    assert restored["data"]["hung"] is True and restored["data"]["volume_left"] is None, restored
+    assert restored["data"]["slow_start"] is True and restored["data"]["volume_left"] is None, restored
 
 
 def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run, monkeypatch):
     """HQP-BENCH-63 round 1 M4: the person restarts HQPlayer a minute into a
-    silent build, taking it for hung: the point is not made again on it
+    silent build: the point is not made again on it
     (failed, asked again by a later run, no mark), the run ends saying so,
     and HQPlayer — answering again — is put back at once."""
     fake = run.fake
@@ -1602,7 +1607,8 @@ def test_a_long_silent_build_says_hqplayer_is_still_preparing_it(run, monkeypatc
     assert _wait(lambda: not bench.running(), 60)
     assert bench.state()["outcome"] == "done", bench.state()["note"]
     said = [i for i, x in enumerate(seen) if x.startswith("HQPlayer is preparing")]
-    assert said and seen[said[0]] == "HQPlayer is preparing sinc-L at DSD256 — some take minutes here.", seen
+    assert said and seen[said[0]] == ("HQPlayer is preparing sinc-L at DSD256 — between rate families "
+                                      "some filters take minutes here, some much longer."), seen
     assert "sinc-L" in seen[said[0] + 1] and not seen[said[0] + 1].startswith("HQPlayer"), seen
 
 
@@ -2511,7 +2517,7 @@ def test_a_run_hqplayer_restarted_under_at_its_own_level_leaves_that_level(run, 
     started = run.q("SELECT started_at FROM hqp_benchmark_runs")[0][0]
     restored = _run_restored()
     assert restored["data"] == {"run_at": started.isoformat(), "volume_left": -20.0,
-                                "volume_before": -3.0, "hung": False}, restored
+                                "volume_before": -3.0, "slow_start": False}, restored
 
 
 def test_a_run_hqplayer_restarted_under_louder_is_lowered_to_the_owners_level(run, monkeypatch):
@@ -2937,7 +2943,7 @@ def test_a_lost_run_back_stopped_after_the_node_restarted_is_put_back_whole_and_
     started = run.q("SELECT started_at FROM hqp_benchmark_runs")[0][0]
     restored = _run_restored()
     assert restored["data"] == {"run_at": started.isoformat(), "volume_left": None,
-                                "volume_before": -3.0, "hung": False}, restored
+                                "volume_before": -3.0, "slow_start": False}, restored
 
 
 def test_a_run_cancelled_in_a_silent_build_is_no_run_lost(run, monkeypatch, request):

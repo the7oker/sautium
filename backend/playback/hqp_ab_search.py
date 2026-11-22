@@ -87,7 +87,7 @@ class Filter:
     group: Optional[str] = None        # the atlas's identical group
     at: Optional[Mapping[str, float]] = None   # axis → value; None: not measured in the context
     # Asked by a benchmark and answered with no speed: 'refused' | 'unstarted'
-    # | 'hung' (hqp_load.headroom's `refused`); None: not asked, or measured
+    # | 'slow_start' (hqp_load.headroom's `refused`); None: not asked, or measured
     asked: Optional[str] = None
     # Never asked, a neighbour on its ladder answering for it: that rate (Hz)
     implied_from: Optional[int] = None
@@ -99,7 +99,7 @@ class Filter:
 
 # The reasons a filter is left out, in the order a tie between them goes
 # (dominant)
-REASONS = ("not_measured_here", "too_slow", "rate", "not_in_atlas", "hung", "refused",
+REASONS = ("not_measured_here", "too_slow", "rate", "not_in_atlas", "slow_start", "refused",
            "unstarted", "identical", "other_rate", "late", "listed")
 
 

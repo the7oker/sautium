@@ -324,17 +324,18 @@ def keeps_up(ctx: Dict[str, Any]) -> Dict[tuple, bool]:
     integrator, "FIR2/XFi", whatever filter was asked) and by what HQPlayer
     PLAYED (the keys covered() counts as measured, listens included — what
     played outweighs what was asked); a point that never started
-    (unstarted), or stopped HQPlayer (hung), does not keep up. A rung a
+    (unstarted), or did not start within the run's build limit (slow_start),
+    does not keep up. A rung a
     neighbour answered for (implied) is not read here: what answers for it
     is read afresh. The benchmark's ladders climb by it."""
     rows = db_query(f"""
         SELECT 0 AS prio, p.at, p.rate_hz AS rate, p.filter, p.shaper, p.src_rate,
-               p.src_channels, (p.result NOT IN ('unstarted', 'hung') AND s.process_speed >= %(ok)s
+               p.src_channels, (p.result NOT IN ('unstarted', 'slow_start') AND s.process_speed >= %(ok)s
                                 AND NOT s.dropout) AS ok
           FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
           LEFT JOIN hqp_dsp_samples s ON s.id = p.sample_id
          WHERE {_RUN_KEY}
-           AND (s.id IS NOT NULL OR p.result IN ('unstarted', 'hung'))
+           AND (s.id IS NOT NULL OR p.result IN ('unstarted', 'slow_start'))
            AND p.at >= now() - make_interval(days => %(days)s)
         UNION ALL
         SELECT 1, last_seen, rate_out, filter, shaper, src_rate, src_channels,
@@ -406,8 +407,8 @@ _CLASS = "CASE WHEN speed_p10 < %(no)s THEN 'no' WHEN speed_p10 < %(ok)s THEN 't
 # An implied row (`p`, of run `r`) stands while the neighbour that answered
 # for it still says so, read as keeps_up reads a key — what HQPlayer played
 # there (the rollup, a benchmark point and every listen after it), else its
-# newest benchmark answer (a dropout, a point that never started or stopped
-# HQPlayer: "does not keep up") — at today's line (`%(ok)s`), within the
+# newest benchmark answer (a dropout, a point that never started or took
+# over the build limit to: "does not keep up") — at today's line (`%(ok)s`), within the
 # retention. A neighbour measured again, listens since, or a line a dropout
 # moved take the implication back: never a stale class.
 _IMPLIED_HOLDS = f"""(p.result <> 'implied' OR p.implied_ok = COALESCE(
@@ -421,7 +422,7 @@ _IMPLIED_HOLDS = f"""(p.result <> 'implied' OR p.implied_ok = COALESCE(
             AND n.src_rate = p.src_rate AND n.src_channels = p.src_channels
             AND n.last_seen >= now() - make_interval(days => {RETENTION_DAYS})
             AND (n.bench_at IS NOT NULL OR n.n >= {PASSIVE_COVER})),
-        (SELECT CASE WHEN q.result IN ('unstarted', 'hung') THEN FALSE
+        (SELECT CASE WHEN q.result IN ('unstarted', 'slow_start') THEN FALSE
                      ELSE s.process_speed >= %(ok)s AND NOT s.dropout END
            FROM hqp_benchmark_points q JOIN hqp_benchmark_runs x ON x.id = q.run_id
            LEFT JOIN hqp_dsp_samples s ON s.id = q.sample_id
@@ -431,7 +432,7 @@ _IMPLIED_HOLDS = f"""(p.result <> 'implied' OR p.implied_ok = COALESCE(
             AND x.convolution = r.convolution
             AND q.rate_hz = p.implied_from AND q.filter = p.filter AND q.shaper = p.shaper
             AND q.src_rate = p.src_rate AND q.src_channels = p.src_channels
-            AND (s.id IS NOT NULL OR q.result IN ('unstarted', 'hung'))
+            AND (s.id IS NOT NULL OR q.result IN ('unstarted', 'slow_start'))
             AND q.at >= now() - make_interval(days => {RETENTION_DAYS})
           ORDER BY q.at DESC, q.id DESC LIMIT 1)))"""
 
@@ -493,8 +494,8 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
         if r["filter"] == filter and r["shaper"] == shaper:
             out["rates"][str(r["rate_out"])] = entry
     # What a benchmark ASKED at a picker entry's key with no sample there:
-    # HQPlayer refused it, never got it going, or stopped answering in it
-    # ("refused" | "unstarted" | "hung") — no speed, so no mark, yet
+    # HQPlayer refused it, never got it going, or did not start it within the
+    # build limit ("refused" | "unstarted" | "slow_start") — no speed, so no mark, yet
     # measured all the same: a row says so instead of offering a run that
     # ends alike — or a neighbour on its ladder answered for it ("implied":
     # a mark of its class, no speed). Its newest answer there within the
@@ -514,7 +515,7 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
                     OR (p.filter = %(filter)s AND p.shaper = %(shaper)s))
                AND p.at >= now() - make_interval(days => %(days)s)
              ORDER BY p.rate_hz, p.filter, p.shaper, p.at DESC, p.id DESC) newest
-         WHERE result IN ('refused', 'unstarted', 'hung', 'implied') AND holds
+         WHERE result IN ('refused', 'unstarted', 'slow_start', 'implied') AND holds
          ORDER BY at DESC, id DESC
     """, {**ctx, **th, "rate_out": rate_out, "filter": filter, "shaper": shaper,
           "src_rate": src_rate, "src_channels": src_channels, "days": RETENTION_DAYS,
@@ -568,9 +569,10 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
 
 # Every key measured in a context, classed at its thresholds, and every
 # combination a run asked for that HQPlayer refused, never got going or
-# stopped answering in (class 'refused' / 'unstarted' / 'hung', no speed),
-# or that a neighbour on its ladder answered for (its class, no speed, the
-# rate that answered: `implied_from`) — the newest answer — unordered.
+# did not start within the build limit (class 'refused' / 'unstarted' /
+# 'slow_start', no speed), or that a neighbour on its ladder answered for
+# (its class, no speed, the rate that answered: `implied_from`) — the newest
+# answer — unordered.
 _RESULTS_SQL = f"""
         SELECT filter, shaper, rate_out, src_rate, src_channels, n,
                round(speed_p10::numeric, 2)::float AS speed, {_CLASS} AS class,
@@ -588,7 +590,7 @@ _RESULTS_SQL = f"""
                        p.result::text AS result, p.implied_from, p.implied_ok,
                        {_IMPLIED_HOLDS} AS holds
                   FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
-                 WHERE p.result IN ('refused', 'unstarted', 'hung', 'implied') AND {_RUN_KEY}
+                 WHERE p.result IN ('refused', 'unstarted', 'slow_start', 'implied') AND {_RUN_KEY}
                    AND NOT EXISTS (
                        SELECT 1 FROM hqp_dsp_speed s
                         WHERE s.hqp_endpoint_id = r.hqp_endpoint_id AND s.hqp_engine = r.hqp_engine
@@ -608,8 +610,9 @@ FIT_ROWS = 24
 
 def results(ctx: Dict[str, Any]) -> list:
     """Every key measured in this context, classed, and every combination a
-    run asked for that HQPlayer refused, never got going or stopped
-    answering in here (class 'refused' / 'unstarted' / 'hung', no speed), or
+    run asked for that HQPlayer refused, never got going or did not start
+    here within the build limit (class 'refused' / 'unstarted' / 'slow_start',
+    no speed), or
     that a neighbour answered for (its class, no speed; the newest answer) —
     the benchmark's results sheet lays them out per axis."""
     return db_query(f"{_RESULTS_SQL} ORDER BY src_rate, rate_out, shaper, filter", {**ctx, **thresholds(ctx)})
@@ -639,7 +642,8 @@ def fit(ctx: Dict[str, Any], *, filter: Optional[str] = None, shaper: Optional[s
 def names(ctx: Dict[str, Any]) -> Dict[str, list]:
     """The filters, the shapers and the output rates this context holds a key
     of, or a combination a run asked for that HQPlayer refused, never got
-    going or stopped answering in, or that a neighbour answered for — every
+    going or did not start within the build limit, or that a neighbour
+    answered for — every
     name and rate fit() finds rows of; the rates in order."""
     row = db_query_one(f"""
         SELECT coalesce(array_agg(DISTINCT filter), '{{}}') AS filters,
@@ -649,7 +653,7 @@ def names(ctx: Dict[str, Any]) -> Dict[str, list]:
                 UNION ALL
                 SELECT p.filter, p.shaper, p.rate_hz
                   FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
-                 WHERE p.result IN ('refused', 'unstarted', 'hung', 'implied') AND {_RUN_KEY}) k
+                 WHERE p.result IN ('refused', 'unstarted', 'slow_start', 'implied') AND {_RUN_KEY}) k
     """, ctx)
     return {"filters": row["filters"], "shapers": row["shapers"], "rates": row["rates"]}
 

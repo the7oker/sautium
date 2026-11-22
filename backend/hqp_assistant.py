@@ -96,8 +96,8 @@ RUNS = "{rate} · {other}: runs at {speed}× ({samples}){unsettled}{dropout} —
 DROPOUT = ", and it dropped out here"
 REFUSED_HERE = "{rate} · {other}: refused by HQPlayer when the Benchmark asked it"
 UNSTARTED_HERE = "{rate} · {other}: never got going here when the Benchmark asked it"
-HUNG_HERE = ("{rate} · {other}: HQPlayer stopped responding while it prepared this when the "
-             "Benchmark asked it — not asked again on this engine")
+SLOW_START_HERE = ("{rate} · {other}: did not start within 10 minutes when the Benchmark asked it "
+                   "(HQPlayer answers nothing while it prepares) — not asked again on this engine")
 IMPLIED_HERE = "{rate} · {other}: {cls}, by the Benchmark's measurement at {from_rate} (not measured itself)"
 AUTO = "auto"
 MORE = "… and {n} more."
@@ -639,8 +639,8 @@ def _host_row(r: Mapping[str, Any], knob: str, th: Mapping[str, Any]) -> str:
         return REFUSED_HERE.format(rate=rate, other=other)
     if r["class"] == "unstarted":
         return UNSTARTED_HERE.format(rate=rate, other=other)
-    if r["class"] == "hung":
-        return HUNG_HERE.format(rate=rate, other=other)
+    if r["class"] == "slow_start":
+        return SLOW_START_HERE.format(rate=rate, other=other)
     if r["speed"] is None:
         return IMPLIED_HERE.format(rate=rate, other=other, cls=_class(r["class"], th),
                                    from_rate=_rate_word(r["implied_from"]))

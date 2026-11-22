@@ -2,13 +2,14 @@
 -- for nodes that ran the earlier files. Idempotent: a no-op on the schema
 -- 001 just created.
 --
--- hqp_point_result: 'hung' — HQPlayer stopped answering while it prepared
--- a point (silent past the run's build limit; only a restart ended it, two
--- such on 6.3.3 with the CUDA resampler, 44.1 → 768 kHz), a result of its
--- own that a later run on that engine, CUDA state and mode does not ask
--- again; 'implied' — a rung of a ladder a neighbour answers for, written so
--- the sheet and Compare by ear read it as too slow or keeping up here,
--- never as not measured (implied_from: that neighbour's rate; implied_ok:
+-- hqp_point_result: 'slow_start' — HQPlayer answered nothing past the
+-- run's build limit after a point's Play (two such on 6.3.3 with the CUDA
+-- resampler, 44.1 → 768 kHz, 2026-11-20: between rate families a build can
+-- take hours, and a long build and a stopped
+-- HQPlayer look the same from outside), a result of its own that a later
+-- run on that engine, CUDA state and mode does not ask again; 'implied' — a
+-- rung of a ladder a neighbour answers for, written so the sheet and Compare
+-- by ear read it as too slow or keeping up here, never as not measured (implied_from: that neighbour's rate; implied_ok:
 -- its answer). Neither value is used in this file: a value an ALTER TYPE
 -- adds cannot be used in the transaction that adds it (the check compares
 -- the text).
@@ -16,7 +17,7 @@
 -- benchmark point's lowest and highest reading — the mark shows the range
 -- where the readings swing (6.3.3: ±5–15 %).
 
-ALTER TYPE hqp_point_result ADD VALUE IF NOT EXISTS 'hung' BEFORE 'failed';
+ALTER TYPE hqp_point_result ADD VALUE IF NOT EXISTS 'slow_start' BEFORE 'failed';
 ALTER TYPE hqp_point_result ADD VALUE IF NOT EXISTS 'implied' BEFORE 'failed';
 
 ALTER TABLE hqp_dsp_samples ADD COLUMN IF NOT EXISTS speed_lo REAL;
