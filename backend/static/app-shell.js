@@ -76,6 +76,39 @@
     return QUEUE_GAP_LINES[why] || 'Not on this output';
   }
 
+  // What a streamed row shows of its stream (the `slots` message on the
+  // event stream, the playlist row's `stream`): waiting, buffering with its
+  // progress, ready (nothing said), failed with why — by the code the node
+  // sends (playback.substitute.REASONS). Drafts for the words sitting
+  // (QUEUE-STREAM-DESIGN §7).
+  const STREAM_REASONS = {
+    region: 'not available in this region',
+    no_match: 'no recording of this length',
+    no_clip: 'no 30-second clip',
+    not_found: 'no streaming source has it',
+    nowhere: 'no streaming source has it',
+    unknown: "couldn't be fetched",
+    off: 'streaming is off on this node',
+  };
+  function streamReason(code) {
+    return STREAM_REASONS[code] || STREAM_REASONS.unknown;
+  }
+  function streamLine(st) {
+    if (!st) return '';
+    if (st.state === 'waiting') return 'Waiting';
+    if (st.state === 'buffering') {
+      return st.progress != null ? `Buffering ${Math.round(st.progress * 100)} %` : 'Buffering…';
+    }
+    if (st.state === 'failed') return `Doesn't stream here — ${streamReason(st.reason)}`;
+    return '';
+  }
+  // The states of the slots `msg` names, keyed `${index}|${track_id}`
+  function streamStates(msg) {
+    const out = new Map();
+    for (const st of (msg && msg.slots) || []) out.set(`${st.index}|${st.track_id}`, st);
+    return out;
+  }
+
   /* ---------- HTML escape ---------- */
 
   // A fetch that failed to reach the node and a 404 read the same in a
@@ -1217,15 +1250,14 @@
             if (!tid) return;
             onceInFlight(row, async () => {     // phantom match → stream it
               window.maybeClaimRenderer();
-              const buf = row.querySelector('.track-buffering');
-              if (buf) buf.hidden = false;      // resolve+download is slow — show it
+              // Its slot is in the queue at once; what its stream does, its
+              // queue row and Now Playing say
               const resp = await fetch('/api/player/play-phantom-track', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ track_id: tid }),
               }).catch(() => null);
               let body = null;
               try { body = resp ? await resp.json() : null; } catch (_) {}
-              if (buf) buf.hidden = true;
               if (!resp || !resp.ok) await reportPlaybackResult(resp, body);
             });
             return;
@@ -1824,7 +1856,29 @@
       // Mirror the playlist whenever player.js refetches it.
       document.addEventListener('playlist-loaded', e => {
         this.tracks = (e.detail && e.detail.tracks) || [];
+        this.version = e.detail ? e.detail.version : undefined;
         if (this.isOpen) this.render();
+      });
+      // A streamed row's state moved: its line in place, on the queue of
+      // the version the sheet shows (another's comes with its playlist)
+      window.addEventListener('sautium:slots', e => this.applySlots(e.detail));
+    },
+
+    applySlots(msg) {
+      if (!msg || msg.version !== this.version) return;
+      const states = streamStates(msg);
+      this.tracks.forEach((t, idx) => {
+        const st = states.get(`${idx + 1}|${t.track_id}`);
+        if (!st || !t.stream) return;
+        t.stream = { state: st.state, progress: st.progress, reason: st.reason };
+        if (!this.isOpen) return;
+        const row = this.list.querySelector(`.q-row[data-index="${idx + 1}"]`);
+        const line = row && row.querySelector('.q-stream');
+        if (!line || row.dataset.trackId !== String(t.track_id)) return;
+        const text = streamLine(st);
+        if (line.textContent !== text) line.textContent = text;
+        line.hidden = !text;
+        row.classList.toggle('is-gap', st.state === 'failed' || !!row.querySelector('.q-gap'));
       });
     },
 
@@ -1842,6 +1896,7 @@
         if (resp.ok) {
           const data = await resp.json();
           this.tracks = data.tracks || [];
+          this.version = data.version;
         }
       } catch (err) {
         console.warn('queue load failed', err);
@@ -1889,7 +1944,12 @@
         const isCurrent = oneIdx === currentIdx;
         // A slot the output does not hold (`gap`: why) — faded, its reason
         // on a line of its own; it moves and leaves like any other slot
-        const gap = t.gap ? queueGapLine(t.gap) : '';
+        // A streamed slot says what its stream does instead (its `stream`:
+        // waiting, buffering, failed with why — updated in place by the
+        // `slots` message, never a repaint)
+        const stream = t.stream ? streamLine(t.stream) : '';
+        const failed = !!(t.stream && t.stream.state === 'failed');
+        const gap = t.gap && !t.stream ? queueGapLine(t.gap) : '';
         // Every track is draggable, including the current one —
         // moving the current row is equivalent to "shift before-
         // tracks across to after-current". Backend rebuilds and
@@ -1925,8 +1985,8 @@
             ${removeSvg}
           </button>`;
         return `
-          <div class="q-row${isCurrent ? ' is-current' : ''}${gap ? ' is-gap' : ''}"
-               data-index="${oneIdx}" data-mfid="${t.id || ''}">
+          <div class="q-row${isCurrent ? ' is-current' : ''}${gap || failed ? ' is-gap' : ''}"
+               data-index="${oneIdx}" data-mfid="${t.id || ''}" data-track-id="${escapeHtml(t.track_id || '')}">
             <span class="q-drag" ${isLocked ? '' : 'data-drag="1"'}>
               ${dragHandleSvg}
             </span>
@@ -1935,6 +1995,7 @@
               <div class="q-title">${escapeHtml(t.title || '')}</div>
               <div class="q-artist">${escapeHtml(t.artist || '')}</div>
               ${gap ? `<div class="q-gap">${escapeHtml(gap)}</div>` : ''}
+              ${t.stream ? `<div class="q-stream"${stream ? '' : ' hidden'}>${escapeHtml(stream)}</div>` : ''}
             </div>
             ${right}
             ${removeBtn}
@@ -5879,7 +5940,7 @@
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
                 ${psub ? `<div class="track-sub">${escapeHtml(psub)}</div>` : ''}
-                <div class="track-buffering"${t.buffering ? '' : ' hidden'}>Buffering…</div>
+                <div class="track-buffering" hidden></div>
               </div>
               <span class="track-dur"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
               <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
@@ -6057,6 +6118,7 @@
           .then(body => {
             if (body && screen.isConnected) {
               applyPhantomMissing(screen, body.unavailable);
+              applyNotStreamable(screen, body.not_streamable);
               updateStreamQualityBadge(screen, body.quality);
               applyPhantomDurations(screen, body.durations, d);
               applyPhantomExcerpts(screen, body.excerpt);
@@ -6364,7 +6426,7 @@
 
     wireDetailHandlers(screen, {
       tracks: tracksList, phantomAlbumId,
-      sessionId, sessionHasPhantom: anyPhantom,
+      sessionId,
     });
     updatePlayingHighlight();
   }
@@ -6587,6 +6649,30 @@
     if (news) outputEventToast.say(ev.id, spec); else outputEventToast.stand(ev.id, spec);
   }
   document.addEventListener('np-update', (e) => onOutputEvent(e.detail));
+
+  // A Play of streamed tracks that does not stream here (`stream_event` on
+  // the status, playback.manager._slot_failed): its first slots failed with
+  // nothing played — said at once, with why, while the queue goes on to the
+  // first slot that does; once more when every slot failed. Told once per
+  // page: an id above this connection's floor not met before. Drafts for the
+  // words sitting (QUEUE-STREAM-DESIGN §7).
+  const streamEventsMet = new Set();
+  let streamEventFloor = 0;
+  function onStreamEvent(data) {
+    if (!data) return;
+    if (data.event_floor != null) streamEventFloor = data.event_floor;
+    const ev = data.stream_event;
+    if (!ev || ev.id <= streamEventFloor || streamEventsMet.has(ev.id)) return;
+    streamEventsMet.add(ev.id);
+    const album = ev.album ? `“${escapeHtml(ev.album)}”` : 'This album';
+    const why = escapeHtml(streamReason(ev.reason));
+    notices.toast(ev.all
+      ? { kind: 'error', key: 'player.not_streamable', title: `Nothing on ${album} streams here`,
+          text: `${why}.` }
+      : { kind: 'error', key: 'player.not_streamable', title: `${album} doesn't stream here`,
+          text: `${why}. Playing from the first track that does.` });
+  }
+  document.addEventListener('np-update', (e) => onStreamEvent(e.detail));
 
   // A condition the output is in for a while, each a lasting toast of its
   // own while the status says it. One that ends by itself takes no taps and
@@ -6859,10 +6945,64 @@
   // `missing` list; matched by track_id, cleared/re-applied on each attempt.
   function applyPhantomMissing(screen, missing) {
     const ids = new Set((missing || []).map(m => m && m.track_id).filter(Boolean));
+    // Why each one does not stream here, said on its line (paintStreamLines)
+    screen._unavailable = new Map((missing || []).filter(m => m && m.track_id && m.reason)
+      .map(m => [m.track_id, m.reason]));
     screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
       row.classList.toggle('is-unavailable', ids.has(row.getAttribute('data-track-id')));
     });
+    paintStreamLines(screen);
   }
+
+  // Nothing on the open album streams here (availability's
+  // `not_streamable`): said in the header before anyone presses Play.
+  function applyNotStreamable(screen, verdict) {
+    if (!screen) return;
+    let el = screen.querySelector('.am-unstreamable');
+    if (!verdict) {
+      if (el) el.remove();
+      return;
+    }
+    if (!el) {
+      const row = screen.querySelector('.album-meta-row');
+      if (!row) return;
+      el = document.createElement('span');
+      el.className = 'am-unstreamable';
+      row.appendChild(el);
+    }
+    const text = "Doesn't stream here";
+    if (el.textContent !== text) el.textContent = text;
+    el.title = streamReason(verdict.reason);
+  }
+
+  // Each phantom row's line under its title: the state of the queue slot that
+  // holds its track queued from THIS album (the `slots` message) — waiting,
+  // buffering, failed with why — else, for a row availability found nowhere,
+  // why; nothing for a ready or plain row. Written only on change (no flicker).
+  function paintStreamLines(screen) {
+    if (!screen || !screen.isConnected) return;
+    const albumId = screen.dataset.phantomAlbumId;
+    const byTrack = new Map();
+    for (const st of ((window.streamSlots && window.streamSlots.slots) || [])) {
+      if (st.album_id === albumId && !byTrack.has(st.track_id)) byTrack.set(st.track_id, st);
+    }
+    const unavailable = screen._unavailable || new Map();
+    screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
+      const line = row.querySelector('.track-buffering');
+      if (!line) return;
+      const tid = row.getAttribute('data-track-id');
+      const st = byTrack.get(tid);
+      const text = st ? streamLine(st)
+        : unavailable.has(tid) ? `Doesn't stream here — ${streamReason(unavailable.get(tid))}` : '';
+      if (line.textContent !== text) line.textContent = text;
+      line.hidden = !text;
+      line.classList.toggle('is-quiet', !st || st.state !== 'buffering');
+    });
+  }
+  window.addEventListener('sautium:slots', () => {
+    const screen = document.querySelector('.detail-screen[data-phantom-album-id]');
+    if (screen) paintStreamLines(screen);
+  });
 
   // Tag the phantom rows that will play as a 30 s excerpt — the track's demo
   // listen is spent, or nothing full-length has it. Driven by the `excerpt`
@@ -6933,16 +7073,6 @@
     if (el.textContent !== m[0]) el.textContent = m[0];
   }
 
-  // Show/hide the "Buffering…" line under a phantom track's title. Shared by
-  // click-to-play and (later) the SSE preview-event stream, so every way a track
-  // starts streaming surfaces the same in-place indicator (no flicker).
-  function setTrackBuffering(screen, trackId, active) {
-    if (!screen || !trackId) return;
-    const sel = (window.CSS && CSS.escape) ? CSS.escape(trackId) : trackId;
-    const el = screen.querySelector(`.track-row[data-track-id="${sel}"] .track-buffering`);
-    if (el) el.hidden = !active;
-  }
-
   // Insert / update / remove a phantom track's key·bpm sub-line in place (it sits
   // after the title, before the buffering line). Writes only on change so a
   // re-fetch that found nothing new touches no DOM (no flicker).
@@ -6962,11 +7092,12 @@
     }
   }
 
-  // Re-read the open phantom album and diff its rows in place: buffering line
-  // (transient, from the proxy) + key·bpm sub-line (from enrichment), both
-  // carried by the one /api/albums/{id} snapshot. No structural re-render, so
-  // open [Next]/[End] confirm bars and scroll position survive. Driven by the
-  // preview-events SSE (see the listener wired in init).
+  // Re-read the open phantom album and diff its rows in place: the key·bpm
+  // sub-line (from enrichment), carried by the /api/albums/{id} snapshot — a
+  // row's stream state is the `slots` message's (paintStreamLines). No
+  // structural re-render, so open [Next]/[End] confirm bars and scroll
+  // position survive. Driven by the preview-events SSE (see the listener
+  // wired in init).
   async function refreshPhantomAlbumTracks(screen, albumId) {
     if (!screen || !screen.isConnected || !albumId) return;
     let d;
@@ -6981,8 +7112,6 @@
       const sel = (window.CSS && CSS.escape) ? CSS.escape(t.track_id) : t.track_id;
       const row = screen.querySelector(`.track-row[data-track-id="${sel}"]`);
       if (!row) continue;
-      const buf = row.querySelector('.track-buffering');
-      if (buf) buf.hidden = !t.buffering;
       updateTrackSubLine(row, [
         t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
         t.bpm ? Math.round(t.bpm) + ' bpm' : null,
@@ -6999,6 +7128,7 @@
     } catch (_) { return; }
     if (!screen.isConnected) return;
     applyPhantomMissing(screen, av.unavailable);
+    applyNotStreamable(screen, av.not_streamable);
     updateStreamQualityBadge(screen, av.quality);
     applyPhantomExcerpts(screen, av.excerpt);
   }
@@ -7182,15 +7312,7 @@
           }).catch(() => null);
           let body = null;
           try { body = resp ? await resp.json() : null; } catch (_) {}
-          if (!(await reportPlaybackResult(resp, body))) return;
-          // Optimistic buffering on streamed rows the preview-events listener
-          // will clear — it refreshes by album, so only a tagged (all-phantom
-          // album) screen gets it; elsewhere the rows would never clear.
-          if (ctx.phantomAlbumId) {
-            (ctx.tracks || []).forEach(t => {
-              if (t.is_phantom && t.track_id) setTrackBuffering(screen, t.track_id, true);
-            });
-          }
+          await reportPlaybackResult(resp, body);
         } finally { btn.disabled = false; }
       });
     });
@@ -7200,7 +7322,7 @@
         const wrap = btn.closest('.album-actions');
         if (!wrap) return;
         if (wrap.classList.contains('is-confirming')) { closeAlbumQueueConfirm(wrap); return; }
-        // Streamed slots roll in from the ordered worker, which only appends.
+        // Every slot, owned or streamed, takes its place at once: either end
         openAlbumQueueBar(wrap, async (position) => {
           const resp = await fetch('/api/player/queue-session', {
             method: 'POST',
@@ -7208,7 +7330,7 @@
             body: JSON.stringify({ session_id: ctx.sessionId, position }),
           }).catch(() => null);
           await reportPlaybackResult(resp);
-        }, { ask: 'Add to:', next: !ctx.sessionHasPhantom });
+        }, { ask: 'Add to:' });
       });
     });
     // Play all — replaces the queue with the full track list. ctx.playOrigin
@@ -7247,15 +7369,12 @@
         } finally { btn.disabled = false; }
       });
     });
-    // Listen (phantom album) — streams the not-owned album onto HQPlayer via the
-    // provider proxy. No media_file_ids exist, so it's a whole-album call by
-    // album_id (play-phantom-album prefetches every track, then plays).
+    // Listen (phantom album) — the not-owned album's slots take the queue at
+    // once, by album_id; each slot's stream comes to it there (the rows' lines,
+    // driven by the `slots` message, say waiting / buffering / failed).
     screen.querySelectorAll('[data-action="play-phantom"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!ctx.phantomAlbumId) return;
-        // Resolve + prefetch takes tens of seconds. Block re-clicks; the
-        // per-track "Buffering…" lines (driven by the preview-events re-fetch)
-        // carry the progress now, not the button.
         btn.disabled = true;
         window.maybeClaimRenderer();
         const resp = await fetch('/api/player/play-phantom-album', {
@@ -7276,25 +7395,17 @@
         applyPhantomMissing(screen, body && body.missing);
         applyPhantomExcerpts(screen, body && body.excerpt);
         if (body && body.track_count === 0) {
-          // Whole album unavailable on this provider → keep the button disabled.
+          // Nothing on it streams here → keep the button disabled.
           btn.disabled = true;
           btn.innerHTML = `${SVG_PLAY} Unavailable`;
           return;
         }
-        // Optimistic buffering on the rows that will stream; the preview-events
-        // re-fetch then clears each as the proxy finishes it (the truth source).
-        const missingIds = new Set(((body && body.missing) || [])
-          .map(m => m && m.track_id).filter(Boolean));
-        (ctx.tracks || []).forEach(t => {
-          if (t.track_id && !missingIds.has(t.track_id))
-            setTrackBuffering(screen, t.track_id, true);
-        });
         btn.disabled = false;
       });
     });
     // Phantom track row → stream + play that single track (mirrors clicking an
     // owned track). Display-only rows carry data-track-id (no media_file_id) and
-    // stream via play-phantom-track; "Buffering…" shows under the title meanwhile.
+    // stream via play-phantom-track; the row's line says what its stream does.
     // data-album-id (album/session screens) rides along: the track sits on every
     // album that lists it, and the slot must be the album the row was clicked on.
     screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
@@ -7304,14 +7415,12 @@
         if (!tid) return;
         onceInFlight(row, async () => {               // ignore re-click while loading
           window.maybeClaimRenderer();
-          setTrackBuffering(screen, tid, true);
           const resp = await fetch('/api/player/play-phantom-track', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ track_id: tid, album_id: row.dataset.albumId || null }),
           }).catch(() => null);
           let body = null;
           try { body = resp ? await resp.json() : null; } catch (_) {}
-          setTrackBuffering(screen, tid, false);
           if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
           if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
         });
@@ -7513,14 +7622,12 @@
     // it first put the row body — a play target — under the second tap.
     const go = (position) => onceInFlight(bar, async () => {
       bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
-      setTrackBuffering(screen, tid, true);
       const resp = await fetch('/api/player/queue-phantom-track', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ track_id: tid, album_id: row.dataset.albumId || null, position }),
       }).catch(() => null);
       let body = null;
       try { body = resp ? await resp.json() : null; } catch (_) {}
-      setTrackBuffering(screen, tid, false);
       closeQueueConfirm(row);
       if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
       if (body && body.track_count === 0) applyPhantomMissing(screen, body.missing);
