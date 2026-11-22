@@ -68,9 +68,13 @@ class Settings(BaseSettings):
     genius_access_token: Optional[str] = None
 
     # HQPlayer Integration (Phase 3.2)
-    # An address, never "localhost": Windows resolves it to ::1 first and
-    # HQPlayer listens on IPv4 only, a refused attempt on every connect.
-    hqplayer_host: str = "127.0.0.1"
+    # At a start these are the environment's (HQPLAYER_HOST / _PORT /
+    # _ENABLED): the choice of an install older than the Output picker, read
+    # once by db_migrate's hqp_choice_v1 and never dialled. From the overlay
+    # on (routers.settings.load_hqplayer_from_db) host and port are the
+    # process's copy of the person's saved pick — None while none was made;
+    # "is an HQPlayer chosen" is hqp_library.driven().
+    hqplayer_host: Optional[str] = None
     hqplayer_port: int = 4321
     hqplayer_enabled: bool = False
     # Where an HQPlayer Desktop on this machine keeps its log

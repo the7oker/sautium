@@ -180,7 +180,8 @@ services:
       # Application settings
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
-      # HQPlayer integration (an HQPlayer Embedded on this board is loopback)
+      # Read only for an install older than the Output picker (the HQPlayer a
+      # node drives is the pick saved in its database)
       HQPLAYER_HOST: ${HQPLAYER_HOST:-127.0.0.1}
       HQPLAYER_PORT: ${HQPLAYER_PORT:-4321}
       HQPLAYER_ENABLED: ${HQPLAYER_ENABLED:-false}

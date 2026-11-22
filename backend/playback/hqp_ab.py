@@ -383,17 +383,16 @@ class Sitting:
         from playback.manager import manager
         from hqplayer_client import PlaybackState
         import hqp_library
-        from config import settings
         b = manager.active
         if b is None or b.id != "hqplayer":
             raise Refused("Comparing filters needs HQPlayer as the audio output")
         if manager.held is not None:
             raise Refused(f"{manager.held['label']} — compare once it gives the output back")
-        link = hqp_link.selected()
+        link = hqp_link.chosen()
         busy = link.busy()
         if busy is not None:
             raise Refused(f"{busy}. Compare once it answers again.")
-        ep = hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+        ep = hqp_library.driven_endpoint()
         if ep is None:
             raise Refused("This HQPlayer is not registered yet — try again once it has played")
         # What it reads may be the last sitting's candidate, lowered: that is

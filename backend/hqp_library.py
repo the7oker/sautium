@@ -300,6 +300,26 @@ def address_key(host: str, port: int) -> Tuple[str, int]:
     return ("here" if is_own_address(host) else host.strip().lower(), int(port))
 
 
+def driven() -> Optional[Tuple[str, int]]:
+    """The HQPlayer this node drives: the address the person's pick saved
+    (user_settings hqplayer.host / hqplayer.port — the Output picker's tap,
+    "Add device by address"), read from the process's copy of it; None while
+    no pick was ever made. The one answer to "is an HQPlayer chosen": no
+    default address stands in for a choice, and with none nothing connects
+    (since 2026-11-22; before it the config's 127.0.0.1 was dialled by every
+    reader that fell back to it)."""
+    from config import settings
+    host = settings.hqplayer_host
+    return (host, int(settings.hqplayer_port or 4321)) if host else None
+
+
+def driven_endpoint() -> Optional[Dict[str, Any]]:
+    """The registry row of the HQPlayer this node drives, None while none is
+    chosen or its first contact has not registered it yet."""
+    address = driven()
+    return endpoint_by_address(*address) if address else None
+
+
 def endpoint_by_address(host: str, port: int) -> Optional[Dict[str, Any]]:
     """The row at this address — the alias of it another caller registered
     included: a Desktop the picker met at host.docker.internal is the one
@@ -881,6 +901,9 @@ if __name__ == "__main__":
     ap.add_argument("--since", help="with --forget-endpoint: also drop artists minted after this ISO time")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    # the address is the operator's own word: its link may dial it (HqpLink._may_dial)
+    from playback import hqp_link
+    hqp_link.link_for(args.host, args.port, probing=True)
     if args.dry_run:
         ep, how, facts = resolve_endpoint(args.host, args.port)
         found, found_counts = parse_library(fetch_library(args.host, args.port))

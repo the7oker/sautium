@@ -6394,7 +6394,8 @@ def test_hqplayer_is_reached_by_address_by_default():
     from hqplayer_client import HQPlayerConnection
     assert HQPlayerClient().host == "127.0.0.1"
     assert HQPlayerConnection().client.host == "127.0.0.1"
-    assert Settings.model_fields["hqplayer_host"].default == "127.0.0.1"
+    # ...and no address is the node's HQPlayer until the person picks one
+    assert Settings.model_fields["hqplayer_host"].default is None
 
 
 # -- SelectTrack starts a stopped HQPlayer ------------------------------------------------

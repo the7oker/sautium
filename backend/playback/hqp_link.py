@@ -74,7 +74,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from config import settings
 from hqplayer_client import HQPlayerClient, PlaybackState, Waker, redact_uri, wait_on
 logger = logging.getLogger(__name__)
 
@@ -195,6 +194,14 @@ class NotAnswering(ConnectionError):
 
     def __init__(self) -> None:
         super().__init__(NOT_ANSWERING)
+
+
+class NotChosen(ConnectionError):
+    """No HQPlayer is chosen, or the address is not one this node was ever
+    pointed at: nothing is asked and nothing is dialled."""
+
+
+NOT_CHOSEN = "No HQPlayer is chosen. Choose one in More › Output."
 
 
 class Owed(NotAnswering):
@@ -664,6 +671,10 @@ class HqpLink:
         self.key = key
         self.host = host
         self.port = port
+        # Made for the person's own act of looking (the picker's scan, "Add
+        # device by address"): the one link that may dial an address neither
+        # chosen nor registered (_may_dial)
+        self.probing = False
         self.build = BuildWatch(self)
         self.lock = _CommandLock(self)
         self.client = HQPlayerClient(host=host, port=port, timeout=COMMAND_WAIT_S,
@@ -1149,6 +1160,8 @@ class HqpLink:
         if c.socket is not None:
             return
         at = (self.host, self.port)
+        if not self._may_dial(at):
+            raise NotChosen(f"HQPlayer at {at[0]}:{at[1]} is not one this node was pointed at")
         if self._circuit_open(at):
             raise ConnectionError(f"HQPlayer at {at[0]}:{at[1]} unreachable (circuit open)")
         sock = c.dial(at)
@@ -1519,7 +1532,23 @@ class HqpLink:
         self.client.close()
 
     def _selected(self) -> bool:
-        return self.key == _key(settings.hqplayer_host, settings.hqplayer_port)
+        import hqp_library
+        address = hqp_library.driven()
+        return address is not None and self.key == _key(*address)
+
+    def _may_dial(self, at: tuple) -> bool:
+        """The net under every caller's own rule (routes and tools ask
+        hqp_library.driven or the registry first): a control connection goes
+        only to the HQPlayer the person chose, one the registry holds (a
+        library they imported, a box they added), or an address their own
+        look is probing. A caller that slipped past its rule fails here,
+        loudly, before the dial — on 2026-11-22 the Library screen of a node
+        with no HQPlayer chosen connected to the default address at every
+        wake of its stream."""
+        if self.probing or self._selected():
+            return True
+        import hqp_library
+        return hqp_library.endpoint_by_address(*at) is not None
 
     def readdress(self, host: str, port: int) -> None:
         """Dial the alias chosen last (the same HQPlayer, `key`): on a Docker
@@ -1628,9 +1657,12 @@ def _key(host: str, port: int) -> tuple:
     return hqp_library.address_key(host, port)
 
 
-def link_for(host: str, port: int) -> HqpLink:
+def link_for(host: str, port: int, *, probing: bool = False) -> HqpLink:
     """The link of the HQPlayer at this address — this machine's aliases are
-    one — made on first use; a closed one is made afresh."""
+    one — made on first use; a closed one is made afresh. `probing`: the
+    person is looking at this address (the picker's scan, "Add device by
+    address") — its link may dial it though nothing chose or registered it
+    yet (HqpLink._may_dial)."""
     key = _key(host, port)
     with _registry_lock:
         link = _links.get(key)
@@ -1638,16 +1670,33 @@ def link_for(host: str, port: int) -> HqpLink:
             link = _links[key] = HqpLink(key, host, port)
             if _closed_why is not None:
                 link.close(_closed_why)
+        if probing:
+            link.probing = True
         return link
 
 
-def selected() -> HqpLink:
-    """The link of the HQPlayer the owner chose (settings' address)."""
+def selected() -> Optional[HqpLink]:
+    """The link of the HQPlayer the person chose (hqp_library.driven), None
+    while none is chosen."""
     global _chosen
-    link = link_for(settings.hqplayer_host, settings.hqplayer_port)
+    import hqp_library
+    address = hqp_library.driven()
+    if address is None:
+        return None
+    link = link_for(*address)
     with _registry_lock:
         if _chosen is None:
             _chosen = link.key
+    return link
+
+
+def chosen() -> HqpLink:
+    """The chosen HQPlayer's link for a caller that needs one: NotChosen
+    where none is — the one refusal of every route and tool that would
+    otherwise ask an HQPlayer nobody picked."""
+    link = selected()
+    if link is None:
+        raise NotChosen(NOT_CHOSEN)
     return link
 
 

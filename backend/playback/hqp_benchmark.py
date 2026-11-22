@@ -1083,7 +1083,7 @@ def _again(step: Callable[[], Any], *, silent_ends: bool = False,
 
 def _endpoint() -> Optional[dict]:
     import hqp_library
-    return hqp_library.endpoint_by_address(settings.hqplayer_host, settings.hqplayer_port)
+    return hqp_library.driven_endpoint()
 
 
 def _mode_index(modes: List[dict], kind: str) -> Optional[int]:
@@ -1171,7 +1171,7 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False,
         raise BenchmarkRefused("Pick this HQPlayer as the audio output first")
     from playback import hqp_link
     from playback.hqp_backend import _stream_mode
-    link = hqp_link.selected()
+    link = hqp_link.chosen()
     busy = link.busy()
     if busy is not None:
         raise BenchmarkRefused(f"{busy}. Start the benchmark once it answers again.")
@@ -2259,7 +2259,7 @@ def _owe(run_id: int, link=None) -> tuple:
     anew — unless a person superseded it on the link it was owed on: then it
     stays superseded."""
     from playback import hqp_link
-    link = link if link is not None else hqp_link.selected()
+    link = link if link is not None else hqp_link.chosen()
     with _lock:
         owed = _owed.get(run_id)
         if owed is None or (owed[0] is not link and owed[0].superseded(owed[1]) is None):

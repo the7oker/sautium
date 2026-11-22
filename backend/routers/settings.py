@@ -762,19 +762,16 @@ def _instruments_state() -> Dict[str, Any]:
     return {"enabled": enabled, **left}
 
 
-def _hqp_endpoint() -> tuple:
-    from config import settings as app_settings
-    host = _read("hqplayer.host") or app_settings.hqplayer_host
-    port = _read("hqplayer.port") or app_settings.hqplayer_port
-    return (host or None), int(port or 4321)
-
-
 def _hqp_library_state() -> Dict[str, Any]:
-    """The HQPlayer library as a source: the configured endpoint, what of
-    it this node holds, whether the owner ever synced it (only then does
-    the output re-check it on attach), and the running job."""
+    """The HQPlayer library as a source: the HQPlayer the person chose
+    (hqp_library.driven), what of it this node holds, whether the owner ever
+    synced it (only then does the output re-check it on attach), and the
+    running job. Read from the registry alone — it asks no HQPlayer
+    anything: with none chosen there is no row and no connection (it dialled
+    the config's default address at every wake of the Library stream until
+    2026-11-22), and a row's product is what its first contact stored."""
     import hqp_library
-    host, port = _hqp_endpoint()
+    host, port = hqp_library.driven() or (None, None)
     state = hqp_library.job_state()
     # Every library this node holds copies from, the configured HQPlayer's
     # first — a friend's streamer that went home still has its rows here
@@ -812,14 +809,7 @@ def _hqp_library_state() -> Dict[str, Any]:
     # a source, and stays out of this list unless it somehow holds copies.
     endpoints = [e for e in endpoints if e["own_library"] is not False or e["synced"] or e["files"]]
     if host:
-        # An endpoint never met answers what it is (one short probe, for
-        # its label); an unreachable one is unknown.
         product = configured["product"] if configured else None
-        if product is None:
-            try:
-                product = hqp_library.get_info(host, port)["product"] or None
-            except OSError:
-                product = None
         state.update(endpoint=f"{host}:{port}", name=configured["name"] if configured else None,
                      label=hqp_library.label(configured["name"] if configured else None, product),
                      product=product,
@@ -842,10 +832,12 @@ def _hqp_target(endpoint_id: Optional[int]) -> tuple:
     endpoint id is given (a library listed in Settings — a friend's box
     that is not the configured output), else the configured endpoint."""
     if endpoint_id is None:
-        host, port = _hqp_endpoint()
-        if not host:
-            raise HTTPException(status_code=400, detail="No HQPlayer endpoint is configured")
-        return host, port
+        import hqp_library
+        from playback.hqp_link import NOT_CHOSEN
+        address = hqp_library.driven()
+        if address is None:
+            raise HTTPException(status_code=409, detail=NOT_CHOSEN)
+        return address
     row = db_query_one("SELECT host, port FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id})
     if not row:
         raise HTTPException(status_code=404, detail="No such HQPlayer library")
@@ -1304,7 +1296,7 @@ def _guidance_state() -> Dict[str, Any]:
     # the whole of it (importing is the owner's call).
     if _read("output.type") == "hqplayer":
         import hqp_library
-        host, port = _hqp_endpoint()
+        host, port = hqp_library.driven() or (None, None)
         if host and hqp_library.has_own_library(host):
             ep = hqp_library.endpoint_by_address(host, port)
             if ((ep is None or ep["library_hash"] is None)
@@ -1644,8 +1636,10 @@ def post_guidance_seen(task: str) -> Dict[str, Any]:
         _write("notice.seen", {n["key"]: n["since"] for n in _notice_items()})
     elif task == "hqp_library":
         # per HQPlayer: another one chosen later lights the trail again
-        host, port = _hqp_endpoint()
-        _write("guidance.hqp_library_seen", f"{host}:{port}")
+        import hqp_library
+        address = hqp_library.driven()
+        if address is not None:
+            _write("guidance.hqp_library_seen", f"{address[0]}:{address[1]}")
     else:
         _write(f"guidance.{task}_seen", True)
     notify_library_subscribers()
@@ -2482,11 +2476,12 @@ class HqplayerPrefs(BaseModel):
 
 @router.get("/hqplayer")
 def get_hqplayer_prefs() -> Dict[str, Any]:
-    from config import settings as app_settings
+    import hqp_library
     from playback.hqp_backend import _stream_mode
+    host, port = hqp_library.driven() or (None, None)
     return {
-        "host": _read("hqplayer.host") or app_settings.hqplayer_host,
-        "port": _read("hqplayer.port") or app_settings.hqplayer_port,
+        "host": host,
+        "port": port,
         # How HQPlayer reaches the files — read off its address, never set:
         # by path on this machine, streams from anywhere else.
         "file_access": "stream" if _stream_mode() else "path",
@@ -2494,28 +2489,31 @@ def get_hqplayer_prefs() -> Dict[str, Any]:
 
 
 def _apply_hqplayer_address(host: Optional[str], port: Optional[int]) -> None:
-    """The one place the active HQPlayer's address is set: persisted to
-    user_settings, overlaid onto the runtime settings, and its link chosen
+    """The one place the HQPlayer this node drives is set — the person's
+    pick: persisted to user_settings, copied onto the runtime settings
+    (hqp_library.driven reads the copy), and its link chosen
     (hqp_link.choose) — another HQPlayer's link takes over and the old one
     retires: what it still owes goes, everything else it held gives up. The
     same HQPlayer picked again (any alias) keeps its link, and the build it
     may be in stays watched. Its endpoint row comes from the output's first
     contact (hqp_library.request_sync) or the next scan — never from here:
-    a save must return at once, not after two control round-trips."""
+    a save must return at once, not after two control round-trips. A port
+    alone moves a chosen HQPlayer's port and chooses none."""
+    import hqp_library
     from config import settings as app_settings
     from playback import hqp_benchmark, hqp_link
     before = hqp_link.selected()
     if host is not None:
-        host = host.strip() or None
         _write("hqplayer.host", host)
-        if host:
-            app_settings.hqplayer_host = host
+        app_settings.hqplayer_host = host
     if port is not None:
         _write("hqplayer.port", port)
         app_settings.hqplayer_port = port
-    logger.info("HQPlayer settings updated: host=%s, port=%s",
-                app_settings.hqplayer_host, app_settings.hqplayer_port)
-    if hqp_link.choose(app_settings.hqplayer_host, app_settings.hqplayer_port) is not before:
+    address = hqp_library.driven()
+    if address is None:
+        return
+    logger.info("HQPlayer settings updated: host=%s, port=%s", *address)
+    if hqp_link.choose(*address) is not before and before is not None:
         # Another HQPlayer chosen: a run cut short on the one before owes
         # its put-back no more
         hqp_benchmark.left_by_person(before.host, before.port, "another HQPlayer was chosen")
@@ -2536,6 +2534,10 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
     so a plain re-activate would leave HQPlayer holding URIs of the old
     form.)"""
     from playback.manager import OutputHeld, manager
+    if req.host is not None:
+        req.host = req.host.strip()
+        if not req.host:
+            raise HTTPException(status_code=400, detail="hqplayer.host is required")
     # Not while the benchmark drives HQPlayer: its connection follows the
     # address, and nothing of the change is written meanwhile.
     try:
@@ -2558,7 +2560,7 @@ def put_hqplayer_prefs(req: HqplayerPrefs) -> Dict[str, Any]:
                     # Registered before anything is released, as the picker
                     # does: a Stop an earlier switch away still owes the
                     # HQPlayer at this address is superseded
-                    hqp_link.selected().accept("attach")
+                    hqp_link.chosen().accept("attach")
                     manager.activate(None, stop_old=False)
                     try:
                         manager.activate("hqplayer")
@@ -2588,6 +2590,7 @@ def get_output_prefs() -> Dict[str, Any]:
     from playback import hqp_link
     from playback.manager import manager
     hold = manager.held
+    link = hqp_link.selected()
     return {
         "type": _read("output.type"),
         "device_id": _read("output.local_device"),
@@ -2599,7 +2602,7 @@ def get_output_prefs() -> Dict[str, Any]:
         # (HqpLink.busy) — the MCP assistant quotes both to keep its HQPlayer
         # tools off meanwhile.
         "held": hold["label"] if hold else None,
-        "busy": hqp_link.selected().busy(),
+        "busy": link.busy() if link is not None else None,
     }
 
 
@@ -2680,6 +2683,13 @@ def _put_output_prefs(req: OutputPrefs) -> tuple:
         if port is None or not 1 <= port <= 65535:
             raise HTTPException(status_code=400, detail=f"hqplayer.port is not a port: {raw!r}")
         address = (host, port)
+    if req.type == "hqplayer" and address is None:
+        # A pick names its HQPlayer: no default address stands in for one
+        # (until 2026-11-22 the config's 127.0.0.1 was written here)
+        import hqp_library
+        if hqp_library.driven() is None:
+            from playback.hqp_link import NOT_CHOSEN
+            raise HTTPException(status_code=409, detail=NOT_CHOSEN)
 
     if address is not None:
         _apply_hqplayer_address(*address)
@@ -2735,24 +2745,8 @@ def _put_output_prefs(req: OutputPrefs) -> tuple:
                              device_id=_read("output.local_device"),
                              exclusive=bool(_read("output.local_exclusive")))
         elif otype == "hqplayer":
-            # Choosing HQPlayer IS configuring it. There is always an effective
-            # endpoint (the config default, 127.0.0.1:4321), so persist it if
-            # nothing was saved and carry on.
-            #
-            # This used to refuse with a 409 when no host had been saved, using
-            # the same predicate that decides whether to POLL HQPlayer. Those
-            # are different questions, and conflating them left the setting
-            # unreachable: nothing configures HQPlayer during setup any more,
-            # so a new node could not select it, and the screen where a host is
-            # entered is only listed while HQPlayer is the active output.
-            if not _read("hqplayer.host"):
-                _write("hqplayer.host", app_settings.hqplayer_host)
-                _write("hqplayer.port", app_settings.hqplayer_port)
-                logger.info("HQPlayer selected with no saved host — recorded "
-                            "the default %s:%s", app_settings.hqplayer_host,
-                            app_settings.hqplayer_port)
             from playback import hqp_link
-            link = hqp_link.selected()
+            link = hqp_link.chosen()
             # The HQPlayer already driven, picked again, stays the output as
             # it is — no detach, no attach: its DSP change, a resume, its
             # spot go on (the link took the alias picked, choose)
@@ -2778,18 +2772,20 @@ def _put_output_prefs(req: OutputPrefs) -> tuple:
 
 
 def load_hqplayer_from_db() -> None:
-    """Startup overlay: copy persisted host/port onto settings before
-    the first request."""
-    try:
-        from config import settings as app_settings
-        host = _read("hqplayer.host")
-        port = _read("hqplayer.port")
-        if host:
-            app_settings.hqplayer_host = host
-        if port:
-            app_settings.hqplayer_port = int(port)
-    except Exception as e:
-        logger.warning(f"Failed to load HQPlayer settings from DB: {e}")
+    """The process's copy of the person's saved pick (hqp_library.driven),
+    made at the start: the saved host and port, or none. The environment's
+    HQPLAYER_HOST is dropped here — it was the choice of an install older
+    than the Output picker, which db_migrate's hqp_choice_v1 saved once; left
+    in place it was the address every "saved, else the default" reader
+    dialled on a node whose owner chose no HQPlayer. Dropped before the
+    read: a failed read leaves no default behind."""
+    from config import settings as app_settings
+    app_settings.hqplayer_host = None
+    host = _read("hqplayer.host")
+    port = _read("hqplayer.port")
+    if host:
+        app_settings.hqplayer_host = host
+        app_settings.hqplayer_port = int(port or 4321)
 
 
 # ============================================================
@@ -3208,7 +3204,7 @@ def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
                                                     "HQPlayer — stop it first")
     if not db_query_one("SELECT 1 AS ok FROM hqp_endpoints WHERE id = %(e)s", {"e": endpoint_id}):
         raise HTTPException(status_code=404, detail="No such HQPlayer library")
-    driven = hqp_library.endpoint_by_address(app_settings.hqplayer_host, app_settings.hqplayer_port)
+    driven = hqp_library.driven_endpoint()
     stats = hqp_library.forget_endpoint_id(endpoint_id)
     if driven is not None and driven["id"] == endpoint_id:
         # The HQPlayer the node drives stays the owner's pick without its
@@ -3216,7 +3212,7 @@ def forget_hqp_library(endpoint_id: int) -> Dict[str, Any]:
         # the attached backend looks its row up again. Left unregistered,
         # the benchmark refused it until the Output picker was opened
         # (2026-10-03).
-        hqp_library.request_sync(app_settings.hqplayer_host, app_settings.hqplayer_port)
+        hqp_library.request_sync(*hqp_library.driven())
         from playback.manager import manager
         if manager.active is not None and manager.active.id == "hqplayer":
             manager.active.endpoint_forgotten()

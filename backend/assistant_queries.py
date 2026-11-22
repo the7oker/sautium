@@ -14,7 +14,6 @@ the id of a FILE and appears only where a file is the subject.
 """
 
 import json
-import os
 import uuid as _uuid
 
 import outside_text
@@ -110,10 +109,10 @@ def active_hqp_endpoint(q):
     kv = {r["key"]: r["value"] for r in rows}
     if kv.get("output.type") != "hqplayer":
         return None
-    host = kv.get("hqplayer.host") or os.environ.get("HQPLAYER_HOST") or None
+    host = kv.get("hqplayer.host")
     if not host:
         return None
-    port = int(kv.get("hqplayer.port") or os.environ.get("HQPLAYER_PORT") or 4321)
+    port = int(kv.get("hqplayer.port") or 4321)
     rows = q("SELECT id FROM hqp_endpoints WHERE host = %(h)s AND port = %(p)s", {"h": host, "p": port})
     return rows[0]["id"] if rows else None
 

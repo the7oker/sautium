@@ -175,8 +175,9 @@ def _hqp_gate(*, commands: bool = True) -> dict:
     start — a device in another room, with the canonical queue none the
     wiser. Returns the output as the backend said it."""
     prefs = _output_prefs()
-    active = prefs.get("type") or ""
-    if active and active != "hqplayer":
+    # unset is this device, never "HQPlayer may have it"
+    active = prefs.get("type") or "browser"
+    if active != "hqplayer":
         raise ConnectionError(
             f"HQPlayer is not the active audio output (currently: {active}). "
             "Its transport and DSP controls are unavailable. Use play_track / "

@@ -33,8 +33,9 @@ def _hqp_gate(*, commands: bool = True) -> None:
     finish, a silence). A reading tool goes on: its questions do."""
     from routers.settings import _read
     from playback.manager import manager
-    active = _read("output.type")
-    if active and active != "hqplayer":
+    # unset is this device (PlaybackManager.init_from_settings), never "HQPlayer may have it"
+    active = _read("output.type") or "browser"
+    if active != "hqplayer":
         raise ConnectionError(
             f"HQPlayer is not the active audio output (currently: {active}). "
             "Its transport and DSP controls are unavailable. Use play_track / "
@@ -50,7 +51,7 @@ def _hqp_gate(*, commands: bool = True) -> None:
         )
     if commands:
         from playback import hqp_link
-        hqp_link.selected().refuse()
+        hqp_link.chosen().refuse()
 
 
 @contextmanager
@@ -64,7 +65,7 @@ def _hqp_asking(*, commands: bool = False):
     change_dsp) — after the block: a change holds the link itself."""
     _hqp_gate(commands=commands)
     from playback import hqp_link
-    with hqp_link.selected().asking() as hqp:
+    with hqp_link.chosen().asking() as hqp:
         yield hqp
 
 

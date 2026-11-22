@@ -46,19 +46,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/player", tags=["player"])
 
 def _hqp_configured() -> bool:
-    """An HQPlayer endpoint is actually configured — env-enabled (Docker
-    .env) or a host saved from the Web UI. Nodes without HQPlayer skip the
-    1s poll loop entirely; the settings PUT starts it the moment a host is
-    saved (precursor of the per-output-backend status loop, HARDWARE-TIERS
-    §2.6)."""
-    from config import settings as app_settings
-    if app_settings.hqplayer_enabled:
-        return True
-    try:
-        from routers.settings import _read
-        return bool(_read("hqplayer.host"))
-    except Exception:
-        return False
+    """The person chose an HQPlayer (hqp_library.driven). The environment's
+    HQPLAYER_ENABLED is no choice: an install older than the Output picker
+    had it saved as one, once (db_migrate's hqp_choice_v1)."""
+    import hqp_library
+    return hqp_library.driven() is not None
 
 
 def start_status_poller():
@@ -182,7 +174,6 @@ def get_outputs(rescan: bool = False):
     refuses while any stream is open, since reinit would invalidate it."""
     from playback.local import devices as local_devices
     from routers.settings import _read
-    from config import settings as app_settings
 
     if rescan:
         local_devices.rescan()
@@ -324,8 +315,6 @@ def _hqplayer_entries() -> list:
     the LAN address."""
     import hqp_library
     from auth_hmac import is_own_address
-    from config import settings as app_settings
-    from routers.settings import _read
     entries: dict[tuple, dict] = {}
     for r in _db_query("""
         SELECT e.id, e.name, e.host, e.port, e.product, e.library_hash IS NOT NULL AS synced,
@@ -358,9 +347,9 @@ def _hqplayer_entries() -> list:
             if not e["product"]:
                 e["product"] = d["product"]
                 e["embedded"] = hqp_library.is_embedded(d["product"])
-    host = _read("hqplayer.host") or app_settings.hqplayer_host
-    if host:
-        port = int(_read("hqplayer.port") or app_settings.hqplayer_port or 4321)
+    address = hqp_library.driven()
+    if address is not None:
+        host, port = address
         key = _hqp_key(host, port)
         e = entries.get(key)
         if e is None:
@@ -933,12 +922,12 @@ async def _scan_run():
         try:
             # Its link says first whether HQPlayer takes anything now — a
             # build, one it did not finish, a silence: busy, never asked into
-            hqp_link.link_for(host, 4321).refuse()
+            hqp_link.link_for(host, 4321, probing=True).refuse()
             return host, await asyncio.to_thread(hqp_library.resolve_endpoint, host, 4321), None
         except Exception as e:
             return host, None, e
     hqps: dict[tuple, dict] = {}
-    configured = _configured_hqp()
+    configured = hqp_library.driven()
     for host, resolved, err in await asyncio.gather(*(_resolve(h) for h in found_hqp)):
         facts = found_hqp[host]
         entry = {"name": facts["name"], "product": facts["product"], "endpoint_id": None,
@@ -1052,15 +1041,6 @@ async def _scan_run():
     return {"renderers": renderers, "hqplayers": _hqplayer_entries()}
 
 
-def _configured_hqp() -> Optional[tuple]:
-    from config import settings as app_settings
-    from routers.settings import _read
-    host = _read("hqplayer.host") or app_settings.hqplayer_host
-    if not host:
-        return None
-    return host, int(_read("hqplayer.port") or app_settings.hqplayer_port or 4321)
-
-
 def _is_hqplayer_renderer(info: dict, found_hqp: dict) -> bool:
     """HQPlayer is a UPnP renderer as well (manufacturer Signalyst — Desktop
     and HQPlayer OS alike); a box that answered as an HQPlayer is driven as
@@ -1087,6 +1067,8 @@ def _probe_hqplayer(host: str, port: int) -> Optional[dict]:
     None. The discovery datagram first; GetInfo over TCP where a firewall
     passes only that."""
     import hqp_library
+    # the person's own look at this address: its link may dial it
+    hqp_link.link_for(host, port, probing=True)
     facts = hqp_library.discover(host, port)
     if facts is None:
         try:

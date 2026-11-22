@@ -116,6 +116,12 @@ for the machine it read (SAUTIUM_BIRTH_PRESET=nano — no models, no streaming
 library, nothing passed on), written only where the owner's row does not
 exist, before the seed step reads the streaming library's switch.
 
+Then, once per database, the HQPlayer an install older than the Output
+picker drove (`hqp_choice_v1`, _save_hqp_choice): its choice — the
+environment's HQPLAYER_ENABLED or a saved host, with no `output.type` — is
+saved as the picker would have saved it, so that "chosen" is the saved rows
+alone from then on and no default address is ever dialled (2026-11-22).
+
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
 (_assistant_role); the runner states its grants after the deltas.
@@ -193,6 +199,41 @@ def _apply_birth_preset(conn) -> dict:
                     "ON CONFLICT (key) DO NOTHING", (json.dumps(name),))
     conn.commit()
     return {"preset": name, "written": written}
+
+
+# The address an install drove before anything was saved: the config's old default
+_HQP_OLD_DEFAULT = ("127.0.0.1", 4321)
+
+
+def _save_hqp_choice(conn) -> dict:
+    """The HQPlayer this node drives today by a choice no row holds, saved
+    as the Output picker saves one: `output.type = hqplayer` and its address.
+    Two installs have such a choice. One older than the picker (2026-09-28),
+    whose `output.type` was never written: the environment's HQPLAYER_ENABLED
+    or a host saved from the old connection editor was the choice. And one
+    whose HQPlayer was picked while the environment configured it: the type
+    is saved, the address came from the environment at every start. Both
+    get the address they run on today — the saved host, else the
+    environment's, else the old default. Every other node is left as it is:
+    with no saved pick it drives no HQPlayer (hqp_library.driven), and the
+    environment's address is dialled by nothing."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT key, value FROM user_settings "
+                    "WHERE key IN ('output.type', 'hqplayer.host', 'hqplayer.port')")
+        held = dict(cur.fetchall())
+        otype, host, port = held.get("output.type"), held.get("hqplayer.host"), held.get("hqplayer.port")
+        chosen = otype == "hqplayer" or (otype is None and bool(settings.hqplayer_enabled or host))
+        written = {}
+        if chosen and otype is None:
+            written["output.type"] = "hqplayer"
+        if chosen and not host:
+            written["hqplayer.host"] = settings.hqplayer_host or _HQP_OLD_DEFAULT[0]
+            written["hqplayer.port"] = int(port or settings.hqplayer_port or _HQP_OLD_DEFAULT[1])
+        for key, value in written.items():
+            cur.execute("INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, json.dumps(value)))
+    conn.commit()
+    return {"chosen": chosen, "written": written}
 
 
 def _renormalize_identities() -> dict:
@@ -740,6 +781,11 @@ def apply_pending() -> dict:
         if not _marked(conn, "birth_preset_v1"):
             out["birth_preset"] = _apply_birth_preset(conn)
             _mark(conn, "birth_preset_v1")
+
+        if not _marked(conn, "hqp_choice_v1"):
+            out["hqp_choice"] = _save_hqp_choice(conn)
+            logger.info("the HQPlayer driven before the Output picker: %s", out["hqp_choice"])
+            _mark(conn, "hqp_choice_v1")
 
         # First: it reads the seals to tell this node's records from another
         # author's, and the identity re-normalization below sheds every seal
