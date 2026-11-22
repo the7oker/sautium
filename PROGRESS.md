@@ -48,12 +48,24 @@ implementation details live in the code, DB and git history.
   file moved to another track would each need a rule of its own; derived,
   they are one, and a second scan is a no-op by construction. A file not yet
   read by this reader contributes nothing, and a track whose files are all
-  unread (or gone) keeps its rows: the credit is of the music. The split is
-  deliberately narrow — `;` and a spaced ` / ` — because nothing in "Lennon,
-  McCartney" or "Bach, Johann Sebastian" tells two names from one inverted
-  name; a wrong split mints two false artists, a kept value one unsplit
-  name. "Last, First" is turned only where the MusicBrainz dump's sort name
-  says it is that artist's sort form. A composer owned this way is owned
+  unread (or gone) keeps its rows: the credit is of the music. A comma is a
+  list (2026-11-22, the design session's Q15): the owner's tags held 491
+  comma values over 896 credits, lists of writers all ("Ed Simons, Tom
+  Rowlands"), none an MB sort form — so a value with `, ` is split, unless
+  the whole is a name the node knows: an artist row something besides a
+  composer credit holds (a performer here, the phantom layer's) or, on a
+  dump node, an MB artist's name or sort name ("Earth, Wind & Fire", "Bach,
+  Johann Sebastian", which the dump's sort name also turns). The decision is
+  the derive's, beside the turning: a dump that arrives or goes derives the
+  comma values again. Known limits: a list whose whole happens to be some
+  artist's name stays whole; on a node without the dump an inverted "Last,
+  First" with no performer row splits into two false names (none in the
+  owner's library); a band the node learns of after the derive stays split
+  until its files are read again; a list that begins with a band ("Earth,
+  Wind & Fire, Maurice White") is not known whole and splits through the
+  band's name. `Various`, `Various Composers` and `Unknown` are no composer,
+  as Various Artists is no artist (Q16); `Traditional` and `Anonymous` say
+  something true and stay. A composer owned this way is owned
   (no phantom), never engaged; his page fetches his Last.fm bio once when a
   person opens it — the one per-artist call he ever causes. Nothing travels:
   a credit is an unsealed string from someone's tags, and MusicBrainz's work

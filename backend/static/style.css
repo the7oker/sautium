@@ -4617,6 +4617,16 @@ a.am-kind { text-decoration: none; }
 }
 .hqp-diag-row.is-failed .hqp-diag-verdict { color: var(--color-negative); }
 .hqp-row-hint.hqp-diag-empty { margin-top: calc(4 * var(--px)); }
+/* Every play the Diagnostics block watched, folded under one quiet link
+   below the ones that did not play (B-125) */
+.hqp-diag-all > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: calc(8 * var(--px)) calc(16 * var(--px));
+  font-size: var(--text-caption);
+  color: var(--color-text-muted);
+}
+.hqp-diag-all > summary::-webkit-details-marker { display: none; }
 
 /* ---- How a setting runs on this HQPlayer (hqpHeadroomMark): the class
    in the dot, the measured speed in mono — technical blue while it keeps
@@ -4831,8 +4841,9 @@ a.am-kind { text-decoration: none; }
   padding-right: calc(4 * var(--px));
 }
 /* A row never measured on this computer (hqp_load's marks): a muted line
-   under its facts, outside the pick button, with "Measure" at its end —
-   the benchmark for that entry alone. */
+   under its facts, outside the pick button, with "Test speed" at its end —
+   the benchmark for that entry alone — and, beside the words, an earlier
+   engine's mark of it as a hint, dimmer, no class colour (HQP-BENCH-63 C1). */
 .hqp-sheet-row.is-unmeasured .hqp-sheet-row-name { padding-bottom: calc(4 * var(--px)); }
 .hqp-sheet-unmeasured {
   grid-column: 1 / -1;
@@ -4848,6 +4859,7 @@ a.am-kind { text-decoration: none; }
   color: var(--color-text-muted);
 }
 .hqp-sheet-unmeasured .hqp-chip-btn { flex: none; }
+.hqp-sheet-earlier { margin-right: auto; color: var(--color-text-dim); white-space: nowrap; }
 .hqp-sheet-info {
   width: calc(44 * var(--px));
   height: calc(44 * var(--px));
@@ -7629,15 +7641,49 @@ html { -webkit-tap-highlight-color: transparent; }
 }
 
 /* Music path — JS-side truncation in fmtPathTruncatedFromStart keeps
-   the tail visible (it's the user-meaningful folder name). CSS just
-   styles the font; no max-width / text-overflow, so the string the
-   renderer produces is the string the user sees. */
+   the tail visible (it's the user-meaningful folder name). CSS styles
+   the font and sets no max-width / text-overflow: the string the renderer
+   produces is the string the user sees — but beside the folder button
+   (.row-stack-pair, below), where a string that still does not fit loses its
+   head. */
 .path-value {
   font-family: var(--font-mono);
   font-size: calc(12.5 * var(--px));
   color: var(--color-blue);
   letter-spacing: 0.02em;
   white-space: nowrap;
+}
+/* A row with a button: the label and its value stand one above the other
+   and the button beside both, on one line of its own words — three things
+   on one line do not fit a phone's sheet (the Music path's Change, the
+   Hardware profile's Turn off / Check for updates / Restart Sautium were
+   cut off or broken over three lines). The value gives way, never the
+   button or the label. */
+.row-stack-pair {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(4 * var(--px));
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.row-stack-pair .row-stack-label { white-space: nowrap; }
+.row-stack-pair .row-stack-value {
+  margin-top: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.row-stack-pair + .profile-btn {
+  flex: none;
+  white-space: nowrap;
+}
+/* The path is cut at its head, where the JS put the ellipsis, so the
+   folder's own name stays in sight. */
+.row-stack-pair .path-value {
+  max-width: 100%;
+  overflow: hidden;
+  display: flex;
+  justify-content: flex-end;
 }
 
 /* A start in flight on a slow output (DLNA: SOAP round-trips + the

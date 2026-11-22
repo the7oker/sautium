@@ -318,14 +318,22 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
     monkeypatch.setattr(setup.os, "getgid", lambda: 1000)
     assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 1
     said = capsys.readouterr().out
-    commands = [line.strip() for line in said.splitlines() if line.startswith("    sudo ") or "| sudo tee" in line]
+    pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
+    commands = [line for line in pasted if line.startswith("sudo ") or "| sudo tee" in line]
     # The desktop's hold let go first: the same disk is not mounted read-only beside a mount for writing
     assert commands[:5] == [
         "sudo umount /dev/sda1", "sudo mkdir -p /mnt/sautium-4A21-0000",
-        "printf '\\n%s\\n' 'UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat ro,nofail,nosuid,nodev,noexec,uid=1000,"
-        "gid=1000,fmask=0133,dmask=0022" + systemd + "' | sudo tee -a /etc/fstab",
+        "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab",
         "sudo systemctl daemon-reload", "sudo mount /mnt/sautium-4A21-0000"]
-    assert "sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab" in commands       # its undo
+    # The line itself is built in short pieces — a line a terminal or a chat wrapped arrives as two
+    # commands — and the pieces build the very line (PI-NODE-2B item 8, W2)
+    pieces = [line for line in pasted if line.startswith(("L='", 'L="$L,'))]
+    assert len(pieces) > 1 and max(len(line) for line in pasted) <= 76, pasted
+    built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
+    assert built == ("UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat ro,nofail,nosuid,nodev,noexec,uid=1000,"
+                     "gid=1000,fmask=0133,dmask=0022" + systemd)
+    # its undo, the mount point in a variable
+    assert "P=/mnt/sautium-4A21-0000" in pasted and 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in commands
     assert "Elements" not in " ".join(commands)        # the volume's own name is in no root command
     # The root to name is the mount point — there with or without the disk — and the folder on it is
     # chosen in the Web UI: a bind of a folder ON the disk would stop the node's start without the disk
@@ -617,7 +625,13 @@ def test_the_root_steps_are_printed_whole_and_yes_never_waits(checkout, monkeypa
     user = os.environ.get("USER") or str(os.getuid())
     assert f"    sudo loginctl enable-linger {user}" in printed
     assert f"    sudo loginctl disable-linger {user}" in printed          # its undo beside it
-    assert "    sudo install -m 0755 " in printed and "/usr/local/lib/sautium/automount" in printed
+    assert '    sudo install -m 0755 "$A/automount" /usr/local/lib/sautium/' in printed
+    assert f"    A={checkout / 'host' / 'automount'}\n" in printed          # the folder once, in a variable
+    assert "    sudo rm -f /usr/local/lib/sautium/automount" in printed      # its undo, a line a file
+    # No command of a block is long enough to be wrapped on its way to a root terminal (item 8, W2):
+    # the lines after the folder's own are fixed text
+    commands = [line[4:] for line in printed.splitlines() if line.startswith("    ")]
+    assert max(len(line) for line in commands if not line.startswith("A=")) <= 76, commands
     assert "<" not in printed.replace("<its UUID>", "")                   # no placeholder to edit
     assert "Updates while signed out: not set" in printed and "Plugged disks: not set" in printed
     files = sorted(p.name for p in (checkout / "host" / "automount").iterdir())
@@ -857,9 +871,8 @@ def test_remove_prints_the_undo_of_a_boot_mount_the_setup_printed(installed, mon
     assert setup.boot_mounts(fstab.decode()) == ["/mnt/sautium-4A21-0000"]
     assert setup.main(["remove"]) == 0
     said = capsys.readouterr().out
-    for line in ("    sudo umount /mnt/sautium-4A21-0000",
-                 "    sudo sed -i '\\|^UUID=[^ ]* /mnt/sautium-4A21-0000 |d' /etc/fstab",
-                 "    sudo rmdir /mnt/sautium-4A21-0000"):
+    for line in ("    P=/mnt/sautium-4A21-0000", '    sudo umount "$P"',
+                 '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab', '    sudo rmdir "$P"'):
         assert line in said, line
     assert "reboot" not in said and "/mnt/music" not in said
 
@@ -935,6 +948,58 @@ def test_status_says_what_is_there_and_changes_nothing(installed, monkeypatch, c
     assert sorted(p.name for p in (installed.root / "host").iterdir()) == before
     asked = [" ".join(a) for a in installed.asked]
     assert not any(word in line for line in asked for word in (" up", " down", " stop", " rm", "sudo")), asked
+
+
+@pytest.mark.parametrize("fstype, uuid", [("ext4", "02f61d5e-92cb-4f9c-a781-099d97795020"), ("exfat", "4A21-0000"),
+                                          ("vfat", "0398-3084"), ("ntfs", "01DC5A7E6B2F4C10"), ("ntfs3", "01DC5A7E6B2F4C10")])
+def test_the_boot_mount_lines_are_short_and_build_the_very_line(fstype, uuid):
+    """Every filesystem's line, with the longest UUID there is (ext4's 36
+    characters, twice in the line): no piece and no undo line long enough to
+    be wrapped, and the pieces put together are the line byte for byte."""
+    found = setup.boot_mount(f"/media/pi/Disk/Music", json.dumps({"filesystems": [
+        {"source": "/dev/sda1", "target": "/media/pi/Disk", "fstype": fstype, "uuid": uuid}]}), 1000, 1000)
+    pieces = setup.in_pieces(found["line"])
+    lines = pieces + setup.boot_mount_undo(found["point"])
+    assert max(len(line) for line in lines) <= 76, lines
+    built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
+    assert built == found["line"]
+    # The undo's sed address, as the shell hands it to sed: that one line of fstab and no other
+    script = "\n".join(setup.boot_mount_undo(found["point"])[:1]) + '\nprintf %s "\\|^UUID=[^ ]* $P |d"'
+    address = subprocess.run(["sh", "-c", script], capture_output=True, text=True).stdout
+    assert address == f"\\|^UUID=[^ ]* {found['point']} |d"
+
+
+def test_status_names_the_disks_mounted_under_the_roots():
+    """`findmnt -R /media/sautium` answered nothing — the automount's folder is
+    no mount point — so a plugged disk never showed (PI-NODE-2B item 8, S1)."""
+    table = ("/ ext4 rw,noatime\n"
+             "/boot/firmware vfat rw\n"
+             "/media/sautium/B269-E281 exfat ro,nosuid,nodev,noexec,uid=1002\n"
+             "/mnt/sautium-4A21-0000 exfat ro,nofail\n"
+             "/media/sautium-other/X ext4 ro\n"
+             "/home/pi/music-nas nfs ro\n")
+    roots = ["/home/pi/music", "/mnt/sautium-4A21-0000", "/media/sautium"]
+    assert setup.mounts_under(roots, table) == [
+        "/media/sautium/B269-E281 exfat ro,nosuid,nodev,noexec,uid=1002", "/mnt/sautium-4A21-0000 exfat ro,nofail"]
+    assert setup.mounts_under([], table) == []
+    # a root with a space in its name: findmnt -r writes it \\x20
+    assert setup.mounts_under(["/srv/My Music"], "/srv/My\\x20Music/disk ext4 ro\n/srv/My ext4 rw\n") == [
+        "/srv/My\\x20Music/disk ext4 ro"]
+    # … and a name outside ASCII written a byte at a time
+    escaped = "".join(f"\\x{b:02x}" for b in "Музика".encode())
+    assert setup.mounts_under(["/srv/Музика"], f"/srv/{escaped}/disk ext4 ro\n") == [f"/srv/{escaped}/disk ext4 ro"]
+    assert setup.mounts_under(["/srv/Музика"], "/srv/Музика/disk ext4 ro\n") == ["/srv/Музика/disk ext4 ro"]
+
+
+def test_the_machine_line_says_an_asked_preset_as_asked():
+    """The arrow is the machine's own verdict: Nano asked for on a board the
+    rule reads as a full node is not said as read off it (item 8, W1)."""
+    big = {"ram_gib": 15.8, "cores": 4, "docker_root_removable": False, "docker_root_free_gb": 800.0}
+    small = dict(big, ram_gib=3.9)
+    assert setup.machine_line(big, None).endswith("on a fixed disk → the full node")
+    assert setup.machine_line(big, "nano").endswith("on a fixed disk; set up as Nano")
+    assert setup.machine_line(small, "nano").endswith("on a fixed disk → Nano")
+    assert setup.machine_line(small, None).endswith("on a fixed disk; set up as the full node")
 
 
 def test_the_wrapper_runs_the_setup_isolated():

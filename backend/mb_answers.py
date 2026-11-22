@@ -541,8 +541,21 @@ _NEXT_SQL = f"""
     LIMIT 1"""
 # Over every backed-off item: one that fell due since the consumer looked is
 # taken at once (zero), never waited past.
+# No row when no item waits on a time. Without the HAVING the aggregate answers
+# one row of NULL, and GREATEST ignores a NULL: greatest(0, NULL) is 0, so a
+# consumer with nothing queued waited zero seconds and asked again — a core
+# of the machine and one of PostgreSQL's, for as long as the queue stayed
+# empty (seen on a Pi, 2026-11-22).
 _NEXT_DUE_SQL = """SELECT greatest(0, extract(epoch FROM min(not_before) - now())) AS seconds
-                     FROM mbws_queue WHERE not_before IS NOT NULL"""
+                     FROM mbws_queue WHERE not_before IS NOT NULL
+                   HAVING count(*) > 0"""
+
+
+def _idle_wait() -> Optional[float]:
+    """How long the consumer sleeps when no item may be asked now: until the
+    earliest backed-off item is due, or — None — until a wake."""
+    due = db_query_one(_NEXT_DUE_SQL)
+    return float(due["seconds"]) if due else None
 
 
 def _lookup(kind: str, mbid: str) -> List[Item]:
@@ -741,9 +754,7 @@ class _Worker:
                 row = db_query_one(_NEXT_SQL, {"last": self._last_author})
                 self._crashes = 0
                 if row is None:
-                    due = db_query_one(_NEXT_DUE_SQL)
-                    self._event.wait(float(due["seconds"]) if due and due["seconds"] is not None
-                                     else None)
+                    self._event.wait(_idle_wait())
                     continue
                 self._one(row["kind"], row["mbid"], row["author"] or "")
             except Exception:

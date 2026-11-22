@@ -234,6 +234,22 @@ def test_a_node_that_stops_asking_wakes_whatever_waited(node, mb, monkeypatch):
     assert mb.asked == []
 
 
+def test_a_consumer_with_nothing_to_ask_waits_for_a_wake_not_zero_seconds(node, mb):
+    """An empty queue names no time at all: the consumer then sleeps until a
+    NOTIFY. Zero seconds here was a loop that never slept."""
+    import mb_answers
+    assert mb_answers._idle_wait() is None
+    waiting, due = mbid(), mbid()
+    mb_answers.enqueue([("artist", waiting), ("artist", due)], mb_answers.PRIORITY_OWNED)
+    assert mb_answers._idle_wait() is None                      # queued, none backed off
+    with node.cursor() as cur:
+        cur.execute("UPDATE mbws_queue SET not_before = now() + interval '90 seconds' WHERE mbid = %s", (waiting,))
+    assert 80 < mb_answers._idle_wait() <= 90
+    with node.cursor() as cur:
+        cur.execute("UPDATE mbws_queue SET not_before = now() - interval '5 seconds' WHERE mbid = %s", (due,))
+    assert mb_answers._idle_wait() == 0                         # one is due: asked at once
+
+
 def _next_step():
     """One step of the consumer on the item it would take next."""
     import mb_answers

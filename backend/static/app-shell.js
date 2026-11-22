@@ -5954,7 +5954,7 @@
         ].filter(Boolean).join(' · ');
         // the track's own composers, beyond the album line's (albums.py
         // _composer_lines); names only — the row is the play control
-        // " · " between names: a name keeps its own comma ("Lennon, McCartney")
+        // " · " between names: a name keeps its own comma ("Earth, Wind & Fire")
         const composers = (t.composers || []).map(c => c.name).join(' · ');
         const composersLine = composers
           ? `<div class="track-artist-line track-composers">${escapeHtml(composers)}</div>` : '';
@@ -9718,11 +9718,17 @@
     loadHqpLog(el.querySelector('[data-log-body]'));
   }
 
-  // The HQPlayer screen's Diagnostics block: the plays it watched, newest
-  // first, each opening its sheet; and HQPlayer's own log on demand.
+  // "All plays" stays as the person left it through the screen's re-renders
+  let hqpDiagAllOpen = false;
+
+  // The HQPlayer screen's Diagnostics block: the plays that did not reach
+  // HQPlayer, newest first, each opening its sheet — with none, one line —
+  // then every play it watched folded under one quiet link (a good play's
+  // trace is what a failed one is compared against: B-125), and
+  // HQPlayer's own log on demand.
   function hqpDiagnosticsBlock(d) {
     if (!d) return '';
-    const rows = (d.attempts || []).slice(0, 8).map(a => {
+    const row = (a) => {
       const v = a.verdict || {};
       const who = [a.artist, a.title].filter(Boolean).join(' — ') || HQP_INTENTS[a.intent] || a.intent;
       const failed = v.code && v.code !== 'played' && v.code !== 'interrupted';
@@ -9732,12 +9738,26 @@
             <span class="hqp-diag-verdict">${escapeHtml(v.title || '')}</span></span>
           ${HQP_CHEVRON}
         </button>`;
-    }).join('');
+    };
+    const attempts = d.attempts || [];
+    const failed = attempts.filter(a => {
+      const code = (a.verdict || {}).code;
+      return code && code !== 'played' && code !== 'interrupted';
+    });
+    const rows = failed.slice(0, 8).map(row).join('');
+    const none = attempts.length
+      ? 'Every play since the node started reached HQPlayer.'
+      : 'Every play on this HQPlayer is traced here — none yet since the node started.';
+    const all = attempts.length
+      ? `<details class="hqp-diag-all"${hqpDiagAllOpen ? ' open' : ''}><summary>All plays ›</summary>${
+          attempts.map(row).join('')}</details>`
+      : '';
     const src = (d.log_source && d.log_source.kind) || 'none';
     return `
       <section class="hqp-section" data-hqp-diag>
         <div class="hqp-section-label">Diagnostics</div>
-        ${rows || '<p class="hqp-row-hint is-left hqp-diag-empty">Every play on this HQPlayer is traced here — none yet since the node started.</p>'}
+        ${rows || `<p class="hqp-row-hint is-left hqp-diag-empty">${none}</p>`}
+        ${all}
         <button class="hqp-row hqp-row-tap" type="button" data-action="hqp-log">
           <span class="hqp-row-label">HQPlayer log</span>
           <span class="hqp-row-value">${escapeHtml(HQP_LOG_SOURCES[src] || '')}</span>
@@ -9749,15 +9769,32 @@
   // How a setting runs on this HQPlayer, measured (playback.hqp_load): a dot
   // in its class's colour and the speed in mono — on every picker entry
   // measured here; on a knob only when its setting is tight or too slow.
-  // An entry never measured is unmarked: nothing is guessed. "~" = the
-  // benchmark's readings did not settle within 15 s.
+  // An entry never measured is unmarked: nothing is guessed. "~" = near the
+  // line, the benchmark's readings did not settle within 15 s; a range
+  // ("21–33×") where they swung; its class in a word where a rate next to
+  // it on its ladder answered for it (implied_from).
   function hqpHeadroomMark(entry, { onlyShort = false } = {}) {
     if (!entry || (onlyShort && entry.class === 'ok')) return '';
+    if (entry.speed == null) {
+      const title = `${entry.class === 'ok' ? 'Keeps up here (faster than' : 'Too slow here (slower than'} at ${
+        fmtRateLabel(entry.implied_from)})`;
+      return `<span class="hqp-hr is-${entry.class}" title="${escapeHtml(title)}"><span class="hqp-hr-dot"></span>${
+        entry.class === 'ok' ? 'keeps up' : 'too slow'}</span>`;
+    }
     const n = entry.n || 0;
+    const swung = entry.lo != null && entry.hi != null && entry.hi > entry.lo * 1.04;
     const title = `Runs at ${entry.speed.toFixed(2)}× on this HQPlayer (${n} sample${n === 1 ? '' : 's'})`
+      + (swung ? ` — its readings swung from ${entry.lo.toFixed(2)}× to ${entry.hi.toFixed(2)}×` : '')
       + (entry.settled ? '' : ' — the readings did not settle within 15 s');
     return `<span class="hqp-hr is-${entry.class}" title="${escapeHtml(title)}"><span class="hqp-hr-dot"></span>${
-      entry.settled ? '' : '~'}${entry.speed.toFixed(1)}×</span>`;
+      entry.settled ? '' : '~'}${swung ? hqpSpeedRange(entry.lo, entry.hi) : entry.speed.toFixed(1)}×</span>`;
+  }
+
+  // A swing's range as the mark draws it: whole numbers from 10× up
+  // ("21–33"), one decimal under ("1.1–1.7")
+  function hqpSpeedRange(lo, hi) {
+    const f = (x) => (hi >= 10 ? Math.round(x).toString() : x.toFixed(1));
+    return `${f(lo)}–${f(hi)}`;
   }
 
   // What the node says of a filter or a modulator (hqp_atlas, through the
@@ -10021,8 +10058,8 @@
     if (!b.volume_control) lines.push('<b>HQPlayer cannot turn the noise down below your level on this output — turn your amplifier down first.</b>');
     if (!b.cuda) lines.push('CUDA offload is not known for this HQPlayer: what is measured now is kept apart from runs after you set it.');
     const ok = await window.confirmDestructive({
-      title: entry ? `Measure ${entry.name}?` : 'Run the benchmark?', message: lines.join('<br><br>'),
-      confirmText: entry ? 'Measure' : 'Run', confirmKind: 'primary',
+      title: entry ? `Test the speed of ${entry.name}?` : 'Run the benchmark?', message: lines.join('<br><br>'),
+      confirmText: entry ? 'Test speed' : 'Run', confirmKind: 'primary',
     });
     if (!ok) return;
     let r, out;
@@ -10049,12 +10086,19 @@
   function hqpBenchCell(row) {
     if (!row) return '<td class="hqp-bench-none">—</td>';
     if (row.class === 'refused') return '<td class="hqp-bench-none" title="HQPlayer refuses this combination">⊘</td>';
-    if (row.class === 'unstarted') return '<td class="hqp-bench-none" title="HQPlayer never got it going on this host (still building it 10 minutes after Play)">○</td>';
+    if (row.class === 'unstarted') return '<td class="hqp-bench-none" title="HQPlayer never got it going on this host (still building it a minute after Play)">○</td>';
+    if (row.class === 'slow_start') return '<td class="hqp-bench-none" title="Over a minute to start here: HQPlayer answered nothing that long after Play">⊗</td>';
+    if (row.speed == null) {
+      const title = `${row.class === 'ok' ? 'Keeps up here (faster than' : 'Too slow here (slower than'} at ${fmtRateLabel(row.implied_from)})`;
+      return `<td title="${escapeHtml(title)}"><span class="hqp-hr is-${row.class}"><span class="hqp-hr-dot"></span></span></td>`;
+    }
     const settled = row.bench_settled !== false;
+    const swung = row.lo != null && row.hi != null && row.hi > row.lo * 1.04;
     const title = `${row.speed.toFixed(2)}× (${row.n} sample${row.n === 1 ? '' : 's'})`
+      + (swung ? ` — swung ${row.lo.toFixed(2)}–${row.hi.toFixed(2)}×` : '')
       + (settled ? '' : ' — did not settle') + (row.dropout ? ' — dropped out' : '');
     return `<td title="${escapeHtml(title)}"><span class="hqp-hr is-${row.class}"><span class="hqp-hr-dot"></span>${
-      settled ? '' : '~'}${row.speed.toFixed(1)}</span>${row.dropout ? '<span class="hqp-bench-drop">✕</span>' : ''}</td>`;
+      settled ? '' : '~'}${swung ? hqpSpeedRange(row.lo, row.hi) : row.speed.toFixed(1)}</span>${row.dropout ? '<span class="hqp-bench-drop">✕</span>' : ''}</td>`;
   }
 
   // A table header's rate: fmtRateLabel's name, squeezed — "705.6k" in PCM,
@@ -10133,7 +10177,7 @@
         <p class="hqp-diag-note"><span class="hqp-hr is-ok"><span class="hqp-hr-dot"></span></span> from ${th.ok}× ·
           <span class="hqp-hr is-tight"><span class="hqp-hr-dot"></span></span> tight ·
           <span class="hqp-hr is-no"><span class="hqp-hr-dot"></span></span> under ${th.no}×${
-          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer · ○ never started here · — not measured (above a rate that does not keep up, or below ${/^PCM/.test(ctx.mode || '') ? '8×' : 'DSD256'} when it does)</p>
+          th.dropout_speed ? ` (it dropped out at ${th.dropout_speed.toFixed(2)}× here)` : ''} · ~ did not settle · ✕ dropped out · ⊘ refused by HQPlayer · ○ never started here · ⊗ over a minute to start here · a dot alone: a rate next to it on its ladder answers for it · — not measured</p>
         <div class="confirm-actions single">
           <button class="profile-btn primary" type="button" data-close>Close</button>
         </div>
@@ -10649,6 +10693,8 @@
       body.querySelectorAll('[data-attempt]').forEach(row => {
         row.addEventListener('click', () => onceInFlight(row, () => openHqpDiagnosis(row.dataset.attempt)));
       });
+      const allPlays = body.querySelector('.hqp-diag-all');
+      if (allPlays) allPlays.addEventListener('toggle', () => { hqpDiagAllOpen = allPlays.open; });
       const logRow = body.querySelector('[data-action="hqp-log"]');
       if (logRow) logRow.addEventListener('click', e => { if (e.detail < 2) openHqpLog(); });
 
@@ -10821,10 +10867,12 @@
   // group's head, drawn once above each run of them the search leaves
   // together.
   // A row without a mark that a benchmark asked for all the same
-  // (hqp_load.headroom's `refused`): Measure would end alike
+  // (hqp_load.headroom's `refused`): Test speed would end alike — and on a
+  // combination that took over a minute to start, hold HQPlayer silent again
   const HQP_UNMEASURED = {
     refused: 'HQPlayer refuses it at this setting',
     unstarted: 'HQPlayer never got it going on this computer',
+    slow_start: 'Over 1 min to start here',
   };
   // With the two filter slots apart, `slot` ('1x' | 'nx') is the one the
   // picker chooses for. "your pick · N" (AB-1 §14.5) counts the person's own
@@ -10857,11 +10905,15 @@
     const currentIdx = (slot === '1x' ? st.filter1x : (filter ? st.filterNx : st.shaper)) ?? -1;
     const hr = state.headroom || {};
     const measured = hr[filter ? 'filters' : 'shapers'] || {};
-    // Asked here and refused, or never got going: measured, with no speed
+    // Asked here and refused, never got going, or over a minute to start:
+    // measured, with no speed
     const refused = (hr.refused || {})[filter ? 'filters' : 'shapers'] || {};
+    // An earlier engine's mark where this one has none (C1): a hint in the
+    // row, never a class — nothing else reads it
+    const earlier = (hr.earlier || {})[filter ? 'filters' : 'shapers'] || {};
     // A row's mark is read for one source and setting (hr.setting): known,
-    // a row without one is not measured here — said, not guessed; "Measure"
-    // runs the benchmark for that entry alone, where a run can play the
+    // a row without one is not measured here — said, not guessed; "Test
+    // speed" runs the benchmark for that entry alone, where a run can play the
     // source the marks are read for (hr.measurable), none runs now and one
     // could start (no_estimate: unregistered, a list missing, [source] mode).
     const marksKnown = !!hr.setting;
@@ -10884,7 +10936,10 @@
       const f = r.facts;
       const info = !!(f && f.card);
       const unmeasured = marksKnown && !measured[r.name];
-      const why = HQP_UNMEASURED[refused[r.name]] || 'Not measured on this computer';
+      const why = HQP_UNMEASURED[refused[r.name]] || 'Speed not tested on this computer';
+      const hint = !refused[r.name] && earlier[r.name]
+        ? `<span class="hqp-sheet-earlier mono" title="Measured on HQPlayer ${escapeHtml(earlier[r.name].engine)}, not on the engine running now">${
+            escapeHtml(earlier[r.name].engine)}: ${earlier[r.name].speed.toFixed(1)}×</span>` : '';
       return `
         <div class="hqp-sheet-row${current ? ' is-current' : ''}${bracketed ? ' is-bracketed' : ''}${
           unmeasured ? ' is-unmeasured' : ''}" data-idx="${r.index}"
@@ -10899,8 +10954,8 @@
             ${hqpFactsHtml(f)}
           </button>
           ${unmeasured ? `<div class="hqp-sheet-unmeasured">
-            <span>${why}</span>${canMeasure && !refused[r.name]
-              ? `<button class="hqp-chip-btn" type="button" data-measure="${escapeHtml(r.name)}">Measure</button>` : ''}
+            <span>${why}</span>${hint}${canMeasure && !refused[r.name]
+              ? `<button class="hqp-chip-btn" type="button" data-measure="${escapeHtml(r.name)}">Test speed</button>` : ''}
           </div>` : ''}
           <div class="hqp-sheet-side">
             ${info ? `<button class="hqp-sheet-info" type="button" data-info="${escapeHtml(r.name)}"
@@ -10951,11 +11006,23 @@
       }).join('');
 
       body.querySelectorAll('[data-pick]').forEach(btn => {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
           const idx = parseInt(btn.dataset.pick, 10);
           const f = entries.find(x => x.index === idx);
           close();
-          if (f) onPick(f);
+          if (!f) return;
+          // A combination that took over a minute to start here on this engine: asked first (Q4)
+          if (refused[f.name] === 'slow_start') {
+            const cuda = bench.cuda && bench.cuda !== 'off' ? 'on' : 'off';
+            const ok = await window.confirmDestructive({
+              title: `Choose ${f.name}?`,
+              message: `This took more than a minute to start here last time (HQPlayer ${
+                escapeHtml((state.info && state.info.engine) || '')}, CUDA ${cuda}), and HQPlayer answers nothing while it prepares. Choose it anyway?`,
+              confirmText: 'Choose it',
+            });
+            if (!ok) return;
+          }
+          onPick(f);
         });
       });
       body.querySelectorAll('[data-measure]').forEach(btn => {
@@ -11059,7 +11126,7 @@
     }
     if (r.ok) return { ok: true, view: out };
     const d = out.detail;
-    return { ok: false, code: (d && d.code) || null,
+    return { ok: false, code: (d && d.code) || null, way: (d && d.way) || null,
              message: (d && d.message) || (typeof d === 'string' ? d : `HTTP ${r.status}`) };
   }
 
@@ -11078,10 +11145,11 @@
                               fixed_volume_ok: fixedOk });
     let res = await abFetch('', body(wish.form));
     let chainRefused = null;
-    // Find my filter waits for Sautium's measurements (W15): the sheet opens
-    // on the pair, the reason under Find my filter
+    // Find my filter waits for Sautium's measurements (W15), or finds none
+    // to compare with here: the sheet opens on the pair, the reason under
+    // Find my filter — with its way on, where it has one (the Benchmark)
     if (!res.ok && res.code === 'chain' && wish.form === 'chain') {
-      chainRefused = res.message;
+      chainRefused = { message: res.message, way: res.way };
       res = await abFetch('', body('pair'));
     }
     return { ...res, chainRefused };
@@ -11317,6 +11385,13 @@
       data-answer="${answer}"${can ? '' : ' disabled'}>${label}</button>`).join('')}</div>`;
   }
 
+  // The way on beside a reason no filter is left to compare with: the
+  // Benchmark's row, for filters not speed-tested here
+  function abWay(way) {
+    return way === 'benchmark'
+      ? ' <button class="ab-link" type="button" data-ab="to-bench">Benchmark ›</button>' : '';
+  }
+
   function abReasons(list) {
     return `<div class="ab-reasons">${list.map(r => `<div><b>${escapeHtml(r.name)}</b><br>${escapeHtml(r.why)}</div>`).join('')}</div>`;
   }
@@ -11379,11 +11454,12 @@
              <span>2</span><div class="ab-frag" data-ab-frag="2"><i></i></div></div>`
         : '<div class="ab-frag" data-ab-frag=""><i></i></div>';
       const chain = v.chain;
-      const chainCap = ab.chainRefused ? escapeHtml(ab.chainRefused)
+      const chainCap = ab.chainRefused ? escapeHtml(ab.chainRefused.message) + abWay(ab.chainRefused.way)
         : `Yours against one other at a time${chain ? ` · ${abNum(chain.to_hear)} to hear${chain.left_out.length
             ? ` · <button class="ab-link" type="button" data-ab-ov="reasons">${abNum(chain.left_out.length)} left out ›</button>` : ''}` : ''}`;
       const pairCap = `Yours, ${escapeHtml(v.yours.name)}, against ${second
         ? `${escapeHtml(second)} · <button class="ab-link" type="button" data-ab-ov="pick">Change ›</button>`
+        : v.seconds.empty ? `none here. ${escapeHtml(v.seconds.empty.words)}${abWay(v.seconds.empty.way)}`
         : '<button class="ab-link" type="button" data-ab-ov="pick">one you choose ›</button>'}`;
       const opt = (f, title, cap, disabled) => `
         <div class="ab-opt${form === f ? ' is-on' : ''}" role="radio" tabindex="${disabled ? -1 : 0}" aria-checked="${form === f}"
@@ -11604,6 +11680,11 @@
     const p = ab.view ? abNow(ab) : null;
     switch (t.dataset.ab) {
       case 'close': onceInFlight(t, () => abClose(ab)); break;
+      case 'to-bench': onceInFlight(t, async () => {
+        await abClose(ab);
+        const row = document.querySelector('[data-hqp-bench]');
+        if (row) row.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      }); break;
       case 'cancel': onceInFlight(t, async () => { await abAsk(ab, { name: 'stop' }); await abClose(ab); }); break;
       case 'stop': abAsk(ab, { name: 'stop' }, { stop: seq }); break;
       case 'go-on': onceInFlight(t, async () => abTake(ab, await abStart(ab.wish, true))); break;
@@ -13384,7 +13465,9 @@
     };
   };
   // A benchmark run HQPlayer went away under — it closed, reset or refused
-  // the connection — put back whole when it answered again
+  // the connection, or answered nothing past the build limit in a point
+  // (`slow_start`: restarted, or the build ended) —
+  // put back whole when it answered again
   // (playback/hqp_benchmark.py): a report, gone once seen. The run's date
   // keeps a put-back days later from reading as a change made on its own.
   // Its volume is lowered when it came back louder than the owner's, raised
@@ -13396,6 +13479,14 @@
     const run = `${escapeHtml(at.toLocaleDateString([], { month: 'short', day: 'numeric' }))} at <span class="num">${escapeHtml(at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>`;
     const volume = d.volume_left == null ? ''
       : ` Its volume was left as it is — ${db(d.volume_left)}; yours was ${db(d.volume_before)}.`;
+    if (d.slow_start) {
+      return {
+        title: 'HQPlayer is back',
+        text: d.volume_left == null
+          ? 'HQPlayer is back: your filter, rate and volume are as they were before the Benchmark.'
+          : `HQPlayer is back: your filter and rate are as they were before the Benchmark.${volume}`,
+      };
+    }
     return {
       title: 'HQPlayer went away during a benchmark',
       text: `Sautium lost the connection to HQPlayer during the benchmark run of ${run}. The settings from before it were put back as soon as HQPlayer answered again.${volume}`,
@@ -17484,8 +17575,10 @@
       ? `<div class="row-stack-sub">${on ? 'On' : 'Off'} from the next start of Sautium.</div>` : '';
     return `<div class="form-row stacked">
         <div class="row-stack">
-          <span class="row-stack-label">AI models</span>
-          <span class="form-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
+          <div class="row-stack-pair">
+            <span class="row-stack-label">AI models</span>
+            <span class="row-stack-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
+          </div>
           <button class="profile-btn secondary" type="button" data-action="models-switch" data-on="${on ? '0' : '1'}">${on ? 'Turn off' : 'Turn on'}</button>
         </div>${pending}</div>`;
   }
@@ -17495,7 +17588,11 @@
   // refusal are the agent's own, shown as text. Draft words for the review.
   function hwSoftwareRow(hw, host) {
     const sw = hw.software || {};
-    const what = [sw.version, sw.commit || sw.build].filter(Boolean).join(' · ') || '—';
+    // The release's version is what a person reads. The commit is support's
+    // (the diagnostics carry it): it rides in the value's title, and stands
+    // in the row only where the tree states no version.
+    const build = sw.commit || sw.build || '';
+    const what = sw.version || build || '—';
     let control = '', sub = '';
     if (hw.restartable && !host.available) {
       sub = 'Updates: on the machine, run ./sautium update';
@@ -17527,8 +17624,10 @@
     }
     return `<div class="form-row stacked">
         <div class="row-stack">
-          <span class="row-stack-label">Sautium</span>
-          <span class="form-value mono">${escapeProfileHtml(what)}</span>
+          <div class="row-stack-pair">
+            <span class="row-stack-label">Sautium</span>
+            <span class="row-stack-value mono"${sw.version && build ? ` title="${escapeProfileHtml(build)}"` : ''}>${escapeProfileHtml(what)}</span>
+          </div>
           ${control}
         </div>${sub ? `<div class="row-stack-sub">${escapeProfileHtml(sub)}</div>` : ''}</div>`;
   }
@@ -17586,17 +17685,21 @@
             ? 'Nothing is analysed here: sound features arrive from other Sautium nodes.'
             : 'Scales analysis, model pre-warm and background load.'}</div></div>
           ${hwModelsRow(hw)}
-          ${cache ? `<div class="form-row">
-            <span class="form-label">Downloaded models</span>
-            <span class="form-value mono">${escapeProfileHtml(fmtBytes(cache))}</span>
+          ${cache ? `<div class="form-row stacked"><div class="row-stack">
+            <div class="row-stack-pair">
+              <span class="row-stack-label">Downloaded models</span>
+              <span class="row-stack-value mono">${escapeProfileHtml(fmtBytes(cache))}</span>
+            </div>
             <button class="profile-btn secondary" type="button" data-action="models-cache-remove">Remove</button>
-          </div>` : ''}
+          </div></div>` : ''}
           ${hwSoftwareRow(hw, host)}
-          ${hw.restartable ? `<div class="form-row">
-            <span class="form-label">This machine</span>
-            <span class="form-value">${escapeProfileHtml(hw.machine || '—')}</span>
+          ${hw.restartable ? `<div class="form-row stacked"><div class="row-stack">
+            <div class="row-stack-pair">
+              <span class="row-stack-label">This machine</span>
+              <span class="row-stack-value">${escapeProfileHtml(hw.machine || '—')}</span>
+            </div>
             <button class="profile-btn secondary" type="button" data-action="restart-node">Restart Sautium</button>
-          </div>` : ''}
+          </div></div>` : ''}
         </div>`;
       wire(hw);
       // Shown: the one-time mark of a node born with a preset is retired,
@@ -18265,7 +18368,10 @@
     const isPathSet     = !!(lib.music_path && (lib.music_path !== '/music' || lib.music_folder === 'setup'));
     const pathFull      = !isPathSet ? ''
       : lib.music_path === '/music' ? 'The folder named at setup' : fmtPathForDisplay(lib.music_path);
-    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull)
+    // With the folder button (Change / Choose) the label and the path stand
+    // one above the other and the button beside both: a few characters fewer
+    // fit, and the button is never the part that gives way.
+    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull, picksFolder ? 24 : 27)
       : picksFolder ? 'Not chosen' : 'Not set';
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
@@ -18292,7 +18398,7 @@
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Away</span>
-            <span class="row-stack-value">${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
+            <span class="row-stack-value" data-library-away>${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
           </div>
           <div class="row-stack-sub">Their files were not found at the last Rescan. They stay in your library until you remove them, and come back by themselves when a scan finds their files.</div>
         </div>
@@ -18326,10 +18432,7 @@
       <div class="profile-group-label">Library</div>
       <div class="form-group">
         <div class="stats-grid">
-          ${_statCell('Tracks',  fmtNum(lib.total_tracks))}
-          ${_statCell('Artists', fmtNum(lib.total_artists))}
-          ${_statCell('Albums',  fmtNum(lib.total_albums))}
-          ${_statCell('Genres',  fmtNum(lib.total_genres))}
+          <div data-library-stats style="display:contents">${_libraryStatCells(lib)}</div>
         </div>
       </div>
       ${scanActions}
@@ -18361,7 +18464,10 @@
         <div class="form-row stacked"><div class="row-stack-sub" data-instruments-line>${escapeProfileHtml(_instrumentsLine(instruments, lib.total_tracks))}</div></div>
       </div>`;
 
-    const emptyState = !isEmpty ? '' : !isPathSet ? `
+    // A scan that runs over an empty library — the first one, started by a
+    // tap, by the folder's choice or by the folder watcher — shows under
+    // either message, with its Cancel.
+    const emptyState = !isEmpty ? '' : (!isPathSet ? `
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
@@ -18375,10 +18481,12 @@
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
-          No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.
+          ${scanRunning
+            ? 'Reading your music folder — tracks appear here as they are indexed. It usually takes a few minutes per 10k tracks.'
+            : 'No tracks indexed yet. Run the first scan to discover your library — it usually takes a few minutes per 10k tracks.'}
         </p>
-        <button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>
-      </div>`;
+        ${scanRunning ? '' : `<button class="empty-cta" data-action="scan">${SETTINGS_ICONS.refresh}Run first scan</button>`}
+      </div>`) + (scanRunning ? scanActions : '');
 
     // Action button rows now live inside libraryStats — under their
     // respective sections (scan under Library, enrich under
@@ -18397,26 +18505,33 @@
         ${_settingsHeader('Library')}
 
         <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}">
+          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}" data-library-drawn="${_libraryDrawn(lib)}">
+            ${picksFolder ? `
+            <div class="row-stack">
+              <div class="row-stack-pair">
+                <span class="row-stack-label">Music path</span>
+                <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
+              </div>
+              <button class="profile-btn secondary" type="button" data-action="choose-folder" data-guide="music_folder">${isPathSet ? 'Change' : 'Choose'}</button>
+            </div>` : `
             <div class="row-stack">
               <span class="row-stack-label">Music path</span>
               <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
-              ${picksFolder ? `<button class="profile-btn secondary" type="button" data-action="choose-folder" data-guide="music_folder">${isPathSet ? 'Change' : 'Choose'}</button>` : ''}
-            </div>
+            </div>`}
             <div class="row-stack-sub"></div>
           </div>
           ${isEmpty ? '' : `
             <div class="form-row">
               <span class="form-label">Storage</span>
-              <span class="form-value mono">${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
+              <span class="form-value mono" data-library-size>${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
             </div>
             <div class="form-row stacked">
               <div class="row-stack">
                 <span class="row-stack-label">Last scan</span>
-                <span class="row-stack-value">${scanRunning ? 'running…' : escapeProfileHtml(fmtRelative(lib.last_scan_at))}</span>
+                <span class="row-stack-value" data-library-last-scan>${scanRunning ? 'running…' : escapeProfileHtml(fmtRelative(lib.last_scan_at))}</span>
               </div>
               ${(!scanRunning && lib.last_scan_at)
-                ? `<div class="row-stack-sub" style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lib.last_scan_at))}</div>`
+                ? `<div class="row-stack-sub" data-library-last-scan-at style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lib.last_scan_at))}</div>`
                 : ''}
             </div>
           `}
@@ -18506,6 +18621,67 @@
      same in-place targets that the old poll used. */
   let _libraryStreamCtrl = null;
 
+  function _libraryStatCells(lib) {
+    return _statCell('Tracks',  fmtNum(lib.total_tracks))
+         + _statCell('Artists', fmtNum(lib.total_artists))
+         + _statCell('Albums',  fmtNum(lib.total_albums))
+         + _statCell('Genres',  fmtNum(lib.total_genres));
+  }
+
+  // The Library screen's numbers, written where they stand whenever a wake
+  // finds them moved — the counts, the size, the last scan's time, how much
+  // is away. A scan too short to be seen running changes only these (the
+  // folder watcher's, of a folder that left or came back), and so do other
+  // producers of the Library stream's wakes while no worker of this screen
+  // runs (an HQPlayer library's import, a background pass): never a redraw.
+  // While a scan runs, "Last scan" keeps its "running…".
+  function _refreshLibraryNumbers(root, lib, scanRunning) {
+    const set = (sel, text) => {
+      const el = root.querySelector(sel);
+      if (el && el.textContent !== text) el.textContent = text;
+    };
+    const stats = root.querySelector('[data-library-stats]');
+    if (stats) {
+      const cells = _libraryStatCells(lib);
+      if (stats.dataset.drawn !== cells) { stats.innerHTML = cells; stats.dataset.drawn = cells; }
+    }
+    set('[data-library-size]', fmtBytes(lib.total_size_bytes));
+    if (!scanRunning) {
+      set('[data-library-last-scan]', fmtRelative(lib.last_scan_at));
+      if (lib.last_scan_at) set('[data-library-last-scan-at]', fmtAbs(lib.last_scan_at));
+    }
+    set('[data-library-away]', _count((lib.away || {}).albums, 'album', 'albums'));
+  }
+
+  // What decides the Library screen's structure beyond its workers and its
+  // emptiness: the folder, whether anything is away (the Away block and its
+  // button), whether a scan ever ran (the line under "Last scan"). Kept on
+  // the drawn screen (data-library-drawn) so a wake can tell.
+  function _libraryDrawn(lib) {
+    return encodeURIComponent(JSON.stringify([
+      lib.music_path || '', ((lib.away || {}).copies || 0) > 0, !!lib.last_scan_at]));
+  }
+
+  // Whether the Library screen as drawn (`root`) shows another structure
+  // than `lib` asks for: a scan or an analysis it does not show, or shows
+  // and is over; empty against not; or — with no worker running — another
+  // folder, an Away block to add or take away, a first scan's time. Its
+  // numbers are no structure (_refreshLibraryNumbers). Pure: the DOM is
+  // read, nothing is written.
+  function _libraryStructureStale(root, lib, scanRunning, enrichRunning) {
+    const shownScan   = !!root.querySelector('[data-cancel-scan]');
+    const shownEnrich = !!root.querySelector('[data-cancel-enrich]');
+    const shownEmpty  = !!root.querySelector('.empty-library');
+    const isEmpty     = (lib.total_tracks || 0) === 0;
+    const drawn       = root.querySelector('[data-library-drawn]');
+    return shownScan !== scanRunning
+        || (shownEnrich && !enrichRunning)
+        || (!shownEnrich && enrichRunning && !!lib.analysis_available && !isEmpty)
+        || shownEmpty !== isEmpty
+        || (!scanRunning && !enrichRunning && !!drawn
+            && drawn.getAttribute('data-library-drawn') !== _libraryDrawn(lib));
+  }
+
   function _subscribeLibraryStream(root) {
     if (_libraryStreamCtrl) { _libraryStreamCtrl.abort(); _libraryStreamCtrl = null; }
 
@@ -18536,6 +18712,7 @@
       if (enrichLine && enrichProgress && enrichLine.textContent !== enrichProgress) {
         enrichLine.textContent = enrichProgress;
       }
+      _refreshLibraryNumbers(root, lib, scanRunning);
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
       _refreshEnrichRow(root, 'instruments', lib.instruments_done, lib.analysable_tracks);
@@ -18551,9 +18728,12 @@
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.total_tracks);
       _askPrunePlan(lib.scan && lib.scan.prune_plan);
 
-      // A worker finishing → full re-render, which flips its Cancel row back.
-      const scanEnrichWasRunning = !!root.querySelector('[data-cancel-scan], [data-cancel-enrich]');
-      if (scanEnrichWasRunning && !scanRunning && !enrichRunning) {
+      // The screen is drawn again only where its structure no longer says
+      // what the library is: a worker finished (its Cancel row flips back);
+      // a scan runs that the screen does not show — one the folder's choice
+      // or the folder watcher started, not a tap here; the library stopped
+      // being empty, or became so. Everything else is updated in place above.
+      if (_libraryStructureStale(root, lib, scanRunning, enrichRunning)) {
         if (parseHash().startsWith('more/library')) render();
       }
     }

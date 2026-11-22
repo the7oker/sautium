@@ -514,7 +514,8 @@ comes after the control port answers again — so neither can end the wait.
   about six in SDM at the highest rate with the longest filters; a
   short silence, never a build: a command behind it waits, and past it
   HQPlayer is "not answering" (people's commands refused with that line,
-  questions go on until it answers) — and `BUILD_LIMIT_S` (10 min) for what may set off a build or meet
+  questions go on until it answers) — and `BUILD_LIMIT_S` (10 min; the
+  benchmark's own bound is a minute since 2026-11-22) for what may set off a build or meet
   one: the Set* commands, Play, SelectTrack, Seek, Next, Previous.
 - **The build watch** (`hqp_link.BuildWatch`, one per link). An answer
   later than `BUILDING_AFTER_S` (1 s) is HQPlayer building: the player
@@ -1190,7 +1191,13 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   up with, "1 / 2" in blocks of two rounds (each side first once a block),
   stopped by two "no difference", a clear pick (a flat Beta prior,
   P > 95 %) or ten rounds. Filters only, in PCM and in SDM mode; never PCM
-  against DSD; never a pair at two output rates.
+  against DSD; never a pair at two output rates. A list with no filter to
+  compare says why, by the reason that left out the most (since 2026-11-22,
+  B-120): none speed-tested on this computer for that mode and engine ("run
+  the Benchmark, then compare", the Benchmark's row as the way), every other
+  one too slow here, and so on; only when the answers emptied it does it say
+  every kind of difference was heard as none. A filter that stopped HQPlayer
+  here within a minute (`slow_start`) is left out as that.
 - **The fragment** is a FLAC cut of the track's own file — the passage the
   person chose on the sheet, 20 ms fades, after a lead of digital silence
   (`transcode.flac_fragment_path_for_file`) — handed to HQPlayer through
@@ -1809,7 +1816,10 @@ while HQPlayer is not playing: one toast with its Why? — a lasting one, on
 screen until its close or until the status offers the diagnosis no more
 (since 2026-11-14; a "Why didn't it play?" tag stood on Now Playing beside
 that track before) — and a sheet with the sentence, the next step and the raw
-trace; the HQPlayer screen lists the recent attempts. A refused rate
+trace; the HQPlayer screen lists the recent attempts that did not play — one
+line when none failed — with every one folded under "All plays" (since
+2026-11-22, B-125: a good play's trace is what a failed one is compared
+against). A refused rate
 combination's toast carries one action, "HQPlayer settings", which opens
 that screen with the picker that needs changing (the diagnosis's `cause`:
 the filter's, the modulator's). Once HQPlayer
@@ -2284,18 +2294,31 @@ cooling — so Sautium measures it instead of predicting it
   at the speed that point itself showed, never the key's p10 that later
   listens move. A key measured again without a dropout no longer counts.
   Nothing is blocked; an entry never measured has no mark and, since
-  2026-11-17, the muted line "Not measured on this computer" on its row of
+  2026-11-17, the muted line "Speed not tested on this computer" (so worded
+  since 2026-11-22) on its row of
   the filter and modulator sheets (a PCM dither's plain picker says
   nothing) — said only where the marks are read for a known source and
   setting (`headroom.setting`). A key a benchmark asked for that HQPlayer
-  refused or never got going here (its newest answer, `headroom.refused`)
-  says "HQPlayer refuses it at this setting" or "HQPlayer never got it going
-  on this computer" instead, with nothing to run (a point is keyed by the
+  refused, never got going, or stopped answering in here (its newest answer,
+  `headroom.refused`) says "HQPlayer refuses it at this setting", "HQPlayer
+  never got it going on this computer" or "Over 1 min to start here" instead,
+  with nothing to run — choosing a filter that stopped HQPlayer asks first
+  (since 2026-11-22) — (a point is keyed by the
   rate it asked — 0 at the automatic rate slot — a mark by the rate that
-  plays; both are read). Where a run can play the
+  plays; both are read). A rung a neighbour on its ladder answered for
+  (`implied`) carries its class in a word ("too slow", "keeps up") and the
+  rate that answered, no speed — while that neighbour's newest benchmark
+  answer still says so at today's line; planning never reads those rows (it
+  asks the measurements afresh). Where the readings swung, the mark is their
+  range ("21–33×"); "~" is left for a point near the line that did not
+  settle. Beside a key the running engine has not measured, the newest
+  earlier engine's mark in the same CUDA state and mode is a hint
+  ("6.2.3: 2.1×", no class colour, `headroom.earlier`) — never a class:
+  Compare by ear, the rate check and the benchmark's plan read the running
+  engine's alone (the owner's word, 2026-11-22). Where a run can play the
   source as a test signal — PCM stereo at a rate of the 44.1k, 48k or 32k
   families up to 768 kHz, `headroom.measurable` — and a run could start, the
-  line ends in **Measure**:
+  line ends in **Test speed** ("Measure" until 2026-11-22):
   the benchmark for that entry alone (`POST /api/hqplayer/benchmark` with
   `{"entry": {"kind": "filter"|"shaper", "name", "src_rate",
   "src_channels"}}`, the source the state's `headroom.source` named; in the
@@ -2310,7 +2333,11 @@ cooling — so Sautium measures it instead of predicting it
   within 90 days: a benchmark sample or three listens of the key, or an
   earlier run's point that ASKED for it and ended in an answer
   (`hqp_benchmark_points`: measured, unsettled, dropped out, refused, never
-  started on this host — not one that failed to run). A repeat run fills gaps: a combination HQPlayer refuses
+  started on this host, no start within the build limit (`slow_start`,
+  since 2026-11-22; migration 072 named the two silent builds of 2026-11-20
+  so) — not one that
+  failed to run, nor a rung a neighbour on its ladder answered for
+  (`implied`: written for the sheet, read afresh by every plan)). A repeat run fills gaps: a combination HQPlayer refuses
   ("…512+fs" below 512×) and an adaptive output rate that plays another rate
   than the one asked are never samples of the asked key, and the ledger is
   what keeps them from being planned again. HQPlayer refuses a combination at
@@ -2381,12 +2408,25 @@ cooling — so Sautium measures it instead of predicting it
   points. A point is Stop → its changed knobs → State read back (the
   selection the run set last is kept on its row) → SelectTrack, then
   `<Status/>` until it names the slot (2 s at most — a stopped HQPlayer plays
-  the slot it is given; the read confirms which) → Play; another entry playing is selected
-  once more. Its readings count after 5 s of moving position (counted again
-  when the position stalls for two ticks before them), are accepted when the
-  last five stay within ±2 % of their mean with no trend (a running average
-  can be equal three times and still lag), and are recorded unsettled at
-  15 s; the p10 is stored with the time to start and to settle. A dropout is
+  the slot it is given; the read confirms which) → Play, only where the
+  select left HQPlayer stopped on the slot (since 2026-11-22: 6.3.3 in PCM
+  refuses DSD128 to any rate under the 352.8 kHz it decimates it to,
+  "Requested filter not possible with this rate combination 352800/176400,
+  stop", forgets the slot, and a Play then started the playlist at its first
+  entry — "HQPlayer played entry 1 instead of 3" ended two runs); another
+  entry playing is selected once more. Its readings count after 5 s of
+  moving position (counted again when the position stalls for two ticks
+  before them). Far from the class line its class is plain however they
+  swing (since 2026-11-22: on 6.3.3 they swing ±5–15 %, and the ±2 % band
+  had settled 21 of 507 points ever): five readings or more whose lowest is
+  1.5 × the "keeps up" line or more (1.88× at the default line), or whose
+  highest is under the "too slow" line over 1.5 (0.67×), decide it, its
+  speed the p10 of all of them, their lowest and highest kept (`speed_lo`,
+  `speed_hi`, migration 071). Near the line the readings are accepted when
+  the last five stay within ±2 % of their mean with no trend (a running
+  average can be equal three times and still lag), and are recorded
+  unsettled at 15 s; the p10 is stored with the time to start and to
+  settle. A dropout is
   the DSP falling behind and only that: once the readings run, the output
   under 0.1 for three ticks while the input holds, the position frozen for
   two, or the transport stopped, at a speed under 1.5×; before the readings
@@ -2425,17 +2465,23 @@ cooling — so Sautium measures it instead of predicting it
   first build is a start time (`init_s`), not a setting the host cannot
   run. A point starts at the SelectTrack (a stopped HQPlayer plays the slot
   it is given — "GoTo 1", then "Play (1/0)" in its log), and from there the
-  run asks for `<Status/>` again on a new connection every 45 s until
+  run asks for `<Status/>` again on a new connection every 20 s (45 s
+  until 2026-11-22) until
   HQPlayer answers, then watches the point on — the silence is not held
   against its start and point deadlines. The second live run gave up after
   10 s instead and set HQPlayer up again: its Stop arrived right after the
   build and stopped what had just been built, and a build it interrupted
   failed inside HQPlayer (`ThreadPoolCreate(): lThreadCntr != 0`, `Stop
-  request (reset)`). A point still building after 10 minutes never started
-  on this host (`unstarted`): not asked again by a later run, which would
-  only take the machine back where the build took it (the second run met
-  HQPlayer grown to 38 GB on a 32 GB laptop, swapping); its ladder steps
-  down from it, and three points in a row that do not play stop the run.
+  request (reset)`). A point still building after a minute (10 minutes
+  until 2026-11-22), HQPlayer
+  answering all through (Embedded), never started on this host
+  (`unstarted`): not asked again by a later run, which would only take the
+  machine back where the build took it (the second run met HQPlayer grown
+  to 38 GB on a 32 GB laptop, swapping); its ladder steps down from it.
+  Three points of one source in a row that do not play end that source's
+  points, said in the run's note; the run goes on with the others and ends
+  only when its control's source — the owner's setting's — goes, or none is
+  left (since 2026-11-22; before, any three ended the run).
   Kept for good, that mark waits for a control: the first setting the run
   saw start is played again, and only if it starts (within three times its
   first start, a minute at least) is the point recorded — otherwise HQPlayer
@@ -2456,7 +2502,40 @@ cooling — so Sautium measures it instead of predicting it
   `FLAC__STREAM_DECODER_SEEK_ERROR`) and stop — after which its output
   engine may not start again until HQPlayer restarts (2026-10-04): a DAC
   as its output is what the benchmark should run against.
-  An HQPlayer silent that long is taken for hung, and the run ends there. A
+  An HQPlayer silent that long, from the point's Play on, did not start the
+  combination here within the bound (`slow_start`, since 2026-11-22): a
+  long build and a stopped HQPlayer look the same from outside — 6.3.3
+  Desktop built poly-sinc-hb-xs at 44.1 → 768 kHz for 6 min in silence and
+  then ran it at 21×, and between rate families some filters take hours to
+  build (the two silences of 2026-11-20,
+  with the CUDA resampler, were most likely builds the owner ended after about half an
+  hour). The bound is a minute (the owner, 2026-11-22: a person does not
+  wait minutes for the music to start, and the same filter at the same
+  ratio is built again at every album of another rate; of 1 451 builds in
+  the lab's HQPlayer log, every one within a rate family took ≤ 10 s, and
+  between families all but four ≤ 10 s), and the run ends at it: HQPlayer
+  answers nothing while it builds. At 20 s of silence the run's line says
+  HQPlayer is still preparing that filter at that rate and that between
+  rate families some filters take long to prepare. Restarted by the person
+  out of a silence past those 20 s, HQPlayer is not asked the point again
+  in that run: the run ends there (the point failed, asked again by a
+  later run) and puts HQPlayer back at once; cancelled past them, the run
+  is marked as having lost HQPlayer, so the restart that follows is put
+  back whole.
+  A `slow_start` point is not asked again on that engine, CUDA state and
+  mode; the run ends at once and says HQPlayer is still preparing it or has
+  stopped — busy cores, still working; idle, stopped; either way a restart
+  ends it — and that Sautium puts everything back when it answers, and
+  marks itself as having lost HQPlayer (`lost_at`): what a restart leaves —
+  HQPlayer's own saved settings — is no one's change, and the run is put
+  back whole over it. The points at a
+  rate of another family than their source's (only the owner's rate makes
+  one) go after every ladder point, before the closing drift check: every
+  slow build and both ten-minute silences were that conversion. At an automatic output
+  rate the owner's setting plays first on each source, and the rest is
+  planned at the rates it played (asked as Auto plays it where HQPlayer's
+  list does not hold that rate), so the rows the sheet reads there are
+  filled. A
   setting far below real time can take a weak host down with it: on a Pi 5,
   poly-sinc-long-lp with ASDM7EC-ul at DSD128 left HQPlayer playing it after
   a cancel, its control port answering nothing for minutes, until it was
@@ -2491,7 +2570,8 @@ cooling — so Sautium measures it instead of predicting it
   playback. Its volume is lowered to the owner's level when HQPlayer came
   back louder, raised only from the level the run set itself, and
   otherwise left as it is; one notice (`hqplayer.run_restored`) says
-  Sautium lost the connection to HQPlayer during the run of that date —
+  Sautium lost the connection to HQPlayer during the run of that date (after
+  a hang: that HQPlayer is back and its settings are as they were) —
   the date keeps a put-back days later from reading as a change made on
   its own — and that the settings from before it were put back, with the
   level the volume was left at beside the owner's, until the owner saw it

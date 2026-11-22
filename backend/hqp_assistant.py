@@ -78,6 +78,7 @@ PAGE_OF = "Measured properties of {name}: {href}"
 # This host's speeds: compare's CPU line and host_fit
 CPU_AT = "On this HQPlayer, at {rate} with {other}, for a {source}:"
 CPU_RUNS = "{name} runs at {speed}× ({samples}){unsettled} — {cls}"
+CPU_IMPLIED = "{name}: {cls}, by the Benchmark's measurement at {from_rate} (not measured itself)"
 CPU_NO_SOURCE = ("On this HQPlayer no speed is read for the setting now: it is read for the track playing, else "
                  "for a file next in the queue. hqplayer_host_fit lists each one measured.")
 NOT_MEASURED_HERE = "{name}: not measured on this HQPlayer — the Benchmark on the HQPlayer screen measures it."
@@ -95,6 +96,9 @@ RUNS = "{rate} · {other}: runs at {speed}× ({samples}){unsettled}{dropout} —
 DROPOUT = ", and it dropped out here"
 REFUSED_HERE = "{rate} · {other}: refused by HQPlayer when the Benchmark asked it"
 UNSTARTED_HERE = "{rate} · {other}: never got going here when the Benchmark asked it"
+SLOW_START_HERE = ("{rate} · {other}: did not start within a minute when the Benchmark asked it "
+                   "(HQPlayer answers nothing while it prepares) — not asked again on this engine")
+IMPLIED_HERE = "{rate} · {other}: {cls}, by the Benchmark's measurement at {from_rate} (not measured itself)"
 AUTO = "auto"
 MORE = "… and {n} more."
 NO_RATE = "This HQPlayer holds no record at “{rate}” in {mode} mode. The rates it holds records at there: {rates}."
@@ -576,9 +580,14 @@ def _cpu(read: Read, a: Named, b: Named) -> List[str]:
                          source=_source(src["rate"], src["channels"]))]
     for n in (a, b):
         mark = marks.get(n.name)
-        out.append(INDENT + (NOT_MEASURED_HERE.format(name=n.name) if mark is None else CPU_RUNS.format(
-            name=n.name, speed=f"{mark['speed']:.2f}", samples=_samples(mark["n"]),
-            unsettled="" if mark["settled"] else UNSETTLED, cls=_class(mark["class"], th))))
+        out.append(INDENT + (
+            NOT_MEASURED_HERE.format(name=n.name) if mark is None
+            else CPU_IMPLIED.format(name=n.name, cls=_class(mark["class"], th),
+                                    from_rate=_rate_word(mark["implied_from"]))
+            if mark["speed"] is None
+            else CPU_RUNS.format(name=n.name, speed=f"{mark['speed']:.2f}", samples=_samples(mark["n"]),
+                                 unsettled="" if mark["settled"] else UNSETTLED,
+                                 cls=_class(mark["class"], th))))
     return out
 
 
@@ -630,6 +639,11 @@ def _host_row(r: Mapping[str, Any], knob: str, th: Mapping[str, Any]) -> str:
         return REFUSED_HERE.format(rate=rate, other=other)
     if r["class"] == "unstarted":
         return UNSTARTED_HERE.format(rate=rate, other=other)
+    if r["class"] == "slow_start":
+        return SLOW_START_HERE.format(rate=rate, other=other)
+    if r["speed"] is None:
+        return IMPLIED_HERE.format(rate=rate, other=other, cls=_class(r["class"], th),
+                                   from_rate=_rate_word(r["implied_from"]))
     return RUNS.format(rate=rate, other=other, speed=f"{r['speed']:.2f}", samples=_samples(r["n"]),
                        unsettled="" if r["bench_settled"] is not False else UNSETTLED,
                        dropout=DROPOUT if r["dropout"] else "", cls=_class(r["class"], th))

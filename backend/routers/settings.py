@@ -1500,15 +1500,17 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": "hqplayer.ab_refused", "kind": "warning",
                       "since": ab_refused["since"].isoformat(), "until": None,
                       "data": ab_refused["data"]})
-    # One put back after HQPlayer went away under it: a report, dropped once
-    # seen (_notices_state)
+    # One put back after HQPlayer went away under it, or answered nothing
+    # past the build limit in it (`slow_start`): a report, dropped once seen
+    # (_notices_state)
     restored = hqp_benchmark.restored_notice()
     if restored is not None:
         items.append({"key": "hqplayer.run_restored", "kind": "info",
                       "since": restored["since"].isoformat(), "until": None,
                       "data": {"run_at": restored["run_at"].isoformat(),
                                "volume_left": restored["volume_left"],
-                               "volume_before": restored["volume_before"]}})
+                               "volume_before": restored["volume_before"],
+                               "slow_start": restored["slow_start"]}})
     # One whose put-back could not read the mode it measured, or set the
     # owner's selection there back — HQPlayer did not let it — until that
     # mode is judged at HQPlayer's nearest rest or the next run's start (only

@@ -281,3 +281,26 @@ def test_an_hqp_ab_block_carries_one_filter_name():
     blocks = parse_blocks_payload('[{"kind": "hqp_ab", "items": [{"filter": " sinc-M "}, {"filter": "xla"}]},'
                                   ' {"kind": "hqp_ab", "items": [{"filter": ""}]}]')
     assert blocks == [{"kind": "hqp_ab", "items": [{"filter": "sinc-M"}]}]
+
+
+def test_the_dominant_reason_left_out_the_most_ties_in_its_order():
+    s = S.Screened([])
+    assert s.dominant() is None
+    for name in ("a", "b"):
+        s.leave("too_slow", name)
+    s.leave("not_measured_here", "c")
+    assert s.dominant() == "too_slow"
+    s.leave("not_measured_here", "d")
+    assert s.dominant() == "not_measured_here"          # a tie: the earlier reason
+    s.leave("slow_start", "e")
+    s.leave("slow_start", "f")
+    s.leave("slow_start", "g")
+    assert s.dominant() == "slow_start"
+
+
+def test_a_filter_asked_and_answered_without_a_speed_is_left_out_as_its_answer():
+    champion = S.Filter("own", 0, 2.0, "ok", at={"phase": 0.0, "cutoff": 0.9, "ringing": 300.0})
+    slow = S.Filter("h", 1, None, None, asked="slow_start")
+    never = S.Filter("n", 2, None, None)
+    out = S.screen([champion, slow, never], champion, atlas=False)
+    assert out.left_out == {"slow_start": ["h"], "not_measured_here": ["n"]}

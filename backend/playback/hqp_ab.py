@@ -106,6 +106,10 @@ SOUND_S = 15.0
 END_S = 90.0
 DELAY_S = 15.0
 STATUS_TICK_S = 0.25
+# How long the sitting's own link waits on one answer before it asks again on
+# a new connection: its builds are paid in the paused lead, bounded by
+# FIRST_FRAME_S, never by the benchmark's one-minute test
+ANSWER_S = 45.0
 # A step whose silence missed this often in a row is not played again: the
 # sitting ends (what grows P after a miss converges in a step or two)
 SLIPS_A_STEP = 3
@@ -119,23 +123,46 @@ _DB_EPS = 0.05
 
 WORDS = {
     "late": "HQPlayer starts it too late here to compare it",
-    "not_measured_here": "Not measured on this computer · The Benchmark measures them",   # W16
+    "not_measured_here": "Speed not tested on this computer · The Benchmark tests them",   # W16
     "too_slow": "Too slow here: {speed}×",
+    "too_slow_implied": "Too slow here: slower than at {from_rate}",
     "rate": "It would make HQPlayer stop on this track: it does not convert {src} to {out}",
     "not_in_atlas": "Not in Sautium's measurements for this context",
+    "slow_start": "Over a minute to start here",
+    "refused": "HQPlayer refuses it at this setting",
+    "unstarted": "HQPlayer never got it going on this computer",
     "identical": "The same output as {other}, so one of them is offered.",
     "other_rate": "Left out: it plays at {rate} here, and your DAC's display would show it.",   # W18
     "listed": "HQPlayer does not list it now",
 }
+
+# Why no filter is left to compare yours with, by the reason that left out
+# the most (Screened.dominant); `way`: what the sheet offers next to it
+EMPTY = {
+    "not_measured_here": ("No filter is speed-tested on this computer for {mode} on HQPlayer "
+                          "{engine} yet: run the Benchmark, then compare."),
+    "too_slow": "Every other filter is too slow here at {out}.",
+    "rate": "Every other filter would make HQPlayer stop on this track: none converts {src} to {out}.",
+    "not_in_atlas": "No other filter is in Sautium's measurements for this context.",
+    "slow_start": "Every other filter took over a minute to start here.",
+    "refused": "HQPlayer refuses every other filter at this setting.",
+    "unstarted": "HQPlayer never got the other filters going on this computer.",
+    "identical": "Every other filter gives the same output as yours here.",
+    "other_rate": "Every other filter plays at another rate here, and your DAC's display would show it.",
+    "late": "HQPlayer starts every other filter too late here to compare them.",
+    "listed": "HQPlayer lists no other filter now.",
+}
+EMPTY_WAY = {"not_measured_here": "benchmark"}
 
 
 class Refused(RuntimeError):
     """Why a sitting cannot start, in words for the person; `code` for the
     sheet where it offers something (fixed_volume: Go on)."""
 
-    def __init__(self, words: str, code: Optional[str] = None):
+    def __init__(self, words: str, code: Optional[str] = None, way: Optional[str] = None):
         super().__init__(words)
         self.code = code
+        self.way = way
 
 
 class _Stopped(Exception):
@@ -318,6 +345,12 @@ class Sitting:
         self.note: Optional[str] = None
         self.say: Optional[Dict[str, Any]] = None
         self.sounding: Optional[Dict[str, Any]] = None
+        # Each fragment as the sitting timed it, once its sound showed
+        # (_fragment): the anchor its silence is measured from, the meter's
+        # position when its pause landed, the resume, its sound at the
+        # output, the P it was played at, and whether its silence missed — a
+        # silence is checked against the sitting's own events (B-119)
+        self.fragments: List[Dict[str, float]] = []
         self.result: Optional[Dict[str, Any]] = None
         self.timings: Dict[str, search.Timing] = {}
         self.lead_s = search.LEAD_MIN_S
@@ -406,8 +439,8 @@ class Sitting:
         rate_out = (status.active_rate if playing and status.active_rate
                     else next((r["rate"] for r in rates if r["index"] == st["rate"]), 0))
         if not rate_out:
-            raise Refused("HQPlayer picks its output rate as it plays: start the track, "
-                          "then compare")
+            raise Refused("HQPlayer is stopped and its output rate is Auto: press Play, then "
+                          "compare — or choose a fixed output rate in HQPlayer.")
         s.vr, s.volume = vr, st["volume"]
         s.mute = _mute_level(vr, st["volume"])
         if (vr is None or not vr["enabled"]) and not fixed_volume_ok:
@@ -442,6 +475,10 @@ class Sitting:
         if self.champion.at is None:
             raise Refused("Find my filter needs your filter in Sautium's measurements for "
                           "this context; Two filters, blind works without them.", code="chain")
+        if not self.screened.candidates:
+            # Nothing to compare with before any answer: why, never the answers
+            words, way = self._empty(self.screened)
+            raise Refused(words, code="chain", way=way)
         s = search.Search(self.screened.candidates, self.champion)
         search.replay(s, _logged(self.ep["id"], self.engine, self.ctx))
         pool = search.pool(s)
@@ -449,6 +486,17 @@ class Sitting:
             raise Refused("Nothing left to compare yours with here: every kind of difference "
                           "was heard as none, or none is left to try.", code="chain")
         self.pool, self.search = pool, s.copy(pool)
+
+    def _empty(self, screened: search.Screened) -> Tuple[str, Optional[str]]:
+        """Why a list has no filter to compare with, by the reason that left
+        out the most, and the way it offers (the Benchmark's, for filters
+        not speed-tested here)."""
+        from hqp_atlas import rate_name
+        reason = screened.dominant() or "listed"
+        return (EMPTY.get(reason, EMPTY["listed"]).format(
+                    mode=self.ctx["mode"].upper(), engine=self.engine or "this engine",
+                    src=rate_name(self.ctx["src_rate"]), out=rate_name(self.ctx["rate_out"])),
+                EMPTY_WAY.get(reason))
 
     def _choose_second(self, second: Optional[str]) -> None:
         if second is None:
@@ -504,7 +552,7 @@ class Sitting:
         try:
             with manager.hold("ab", LABEL, spot=self.spot):
                 self._publish()
-                link = _Link(self._halt.wait, answer_s=search_answer_s())
+                link = _Link(self._halt.wait, answer_s=ANSWER_S)
                 if not link.connect():
                     self._finish("failed", "HQPlayer is not answering")
                     return
@@ -853,15 +901,21 @@ class Sitting:
             if warm:
                 self._stop_out()
                 raise _WarmLate(lead)
+            # sounded before its resume: missed, its sound out all the same
+            self.fragments.append({"anchor": anchor, "p": p, "resume": resume, "out_onset": None,
+                                   "silence_s": self.silence_s, "slipped": True})
             self._slipped(name, p=lead)
         onset = self._wait(lambda: self._onset(resumed), SOUND_S + self.lead_s, "sound of the passage")
         out_onset = onset + d
         if not warm:
+            self.fragments.append({"anchor": anchor, "p": p, "resume": resume,
+                                   "out_onset": out_onset, "silence_s": self.silence_s})
             self.sounding = {"which": label, "in_s": round(max(out_onset - time.time(), 0.0), 3),
                              "length_s": self.length_s}
             self._publish()
             realised = out_onset - anchor
-            if abs(realised - self.silence_s) > self.tolerance:
+            self.fragments[-1]["slipped"] = abs(realised - self.silence_s) > self.tolerance
+            if self.fragments[-1]["slipped"]:
                 self._slipped(name, r=out_onset - resumed - (lead - p))
         last, ended = self._end()
         end_out = last + d
@@ -1282,11 +1336,14 @@ class Sitting:
         other = next((x.name for x in self.all_filters
                       if f is not None and x.group == f.group and x.name != name
                       and (x.name == self.yours or x in self.screened.candidates)), None)
+        if reason == "too_slow" and f is not None and f.speed is None and f.implied_from:
+            reason = "too_slow_implied"
         return WORDS[reason].format(speed=f"{f.speed:.1f}" if f and f.speed else "?",
                                     src=rate_name(self.ctx["src_rate"]),
                                     out=rate_name(self.ctx["rate_out"]),
                                     other=other or "another one",
-                                    rate=rate_name(kw.get("rate") or self.ctx["rate_out"]))
+                                    rate=rate_name(kw.get("rate") or self.ctx["rate_out"]),
+                                    from_rate=rate_name(f.implied_from) if f and f.implied_from else "")
 
     def _left_out(self, screened: search.Screened) -> List[Dict[str, str]]:
         return [{"name": n, "why": self._reason_words(r, n, rate=self.left_rates.get(n))}
@@ -1317,7 +1374,10 @@ class Sitting:
             "seconds": {"list": [{"name": f.name, "speed": f.speed, "tight": f.klass == "tight",
                                   "picks": self.picks.get(f.name, 0)}
                                  for f in self.second_list.candidates],
-                        "left_out": self._left_out(self.second_list)},
+                        "left_out": self._left_out(self.second_list),
+                        # None to choose from: why, in place of "one you choose"
+                        "empty": (dict(zip(("words", "way"), self._empty(self.second_list)))
+                                  if not self.second_list.candidates else None)},
             "picks_yours": self.picks.get(self.yours, 0),
             "step": self.step_view, "sounding": self.sounding, "say": self.say,
             "result": self.result, "ended": self.ended, "note": self.note,
@@ -1360,9 +1420,7 @@ class Sitting:
                          {"name": pair.other, "picks": m, "speed": speeds.get(pair.other)}]}
 
 
-def search_answer_s() -> float:
-    from playback.hqp_benchmark import ANSWER_WAIT_S
-    return ANSWER_WAIT_S
+
 
 
 def _chain_say(chain: search.Chain) -> Optional[Dict[str, Any]]:
@@ -1445,6 +1503,7 @@ def _screen(s: Sitting, filters: List[dict], own: str, shaper: str, mode_name: s
     out = []
     for f in filters:
         mark = hr["filters"].get(f["name"]) or {}
+        asked = (hr.get("refused") or {}).get("filters", {}).get(f["name"])
         at = group = None
         if atlas is not None:
             found = atlas.lookup("filter", f["name"], engine, s.ctx["mode"])
@@ -1456,7 +1515,9 @@ def _screen(s: Sitting, filters: List[dict], own: str, shaper: str, mode_name: s
                                  # the class's arithmetic alone (no measurement passed): a stop
                                  # HQPlayer was measured making is the rate check's to say
                                  refusal(RateFilter(f["name"], (f.get("parsed") or {}).get("ratio")),
-                                         s.ctx["src_rate"], s.ctx["rate_out"], None) is None, group, at))
+                                         s.ctx["src_rate"], s.ctx["rate_out"], None) is None, group, at,
+                                 asked=None if mark else asked,
+                                 implied_from=mark.get("implied_from")))
     s.all_filters = out
     champion = next(f for f in out if f.name == own)
     return (atlas, search.screen(out, champion, atlas=atlas is not None),

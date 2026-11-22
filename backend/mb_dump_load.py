@@ -605,19 +605,20 @@ def download_and_load(progress_cb: ProgressCb = _noop, force: bool = False) -> D
     # enabled 'local' state the moment the full load lands.
     db_execute("NOTIFY sautium_mb_sources")
     # Last, once the dump's own steps are done: a composer written "Last,
-    # First" takes the name the dump's sort name says it stands for
-    # (credits._named_by_dump), so a dump that arrives after the scan names
-    # its credits now (CREDITS-1-DESIGN §5.3).
+    # First" takes the name the dump's sort name says it stands for, and a
+    # comma value the dump knows whole is one name, not a list
+    # (credits._names_of), so a dump that arrives after the scan names its
+    # credits now (CREDITS-1-DESIGN §5.3, §12.6).
     _rename_composers("under the dump's names")
     progress_cb({"phase": "done", "version": version})
     return {"version": version, "loaded": True, "up_to_date": False}
 
 
 def _rename_composers(why: str) -> None:
-    from credits import rename_inverted
+    from credits import rederive_commas
     from database import get_db_context
     with get_db_context() as db:
-        renamed = rename_inverted(db)
+        renamed = rederive_commas(db)
         db.commit()
     if renamed:
         logger.info("composer credits derived again for %d track(s) %s", renamed, why)
@@ -842,8 +843,9 @@ def delete_dump() -> Dict:
                 os.remove(os.path.join(_DATA, name))
             except OSError:
                 pass
-    # the composers the dump had named take their written names again: the
-    # rule is the same for every node without it (credits._named_by_dump)
+    # the composers the dump had named take their written names again, and
+    # a list it knew whole its writers: the rule is the same for every node
+    # without it (credits._names_of)
     _rename_composers("as their tags write them, the dump gone")
     logger.info("MB dump deleted (~%.1f GB of tables freed)", freed / 1e9)
     return {"deleted": True, "freed_bytes": freed}

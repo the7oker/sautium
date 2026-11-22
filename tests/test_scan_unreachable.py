@@ -114,6 +114,43 @@ def main_module(monkeypatch):
     main._scan_state.update(saved)
 
 
+def test_a_folder_that_is_gone_is_refused_as_unreachable_not_reported_as_a_failed_scan(
+        cur, library, main_module, heard, caplog):
+    """A plugged disk pulled: its automount removes the mount point itself,
+    so the chosen folder is not empty — it is not there. The scan the wake
+    queued is refused like any walk over an unreachable library: one warning,
+    no traceback, nothing recorded (PI-NODE-2B item 8, S2)."""
+    import logging
+    _owned_file(cur)
+    library.rmdir()
+    with caplog.at_level(logging.WARNING, logger="main"):
+        main_module.request_scan(explicit=False)
+        main_module._scan_thread.join()
+
+    assert main_module._scan_state["running"] is False
+    assert main_module._scan_state["progress"] == f"Scan failed: {scanner.UNREACHABLE}"
+    said = [r for r in caplog.records if r.name == "main"]
+    assert [r.levelname for r in said] == ["WARNING"] and said[0].exc_info is None
+    assert _last_scan(cur) is None
+
+
+def test_a_folder_that_never_was_is_still_a_wrong_setting(cur, library):
+    library.rmdir()                      # nothing catalogued: no library to be away
+    with pytest.raises(ValueError, match="does not exist"):
+        scanner.LibraryScanner()
+
+
+def test_a_picked_folder_gone_before_its_first_file_is_away_not_a_wrong_setting(cur, library, monkeypatch):
+    """On a node whose owner picks the folder under mounted roots, the folder
+    is a choice, never a setting to get wrong: its disk pulled before any file
+    was read is the unreachable library too."""
+    import library_root
+    monkeypatch.setattr(library_root, "picks", lambda: True)
+    library.rmdir()
+    with pytest.raises(scanner.LibraryUnreachable):
+        scanner.LibraryScanner()
+
+
 def _owned_file(cur, album="Solar Fields/Shaped By Time", name="01.flac"):
     """A catalogued file with a track of its own; a second name in the same
     folder joins that folder's copy (one album, one variant)."""

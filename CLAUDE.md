@@ -250,11 +250,15 @@ See:
   tag rows are DERIVED (since 2026-11-21, step 2b; `backend/credits.py`):
   each file keeps the composers its tags name (`raw_composers` on
   `media_files` and `hqp_library_files` — COMPOSER, TCOM, ©wrt, a cue's
-  SONGWRITER, HQPlayer's `composer`; split on `;` and a spaced ` / ` only),
-  and `derive_composers` rewrites a track's rows from its owned files, best
-  copy first, at every write of them; the name is the artist's by the
-  UUID v5 rule (a composer who performs is one row), "Last, First" turned
-  only by the dump's sort name. Owned through a credit is owned
+  SONGWRITER, HQPlayer's `composer`; split on `;` and a spaced ` / `,
+  `Various`, `Various Composers` and `Unknown` read as none — since
+  2026-11-22), and `derive_composers` rewrites a track's rows from its owned
+  files, best copy first, at every write of them; the name is the artist's
+  by the UUID v5 rule (a composer who performs is one row), "Last, First"
+  turned only by the dump's sort name, and a value with `, ` a list of its
+  writers unless the node knows it whole (an artist row something besides a
+  credit holds, or on a dump node an MB name or sort name: `Earth, Wind &
+  Fire`; since 2026-11-22). Owned through a credit is owned
   (`sql_queries.ARTIST_OWNED`), never engaged. Nothing of it travels.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.

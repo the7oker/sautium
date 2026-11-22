@@ -341,7 +341,7 @@ def test_the_blocks_rows_say_each_state_in_its_words():
         "absent on a machine": "AI models Not available: no AI models exist for this machine.",
     }
     said = {name: case["text"] for name, case in out["software"].items()}
-    head = "Sautium 0.3.0 · 4f2a91c0e7b3"
+    head = "Sautium 0.3.0"
     assert said == {
         "no agent": f"{head} Updates: on the machine, run ./sautium update",
         "a launcher's": head,
@@ -362,6 +362,9 @@ def test_the_blocks_rows_say_each_state_in_its_words():
     assert "<b>local</b>" not in out["software"]["update refused"]["raw"]
     assert "<button" not in out["software"]["updating"]["raw"]
     assert 'data-action="host-check" disabled' in out["software"]["checking"]["raw"]
+    # The version is what a person reads; the commit is support's and rides in the value's title
+    assert "0.3.0" in said["never checked"] and "4f2a91c0e7b3" not in said["never checked"]
+    assert 'title="4f2a91c0e7b3"' in out["software"]["never checked"]["raw"]
 
 
 # -- the trail's three new marks (§4.1) ---------------------------------------------------------

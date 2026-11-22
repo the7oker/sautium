@@ -102,8 +102,9 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      the next scan, and on a mount that sends no events the watcher's start
      queues one until a whole walk has read the library under it
      (library_watch.start, scanner.TAGS_READ_KEY). The composer read
-     (CREDITS-1 step 2b, 2026-11-21: TAGS_READ_REV 2) reaches every node
-     the same way, and an HQPlayer's library by its own revision
+     (CREDITS-1 step 2b, 2026-11-21: TAGS_READ_REV 2; a placeholder none
+     and a comma list its writers, 2026-11-22: 3) reaches every node the
+     same way, and an HQPlayer's library by its own revision
      (hqp_endpoints.library_read_rev under hqp_library.LIBRARY_READ_REV: its
      next sync reads it whole, the attach's check included) — no step
      either, and no library hash is cleared: the hash is how a library that

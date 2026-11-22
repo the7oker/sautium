@@ -852,7 +852,8 @@ _REREAD_ROWS_SQL = text("""
     SELECT mf.id, mf.track_id::text AS track_id, mf.album_variant_id, mf.file_path,
            mf.cue_start_seconds, mf.raw_track_name, mf.raw_artist, mf.raw_album_artist,
            mf.raw_album, mf.raw_genre, mf.raw_composers, mf.duration_seconds, mf.sample_rate,
-           mf.bit_depth, mf.is_lossless, mf.stat_mtime_ns, mf.file_size_bytes, av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
+           mf.bit_depth, mf.is_lossless, mf.stat_mtime_ns, mf.file_size_bytes, mf.tags_read_rev,
+           av.raw_title AS v_title, av.raw_artist AS v_artist, av.album_id::text AS album_id
       FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
      WHERE mf.file_path = ANY(CAST(:paths AS text[]))
 """)
@@ -1064,9 +1065,12 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                     if (row.raw_genre or None) != (md.get("genre") or None):
                         touched_albums.add(row.album_id)
                 # the file's composers changed, it moved (a re-home: both tracks
-                # name what their files say now), or its rank among the
-                # track's copies did (the best copy's order leads)
+                # name what their files say now), its rank among the track's
+                # copies did (the best copy's order leads), or it was read
+                # under an older reader — whose composers may read the same
+                # and stand for others now (rev 3: a comma list's writers)
                 if (track != row.track_id or row.raw_composers != md.get("composers")
+                        or row.tags_read_rev < TAGS_READ_REV
                         or (row.is_lossless, row.sample_rate, row.bit_depth)
                         != (md.get("is_lossless", True), md.get("sample_rate"), md.get("bit_depth"))):
                     derive_due.update({row.track_id, track})
@@ -1243,8 +1247,9 @@ def _int_or_none(value) -> Optional[int]:
 # under an older one is read again by the next scan, in place, as a changed
 # file is: a reader that sees more (TITLE's values joined, the barcode)
 # reaches every file once (CANON-CLASSICAL-DESIGN §1). Rev 1: 2026-11-18;
-# rev 2, 2026-11-21: the composers (CREDITS-1-DESIGN §5).
-TAGS_READ_REV = 2
+# rev 2, 2026-11-21: the composers (CREDITS-1-DESIGN §5); rev 3, 2026-11-22:
+# a placeholder composer is none, a comma list its writers (§12.6).
+TAGS_READ_REV = 3
 # The revision the last whole walk read the library under (user_settings).
 TAGS_READ_KEY = "scanner.tags_read_rev"
 
@@ -1294,7 +1299,8 @@ def composer_names(audio) -> List[str]:
     COMPOSER field (Vorbis, APE), every TCOM value (ID3v2.4's list — v2.3
     has none, and its spec separates the composers of one string with `/`),
     every ©wrt; a publishing credit read away as from an artist
-    (without_rights_societies); split on `;` and a spaced ` / `."""
+    (without_rights_societies); split on `;` and a spaced ` / `, no
+    placeholder among them (credits.split_names)."""
     values = [v for v in map(without_rights_societies,
                              tag_values(audio, "composer", "TCOM", "\xa9wrt")) if v]
     version = getattr(audio.tags, "version", None)
@@ -1395,6 +1401,18 @@ class LibraryScanner:
         self.library_path = Path(library_path or settings.music_library_path)
 
         if not self.library_path.exists():
+            if library_path is None:
+                # The library's own folder gone under a catalogue that knows
+                # files — a disk pulled, its mount point removed with it — is
+                # the unreachable library every scan refuses (an expected
+                # condition, said in the Library row), not a failed scan.
+                refuse_if_unreachable()
+                # A folder the owner picked under the roots is never a wrong
+                # setting: gone before its first file was read, its disk is
+                # away all the same.
+                import library_root
+                if library_root.picks():
+                    raise LibraryUnreachable(UNREACHABLE)
             raise ValueError(f"Library path does not exist: {self.library_path}")
 
         logger.info(f"Initialized scanner for: {self.library_path}")
