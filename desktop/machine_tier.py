@@ -49,15 +49,52 @@ def auto_tier(device: str, accel_gb: float, ram_gb: float) -> str:
     return tier
 
 
-def birth_preset(ram_gib: float, data_root_removable: bool,
+# What Docker's data root, or a swap, sits on — and how a person would name it
+MEDIA = {"sd_card": "a microSD card", "emmc": "eMMC", "nvme": "an NVMe SSD", "ssd": "an SSD",
+         "hard_disk": "a hard disk", "usb_stick": "a USB stick", "usb_disk": "a USB disk",
+         "unknown": "a disk"}
+# Media a database wears out and waits on: a node whose data lives there is born Nano
+CARD_MEDIA = ("sd_card", "usb_stick")
+
+
+def _flag(value) -> bool:
+    """lsblk's boolean, as its JSON gives it across versions (true, "1", 1)."""
+    return value in (True, "1", 1)
+
+
+def storage_medium(chain: List[dict], sysfs: str = "/sys/block") -> str:
+    """The medium under a block device, one of MEDIA's keys. `chain` is
+    lsblk's own tree walked from the whole disk down to the device (its
+    NAME, RM, TRAN, ROTA columns): the disk says what it is, whatever sits
+    on it. A card and eMMC are both `mmcblk*`; the kernel says which in
+    <sysfs>/<disk>/device/type. Hot-pluggable decides nothing — an NVMe in a
+    USB case is, and is no card. A bridge that reports a stick as fixed, or
+    an SSD as removable, is read wrong: the caller says what was read."""
+    if not chain:
+        return "unknown"
+    disk = chain[0]
+    name, tran = str(disk.get("name") or ""), disk.get("tran")
+    if name.startswith("mmcblk"):
+        # Unreadable, it is taken for the card it most often is
+        return "emmc" if _read(os.path.join(sysfs, name, "device", "type")) == "MMC" else "sd_card"
+    if name.startswith("nvme") or tran == "nvme":
+        return "nvme"
+    if tran == "usb":
+        return "usb_stick" if _flag(disk.get("rm")) else "usb_disk"
+    if tran in ("sata", "ata"):
+        return "hard_disk" if _flag(disk.get("rota")) else "ssd"
+    return "unknown"
+
+
+def birth_preset(ram_gib: float, data_root_medium: str,
                  data_root_free_gb: Optional[float]) -> Tuple[Optional[str], str]:
     """(the preset — "nano" or None for the full node —, why in a few words)
-    for a machine with `ram_gib` of memory whose Docker data root is on a
-    card or a removable disk or not, with that much free on it."""
+    for a machine with `ram_gib` of memory whose Docker data root is on that
+    medium (storage_medium), with that much free on it."""
     if ram_gib < NANO_BELOW_RAM_GIB:
         return "nano", "under 8 GB of memory"
-    if data_root_removable:
-        return "nano", "Docker's data is on a card or a removable disk"
+    if data_root_medium in CARD_MEDIA:
+        return "nano", f"Docker's data is on {MEDIA[data_root_medium]}"
     if data_root_free_gb is not None and data_root_free_gb < NANO_BELOW_FREE_GB:
         return "nano", f"under {NANO_BELOW_FREE_GB} GB free for Docker's data"
     return None, "enough memory and disk for the full node"
