@@ -6706,6 +6706,8 @@ def _streams_on_hqplayer(fake, monkeypatch, *, dropped: int):
     monkeypatch.setattr(proxy, "track_ready_hooks", [lambda e: mgr.stream_landed(e.token, e.reshaped)])
     monkeypatch.setattr(proxy, "track_failed_hooks", [lambda e: mgr.stream_failed(e.token)],
                         raising=False)
+    # the fetch lane: the window's refetch of bytes the budget dropped
+    mgr.lane.attach(proxy)
     mgr.queue.replace([_item("E:/Music/A/01.flac", 1)] + [
         QueueItem(track_id=f"stream-{i}", media_file_id=None, source={"kind": "proxy", "token": tok},
                   title=f"Stream {i}", artist="Artist", album="Album", duration_seconds=300.0,

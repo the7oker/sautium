@@ -721,7 +721,7 @@ def streamed(proxy: MediaProxy, n: int, *, cover_url: str, seconds: float = 4.0)
     track_id = f"10000000-0000-0000-0000-{n:012d}"
     tok = f"stream{n}"
     e = _Entry(tok, TrackQuery(artist="Artist", title=f"Stream {n}", album="Album",
-                               duration=seconds, track_id=track_id, cover_url=cover_url), n)
+                               duration=seconds, track_id=track_id, cover_url=cover_url))
     e.audio = FetchedAudio(data=b"fLaC" + b"\x00" * 4092, mime="audio/flac", lossless=True)
     e.provider = SimpleNamespace(manifest=SimpleNamespace(id="test", demo_limited=False))
     e._claimed = True
