@@ -50,20 +50,35 @@ implementation details live in the code, DB and git history.
   read by this reader contributes nothing, and a track whose files are all
   unread (or gone) keeps its rows: the credit is of the music. A comma is a
   list (2026-11-22, the design session's Q15): the owner's tags held 491
-  comma values over 896 credits, lists of writers all ("Ed Simons, Tom
-  Rowlands"), none an MB sort form — so a value with `, ` is split, unless
-  the whole is a name the node knows: an artist row something besides a
-  composer credit holds (a performer here, the phantom layer's) or, on a
-  dump node, an MB artist's name or sort name ("Earth, Wind & Fire", "Bach,
-  Johann Sebastian", which the dump's sort name also turns). The decision is
-  the derive's, beside the turning: a dump that arrives or goes derives the
-  comma values again. Known limits: a list whose whole happens to be some
-  artist's name stays whole; on a node without the dump an inverted "Last,
-  First" with no performer row splits into two false names (none in the
-  owner's library); a band the node learns of after the derive stays split
-  until its files are read again; a list that begins with a band ("Earth,
+  comma values over 896 credits, lists of writers nearly all ("Ed Simons,
+  Tom Rowlands") — so a value with `, ` is split, unless the whole is a name
+  the node knows: an artist row something besides a composer credit holds
+  (a performer here, the phantom layer's) or an MB artist's name or sort
+  name among the MB rows the node holds ("Earth, Wind & Fire", "Bach,
+  Johann Sebastian", which MB's sort name also turns). **What the node
+  holds decides the rest (2026-11-23, LIBRARY-FIXES-1, B-130):** MB rows are
+  evidence however they came — the dump's or a slice's, which carries a
+  composer's row wherever MB's artist credits of an engaged artist name
+  him — and their absence says nothing on a node without the dump, so
+  there a two-part value whose first part is one word ("Debussy, Claude",
+  "Loewe, Lerner": no shape tells them apart) is one name as written; a
+  list kept whole shows the file's own text, a split would invent two
+  names. On a dump node MB's silence is evidence, and such a value is a
+  list. Of the owner's 483 spaced comma values 12 have that shape: 3
+  inverted names, 1 band, 8 lists. A generational suffix belongs to the
+  name before it ("Ray Parker, Jr."). The file's COMPOSERSORT is not read:
+  17 of 42 840 files carried it, each a copy of its COMPOSER value, lists
+  included. The decision is the derive's, beside the turning: whenever MB
+  rows arrive or go (a dump's load or deletion, the canon pass slices wake)
+  the comma tracks that would now read otherwise are derived again, and
+  only those. Known limits: a list whose whole happens to be some artist's
+  name stays whole; on a dump node an inverted name MB does not know
+  ("Ingrams, Robert Q.") splits; a band the node learns of later as a
+  performer stays split until the next whole canon pass or a re-read of
+  its files; a list that begins with a band ("Earth,
   Wind & Fire, Maurice White") is not known whole and splits through the
-  band's name. `Various`, `Various Composers` and `Unknown` are no composer,
+  band's name; a description split at its commas ("… from Valdres, Norway")
+  credits its parts. `Various`, `Various Composers` and `Unknown` are no composer,
   as Various Artists is no artist (Q16); `Traditional` and `Anonymous` say
   something true and stay. A composer owned this way is owned
   (no phantom), never engaged; his page fetches his Last.fm bio once when a
