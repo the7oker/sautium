@@ -517,6 +517,11 @@ def test_the_shape_rule_and_the_generational_suffix(cur, library, templates):
     _dump(cur, False)
     assert _rederive() == 3
     assert _credits(cur) == without
+    # a composer row renamed in place keeps its id: no change to the derive
+    # (review round 3, L3), where comparing names alone derived it at every pass
+    cur.execute("UPDATE artists SET name = 'Claude Debussy' WHERE name = 'Debussy, Claude'")
+    assert _rederive() == 0
+    assert _credits(cur)["Clair de lune"] == ["Claude Debussy"]
 
 
 def test_a_canon_run_after_the_last_slice_row_dropped_derives_the_written_form(

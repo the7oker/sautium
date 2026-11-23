@@ -65,8 +65,9 @@ implementation details live in the code, DB and git history.
   unless the script writes names without spaces ("坂本龍一, 細野晴臣") or a
   part is no given name ("Traditional"); a list kept whole shows the file's
   own text, a split would invent two names. A part the node knows as an
-  artist says nothing either way: "Björk, Nellee Hooper" is a list,
-  "Mozart, Wolfgang Amadeus" beside a performer "Mozart" is not. On a dump node MB's silence is evidence, and such a value is a
+  artist says nothing either way: without the dump "Björk, Nellee Hooper"
+  is one name as written, as "Mozart, Wolfgang Amadeus" beside a performer
+  "Mozart" is. On a dump node MB's silence is evidence, and such a value is a
   list. Of the owner's 483 spaced comma values 12 have that shape: 3
   inverted names, 1 band, 8 lists. A generational suffix belongs to the
   name before it ("Ray Parker, Jr."). The file's COMPOSERSORT is not read:
@@ -77,7 +78,10 @@ implementation details live in the code, DB and git history.
   derived again, and only those — compared by artist, or by name folded as
   the canon folds, so a composer the canon merged into a performer's
   spelling stays merged. Known limits: a list whose whole happens to be some artist's
-  name stays whole; on a dump node an inverted name MB does not know
+  name stays whole; on a node without the dump a list led by a one-word
+  name ("Loewe, Lerner", "Björk, Nellee Hooper") stays one name as written
+  — 8 of the owner's 12 values of that shape; on a dump node an inverted
+  name MB does not know
   ("Ingrams, Robert Q.") splits; a band the node learns of later as a
   performer stays split until the next whole canon pass or a re-read of
   its files; a list that begins with a band ("Earth,
