@@ -174,11 +174,12 @@ class PeerAuthMiddleware:
             _record()
             raise
         body = b"".join(chunks)
-        own = self._own()
 
         def _shape_and_signer():
             # Off the loop: a body is up to its route's cap, and both its
-            # parse and its hash cost per byte.
+            # parse and its hash cost per byte; this node's key is a stat
+            # of its identity file.
+            own = self._own()
             return (contact_log.request_items(raw_target, body),
                     peer_auth.verify_request(headers, own, scope["method"], raw_target, body)
                     if own else (None, None))

@@ -161,7 +161,8 @@ class UPnPService:
                 port answers as the peer surface (answers_as_peer_surface):
                 behind a front another process owns it.
             leads_here: (external ip, external port) -> the module's
-                leads_here() check, asked once of each mapping as it is made.
+                leads_here() check, asked of each mapping as it is made and again
+                at recheck().
         """
         self._ports = ports or []
         self._gate = gate

@@ -380,7 +380,7 @@ async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
         # The launcher restarts its P2P manager on the NOTIFY; a Docker
         # node serves its peer surface from this process: its certificate
         # and its request check follow the key at once
-        # (main.identity_changed), its admission gate keeps the key the
+        # (main._peer_surface_follows_identity), its admission gate keeps the key the
         # start built it on.
         "restart_required": not settings.p2p_listen_port,
     })

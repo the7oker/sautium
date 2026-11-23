@@ -341,7 +341,7 @@ KDF inputs, so either change is a new key; the old one is kept:
    `node_info.json`) is changed there; the route answers 409.
    The launcher restarts its P2P manager on the notify; a Docker node reports
    `restart_required` — its peer surface's certificate and request check
-   follow the new key at once (since 2026-11-23, `main.identity_changed`), its
+   follow the new key at once (since 2026-11-23, `p2p_identity.changed`), its
    admission gate keeps the key the start built it on.
 3. `friends.bound_identity` (delta 014) records which of OUR keys each
    friend binds our invite code to — set by `add_friend` on both surfaces,

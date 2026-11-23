@@ -356,27 +356,26 @@ def _tls_dir() -> _Path:
     return _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls"))
 
 
-async def identity_changed() -> None:
+async def _peer_surface_follows_identity() -> None:
     """This node's identity appeared (its account was made) under a process
     that keeps running, or changed (a rotation). What the start decided on
     the identity it had then — none, on a node not yet born — is decided
-    again, so that a node born through the first-run form is a whole peer
-    with no restart (PI-NODE-2C's evening on a 4 GB Pi: F1, F7):
+    again by the three followers below, so that a node born through the
+    first-run form is a whole peer with no restart (PI-NODE-2C's evening on
+    a 4 GB Pi: F1, F7). This one:
 
     - the peer surface presents a certificate bound to the key from the next
       handshake on — until then every pinned dial of this node was refused;
-    - the mapping of its port is asked again whom it leads to: the check
-      from inside is pinned to that key and learns nothing without one, so a
-      node not yet born kept a port the router's own forward gives a
-      neighbour;
-    - the DHT announces the account's invite code, which friends look up;
-    - the admission gate, which a start with no key could not build, is built.
+    - then, and only then (its check from inside is pinned to that key and
+      would take the old certificate for a neighbour's), the mapping of its
+      port is asked again whom it leads to: with no key the check learns
+      nothing, so a node not yet born kept a port the router's own forward
+      gives a neighbour.
 
     A rotation still asks for a restart (routers/auth.change_identity): the
-    gate a start built keeps signing with the key it was built on."""
-    from p2p_identity import resolve_identity, tls_binding
-    ident = await asyncio.to_thread(resolve_identity, settings)
+    admission gate a start built keeps signing with the key it was built on."""
     if _peer_tls is not None:
+        from p2p_identity import tls_binding
         from tls_gen import load_bound
         # On the loop, not in a thread: only the loop makes TLS objects from
         # this context, so no handshake meets it between the certificate's
@@ -385,12 +384,23 @@ async def identity_changed() -> None:
         logger.info("The peer surface answers under this node's identity from the next handshake on")
     if _upnp is not None and await asyncio.to_thread(_upnp.recheck):
         _peer_port_mapped(_upnp.get_external_port(_listen_port()))
+
+
+async def _announce_user() -> None:
+    """The account's invite code on the DHT, which friends look up."""
+    from p2p_identity import resolve_identity
+    ident = await asyncio.to_thread(resolve_identity, settings)
     if _dht_service is not None and ident:
         await _dht_service.announce_user(ident["invite_code"])
-    if settings.serves_peer_surface and ident:
-        import p2p_app
-        if p2p_app._gate_svc is None:
-            await asyncio.to_thread(p2p_app._gate)
+
+
+async def _gate_follows_identity() -> None:
+    """The admission gate a start with no key could not build. On the loop,
+    where a request builds it lazily: two builds would leave two seeders."""
+    from p2p_identity import resolve_identity
+    import p2p_app
+    if settings.serves_peer_surface and p2p_app._gate_svc is None and resolve_identity(settings):
+        p2p_app._gate()
 
 
 def _upnp_heuristic():
@@ -907,7 +917,8 @@ async def lifespan(app: FastAPI):
     announce_port = _peer_port()
     _peer_ready = asyncio.Event()
     import p2p_identity
-    p2p_identity.on_change(identity_changed)
+    for follower in (_peer_surface_follows_identity, _announce_user, _gate_follows_identity):
+        p2p_identity.on_change(follower)
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
         _start_host_network()
     if settings.p2p_sync_port:
@@ -1038,10 +1049,10 @@ async def lifespan(app: FastAPI):
                     await _dht_service.announce_node()
 
                     # Announce user identity in DHT
-                    if _p2p_identity:
-                        await _dht_service.announce_user(
-                            _p2p_identity["invite_code"]
-                        )
+                    # The identity of this moment, not the start's: an
+                    # account made, or a key rotated, while the DHT was
+                    # still bootstrapping is the one announced
+                    await _announce_user()
 
                     # Advertise the MB dump so dump-less nodes can find this
                     # one as a slice source without a LAN beacon or a

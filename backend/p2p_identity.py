@@ -140,7 +140,7 @@ def on_change(follower) -> None:
     """`follower` — a coroutine function — runs each time this node's
     identity appears (its account is made) or changes (a rotation) under the
     running process: what a start decided on the identity it had then is
-    decided again, with no restart (main.identity_changed)."""
+    decided again, with no restart (main's three followers)."""
     if follower not in _followers:
         _followers.append(follower)
 
@@ -384,7 +384,7 @@ def proof_path(settings):
 def tls_binding(settings):
     """(node_pubkey_hex, sign_fn) for tls_gen.ensure_cert's peer channel
     binding — None without identity (the cert is then generated unbound, and
-    made again bound the moment an account exists: main.identity_changed)."""
+    made again bound the moment an account exists: main._peer_surface_follows_identity)."""
     ident = resolve_identity(settings)
     key = load_signing_key(settings)
     if not ident or key is None:
