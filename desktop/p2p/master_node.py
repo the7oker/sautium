@@ -15,8 +15,11 @@ constants. Empty values mean "no master configured" — dev builds before
 activation simply skip the auto-add.
 
 MIRRORED: desktop/p2p/master_node.py <-> backend/master_node.py (the
-Docker image builds from backend/ only). Update both together.
+Docker image builds from backend/ only). Update both together. The role
+below is this copy's alone: one decision per process, both runtimes.
 """
+
+from typing import Optional
 
 MASTER_USERNAME = "Sautium"
 MASTER_INVITE_CODE = "Sautium#FBE3-7BA9-57CE"
@@ -30,3 +33,29 @@ MASTER_TOKEN_ID = "95f7c9f1-6b74-4f98-824d-faf7a1030d3b"
 
 def master_configured() -> bool:
     return bool(MASTER_INVITE_CODE and MASTER_PUBKEY_HEX and MASTER_TOKEN_ID)
+
+
+# Whether this process is the master: decided by its start (the backend's
+# lifespan, the launcher's P2PManager.start) from the key it signs with, and
+# again only where that key changes in the process (an account made later, a
+# rotation); read by every path that acts as the master. A remote's pin is never
+# read from here: "that peer is the master" stays a comparison with
+# MASTER_PUBKEY_HEX.
+_role: Optional[bool] = None
+
+
+def decide(public_key_hex: Optional[str]) -> bool:
+    """This process's role from its own key: the master exactly when the key
+    is the pin. The backend's start decides it inside its refusal
+    (p2p_identity.master_refusal), which ends a backend meant to be the
+    master under another key; an account made later and a rotation decide it
+    again on their new key."""
+    global _role
+    _role = bool(public_key_hex) and public_key_hex.lower() == MASTER_PUBKEY_HEX.lower()
+    return _role
+
+
+def is_master() -> bool:
+    if _role is None:
+        raise RuntimeError("the master role is read before this process's start decided it")
+    return _role

@@ -143,6 +143,9 @@ services:
       # never auth). Pair with P2P_SYNC_PUBLISH=127.0.0.1:<upstream port>
       # below; a directly reachable upstream lets anyone set that header.
       P2P_TRUSTED_FRONT: ${P2P_TRUSTED_FRONT:-0}
+      # The master's own line (p2p_identity.master_refusal): under any key but the pin
+      # a backend meant to be the master refuses to start. 0 (off) for every other node.
+      SAUTIUM_MASTER: ${SAUTIUM_MASTER:-0}
       P2P_USERNAME: ${P2P_USERNAME:-}
       P2P_PASSWORD: ${P2P_PASSWORD:-}
       P2P_EMAIL: ${P2P_EMAIL:-}

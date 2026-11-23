@@ -130,7 +130,10 @@ def load_proof(path: Path) -> Optional[dict]:
 
 
 def save_proof(path: Path, proof: dict) -> None:
-    Path(path).write_text(json.dumps(proof, indent=2), encoding="utf-8")
+    from desktop.node_identity import write_identity_document
+    path = Path(path)
+    write_identity_document(path.parent, path.name, json.dumps(proof, indent=2).encode("utf-8"),
+                            proof["pubkey"])
 
 
 _served: dict = {}           # path -> (the file's mtime_ns, the proof as it travels)

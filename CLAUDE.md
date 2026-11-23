@@ -628,7 +628,12 @@ See:
   (`birth_certificate.json` + `identity_proof.json` — the Docker node derives
   its KEY in memory, but the Worker-issued certificate and the mined
   proof-of-work must survive container recreation; same file names as the
-  launcher so the export/import bundle moves between the two).
+  launcher so the export/import bundle moves between the two). Neither file
+  is written over with another key's (since 2026-11-22, B-113):
+  `node_identity.write_identity_document` is their one writer on both
+  runtimes — the worker, the email road, a bundle's import, a restore — and
+  moves a document of another key whole to `replaced-<when>/` with an
+  `error` naming both keys.
 - HQPlayer Desktop's data folder: `${HQPLAYER_DATA_DIR}` → `/hqplayer:ro` in
   every compose file (since 2026-10-02; four since 2026-11-09, with the Linux
   arm64 `docker-compose.pi.yml`) — the playback diagnostics read
@@ -933,7 +938,7 @@ toast takes no pointer events and never blocks the user (see
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
 | `docs/design/INFORMATION-ARCHITECTURE.md` | Navigation model, screen inventory, state flows (source of truth for UI layout) |
 | `docs/design/reference/claude-design-bundle/` | Claude Design handoff bundle — visual-intent reference |
-| `backend/master_node.py` | Shipped master identity pins (mirrored in desktop/p2p/) |
+| `backend/master_node.py` + `desktop/p2p/master_node.py` | Shipped master identity pins (mirrored), and in the desktop copy alone the role each process's start decides (`decide`, `is_master` — raises before a decision; decided again where the process's key itself changes: an account made later, a rotation): the master exactly when its key is the pin. Paths that act AS the master read the role; "that peer is the master" stays a comparison with the pin. A backend meant to be the master — its database's signing key of record is the pin, or `SAUTIUM_MASTER=1` — whose key is not the pin refuses to start, before anything is written, one `error` line naming the pinned invite code and the one it holds instead (`p2p_identity.master_refusal`, since 2026-11-22, B-113); the trusted front and the username are no signal |
 | `backend/invite_tokens.py` | Invite tokens + signed grants (mirrored in desktop/p2p/) |
 | `desktop/mb_slice_client.py` | Slice requester — per-name verification against the original author's key and certificate, its own subtree only, clashes (an id under another MBID, an artist's or group's MBID under another id) held back and asked about one at a time, every import indexed with its author and the node that passed it |
 | `backend/musicbrainz.py` + `backend/mb_answers.py` + `backend/canon/confirm.py` | MusicBrainz's web service by MBID only (one pace, the persistent cooldown, the project's User-Agent), its answers kept by MBID with the queue that asks for them, and the premises every irreversible canon decision of a node without the dump is re-made on |

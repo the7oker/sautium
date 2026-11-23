@@ -402,6 +402,7 @@ def test_the_gate(node, monkeypatch):
                     "VALUES (%s, %s, 'Sautium', 'master')", (MASTER.pub, master_node.MASTER_INVITE_CODE))
     assert allowed() is not None
     monkeypatch.setattr(worker, "_identity", lambda: _ident(MASTER))     # the master ships nothing
+    master_node.decide(MASTER.pub)
     assert allowed() is None
 
 
@@ -539,6 +540,7 @@ def test_one_worker_where_the_backend_owns_the_peer_surface(node, monkeypatch):
     async def scene(port, who):
         monkeypatch.setattr(settings, "p2p_sync_port", port)
         keys["who"] = who
+        master_node.decide(who.pub)
         client = await p2p_chat.start_client()
         worker = diag_node._worker
         hands = client is not None and client._on_warrant == worker.warrant

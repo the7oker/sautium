@@ -477,6 +477,30 @@ token handshake, stores the grant and pulls the welcome message through the
 ordinary history sync. Deleting the contact sets `p2p.master_removed` — the
 auto-add never resurrects it (re-adding the code by hand clears the flag).
 
+**A master fails closed** (since 2026-11-22, B-113 — on 2026-11-19 the
+master started with a password changed by accident in its `.env`, derived
+another key and ran as an ordinary node: it seeded itself as its own Support
+contact, stored a certificate of the new key over its own and sealed rows
+under the wrong key, and every node saw Support offline). Each process
+decides its role at its start (`desktop/p2p/master_node.decide`; again where
+its key itself changes — an account made later, a rotation): the master
+exactly when its key is the pin. A backend is *meant* to be the
+master when its database records the pin as its signing key of record
+(`identity.signing_key`, written by every start with a key — a restored
+backup carries it) or its configuration says `SAUTIUM_MASTER=1` (for a
+master on a database that never held it); such a backend whose key is not
+the pin refuses to start, in the lifespan right after the database answers
+and before anything is written (the API secret, the migrations, the
+record's own write), so every restart refuses again. It logs one `error`
+line naming the pinned invite code and the one the node holds instead and
+exits with uvicorn's startup failure (3); Docker's
+restart policy keeps trying, and each try says why. The trusted front and
+the username are no signal: a person may run a front or take the name
+`Sautium`, and is never refused a start for it. The certificate and the
+proof are never written over with another key's
+(`node_identity.write_identity_document`, the files' one writer): a
+document of another key is moved whole to `replaced-<when>/`.
+
 `/api/relay/*` is a deliberately **proxy-agnostic** contract (both surfaces):
 - `GET /api/relay/wake-stream?pubkey&ts&sig&instance` — the "you have mail"
   SSE channel. A CGNAT node holds ONE outbound connection (outbound works from

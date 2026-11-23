@@ -339,8 +339,8 @@ def test_a_nested_document_is_a_400_not_an_error(monkeypatch):
 
 
 def test_the_diag_routes_answer_on_the_master_only_and_before_reading(monkeypatch):
-    monkeypatch.setattr(peer_diag, "resolve_identity",
-                        lambda s: {"public_key_hex": "cd" * 32})            # not the master
+    from desktop.p2p import master_node
+    master_node.decide("cd" * 32)                                           # not the master
     body = b"x" * 1024
     status, _, read = asyncio.run(_call(
         "POST", "/api/diag/report",
@@ -349,9 +349,9 @@ def test_the_diag_routes_answer_on_the_master_only_and_before_reading(monkeypatc
 
 
 def test_the_master_refuses_a_stranger_before_reading_its_body(monkeypatch):
+    from desktop.p2p import master_node
     from master_node import MASTER_PUBKEY_HEX
-    monkeypatch.setattr(peer_diag, "resolve_identity",
-                        lambda s: {"public_key_hex": MASTER_PUBKEY_HEX})
+    master_node.decide(MASTER_PUBKEY_HEX)
     monkeypatch.setattr(peer_diag, "get_peer_chat", lambda: _Chat())
     body = b"x" * (200 * 1024)
     status, _, read = asyncio.run(_call(
@@ -749,9 +749,9 @@ def test_a_wait_on_a_descriptor_past_1023_holds():
 
 
 def test_a_bundle_for_a_warrant_not_its_signers_is_refused_before_its_body(monkeypatch):
+    from desktop.p2p import master_node
     from master_node import MASTER_PUBKEY_HEX
-    monkeypatch.setattr(peer_diag, "resolve_identity",
-                        lambda s: {"public_key_hex": MASTER_PUBKEY_HEX})
+    master_node.decide(MASTER_PUBKEY_HEX)
     monkeypatch.setattr(peer_diag, "_signer_is_friend", lambda pk: True)
     warrants = {"11111111-1111-1111-1111-111111111111": None,
                 "22222222-2222-2222-2222-222222222222":

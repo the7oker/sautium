@@ -111,8 +111,14 @@ def verify_certificate(cert: dict,
 
 
 def _cert_path() -> Path:
-    from desktop.node_identity import _identity_dir
-    return _identity_dir() / "birth_certificate.json"
+    from desktop.node_identity import CERT_FILENAME, _identity_dir
+    return _identity_dir() / CERT_FILENAME
+
+
+def _write(cert: dict) -> None:
+    from desktop.node_identity import CERT_FILENAME, _identity_dir, write_identity_document
+    write_identity_document(_identity_dir(), CERT_FILENAME,
+                            json.dumps(cert, indent=2).encode("utf-8"), cert["pubkey"])
 
 
 def proof_path() -> Path:
@@ -189,7 +195,7 @@ def save_certificate(cert: dict) -> bool:
         logger.warning("birth cert rejected: subject %s is not this node",
                        cert["pubkey"][:8])
         return False
-    _cert_path().write_text(json.dumps(cert, indent=2), encoding="utf-8")
+    _write(cert)
     logger.info("identity cert stored (issued_at=%s method=%s)",
                 cert["issued_at"], cert["method"])
     return True
@@ -259,7 +265,7 @@ def request_certificate(pubkey_hex: Optional[str] = None,
         logger.warning("birth cert request failed or returned invalid cert")
         return None
 
-    _cert_path().write_text(json.dumps(cert, indent=2), encoding="utf-8")
+    _write(cert)
     logger.info("identity cert obtained (issued_at=%s method=%s)",
                 cert["issued_at"], cert["method"])
     return cert

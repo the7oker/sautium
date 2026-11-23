@@ -37,7 +37,8 @@ def master(scratch_dsn, monkeypatch):
     from routers import p2p, support
     pool = psycopg2.pool.ThreadedConnectionPool(1, 3, dsn=scratch_dsn, options="-c timezone=UTC")
     monkeypatch.setattr(db_pool, "_pool", pool)
-    monkeypatch.setattr(support, "resolve_identity", lambda s: {"public_key_hex": MASTER_PUBKEY_HEX})
+    from desktop.p2p import master_node
+    master_node.decide(MASTER_PUBKEY_HEX)
     planted = {}
 
     def canary(field, key, short=False):

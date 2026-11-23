@@ -575,7 +575,10 @@ def _after_rotation(pubkey: str) -> None:
     p2p_router.forget_identity()
     p2p_chat.forget_service()
     # The chat client and the identity worker are built on the old key: they
-    # start again on the new (the worker's old thread stopped first).
+    # start again on the new (the worker's old thread stopped first), under
+    # the role the new key has.
+    from desktop.p2p import master_node
+    master_node.decide(pubkey)
     p2p_chat.soon(p2p_chat.restart_client())
     p2p_chat.soon(p2p_router.restart_identity_worker())
     _record_signing_key(pubkey)

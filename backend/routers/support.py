@@ -34,8 +34,8 @@ from pydantic import BaseModel, Field
 from config import settings
 from db_pool import db_execute, db_query, db_query_one
 from desktop.p2p import diag_protocol
-from master_node import MASTER_PUBKEY_HEX
-from p2p_identity import load_signing_key, resolve_identity
+from desktop.p2p.master_node import is_master
+from p2p_identity import load_signing_key
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,7 @@ PROBLEM_KINDS = ("service.start_failed", "p2p.start_failed", "backend.crashed",
 
 
 def _require_master() -> None:
-    ident = resolve_identity(settings)
-    if not ident or ident["public_key_hex"].lower() != MASTER_PUBKEY_HEX:
+    if not is_master():
         raise HTTPException(status_code=404, detail="Not found")
 
 

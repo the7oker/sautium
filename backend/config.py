@@ -163,6 +163,11 @@ class Settings(BaseSettings):
     # no bridge, no gateway every host-local connection arrives from — a front
     # on this machine reaches the peer surface on loopback, where it binds.
     sautium_host_network: bool = False
+    # This backend is meant to be the Sautium master: under any key but the
+    # pin it refuses to start (p2p_identity.master_refusal). Its database's
+    # signing key of record says the same without this line; the line is for
+    # a master on a database that never held it.
+    sautium_master: bool = False
     # The folders this node may read music from, colon-separated, each bound
     # read-only at its own host path by the console setup's compose override
     # (library_root.py). Set, the owner chooses the library's folder under

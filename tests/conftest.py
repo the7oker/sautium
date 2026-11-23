@@ -122,6 +122,16 @@ def _models_switch_never_touched(request, monkeypatch):
     monkeypatch.setattr(hardware_profile, "models_switch", lambda: True)
 
 
+@pytest.fixture(autouse=True)
+def _role_decided(monkeypatch):
+    """Every process's start decides whether it is the master
+    (desktop/p2p/master_node.decide) before anything reads it; a test runs as
+    a process that decided it is not. A test of the master's paths decides
+    the role itself, a test of the decision starts from none."""
+    from desktop.p2p import master_node
+    monkeypatch.setattr(master_node, "_role", False)
+
+
 def pytest_sessionstart(session):
     if not _recreate(SESSION_DATABASE, create=True):
         return

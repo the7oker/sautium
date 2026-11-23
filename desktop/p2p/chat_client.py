@@ -17,7 +17,7 @@ backend/routers/peer_chat.py); what both halves spell alike is in chat_wire.
 Each runtime injects what is its own: the store (a ChatService), the
 identity, the DHT, the LAN tier, the port the probe dials back, its local
 reachability tells and the verdict's consumers, and the callbacks for what
-arrives. The master runs no client half (see `master_runs_none`).
+arrives. The master runs no client half (p2p_chat.start_client says why).
 
 The store blocks: every call goes through one thread of this client's own,
 so the loop that runs it — the backend's serves the Web UI — never waits on
@@ -89,16 +89,6 @@ def replied_friends(notes) -> set:
                 and parts[2] == "out" and parts[1].isdigit()):
             out.add(int(parts[1]))
     return out
-
-
-def master_runs_none(public_key_hex: Optional[str]) -> bool:
-    """The master builds no client on either runtime: every node holds a wake
-    stream to it (relay #0), so a reply is a ping down that stream and the
-    node's pull; it holds no stream to anyone — it IS relay #0 — and it
-    deposits nothing, the mailbox is its own. Pushing to the whole network
-    would cost a DHT lookup per friend and dials at addresses behind NAT that
-    never answer, the work relay #0 exists to avoid."""
-    return bool(public_key_hex) and public_key_hex.lower() == master_node.MASTER_PUBKEY_HEX.lower()
 
 
 def upnp_heuristic(upnp, dht):
@@ -1158,7 +1148,7 @@ class ChatClient:
         if not master_node.master_configured():
             return
         ident = self._identity()
-        if not ident or master_runs_none(ident.public_key_hex):
+        if not ident or master_node.is_master():
             return  # the master must not add itself
         if await self.setting("p2p.master_removed"):
             return
@@ -1201,7 +1191,7 @@ class ChatClient:
         while self.running:
             try:
                 ident = self._identity()
-                if (not ident or master_runs_none(ident.public_key_hex)
+                if (not ident or master_node.is_master()
                         or await self.setting("p2p.master_removed")):
                     await asyncio.sleep(60)
                     continue
