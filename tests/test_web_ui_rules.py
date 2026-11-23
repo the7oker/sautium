@@ -247,3 +247,21 @@ def test_hqplayer_settings_from_a_toast_opens_the_screen_at_one_picker():
     for selector in got["openers"].values():
         marker = selector.split('"')[1]
         assert marker in body or f"data-knob=\"${{knob}}\"" in body, selector
+
+
+def test_the_variant_picker_has_a_row_of_its_own():
+    """B-133: the album header's pill stood on the artist's line wherever a
+    short name and the short "All variants · best per track" fit beside each
+    other — the artist line is an inline button, and so was the pill. It is
+    a block-level box under the artist and the composer line, in every
+    layout (no media rule makes it inline again)."""
+    css = _css()
+    toggle = _rule(css, ".album-variant-toggle")
+    assert toggle["display"] in ("flex", "block", "grid")
+    assert toggle["width"] == "fit-content"
+    for body in re.findall(r"\.album-variant-toggle\s*\{([^{}]*)\}", css):
+        assert not re.search(r"display\s*:\s*inline", body)
+    head = _shell()
+    meta = head[head.index('<div class="album-meta-block">'):]
+    meta = meta[:meta.index('<div class="album-meta-row">')]
+    assert meta.index("album-artist-line") < meta.index("${composerHtml}") < meta.index("${variantHtml}")
