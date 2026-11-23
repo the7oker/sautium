@@ -979,7 +979,8 @@ def _a_box_copied_then_its_old_folder_removed(cur, library, main_module, monkeyp
     cur.execute("SELECT count(*) FROM tracks WHERE title IN ('Carrier', 'Relay')")
     assert cur.fetchone()[0] == 2                 # one track each, two copies
     shutil.rmtree(library / "Ostrava Unit" / "Pulse Archive")
-    _scoped(main_module, monkeypatch, "Ostrava Unit", False)
+    state = _scoped(main_module, monkeypatch, "Ostrava Unit", False)
+    assert state["result"]["away"] == 1          # said, found elsewhere or not (review round 1, L4)
     assert _copies(cur) == [("Classical/Ostrava Unit/Pulse Archive", False),
                             ("Music/Ostrava Unit/Pulse Archive", True)]
 

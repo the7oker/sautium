@@ -61,17 +61,22 @@ implementation details live in the code, DB and git history.
   composer's row wherever MB's artist credits of an engaged artist name
   him — and their absence says nothing on a node without the dump, so
   there a two-part value whose first part is one word ("Debussy, Claude",
-  "Loewe, Lerner": no shape tells them apart) is one name as written; a
-  list kept whole shows the file's own text, a split would invent two
-  names. On a dump node MB's silence is evidence, and such a value is a
+  "Loewe, Lerner": no shape tells them apart) is one name as written —
+  unless a part is an artist the node knows of its own ("Björk, Nellee
+  Hooper"), the script writes names without spaces ("坂本龍一, 細野晴臣") or a
+  part is no given name ("Traditional"); a list kept whole shows the file's
+  own text, a split would invent two names. On a dump node MB's silence is evidence, and such a value is a
   list. Of the owner's 483 spaced comma values 12 have that shape: 3
   inverted names, 1 band, 8 lists. A generational suffix belongs to the
   name before it ("Ray Parker, Jr."). The file's COMPOSERSORT is not read:
   17 of 42 840 files carried it, each a copy of its COMPOSER value, lists
   included. The decision is the derive's, beside the turning: whenever MB
   rows arrive or go (a dump's load or deletion, the canon pass slices wake)
-  the comma tracks that would now read otherwise are derived again, and
-  only those. Known limits: a list whose whole happens to be some artist's
+  the comma tracks whose composers would now be named otherwise are
+  derived again, and only those — compared by name folded, so a composer
+  the canon merged into a performer's spelling stays merged; while a dump
+  load holds the mb_* tables they are no evidence, and its end derives
+  again. Known limits: a list whose whole happens to be some artist's
   name stays whole; on a dump node an inverted name MB does not know
   ("Ingrams, Robert Q.") splits; a band the node learns of later as a
   performer stays split until the next whole canon pass or a re-read of

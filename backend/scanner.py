@@ -2185,7 +2185,7 @@ def _mark_present(paths: Set[str]) -> int:
 def _prune_stats() -> Dict[str, Any]:
     return {"checked": 0, "pruned": 0, "kept_unread": 0, "orphan_tracks": 0,
             "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0,
-            "copies": 0, "copy_files": 0, "away": 0, "back": 0, "relinked": 0}
+            "copies": 0, "copy_files": 0, "away": 0, "set_aside": 0, "back": 0, "relinked": 0}
 
 
 # The local copies whose files are ALL among a walk's missing ones, and
@@ -2262,6 +2262,7 @@ def _set_aside(missing_ids: List[int], stats: Dict[str, Any]) -> List[int]:
             "SELECT id FROM media_files WHERE album_variant_id = ANY(CAST(:v AS int[]))"),
             {"v": away}).scalars()) if away else set()
     stats["away"] = sum(1 for c in copies if not c.away and not c.found_elsewhere)
+    stats["set_aside"] = len(newly)
     if newly:
         logger.info(f"Rescan set {len(newly)} cop(ies) aside as away: none of their files was found")
     return [i for i in missing_ids if i not in kept]
@@ -2309,7 +2310,8 @@ def set_aside_missing(scopes: Optional[Sequence[Tuple[str, bool]]], walked: Set[
     missing = [r.id for r in rows if r.file_path not in walked and judged(r.file_path)]
     stats = _prune_stats()
     _set_aside(missing, stats)
-    return stats["away"]
+    # no question follows: a copy found again elsewhere is set aside as well
+    return stats["set_aside"]
 
 
 def plan_prune(
