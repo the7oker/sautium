@@ -654,14 +654,15 @@ def test_a_comma_value_the_mb_rows_name_is_one_name_whether_a_dump_or_a_slice_br
     _dump(cur, False)
 
 
-def test_a_list_led_by_an_artist_the_node_knows_or_unspaced_or_traditional_is_a_list(
-        cur, library, templates):
+def test_an_unspaced_script_or_traditional_is_no_inversion(cur, library, templates):
     """Review round 1, M2: the shape's one-word first part is no inversion
-    when the node knows a part as an artist of its own (a performer here),
-    when the script writes names without spaces, or when a part is no given
-    name ("Traditional"). And on a dump node, a performer's row keeps a
-    comma name whole with no MB row (the artists arm, which the dump-less
-    shape would hide)."""
+    when the script writes names without spaces or a part is no given name
+    ("Traditional"). A list led by a performer the node knows ("Björk,
+    Nellee Hooper") is §9 Q1's accepted residue on a node without the dump:
+    one name as written (review round 2, M2: a known part says nothing —
+    "Mozart, Wolfgang Amadeus" beside a performer "Mozart"). And on a dump
+    node, a performer's row keeps a comma name whole with no MB row (the
+    artists arm, which the dump-less shape would hide)."""
     _clean(cur)
     cur.execute("DELETE FROM mb_artist")
     _flac(templates, library / "B" / "Post" / "01.flac", "Army of Me", "Björk", "Post", ["Björk"], 1)
@@ -673,70 +674,45 @@ def test_a_list_led_by_an_artist_the_node_knows_or_unspaced_or_traditional_is_a_
                                         ("Boogie Wonderland", "Earth, Wind & Fire")), 1):
         _flac(templates, library / "V" / "Mix" / f"0{i}.flac", title, "Someone", "Mix", [value], i)
     _scan()
-    lists = {"Isobel": ["Björk", "Nellee Hooper"], "Rydeen": ["坂本龍一", "細野晴臣"],
+    lists = {"Isobel": ["Björk, Nellee Hooper"], "Rydeen": ["坂本龍一", "細野晴臣"],
              "Danny Boy": ["Traditional", "Anonymous"], "Boogie Wonderland": ["Earth, Wind & Fire"]}
     got = _credits(cur)
     assert {t: got[t] for t in lists} == lists
-    cur.execute("SELECT count(*) FROM track_credits tc JOIN tracks t ON t.id = tc.track_id "
-                "WHERE t.title = 'Isobel' AND tc.artist_id = %s", (_artist_id(cur, "Björk"),))
-    assert cur.fetchone()[0] == 1                                # the performer's own row
     _dump(cur, True)
-    assert _rederive() == 0
-    assert {t: _credits(cur)[t] for t in lists} == lists        # EWF by its performer row
+    assert _rederive() == 1                                      # Isobel: MB's silence is a list here
+    assert {t: _credits(cur)[t] for t in lists} == dict(lists, Isobel=["Björk", "Nellee Hooper"])
     _dump(cur, False)
 
 
 def test_a_composer_the_canon_merged_into_a_performers_spelling_stays_merged(cur, library, templates):
     """Review round 1, M1: the canon moved the tag's "Bjork" onto the
     performer "Björk" (recanonicalize_artist repoints the credits and drops
-    the source). A whole canon pass's derive compares names folded, so it
+    the source). A whole canon pass's derive compares names folded as the
+    canon folds (f_unaccent, so "Soren" and "Søren" too — round 2, L1), so it
     leaves the merge as it is; comparing ids it derived the track and minted
     "Bjork" again."""
     from canon.identity import repoint_track_credits
     _clean(cur)
     cur.execute("DELETE FROM mb_artist")
     _flac(templates, library / "B" / "Post" / "01.flac", "Army of Me", "Björk", "Post", ["Björk"], 1)
+    _flac(templates, library / "S" / "S" / "01.flac", "Vinter", "Søren Bebe", "S", ["Søren Bebe"], 1)
     _flac(templates, library / "D" / "D" / "01.flac", "I've Seen It All", "Someone", "D",
-          ["Bjork", "Sjón Sigurdsson, Lars von Trier"], 1)
+          ["Bjork", "Soren Bebe", "Sjón Sigurdsson, Lars von Trier"], 1)
     _scan()
-    tag, performer = _artist_id(cur, "Bjork"), _artist_id(cur, "Björk")
-    assert tag and performer and tag != performer
     from database import get_db_context
-    with get_db_context() as db:
-        repoint_track_credits(db, tag, performer)
-        db.commit()
-    cur.execute("DELETE FROM artists WHERE id = %s", (tag,))
-    assert _credits(cur)["I've Seen It All"] == ["Björk", "Sjón Sigurdsson", "Lars von Trier"]
+    for spelt, canon in (("Bjork", "Björk"), ("Soren Bebe", "Søren Bebe")):
+        tag, performer = _artist_id(cur, spelt), _artist_id(cur, canon)
+        assert tag and performer and tag != performer
+        with get_db_context() as db:
+            repoint_track_credits(db, tag, performer)
+            db.commit()
+        cur.execute("DELETE FROM artists WHERE id = %s", (tag,))
+    merged = ["Björk", "Søren Bebe", "Sjón Sigurdsson", "Lars von Trier"]
+    assert _credits(cur)["I've Seen It All"] == merged
     assert _rederive() == 0
-    assert _artist_id(cur, "Bjork") is None
+    assert _credits(cur)["I've Seen It All"] == merged
+    assert _artist_id(cur, "Bjork") is None and _artist_id(cur, "Soren Bebe") is None
 
-
-def test_mb_rows_are_no_evidence_while_a_dump_load_holds_them(cur, library, templates, scratch_dsn):
-    """Review round 1, L2: a load holds the mb_* tables half loaded and
-    unindexed; a derive meanwhile reads them as absent, and the load's end
-    derives the comma tracks again."""
-    _clean(cur)
-    cur.execute("DELETE FROM mb_artist")
-    _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G",
-          ["Bach, Johann Sebastian"], 1)
-    _scan()
-    cur.execute("INSERT INTO mb_artist (id, gid, name, sort_name) VALUES (1, %s, %s, %s)",
-                (str(uuid.uuid4()), BACH, "Bach, Johann Sebastian"))
-    from mb_dump_load import MB_LOAD_LOCK_KEY
-    loader = psycopg2.connect(scratch_dsn)
-    loader.autocommit = True
-    try:
-        with loader.cursor() as c:
-            c.execute("SELECT pg_advisory_lock(%s)", (MB_LOAD_LOCK_KEY,))
-        assert _rederive() == 0
-        assert _credits(cur) == {"Aria": ["Bach, Johann Sebastian"]}
-        with loader.cursor() as c:
-            c.execute("SELECT pg_advisory_unlock(%s)", (MB_LOAD_LOCK_KEY,))
-    finally:
-        loader.close()
-    assert _rederive() == 1
-    assert _credits(cur) == {"Aria": [BACH]}
-    cur.execute("DELETE FROM mb_artist")
 
 
 def test_a_name_too_long_for_an_artist_names_nobody_and_a_long_list_its_writers(cur, library, templates):

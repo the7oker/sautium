@@ -260,8 +260,7 @@ See:
   node knows it whole (an artist row something besides a credit holds, or
   an MB name or sort name it holds: `Earth, Wind & Fire`; since 2026-11-22)
   — on a node without the dump a two-part value whose first part is one word
-  (`Debussy, Claude`) is one name as written unless a part is an artist the
-  node knows, and a generational suffix
+  (`Debussy, Claude`) is one name as written, and a generational suffix
   (`Ray Parker, Jr.`) is part of the name before it (since 2026-11-23,
   LIBRARY-FIXES-1); the comma tracks that would now read otherwise are
   derived again whenever MB rows arrive or go. Owned through a credit is owned

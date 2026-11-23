@@ -2218,7 +2218,8 @@ _GONE_COPIES_SQL = text("""
                        AND NOT EXISTS (SELECT 1 FROM media_files o
                                        WHERE o.album_variant_id = ov.id
                                          AND o.track_id = mf.track_id
-                                         AND o.id <> ALL(CAST(:ids AS int[])))
+                                         AND NOT EXISTS (SELECT 1 FROM missing x
+                                                         WHERE x.id = o.id))
                        AND NOT EXISTS (SELECT 1 FROM hqp_library_files h
                                        WHERE h.album_variant_id = ov.id
                                          AND h.track_id = mf.track_id))
