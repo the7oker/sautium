@@ -2185,17 +2185,20 @@ def _mark_present(paths: Set[str]) -> int:
 def _prune_stats() -> Dict[str, Any]:
     return {"checked": 0, "pruned": 0, "kept_unread": 0, "orphan_tracks": 0,
             "orphan_variants": 0, "orphan_albums": 0, "orphan_artists": 0,
-            "copies": 0, "copy_files": 0, "away": 0, "back": 0, "relinked": 0}
+            "copies": 0, "copy_files": 0, "away": 0, "set_aside": 0, "back": 0, "relinked": 0}
 
 
 # The local copies whose files are ALL among a walk's missing ones, and
 # whether ONE other present copy of the same album holds every one of their
 # tracks — a folder moved within the library, re-ripped elsewhere, the card's
 # copy away while the disk holds the album, the disk moved to the HQPlayer's
-# box. Present means seen: a local copy's file this very walk found
-# (`seen`, its paths — a copy outside a --path walk or under an unread folder
-# was not looked at), or a copy in an HQPlayer's library, which its own sync
-# keeps. One statement over the missing set.
+# box. Present means a copy that is not away, through a file this walk did
+# not find missing: inside the walk's scope that file was seen; outside it
+# (a scoped Rescan, a watcher's folder) or under a folder it could not read,
+# the database's word is taken, as an HQPlayer's library is taken on its own
+# sync's (LIBRARY-FIXES-1 §2.2, B-128). A copy wrongly found loses nothing by
+# it: a Rescan asks, and the removal is the person's. One statement over the
+# missing set.
 _GONE_COPIES_SQL = text("""
     WITH missing AS (SELECT unnest(CAST(:ids AS int[])) AS id),
     gone AS (
@@ -2215,7 +2218,8 @@ _GONE_COPIES_SQL = text("""
                        AND NOT EXISTS (SELECT 1 FROM media_files o
                                        WHERE o.album_variant_id = ov.id
                                          AND o.track_id = mf.track_id
-                                         AND o.file_path = ANY(CAST(:seen AS text[])))
+                                         AND NOT EXISTS (SELECT 1 FROM missing x
+                                                         WHERE x.id = o.id))
                        AND NOT EXISTS (SELECT 1 FROM hqp_library_files h
                                        WHERE h.album_variant_id = ov.id
                                          AND h.track_id = mf.track_id))
@@ -2224,7 +2228,7 @@ _GONE_COPIES_SQL = text("""
 """)
 
 
-def _set_aside(missing_ids: List[int], seen: Set[str], stats: Dict[str, Any]) -> List[int]:
+def _set_aside(missing_ids: List[int], stats: Dict[str, Any]) -> List[int]:
     """A copy whose files are all missing is away, not gone: it is marked
     absent (nothing removed, nothing asked — a walk that sees one of its
     files marks it present again) and its files leave the removal. A copy
@@ -2234,7 +2238,7 @@ def _set_aside(missing_ids: List[int], seen: Set[str], stats: Dict[str, Any]) ->
     if not missing_ids:
         return missing_ids
     with get_db_context() as db:
-        copies = db.execute(_GONE_COPIES_SQL, {"ids": missing_ids, "seen": list(seen)}).fetchall()
+        copies = db.execute(_GONE_COPIES_SQL, {"ids": missing_ids}).fetchall()
         away = [c.vid for c in copies if not c.found_elsewhere]
         newly = [c.vid for c in copies if not c.away]
         if newly:
@@ -2259,6 +2263,7 @@ def _set_aside(missing_ids: List[int], seen: Set[str], stats: Dict[str, Any]) ->
             "SELECT id FROM media_files WHERE album_variant_id = ANY(CAST(:v AS int[]))"),
             {"v": away}).scalars()) if away else set()
     stats["away"] = sum(1 for c in copies if not c.away and not c.found_elsewhere)
+    stats["set_aside"] = len(newly)
     if newly:
         logger.info(f"Rescan set {len(newly)} cop(ies) aside as away: none of their files was found")
     return [i for i in missing_ids if i not in kept]
@@ -2305,8 +2310,9 @@ def set_aside_missing(scopes: Optional[Sequence[Tuple[str, bool]]], walked: Set[
                               {"p": prefixes}).fetchall()
     missing = [r.id for r in rows if r.file_path not in walked and judged(r.file_path)]
     stats = _prune_stats()
-    _set_aside(missing, walked, stats)
-    return stats["away"]
+    _set_aside(missing, stats)
+    # no question follows: a copy found again elsewhere is set aside as well
+    return stats["set_aside"]
 
 
 def plan_prune(
@@ -2400,7 +2406,7 @@ def plan_prune(
             missing_ids.append(mf_id)
             logger.info(f"Missing: {file_path}")
 
-    return _prune_files(_set_aside(missing_ids, disk_paths, stats), stats, dry_run=True,
+    return _prune_files(_set_aside(missing_ids, stats), stats, dry_run=True,
                         progress_cb=progress_cb, cancel_check=cancel_check)
 
 

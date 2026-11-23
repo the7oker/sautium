@@ -33,7 +33,7 @@ from mutagen.id3 import ID3, TALB, TCOM, TIT2, TPE1, TPE2  # noqa: E402
 from mutagen.mp4 import MP4  # noqa: E402
 
 import scanner  # noqa: E402
-from tests.test_scan_unreachable import cur, library  # noqa: E402,F401
+from tests.test_scan_unreachable import cur, library, main_module  # noqa: E402,F401
 from uuid_utils import artist_uuid  # noqa: E402
 
 pytestmark = pytest.mark.skipif(
@@ -436,41 +436,146 @@ def test_a_name_held_by_another_id_is_that_artist(cur, library, templates):
     assert cur.fetchall() == [(other,)]
 
 
-# -- T9: "Last, First" by the dump's sort name ----------------------------------
+# -- T9: "Last, First" by MusicBrainz's sort name, from the rows the node holds ----
 
-def test_last_first_takes_the_dumps_name_on_a_dump_node_only(cur, library, templates):
+def _dump(cur, on: bool):
+    if on:
+        cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"x\"')")
+    else:
+        cur.execute("DELETE FROM user_settings WHERE key = 'musicbrainz.db_version'")
+
+
+def _rederive():
     import credits
     from database import get_db_context
+    with get_db_context() as db:
+        n = credits.rederive_commas(db)
+        db.commit()
+    return n
+
+
+def test_last_first_takes_mbs_name_from_any_rows_held_and_its_shape_reads_by_the_node(
+        cur, library, templates):
+    """LIBRARY-FIXES-1 §9 Q1 (B-130): without the dump MB's silence says
+    nothing — a two-part value whose first part is one word is one name as
+    written; a slice's row turns it as the dump's does; on a dump node the
+    silence is evidence and such a value is a list. Red before: a slice's
+    row turned nothing, and a dump-less node split both."""
     _clean(cur)
     cur.execute("DELETE FROM mb_artist")
     _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G",
           ["Bach, Johann Sebastian", "Lennon, McCartney"], 1)
     _scan()
-    # no dump and no performer of either name: both are lists (Q15) — the
-    # inverted name's split is the residue §12.6 accepts
-    assert _credits(cur) == {"Aria": ["Bach", "Johann Sebastian", "Lennon", "McCartney"]}
+    assert _credits(cur) == {"Aria": ["Bach, Johann Sebastian", "Lennon, McCartney"]}
+    assert _artist_id(cur, "Bach") is None and _artist_id(cur, "Johann Sebastian") is None
+    # a slice brought Bach's row (a co-credited collaborator's bare row)
     cur.execute("INSERT INTO mb_artist (id, gid, name, sort_name) VALUES (1, %s, %s, %s)",
                 (str(uuid.uuid4()), BACH, "Bach, Johann Sebastian"))
-    with get_db_context() as db:                 # slice rows alone: no dump, no rename
-        credits.rederive_commas(db)
-        db.commit()
-    assert _credits(cur)["Aria"][:2] == ["Bach", "Johann Sebastian"]
-    cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"x\"')")
-    with get_db_context() as db:                 # the dump arrived after the scan (§5.3)
-        assert credits.rederive_commas(db) == 1
-        db.commit()
+    assert _rederive() == 1
+    assert _credits(cur) == {"Aria": [BACH, "Lennon, McCartney"]}
+    assert _artist_id(cur, "Bach, Johann Sebastian") is None      # no orphan of the written form
+    assert _rederive() == 0                                        # nothing new arrived: nothing derived
+    _dump(cur, True)                                               # the dump arrived (§5.3)
+    assert _rederive() == 1
     assert _credits(cur) == {"Aria": [BACH, "Lennon", "McCartney"]}
-    assert _artist_id(cur, "Bach, Johann Sebastian") is None
-    assert _artist_id(cur, "Bach") is None and _artist_id(cur, "Johann Sebastian") is None
-    # the dump deleted: the written form splits again, and the turned name
-    # leaves with the credit that alone held it
+    # the dump deleted, the slice's row dropped: the written forms again,
+    # and the turned name leaves with the credit that alone held it
     cur.execute("DELETE FROM mb_artist")
-    cur.execute("DELETE FROM user_settings WHERE key = 'musicbrainz.db_version'")
-    with get_db_context() as db:
-        assert credits.rederive_commas(db) == 1
-        db.commit()
-    assert _credits(cur) == {"Aria": ["Bach", "Johann Sebastian", "Lennon", "McCartney"]}
-    assert _artist_id(cur, BACH) is None
+    _dump(cur, False)
+    assert _rederive() == 1
+    assert _credits(cur) == {"Aria": ["Bach, Johann Sebastian", "Lennon, McCartney"]}
+    assert _artist_id(cur, BACH) is None and _artist_id(cur, "Lennon") is None
+
+
+def test_the_shape_rule_and_the_generational_suffix(cur, library, templates):
+    """A two-part value with a one-word first part: one name on a node
+    without the dump, a list on a dump node that knows nothing of it; a
+    first part of two words or more is a list on both; a generational
+    suffix is part of the name before it on both (§9)."""
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    for i, (title, value) in enumerate((("Clair de lune", "Debussy, Claude"),
+                                        ("My Fair Lady", "Loewe, Lerner"),
+                                        ("Block Rockin' Beats", "Ed Simons, Tom Rowlands"),
+                                        ("Ghostbusters", "Ray Parker, Jr., Jeffrey Cohen"),
+                                        ("Jack and Jill", "Ray Parker, Jr."),
+                                        ("Blue Danube", "Strauss, Johann, II")), 1):
+        _flac(templates, library / "V" / "Mix" / f"0{i}.flac", title, "Someone", "Mix", [value], i)
+    _scan()
+    without = {"Clair de lune": ["Debussy, Claude"], "My Fair Lady": ["Loewe, Lerner"],
+               "Block Rockin' Beats": ["Ed Simons", "Tom Rowlands"],
+               "Ghostbusters": ["Ray Parker, Jr.", "Jeffrey Cohen"],
+               "Jack and Jill": ["Ray Parker, Jr."],
+               "Blue Danube": ["Strauss, Johann, II"]}       # "Strauss" and "Johann, II": the shape
+    assert _credits(cur) == without
+    assert _artist_id(cur, "Jr.") is None
+    _dump(cur, True)
+    assert _rederive() == 3
+    assert _credits(cur) == dict(without, **{"Clair de lune": ["Debussy", "Claude"],
+                                             "My Fair Lady": ["Loewe", "Lerner"],
+                                             "Blue Danube": ["Strauss", "Johann, II"]})
+    _dump(cur, False)
+    assert _rederive() == 3
+    assert _credits(cur) == without
+    # a composer row renamed in place keeps its id: no change to the derive
+    # (review round 3, L3), where comparing names alone derived it at every pass
+    cur.execute("UPDATE artists SET name = 'Claude Debussy' WHERE name = 'Debussy, Claude'")
+    assert _rederive() == 0
+    assert _credits(cur)["Clair de lune"] == ["Claude Debussy"]
+
+
+def test_a_canon_run_after_the_last_slice_row_dropped_derives_the_written_form(
+        cur, library, templates, main_module):
+    """The whole canon pass the slice cycle, the launcher's endpoint and a
+    rebuild wake takes the derive — before its check for MB data, so a drop
+    of the last slice row is followed too."""
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    cur.execute("INSERT INTO mb_artist (id, gid, name, sort_name) VALUES (1, %s, %s, %s)",
+                (str(uuid.uuid4()), BACH, "Bach, Johann Sebastian"))
+    _flac(templates, library / "G" / "G" / "01.flac", "Aria", "Glenn Gould", "G",
+          ["Bach, Johann Sebastian"], 1)
+    _scan()
+    assert _credits(cur) == {"Aria": [BACH]}
+    cur.execute("DELETE FROM mb_artist")
+    main_module._canon_run(True, [], [])
+    assert _credits(cur) == {"Aria": ["Bach, Johann Sebastian"]}
+
+
+def test_the_release_derives_the_comma_tracks_once(cur, library, templates, scratch_dsn, monkeypatch):
+    """db_migrate's composer_commas_v1 on a database §12.6's rule credited:
+    the split inverted name is one name after the start, and a second start
+    does nothing."""
+    import db_migrate
+    import seed_import
+    from config import settings
+    from urllib.parse import urlparse
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    _flac(templates, library / "I" / "I" / "01.flac", "Song", "Someone", "I", ["Ingrams, Robert Q."], 1)
+    _scan()
+    # the credits as §12.6 wrote them on this node
+    cur.execute("DELETE FROM track_credits")
+    for pos, name in enumerate(("Ingrams", "Robert Q.")):
+        cur.execute("INSERT INTO artists (id, name, name_latin) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (str(artist_uuid(name)), name, name.lower()))
+        cur.execute("""INSERT INTO track_credits (track_id, role, artist_id, source, position)
+                       SELECT id, 'composer', %s, 'tag', %s FROM tracks WHERE title = 'Song'""",
+                    (str(artist_uuid(name)), pos))
+    url = urlparse(scratch_dsn)
+    for key, value in dict(postgres_host=url.hostname, postgres_port=url.port,
+                           postgres_user=url.username, postgres_password=url.password,
+                           postgres_db=url.path.lstrip("/")).items():
+        monkeypatch.setattr(settings, key, value)
+    cur.execute("DELETE FROM _schema_migrations WHERE filename = 'composer_commas_v1'")
+    marked = db_migrate._marked
+    monkeypatch.setattr(db_migrate, "_marked", lambda c, name: (
+        marked(c, name) if name == "composer_commas_v1" else True))
+    monkeypatch.setattr(seed_import, "bundle_info", lambda: None)
+    assert db_migrate.apply_pending()["composer_commas"] == 1
+    assert _credits(cur) == {"Song": ["Ingrams, Robert Q."]}
+    assert _artist_id(cur, "Ingrams") is None and _artist_id(cur, "Robert Q.") is None
+    assert "composer_commas" not in db_migrate.apply_pending()
 
 
 # -- §12.6 Q15: a comma is a list unless the node knows the whole ----------------
@@ -524,33 +629,95 @@ def test_a_comma_list_splits_and_a_name_the_node_knows_stays_whole(cur, library,
     assert _scan()["reread"] == 0 and _credits(cur) == credits            # idempotent
 
 
-def test_a_comma_value_the_dump_names_is_one_name_on_a_dump_node_only(cur, library, templates):
-    import credits
-    from database import get_db_context
+def test_a_comma_value_the_mb_rows_name_is_one_name_whether_a_dump_or_a_slice_brought_them(
+        cur, library, templates):
     _clean(cur)
     cur.execute("DELETE FROM mb_artist")
+    # a slice's rows: no dump on this node
     cur.execute("INSERT INTO mb_artist (id, gid, name, sort_name) VALUES (1, %s, %s, %s), (2, %s, %s, %s)",
-                (str(uuid.uuid4()), "Emerson, Lake & Palmer", "Emerson, Lake & Palmer",
+                (str(uuid.uuid4()), "Crosby, Stills, Nash & Young", "Crosby, Stills, Nash & Young",
                  str(uuid.uuid4()), "Johann Strauss II", "Strauss, Johann, II"))
-    _flac(templates, library / "V" / "Mix" / "01.flac", "Lucky Man", "Greg Lake", "Mix",
-          ["Emerson, Lake & Palmer"], 1)
+    _flac(templates, library / "V" / "Mix" / "01.flac", "Ohio", "Neil Young", "Mix",
+          ["crosby, stills, nash & young"], 1)
     _flac(templates, library / "V" / "Mix" / "02.flac", "Blue Danube", "Wiener Philharmoniker", "Mix",
           ["strauss, johann, ii", "Bryan Adams, Jim Vallance"], 2)
+    _flac(templates, library / "V" / "Mix" / "03.flac", "Teach Your Children", "Graham Nash", "Mix",
+          ["Crosby, Stills, Nash, Young"], 3)
     _scan()
-    # slice rows alone are no dump: lists
-    assert _credits(cur) == {"Lucky Man": ["Emerson", "Lake & Palmer"],
-                             "Blue Danube": ["strauss", "johann", "ii", "Bryan Adams", "Jim Vallance"]}
-    cur.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"x\"')")
-    with get_db_context() as db:
-        assert credits.rederive_commas(db) == 2
-        db.commit()
     # an MB name, and a sort name compared folded, keep the value whole as
-    # written; a list MB knows no whole of still splits
-    assert _credits(cur) == {"Lucky Man": ["Emerson, Lake & Palmer"],
-                             "Blue Danube": ["strauss, johann, ii", "Bryan Adams", "Jim Vallance"]}
-    assert _artist_id(cur, "Emerson") is None and _artist_id(cur, "ii") is None
+    # written; a list MB knows no whole of splits — its first part one word
+    # and three parts, it is no inverted name by its shape either
+    held = {"Ohio": ["crosby, stills, nash & young"],
+            "Blue Danube": ["strauss, johann, ii", "Bryan Adams", "Jim Vallance"],
+            "Teach Your Children": ["Crosby", "Stills", "Nash", "Young"]}
+    assert _credits(cur) == held
+    _dump(cur, True)
+    assert _rederive() == 0                                   # the dump knows no more of them
+    assert _credits(cur) == held
+    assert _artist_id(cur, "Nash & Young") is None and _artist_id(cur, "ii") is None
     cur.execute("DELETE FROM mb_artist")
-    cur.execute("DELETE FROM user_settings WHERE key = 'musicbrainz.db_version'")
+    _dump(cur, False)
+
+
+def test_an_unspaced_script_or_traditional_is_no_inversion(cur, library, templates):
+    """Review round 1, M2: the shape's one-word first part is no inversion
+    when the script writes names without spaces or a part is no given name
+    ("Traditional"). A list led by a performer the node knows ("Björk,
+    Nellee Hooper") is §9 Q1's accepted residue on a node without the dump:
+    one name as written (review round 2, M2: a known part says nothing —
+    "Mozart, Wolfgang Amadeus" beside a performer "Mozart"). And on a dump
+    node, a performer's row keeps a comma name whole with no MB row (the
+    artists arm, which the dump-less shape would hide)."""
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    _flac(templates, library / "B" / "Post" / "01.flac", "Army of Me", "Björk", "Post", ["Björk"], 1)
+    _flac(templates, library / "EWF" / "Gratitude" / "01.flac", "Shining Star", "Earth, Wind & Fire",
+          "Gratitude", ["Maurice White"], 1)
+    for i, (title, value) in enumerate((("Isobel", "Björk, Nellee Hooper"),
+                                        ("Rydeen", "坂本龍一, 細野晴臣"),
+                                        ("Danny Boy", "Traditional, Anonymous"),
+                                        ("Boogie Wonderland", "Earth, Wind & Fire")), 1):
+        _flac(templates, library / "V" / "Mix" / f"0{i}.flac", title, "Someone", "Mix", [value], i)
+    _scan()
+    lists = {"Isobel": ["Björk, Nellee Hooper"], "Rydeen": ["坂本龍一", "細野晴臣"],
+             "Danny Boy": ["Traditional", "Anonymous"], "Boogie Wonderland": ["Earth, Wind & Fire"]}
+    got = _credits(cur)
+    assert {t: got[t] for t in lists} == lists
+    _dump(cur, True)
+    assert _rederive() == 1                                      # Isobel: MB's silence is a list here
+    assert {t: _credits(cur)[t] for t in lists} == dict(lists, Isobel=["Björk", "Nellee Hooper"])
+    _dump(cur, False)
+
+
+def test_a_composer_the_canon_merged_into_a_performers_spelling_stays_merged(cur, library, templates):
+    """Review round 1, M1: the canon moved the tag's "Bjork" onto the
+    performer "Björk" (recanonicalize_artist repoints the credits and drops
+    the source). A whole canon pass's derive compares names folded as the
+    canon folds (f_unaccent, so "Soren" and "Søren" too — round 2, L1), so it
+    leaves the merge as it is; comparing ids it derived the track and minted
+    "Bjork" again."""
+    from canon.identity import repoint_track_credits
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    _flac(templates, library / "B" / "Post" / "01.flac", "Army of Me", "Björk", "Post", ["Björk"], 1)
+    _flac(templates, library / "S" / "S" / "01.flac", "Vinter", "Søren Bebe", "S", ["Søren Bebe"], 1)
+    _flac(templates, library / "D" / "D" / "01.flac", "I've Seen It All", "Someone", "D",
+          ["Bjork", "Soren Bebe", "Sjón Sigurdsson, Lars von Trier"], 1)
+    _scan()
+    from database import get_db_context
+    for spelt, canon in (("Bjork", "Björk"), ("Soren Bebe", "Søren Bebe")):
+        tag, performer = _artist_id(cur, spelt), _artist_id(cur, canon)
+        assert tag and performer and tag != performer
+        with get_db_context() as db:
+            repoint_track_credits(db, tag, performer)
+            db.commit()
+        cur.execute("DELETE FROM artists WHERE id = %s", (tag,))
+    merged = ["Björk", "Søren Bebe", "Sjón Sigurdsson", "Lars von Trier"]
+    assert _credits(cur)["I've Seen It All"] == merged
+    assert _rederive() == 0
+    assert _credits(cur)["I've Seen It All"] == merged
+    assert _artist_id(cur, "Bjork") is None and _artist_id(cur, "Soren Bebe") is None
+
 
 
 def test_a_name_too_long_for_an_artist_names_nobody_and_a_long_list_its_writers(cur, library, templates):

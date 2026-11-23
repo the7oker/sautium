@@ -30,14 +30,26 @@ logger = logging.getLogger(__name__)
 _JOINERS = re.compile(r"\s*;\s*|\s+/\s+")
 
 # In composer tags a comma joins a list of writers ("Ed Simons, Tom
-# Rowlands"; the owner's library: 491 such values, none an MB sort form —
-# CREDITS-1-DESIGN §12.5, Q15), except where the whole value is one name — a
-# band ("Earth, Wind & Fire"), an inverted name ("Bach, Johann Sebastian") —
-# which are exactly the values some catalogue knows whole. So the split is
-# decided at the derive, beside the dump's turning of "Last, First": one
-# decision about what a comma value stands for, made against what the node
-# knows, and made again when a dump arrives or goes (rederive_commas, §5.3).
+# Rowlands"; the owner's library: 483 such values, CREDITS-1-DESIGN §12.5,
+# Q15), except where the whole value is one name — a band ("Earth, Wind &
+# Fire"), an inverted name ("Bach, Johann Sebastian") — which are exactly the
+# values some catalogue knows whole. So the split is decided at the derive,
+# beside MusicBrainz's turning of "Last, First": one decision about what a
+# comma value stands for, made against what the node knows, and made again
+# when MB rows arrive or go (rederive_commas, §5.3; LIBRARY-FIXES-1 §9).
 _LIST_COMMA = re.compile(r"\s*,\s+")
+
+# A generational suffix is part of the name before it ("Ray Parker, Jr."),
+# never a writer of its own.
+_SUFFIX = re.compile(r"(?:jr|sr|ii|iii|iv)\.?", re.IGNORECASE)
+
+# "Last, First" is a Latin-script habit, among others; a name in these
+# scripts is written without spaces, so its one "word" says nothing of an
+# inversion ("坂本龍一, 細野晴臣" is two writers).
+_UNSPACED_SCRIPT = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+
+# Parts that are no given names: beside another part, a list of writers.
+_LIST_WORDS = frozenset({"traditional", "anonymous"})
 
 # A placeholder names nobody, as Various Artists is no artist (Q16); folded
 # (normalize), so "[unknown]" and "VARIOUS" are these. "Traditional" and
@@ -98,13 +110,14 @@ def _dump_node(db: Session) -> bool:
         "SELECT 1 FROM user_settings WHERE key = 'musicbrainz.db_version'")).first() is not None
 
 
-def _named_by_dump(db: Session, written: Set[str]) -> Dict[str, str]:
-    """{written: MusicBrainz's name} for the one-comma names the dump says
-    are an artist's sort form: an MB artist named as the name turned around
-    whose sort name is the name (both case- and accent-folded, f_unaccent),
-    and only one such name. Only from the dump: a slice-fed node's mb_*
-    rows hold the subtrees of engaged artists, which a composer never is
-    (Q4) — so a node without the dump keeps the written form."""
+def _named_by_mb(db: Session, written: Set[str]) -> Dict[str, str]:
+    """{written: MusicBrainz's name} for the one-comma names the MB rows this
+    node holds say are an artist's sort form: an MB artist named as the name
+    turned around whose sort name is the name (both case- and accent-folded,
+    f_unaccent), and only one such name. The dump's rows or a slice's alike
+    — a slice brings the composer's row wherever MB's artist credits of an
+    engaged artist name him: a row held is evidence however it came, and a
+    namesake a partial set lacks writes the same name."""
     pairs = [(w, t) for w in written for t in [_turned(w)] if t]
     if not pairs:
         return {}
@@ -119,14 +132,15 @@ def _named_by_dump(db: Session, written: Set[str]) -> Dict[str, str]:
     return {r.v: r.name for r in rows}
 
 
-def _known_whole(db: Session, values: Set[str], dump: bool) -> Set[str]:
+def _known_whole(db: Session, values: Set[str]) -> Set[str]:
     """The comma values that name an artist this node knows whole (Q15): an
     artists row of that identity (the UUID v5 rule, or the name itself — a
     canon rename keeps the id) that something besides a composer credit
     holds — a performer here, the phantom layer's, an MBID's, a similar
     edge's: a composer row an earlier derive minted is no evidence of
-    itself — or, on a dump node, an MB artist's name or sort name, folded
-    as the dump's naming folds (f_unaccent)."""
+    itself — or an MB artist's name or sort name among the rows the node
+    holds, the dump's or a slice's, folded as MB's naming folds
+    (f_unaccent)."""
     if not values:
         return set()
     vs = sorted(values)
@@ -140,29 +154,59 @@ def _known_whole(db: Session, values: Set[str], dump: bool) -> Set[str]:
                                OR EXISTS (SELECT 1 FROM similar_artists sa WHERE sa.artist_id = a.id)
                                OR EXISTS (SELECT 1 FROM similar_artists sa
                                            WHERE sa.similar_artist_id = a.id)))
-            OR (CAST(:dump AS boolean)
-                AND (EXISTS (SELECT 1 FROM mb_artist m WHERE f_unaccent(m.name) = f_unaccent(w.v))
-                     OR EXISTS (SELECT 1 FROM mb_artist m
-                                 WHERE f_unaccent(m.sort_name) = f_unaccent(w.v))))"""),
-        {"v": vs, "i": [str(artist_uuid(v)) for v in vs], "dump": dump}).scalars())
+            OR EXISTS (SELECT 1 FROM mb_artist m WHERE f_unaccent(m.name) = f_unaccent(w.v))
+            OR EXISTS (SELECT 1 FROM mb_artist m WHERE f_unaccent(m.sort_name) = f_unaccent(w.v))"""),
+        {"v": vs, "i": [str(artist_uuid(v)) for v in vs]}).scalars())
+
+
+def _parts(value: str) -> List[str]:
+    """A comma value's parts, a generational suffix joined to the part
+    before it."""
+    parts: List[str] = []
+    for p in (p.strip() for p in _LIST_COMMA.split(value)):
+        if parts and _SUFFIX.fullmatch(p):
+            parts[-1] = f"{parts[-1]}, {p}"
+        else:
+            parts.append(p)
+    return parts
+
+
+def _inverted_shape(parts: List[str]) -> bool:
+    """Two parts, the first one word of a spaced script, neither a word no
+    given name is: "Debussy, Claude" or "Loewe, Lerner", which no shape tells
+    apart."""
+    return (len(parts) == 2 and not re.search(r"\s", parts[0])
+            and not _UNSPACED_SCRIPT.search(parts[0])
+            and not {normalize(p) for p in parts} & _LIST_WORDS)
 
 
 def _names_of(db: Session, written: Set[str]) -> Dict[str, List[str]]:
     """{written value: the names it stands for, in order}: a one-comma name
-    the dump turns takes the dump's name; a comma value the node knows whole
-    is that one name; any other comma value is a list, split on `, ` (Q15).
-    A name too long for artists.name is no artist's (a tag that pasted liner
-    notes) and names nobody."""
+    the MB rows held turn takes MB's name; a comma value the node knows whole
+    is that one name; any other comma value is a list of its parts (Q15) —
+    except a two-part value whose first part is one word on a node without
+    the dump, which is one name as written: there MB's silence says nothing,
+    and a list kept whole shows the file's own text where a split would
+    invent two names ("Debussy" and "Claude"). On a dump node that silence
+    is evidence, and such a value is a list (LIBRARY-FIXES-1 §9 Q1). A name
+    too long for artists.name is no artist's (a tag that pasted liner notes)
+    and names nobody."""
     dump = _dump_node(db)
-    named = _named_by_dump(db, written) if dump else {}
+    named = _named_by_mb(db, written)
     lists = {w for w in written if w not in named and _LIST_COMMA.search(w)}
-    whole = _known_whole(db, lists, dump)
+    whole = _known_whole(db, lists)
+    parts_of = {w: _parts(w) for w in lists - whole}
     out: Dict[str, List[str]] = {}
     for w in written:
         if w in named:
             names = [named[w]]
-        elif w in lists and w not in whole:
-            names = [n for n in (p.strip() for p in _LIST_COMMA.split(w)) if _is_name(n)]
+        elif (w in parts_of and not dump and len(w) <= NAME_MAX
+              and _inverted_shape(parts_of[w]) and all(_is_name(p) for p in parts_of[w])):
+            names = [w]
+        elif w in parts_of:
+            # a placeholder among the parts ("Traditional, Unknown") names
+            # nobody, and the rest are the list
+            names = [n for n in parts_of[w] if _is_name(n)]
         else:
             names = [w]
         out[w] = [n for n in dict.fromkeys(names) if len(n) <= NAME_MAX]
@@ -176,8 +220,9 @@ def derive_composers(db: Session, track_ids: Iterable, *, sweep: bool = True) ->
     nothing, and a track none of whose owned files is read keeps its rows —
     no file left included: the credit is of the music (Q5). A name is the
     artist of the existing UUID v5 rule, so a composer who performs is one
-    row; a written one-comma name takes MusicBrainz's name on a dump node,
-    and a comma list is its writers unless the node knows it whole.
+    row; a written one-comma name takes MusicBrainz's name where the MB rows
+    held say so, and a comma list is its writers unless the node knows it
+    whole (_names_of).
     Returns the artists a credit of these tracks named before and names no
     longer; with `sweep`, those no other row names are deleted (Q3: a
     corrected tag leaves no orphan) — a caller that sweeps them itself (a
@@ -228,7 +273,10 @@ def _derive_alone(db: Session, tids: List[str], sweep: bool) -> Set[str]:
     return set()
 
 
-def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:
+def _plan(db: Session, tids: List[str]):
+    """What a derive of `tids` would write: ({track: [artist ids in
+    position order]}, {artist id to mint: name}, {artist id: the name that
+    named it}), or None when no owned file of them is read."""
     # the best copy first, as best_rip_order ranks rips; a copy here before
     # the HQPlayer's of the same quality, ids last (two tables' serials)
     files = db.execute(text("""
@@ -243,7 +291,7 @@ def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:
          ORDER BY f.track_id, f.is_lossless DESC NULLS LAST, f.sample_rate DESC NULLS LAST,
                   f.bit_depth DESC NULLS LAST, f.at_hqp, f.id"""), {"t": tids}).fetchall()
     if not files:
-        return set()
+        return None
     names_of = _names_of(db, {w for f in files for w in f.raw_composers})
     names = {n for ns in names_of.values() for n in ns}
     # artists.name is UNIQUE: a row already holding the name is that artist,
@@ -258,11 +306,21 @@ def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:
             for n in names_of[w]:
                 if ids[n] not in order:
                     order.append(ids[n])
+    named: Dict[str, str] = {}
+    for n in sorted(names):
+        named.setdefault(ids[n], n)
+    return credits, {ids[n]: n for n in names if n not in held}, named
+
+
+def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:
+    plan = _plan(db, tids)
+    if plan is None:
+        return set()
+    credits, mint, _named = plan
     before = set(db.execute(text("""
         DELETE FROM track_credits
          WHERE track_id = ANY(CAST(:t AS uuid[])) AND role = 'composer' AND source = 'tag'
         RETURNING artist_id::text"""), {"t": list(credits)}).scalars())
-    mint = {ids[n]: n for n in names if n not in held}
     if mint:
         db.execute(text("""
             INSERT INTO artists (id, name, name_latin)
@@ -294,16 +352,44 @@ def _derive(db: Session, tids: List[str], sweep: bool) -> Set[str]:
 
 
 def rederive_commas(db: Session) -> int:
-    """After a dump load or its deletion: the tracks a written comma value
-    names are derived again — 'Bach, Johann Sebastian' takes the dump's
-    name, a list the dump knows whole is one name, and back (§5.3). Only
-    those can change. Returns how many tracks."""
-    tids = list(db.execute(text("""
+    """When what the node knows of names changed — the dump loaded or
+    deleted, slices landed or dropped (the canon run they wake), this
+    release's rule (db_migrate's composer_commas_v1) — the tracks whose
+    written comma value now reads otherwise are derived again: 'Bach,
+    Johann Sebastian' takes MusicBrainz's name, a list it knows whole is one
+    name, and back (§5.3). Only a comma track can change, and only one whose
+    composers the rule would now name otherwise is touched — position by
+    position the same artist, or a name the same folded as the canon folds
+    (f_unaccent, then the identity rule): a composer the canon merged into a
+    performer's spelling ("Bjork" into "Björk") is no change, where a derive
+    would mint the tag's spelling again. A run after which nothing that
+    matters arrived derives nothing. Returns how many tracks."""
+    lock_credits(db)
+    tids = [str(t) for t in db.execute(text("""
         SELECT DISTINCT f.track_id FROM (
             SELECT track_id, raw_composers FROM media_files WHERE raw_composers IS NOT NULL
             UNION ALL
             SELECT track_id, raw_composers FROM hqp_library_files WHERE raw_composers IS NOT NULL) f
-         WHERE EXISTS (SELECT 1 FROM unnest(f.raw_composers) n WHERE n LIKE '%,%')""")).scalars())
-    for i in range(0, len(tids), 500):
-        derive_composers(db, tids[i:i + 500])
-    return len(tids)
+         WHERE EXISTS (SELECT 1 FROM unnest(f.raw_composers) n WHERE n LIKE '%,%')""")).scalars()]
+    plan = _plan(db, sorted(tids)) if tids else None
+    if plan is None:
+        return 0
+    credits, _mint, named = plan
+    stored = {r.track_id: list(zip(r.ids, r.names)) for r in db.execute(text("""
+        SELECT tc.track_id::text AS track_id, array_agg(a.id::text ORDER BY tc.position) AS ids,
+               array_agg(a.name ORDER BY tc.position) AS names
+          FROM track_credits tc JOIN artists a ON a.id = tc.artist_id
+         WHERE tc.track_id = ANY(CAST(:t AS uuid[])) AND tc.role = 'composer' AND tc.source = 'tag'
+         GROUP BY tc.track_id"""), {"t": tids})}
+    spelt = sorted(set(named.values()) | {n for row in stored.values() for _i, n in row})
+    folded = {n: normalize(f) for n, f in db.execute(text(
+        "SELECT n, f_unaccent(n) FROM unnest(CAST(:n AS text[])) AS n"), {"n": spelt})}
+
+    def same(order, row):
+        return len(order) == len(row) and all(
+            a == i or folded[named[a]] == folded[n] for a, (i, n) in zip(order, row))
+
+    changed = sorted(t for t, order in credits.items() if not same(order, stored.get(t, [])))
+    for i in range(0, len(changed), 500):
+        derive_composers(db, changed[i:i + 500])
+    return len(changed)

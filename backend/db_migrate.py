@@ -108,7 +108,13 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      (hqp_endpoints.library_read_rev under hqp_library.LIBRARY_READ_REV: its
      next sync reads it whole, the attach's check included) — no step
      either, and no library hash is cleared: the hash is how a library that
-     moved to a new address is known.
+     moved to a new address is known. The comma rule of LIBRARY-FIXES-1
+     (2026-11-23: MB rows held turn or keep whole however they came; a
+     two-part value whose first part is one word is one name on a node
+     without the dump; a generational suffix joins its name) reads no file
+     differently, so it is a derive, not a re-read: `composer_commas_v1`
+     derives once the comma tracks it would now credit otherwise
+     (credits.rederive_commas).
 
 Right after the schema deltas, once per database, the birth preset
 (`birth_preset_v1`, _apply_birth_preset): the switches a node's setup chose
@@ -877,6 +883,14 @@ def apply_pending() -> dict:
         if not _marked(conn, "canon_classical_v1"):
             out["canon_woken"] = _wake_owned_canon(conn)
             _mark(conn, "canon_classical_v1")
+
+        if not _marked(conn, "composer_commas_v1"):
+            from credits import rederive_commas
+            from database import get_db_context
+            with get_db_context() as db:
+                out["composer_commas"] = rederive_commas(db)
+                db.commit()
+            _mark(conn, "composer_commas_v1")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

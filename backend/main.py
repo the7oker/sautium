@@ -2396,6 +2396,26 @@ def _canon_run(full: bool, owned: list, phantom: list) -> None:
     similar-artist stubs whose answers just came (`owned`, `phantom`) — a
     woken subject re-decides itself, not the library."""
     try:
+        if full:
+            # A whole pass follows slices landed or dropped (the slice cycle,
+            # the launcher's endpoint, a rebuild): MB rows are evidence of a
+            # composer's name however they came, so a comma value may read
+            # otherwise now — and after a drop of the last of them too,
+            # before the check below that finds no MB data.
+            # Its own failure is logged and leaves the canon its pass.
+            from credits import rederive_commas
+            from database import get_db_context
+            try:
+                with get_db_context() as db:
+                    renamed = rederive_commas(db)
+                    db.commit()
+            except Exception:
+                logger.error("composer credits: the derive after the MB rows changed failed; the "
+                             "next whole canon pass tries again", exc_info=True)
+            else:
+                if renamed:
+                    logger.info("composer credits derived again for %d track(s) under the MB rows "
+                                "held", renamed)
         # Re-evaluate the MB data source: the caller (P2P slice import) may have
         # just inserted the FIRST mb_artist rows into a dump-less node.
         import mb_backend as mb

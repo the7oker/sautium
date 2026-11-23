@@ -255,10 +255,16 @@ See:
   2026-11-22), and `derive_composers` rewrites a track's rows from its owned
   files, best copy first, at every write of them; the name is the artist's
   by the UUID v5 rule (a composer who performs is one row), "Last, First"
-  turned only by the dump's sort name, and a value with `, ` a list of its
-  writers unless the node knows it whole (an artist row something besides a
-  credit holds, or on a dump node an MB name or sort name: `Earth, Wind &
-  Fire`; since 2026-11-22). Owned through a credit is owned
+  turned by an MB sort name among the MB rows the node holds — the dump's
+  or a slice's —, and a value with `, ` a list of its writers unless the
+  node knows it whole (an artist row something besides a credit holds, or
+  an MB name or sort name it holds: `Earth, Wind & Fire`; since 2026-11-22)
+  — on a node without the dump a two-part value whose first part is one word
+  (`Debussy, Claude`) is one name as written — not in an unspaced script
+  or beside `Traditional`/`Anonymous` —, and a generational suffix
+  (`Ray Parker, Jr.`) is part of the name before it (since 2026-11-23,
+  LIBRARY-FIXES-1); the comma tracks that would now read otherwise are
+  derived again whenever MB rows arrive or go. Owned through a credit is owned
   (`sql_queries.ARTIST_OWNED`), never engaged. Nothing of it travels.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.

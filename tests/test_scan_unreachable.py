@@ -949,6 +949,87 @@ def test_a_copy_found_again_elsewhere_is_asked_about_apart_and_its_analysis_foll
     assert cur.fetchone()[0] == 1
 
 
+def _scoped(main_module, monkeypatch, folder, prune):
+    """A walk of one folder: a scoped Rescan (prune), or the watcher's or
+    "Scan for new"'s walk of it (no question)."""
+    from canon import post_import
+    monkeypatch.setattr(post_import, "run", _post_import)
+    main_module.request_scan({folder: True}, prune=prune)
+    main_module._scan_thread.join()
+    return main_module._scan_state
+
+
+def _copies(cur, album="Pulse Archive"):
+    cur.execute("""SELECT av.directory_path, av.absent_since IS NOT NULL FROM album_variants av
+                     JOIN albums a ON a.id = av.album_id WHERE a.title = %s ORDER BY 1""", (album,))
+    return [("/".join(Path(p).parts[-3:]), away) for p, away in cur.fetchall()]
+
+
+def _a_box_copied_then_its_old_folder_removed(cur, library, main_module, monkeypatch):
+    """B-128's history: the album copied to a folder outside the one it was
+    in and scanned (its files join the same tracks), the old folder removed
+    later, a walk of the folder that held it — the old copy away."""
+    import shutil
+    _flac(library / "Ostrava Unit" / "Second Signal" / "01.flac", 7, "Beacon",
+          album="Second Signal")                  # the folder still walks something
+    _scan(main_module, monkeypatch, False)
+    shutil.copytree(library / "Ostrava Unit" / "Pulse Archive",
+                    library / "Classical" / "Ostrava Unit" / "Pulse Archive")
+    _scan(main_module, monkeypatch, False)
+    cur.execute("SELECT count(*) FROM tracks WHERE title IN ('Carrier', 'Relay')")
+    assert cur.fetchone()[0] == 2                 # one track each, two copies
+    shutil.rmtree(library / "Ostrava Unit" / "Pulse Archive")
+    state = _scoped(main_module, monkeypatch, "Ostrava Unit", False)
+    assert state["result"]["away"] == 1          # said, found elsewhere or not (review round 1, L4)
+    assert _copies(cur) == [("Classical/Ostrava Unit/Pulse Archive", False),
+                            ("Music/Ostrava Unit/Pulse Archive", True)]
+
+
+def test_a_copy_moved_out_of_the_rescans_folder_long_ago_is_found_again_elsewhere(
+        cur, library, main_module, monkeypatch, scanned_library):
+    """B-128 (LIBRARY-FIXES-1 §2): a Rescan of the folder that held the old
+    copy walks nothing of the new one, yet the database holds the new copy
+    present — so the old copy is offered as found again elsewhere, not kept
+    as away. Red before: found elsewhere wanted the new copy's files in the
+    Rescan's own walk."""
+    _a_box_copied_then_its_old_folder_removed(cur, library, main_module, monkeypatch)
+
+    state = _scoped(main_module, monkeypatch, "Ostrava Unit", True)
+    assert state["prune_plan"]["counts"] == {"files": 0, "copies": 1, "tracks": 0,
+                                             "albums": 0, "artists": 0, "away": 0}
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert _copies(cur) == [("Classical/Ostrava Unit/Pulse Archive", False)]
+    for title, (track_id, _sid) in scanned_library.items():
+        [(_mf_id, path)] = _sources(cur, track_id)
+        assert "Classical/Ostrava Unit/Pulse Archive/" in path
+        assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
+
+
+def test_a_copy_found_through_the_databases_word_loses_nothing_when_that_word_was_stale(
+        cur, library, main_module, monkeypatch, scanned_library):
+    """The threat of §2.2: the other copy is gone too, outside the Rescan's
+    folder, and nothing has judged it yet. The yes removes only the old
+    copy's rows; the tracks, their analysis and the other copy's rows stay,
+    and the next walk that judges the other copy sets it away."""
+    import shutil
+    _a_box_copied_then_its_old_folder_removed(cur, library, main_module, monkeypatch)
+    shutil.rmtree(library / "Classical")
+
+    state = _scoped(main_module, monkeypatch, "Ostrava Unit", True)
+    assert state["prune_plan"]["counts"]["copies"] == 1
+    _answer(main_module, state["prune_plan"]["id"], True)
+
+    assert _copies(cur) == [("Classical/Ostrava Unit/Pulse Archive", False)]
+    for title, (track_id, _sid) in scanned_library.items():
+        cur.execute("SELECT count(*) FROM tracks WHERE id = %s", (track_id,))
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM embeddings WHERE track_id = %s", (track_id,))
+        assert cur.fetchone()[0] == 1
+    _scan(main_module, monkeypatch, False)        # "Scan for new" over the whole library
+    assert _copies(cur) == [("Classical/Ostrava Unit/Pulse Archive", True)]
+
+
 def test_a_copy_away_while_another_is_found_keeps_one_analysis(
         cur, library, main_module, monkeypatch, tmp_path, scanned_library):
     """The card's copy away while the disk holds the album: plays take the

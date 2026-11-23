@@ -2589,9 +2589,14 @@ body.sautium-base {
 }
 /* Compact pill that opens the variant picker sheet; only rendered when
    the album has more than one rip. Mono+blue label matches the visual
-   language used for other technical readouts (BPM, sample rate). */
+   language used for other technical readouts (BPM, sample rate). A row of
+   its own under the artist and the composer line (B-133): the artist line
+   is an inline button, so an inline pill shared its line whenever both
+   fit — a short name beside "All variants · best per track", at every
+   width. */
 .album-variant-toggle {
-  display: inline-flex;
+  display: flex;
+  width: fit-content;
   align-items: center;
   gap: calc(6 * var(--px));
   margin-top: calc(8 * var(--px));
