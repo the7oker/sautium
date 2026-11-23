@@ -149,7 +149,11 @@ async def changed() -> None:
     """Said by the two places that make or change the identity
     (routers/auth.create_account, device_auth._after_rotation)."""
     for follower in list(_followers):
-        await follower()
+        try:
+            await follower()
+        except Exception:
+            logger.exception("identity: %s did not follow the identity's change — "
+                             "a restart of the backend decides it again", follower.__name__)
 
 
 def forget_cached() -> None:

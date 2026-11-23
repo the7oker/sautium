@@ -488,8 +488,8 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     Everything in this process that cached the old key is told, and its
     chat client and identity worker start again on the new one; the P2P
     layer learns through NOTIFY (the launcher restarts its manager on it —
-    a Docker node restarts the backend for its peer surface, bound to the
-    key at start)."""
+    a Docker node's peer surface follows the key at once, and it restarts
+    the backend for its admission gate, built on the key at start)."""
     d = _identity_dir()
     if d is None:
         raise RuntimeError("no identity directory configured")

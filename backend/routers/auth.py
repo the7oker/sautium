@@ -378,8 +378,10 @@ async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
         "email_grant": (device_auth.grant("email", EMAIL_FLOW_SECONDS)
                         if info.get("email") else None),
         # The launcher restarts its P2P manager on the NOTIFY; a Docker
-        # node serves its peer surface from this process, bound to the key
-        # it started with.
+        # node serves its peer surface from this process: its certificate
+        # and its request check follow the key at once
+        # (main.identity_changed), its admission gate keeps the key the
+        # start built it on.
         "restart_required": not settings.p2p_listen_port,
     })
 

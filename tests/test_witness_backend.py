@@ -872,6 +872,24 @@ def test_the_docker_surface_records_an_introduction(conn):
         assert cur.fetchone()["n"] == 1
 
 
+def test_a_request_before_the_account_leaves_no_later_signature_unchecked(conn, monkeypatch):
+    """A node's account is made under its running process (the first-run
+    form). The surface once kept "no key" from a request that came before
+    it, and from then on checked no signature — no introduction recorded,
+    no ban applied — until a restart (PI-NODE-2C's evening, F7's review)."""
+    from fastapi.testclient import TestClient
+    client = Ed25519PrivateKey.generate()
+    pub = client.public_key().public_bytes_raw().hex()
+    with TestClient(_docker_app()) as http:
+        with monkeypatch.context() as unborn:
+            unborn.setattr(p2p_identity, "resolve_identity", lambda s: None)
+            r = http.get("/api/sync/witness-test", headers=_signed(client, cert=certificate(pub)))
+            assert peer_auth.HDR_IDENTITY not in r.headers
+        r = http.get("/api/sync/witness-test", headers=_signed(client, cert=certificate(pub)))
+        assert r.status_code == 200 and r.headers[peer_auth.HDR_IDENTITY] == "unverified"
+    assert _row(conn, pub, "introduced") is not None
+
+
 def test_the_docker_surface_records_after_the_gate_and_never_fails_on_the_record(conn, monkeypatch, caplog):
     from fastapi.testclient import TestClient
 

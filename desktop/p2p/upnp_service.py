@@ -318,10 +318,13 @@ class UPnPService:
                 except Exception as e:      # miniupnpc raises bare Exception for a router's error
                     logger.info(f"UPnP: the mapping of {ext} could not be removed: {e}")
                 self._mapped.remove((ext, intn))
+                changed = True
+                if self._gate is not None and not self._gate():
+                    logger.warning("UPnP: %d does not answer as the peer surface — not mapped again", intn)
+                    continue
                 taken = self._map_port(self._upnp, intn)
                 if taken:
                     self._mapped.append((taken, intn))
-                changed = True
             return changed
 
     async def keep_mapped(self, internal_port: int, on_external: Callable[[int], None]) -> None:
@@ -351,14 +354,15 @@ class UPnPService:
 
     def close_ports(self):
         """Remove all UPnP port mappings."""
-        if not self._upnp:
-            return
-        for ext, _ in self._mapped:
-            try:
-                self._upnp.deleteportmapping(ext, "TCP")
-            except Exception:
-                pass
-        if self._mapped:
-            logger.info(f"UPnP: {len(self._mapped)} mappings removed")
-        self._mapped.clear()
-        self._external_ip = None
+        with self._lock:
+            if not self._upnp:
+                return
+            for ext, _ in self._mapped:
+                try:
+                    self._upnp.deleteportmapping(ext, "TCP")
+                except Exception:
+                    pass
+            if self._mapped:
+                logger.info(f"UPnP: {len(self._mapped)} mappings removed")
+            self._mapped.clear()
+            self._external_ip = None

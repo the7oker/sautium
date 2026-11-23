@@ -387,6 +387,45 @@ def test_a_recheck_with_nothing_mapped_asks_nobody(igd):
     assert asked == [] and igd.asked == []
 
 
+def test_a_recheck_asks_the_gate_before_it_maps_again(igd):
+    answers, verdict = [True], {}
+    upnp = UPnPService(ports=[8801], gate=lambda: answers[0], leads_here=lambda ip, port: verdict.get(port))
+    upnp.open_ports()
+    assert upnp.get_external_port(8801) == 8801
+
+    verdict[8801], answers[0] = False, False        # a neighbour's port, and the surface no longer answers
+    assert upnp.recheck() is True
+    assert upnp.get_external_port(8801) is None
+    assert igd.table == {} and igd.asked == [8801]
+
+
+def test_a_recheck_that_finds_no_port_leaves_the_node_unmapped(igd):
+    verdict = {}
+    upnp = UPnPService(ports=[8801], leads_here=lambda ip, port: verdict.get(port))
+    upnp.open_ports()
+    verdict.update({port: False for port in range(8801, 8806)})
+    assert upnp.recheck() is True
+    assert upnp.get_external_port(8801) is None
+    assert igd.table == {}
+
+
+def test_a_follower_that_fails_is_said_and_the_next_still_hears(monkeypatch, caplog):
+    monkeypatch.setattr(p2p_identity, "_followers", [])
+    heard = []
+
+    async def broken():
+        raise RuntimeError("the certificate's folder is gone")
+
+    async def next_one():
+        heard.append("next")
+
+    p2p_identity.on_change(broken)
+    p2p_identity.on_change(next_one)
+    asyncio.run(p2p_identity.changed())
+    assert heard == ["next"]
+    assert "broken did not follow the identity's change" in caplog.text
+
+
 def test_the_identitys_event_reaches_each_follower_once(monkeypatch):
     monkeypatch.setattr(p2p_identity, "_followers", [])
     heard = []

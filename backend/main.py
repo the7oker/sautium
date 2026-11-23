@@ -357,23 +357,40 @@ def _tls_dir() -> _Path:
 
 
 async def identity_changed() -> None:
-    """This node's identity appeared (its account was made) or changed (a
-    rotation) under a process that keeps running. What the start decided on
+    """This node's identity appeared (its account was made) under a process
+    that keeps running, or changed (a rotation). What the start decided on
     the identity it had then — none, on a node not yet born — is decided
-    again. The peer surface presents a certificate bound to the key from the
-    next handshake on: until then every pinned dial of this node was refused
-    and it answered no peer before its next restart. And the mapping of its
-    port is asked again whom it leads to: the check from inside is pinned to
-    that key and learns nothing without one, so a node not yet born kept a
-    port the router's own forward gives a neighbour (PI-NODE-2C's evening
-    on a 4 GB Pi: F1, F7)."""
+    again, so that a node born through the first-run form is a whole peer
+    with no restart (PI-NODE-2C's evening on a 4 GB Pi: F1, F7):
+
+    - the peer surface presents a certificate bound to the key from the next
+      handshake on — until then every pinned dial of this node was refused;
+    - the mapping of its port is asked again whom it leads to: the check
+      from inside is pinned to that key and learns nothing without one, so a
+      node not yet born kept a port the router's own forward gives a
+      neighbour;
+    - the DHT announces the account's invite code, which friends look up;
+    - the admission gate, which a start with no key could not build, is built.
+
+    A rotation still asks for a restart (routers/auth.change_identity): the
+    gate a start built keeps signing with the key it was built on."""
+    from p2p_identity import resolve_identity, tls_binding
+    ident = await asyncio.to_thread(resolve_identity, settings)
     if _peer_tls is not None:
-        from p2p_identity import tls_binding
         from tls_gen import load_bound
-        await asyncio.to_thread(load_bound, _peer_tls, _tls_dir(), tls_binding(settings))
+        # On the loop, not in a thread: only the loop makes TLS objects from
+        # this context, so no handshake meets it between the certificate's
+        # load and its key's
+        load_bound(_peer_tls, _tls_dir(), tls_binding(settings))
         logger.info("The peer surface answers under this node's identity from the next handshake on")
     if _upnp is not None and await asyncio.to_thread(_upnp.recheck):
         _peer_port_mapped(_upnp.get_external_port(_listen_port()))
+    if _dht_service is not None and ident:
+        await _dht_service.announce_user(ident["invite_code"])
+    if settings.serves_peer_surface and ident:
+        import p2p_app
+        if p2p_app._gate_svc is None:
+            await asyncio.to_thread(p2p_app._gate)
 
 
 def _upnp_heuristic():
@@ -473,7 +490,6 @@ async def _serve_p2p(port: int) -> None:
     already publishes this port, that killed the whole backend seconds after
     startup (WinError 10048, measured 2026-07-28). The peer surface is
     optional; the Web UI is not."""
-    import os
     import socket
 
     import ssl
@@ -882,7 +898,7 @@ async def lifespan(app: FastAPI):
     # The peer surface: sync protocol only, on its own port (p2p_app.py).
     # Everything a peer is told about this node points here — never at the
     # Web UI port, whose page carries the API secret.
-    global _p2p_server_task, _peer_ready, _lan_discovery
+    global _p2p_server_task, _peer_ready, _lan_discovery, _upnp, _peer_tls
     if settings.serves_peer_surface:
         # Support diagnostics' start-of-life note where this backend ships
         # them (diag_node; a launcher-mode backend's launcher records its own)
@@ -1325,6 +1341,8 @@ async def lifespan(app: FastAPI):
         await _lan_discovery.stop()
     if _upnp is not None:
         await asyncio.to_thread(_upnp.close_ports)
+        _upnp = None
+    _peer_tls = None
     if _dht_service:
         await _dht_service.stop()
         _dht_service = None
