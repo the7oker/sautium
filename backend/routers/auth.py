@@ -264,8 +264,9 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
         logger.error(f"account creation failed: {e}")
         raise HTTPException(status_code=500, detail="could not create account")
     # The node has an account from now on: its chat client starts (the
-    # Support contact, the handshakes, the outbox) and its identity worker
-    # (the certificate, the proof), with no restart.
+    # Support contact, the handshakes, the outbox), its identity worker
+    # (the certificate, the proof), and its peer surface answers under the
+    # new key (p2p_identity.changed), with no restart.
     import p2p_chat
     from desktop.p2p import master_node
     from routers import p2p as p2p_router
@@ -279,6 +280,8 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
                     "its warrants' dispatch and its relay announce")
     p2p_chat.soon(p2p_chat.start_client())
     p2p_chat.soon(p2p_router.start_identity_worker())
+    import p2p_identity
+    p2p_chat.soon(p2p_identity.changed())
     return reply({"token": device_auth.current_token(_secret()),
                   "invite_code": info.get("invite_code"),
                   "username": info.get("username"),

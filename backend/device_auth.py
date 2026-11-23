@@ -581,6 +581,7 @@ def _after_rotation(pubkey: str) -> None:
     master_node.decide(pubkey)
     p2p_chat.soon(p2p_chat.restart_client())
     p2p_chat.soon(p2p_router.restart_identity_worker())
+    p2p_chat.soon(p2p_identity.changed())
     _record_signing_key(pubkey)
     # The Worker's invite code → mailbox mapping named the old code.
     db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
