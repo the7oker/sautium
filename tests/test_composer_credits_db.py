@@ -649,7 +649,7 @@ def test_a_comma_value_the_mb_rows_name_is_one_name_whether_a_dump_or_a_slice_br
     _dump(cur, True)
     assert _rederive() == 0                                   # the dump knows no more of them
     assert _credits(cur) == held
-    assert _artist_id(cur, "Crosby") is None and _artist_id(cur, "ii") is None
+    assert _artist_id(cur, "Nash & Young") is None and _artist_id(cur, "ii") is None
     cur.execute("DELETE FROM mb_artist")
     _dump(cur, False)
 
