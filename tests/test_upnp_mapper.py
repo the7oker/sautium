@@ -14,7 +14,9 @@ import asyncio
 import datetime
 import socket
 import ssl
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 from cryptography import x509
@@ -23,6 +25,12 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509.oid import NameOID
 
+BACKEND = Path(__file__).resolve().parent.parent / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+import p2p_identity  # noqa: E402
+import tls_gen  # noqa: E402
 from desktop import portmap
 from desktop.p2p import peer_auth, upnp_service
 from desktop.p2p.upnp_service import UPnPService, leads_here
@@ -303,3 +311,130 @@ def test_the_announce_hears_of_a_lost_mapping(igd, monkeypatch):
         finally:
             task.cancel()
     assert asyncio.run(scene()) is None
+
+
+# -- a node born under a running process ------------------------------------------------
+# PI-NODE-2C's evening on a 4 GB Pi (F1, F7): the node's first start has no
+# account, so its peer certificate is bound to no key and the mapper's check
+# from inside has none to pin; the account is then made with no restart.
+
+def test_a_surface_started_with_no_identity_answers_under_it_once_it_has_one(tmp_path):
+    key, pub = _key()
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls_gen.load_bound(ctx, tmp_path)                           # the start, no account yet
+    surface = Answering(ctx)
+    try:
+        assert leads_here(lambda: pub)("127.0.0.1", surface.port) is None   # every pinned dial refused
+        cert = tls_gen.load_bound(ctx, tmp_path, (pub, key.sign))            # the account is made
+        assert leads_here(lambda: pub)("127.0.0.1", surface.port) is True   # the same listener
+        made = cert.read_bytes()
+        tls_gen.load_bound(ctx, tmp_path, (pub, key.sign))
+        assert cert.read_bytes() == made                        # not minted again for the key it has
+
+        new, new_pub = _key()                                   # a rotation
+        tls_gen.load_bound(ctx, tmp_path, (new_pub, new.sign))
+        assert leads_here(lambda: new_pub)("127.0.0.1", surface.port) is True
+        assert leads_here(lambda: pub)("127.0.0.1", surface.port) is False
+    finally:
+        surface.close()
+
+
+def test_a_port_taken_before_the_node_had_a_key_is_given_back_when_it_has_one(igd, tmp_path):
+    """The router forwards the port to a neighbour by a rule of its own and
+    says yes to this node's mapping of it; the node has no key yet, so its
+    check learns nothing and the mapping stands — until the key appears."""
+    mine, mine_pub = _key()
+    other, _ = _key()
+    neighbour = Answering(_bound_context(tmp_path, other))
+    port = neighbour.port
+    with socket.socket() as probe:              # nothing answers on the next port: no hairpin told
+        probe.bind(("127.0.0.1", port + 1))
+    igd.static.add(port)
+    held = []
+    try:
+        upnp = UPnPService(ports=[port], leads_here=leads_here(lambda: held[0] if held else None))
+        upnp.open_ports()
+        assert upnp.get_external_port(port) == port
+        assert upnp.recheck() is False              # still no key: nothing learnt, nothing moved
+        assert upnp.get_external_port(port) == port
+
+        held.append(mine_pub)
+        assert upnp.recheck() is True
+    finally:
+        neighbour.close()
+    assert upnp.get_external_port(port) == port + 1
+    assert list(igd.table) == [(port + 1, "TCP")]
+    assert upnp.recheck() is False                  # the port it holds now: nothing more to give back
+
+
+def test_a_recheck_leaves_a_mapping_that_leads_here(igd, tmp_path):
+    mine, mine_pub = _key()
+    here = Answering(_bound_context(tmp_path, mine))
+    try:
+        upnp = UPnPService(ports=[here.port], leads_here=leads_here(lambda: mine_pub))
+        upnp.open_ports()
+        assert upnp.recheck() is False
+    finally:
+        here.close()
+    assert upnp.get_external_port(here.port) == here.port
+    assert igd.asked == [here.port]
+
+
+def test_a_recheck_with_nothing_mapped_asks_nobody(igd):
+    asked = []
+    upnp = UPnPService(ports=[8801], leads_here=lambda ip, port: asked.append(port))
+    assert upnp.recheck() is False
+    assert asked == [] and igd.asked == []
+
+
+def test_a_recheck_asks_the_gate_before_it_maps_again(igd):
+    answers, verdict = [True], {}
+    upnp = UPnPService(ports=[8801], gate=lambda: answers[0], leads_here=lambda ip, port: verdict.get(port))
+    upnp.open_ports()
+    assert upnp.get_external_port(8801) == 8801
+
+    verdict[8801], answers[0] = False, False        # a neighbour's port, and the surface no longer answers
+    assert upnp.recheck() is True
+    assert upnp.get_external_port(8801) is None
+    assert igd.table == {} and igd.asked == [8801]
+
+
+def test_a_recheck_that_finds_no_port_leaves_the_node_unmapped(igd):
+    verdict = {}
+    upnp = UPnPService(ports=[8801], leads_here=lambda ip, port: verdict.get(port))
+    upnp.open_ports()
+    verdict.update({port: False for port in range(8801, 8806)})
+    assert upnp.recheck() is True
+    assert upnp.get_external_port(8801) is None
+    assert igd.table == {}
+
+
+def test_a_follower_that_fails_is_said_and_the_next_still_hears(monkeypatch, caplog):
+    monkeypatch.setattr(p2p_identity, "_followers", [])
+    heard = []
+
+    async def broken():
+        raise RuntimeError("the certificate's folder is gone")
+
+    async def next_one():
+        heard.append("next")
+
+    p2p_identity.on_change(broken)
+    p2p_identity.on_change(next_one)
+    asyncio.run(p2p_identity.changed())
+    assert heard == ["next"]
+    assert "broken did not follow the identity's change" in caplog.text
+
+
+def test_the_identitys_event_reaches_each_follower_once(monkeypatch):
+    monkeypatch.setattr(p2p_identity, "_followers", [])
+    heard = []
+
+    async def follower():
+        heard.append("peer surface")
+
+    p2p_identity.on_change(follower)
+    p2p_identity.on_change(follower)                # a second lifespan in one process
+    asyncio.run(p2p_identity.changed())
+    assert heard == ["peer surface"]
+

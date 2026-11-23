@@ -133,6 +133,29 @@ _identity_cache = None
 _identity_cache_mtime = None
 
 
+_followers: list = []
+
+
+def on_change(follower) -> None:
+    """`follower` — a coroutine function — runs each time this node's
+    identity appears (its account is made) or changes (a rotation) under the
+    running process: what a start decided on the identity it had then is
+    decided again, with no restart (main's three followers)."""
+    if follower not in _followers:
+        _followers.append(follower)
+
+
+async def changed() -> None:
+    """Said by the two places that make or change the identity
+    (routers/auth.create_account, device_auth._after_rotation)."""
+    for follower in list(_followers):
+        try:
+            await follower()
+        except Exception:
+            logger.exception("identity: %s did not follow the identity's change — "
+                             "a restart of the backend decides it again", follower.__name__)
+
+
 def forget_cached() -> None:
     """Drop the process-wide identity caches — after a rotation on disk the
     next call reads the new key and node_info.json."""
@@ -360,8 +383,8 @@ def proof_path(settings):
 
 def tls_binding(settings):
     """(node_pubkey_hex, sign_fn) for tls_gen.ensure_cert's peer channel
-    binding — None without identity (the cert is then generated unbound and
-    regenerated bound on the first start after an account exists)."""
+    binding — None without identity (the cert is then generated unbound, and
+    made again bound the moment an account exists: main._peer_surface_follows_identity)."""
     ident = resolve_identity(settings)
     key = load_signing_key(settings)
     if not ident or key is None:

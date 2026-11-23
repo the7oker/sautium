@@ -98,6 +98,9 @@ _lan_discovery = None
 _upnp = None
 _host_tasks: list[asyncio.Task] = []
 _peer_ready: Optional[asyncio.Event] = None
+# The peer surface's own TLS context (None behind a trusted front, which
+# terminates the peer TLS): its chain is loaded again when the identity moves.
+_peer_tls = None
 
 
 def _diag_record(kind: str, detail: dict) -> None:
@@ -332,18 +335,72 @@ async def _map_peer_port() -> None:
         logger.info("UPnP: miniupnpc not installed — the peer port is not mapped")
         return
     await _peer_ready.wait()
-
-    def mapped(ext: Optional[int]) -> None:
-        if _dht_service is not None:
-            _dht_service.set_announce_port(ext or _peer_port())
-        from p2p_chat import chat_client
-        client = chat_client()
-        if client is not None:
-            client.recheck_reachability()
-
     if await asyncio.to_thread(_upnp.open_ports):
-        mapped(_announce_port())
-    await _upnp.keep_mapped(_listen_port(), mapped)
+        _peer_port_mapped(_announce_port())
+    await _upnp.keep_mapped(_listen_port(), _peer_port_mapped)
+
+
+def _peer_port_mapped(ext: Optional[int]) -> None:
+    """The router's external port of the peer surface is `ext` now (None:
+    no mapping left): the DHT announces it and the verdict is asked again."""
+    if _dht_service is not None:
+        _dht_service.set_announce_port(ext or _peer_port())
+    from p2p_chat import chat_client
+    client = chat_client()
+    if client is not None:
+        client.recheck_reachability()
+
+
+def _tls_dir() -> _Path:
+    import os
+    return _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls"))
+
+
+async def _peer_surface_follows_identity() -> None:
+    """This node's identity appeared (its account was made) under a process
+    that keeps running, or changed (a rotation). What the start decided on
+    the identity it had then — none, on a node not yet born — is decided
+    again by the three followers below, so that a node born through the
+    first-run form is a whole peer with no restart (PI-NODE-2C's evening on
+    a 4 GB Pi: F1, F7). This one:
+
+    - the peer surface presents a certificate bound to the key from the next
+      handshake on — until then every pinned dial of this node was refused;
+    - then, and only then (its check from inside is pinned to that key and
+      would take the old certificate for a neighbour's), the mapping of its
+      port is asked again whom it leads to: with no key the check learns
+      nothing, so a node not yet born kept a port the router's own forward
+      gives a neighbour.
+
+    A rotation still asks for a restart (routers/auth.change_identity): the
+    admission gate a start built keeps signing with the key it was built on."""
+    if _peer_tls is not None:
+        from p2p_identity import tls_binding
+        from tls_gen import load_bound
+        # On the loop, not in a thread: only the loop makes TLS objects from
+        # this context, so no handshake meets it between the certificate's
+        # load and its key's
+        load_bound(_peer_tls, _tls_dir(), tls_binding(settings))
+        logger.info("The peer surface answers under this node's identity from the next handshake on")
+    if _upnp is not None and await asyncio.to_thread(_upnp.recheck):
+        _peer_port_mapped(_upnp.get_external_port(_listen_port()))
+
+
+async def _announce_user() -> None:
+    """The account's invite code on the DHT, which friends look up."""
+    from p2p_identity import resolve_identity
+    ident = await asyncio.to_thread(resolve_identity, settings)
+    if _dht_service is not None and ident:
+        await _dht_service.announce_user(ident["invite_code"])
+
+
+async def _gate_follows_identity() -> None:
+    """The admission gate a start with no key could not build. On the loop,
+    where a request builds it lazily: two builds would leave two seeders."""
+    from p2p_identity import resolve_identity
+    import p2p_app
+    if settings.serves_peer_surface and p2p_app._gate_svc is None and resolve_identity(settings):
+        p2p_app._gate()
 
 
 def _upnp_heuristic():
@@ -443,7 +500,6 @@ async def _serve_p2p(port: int) -> None:
     already publishes this port, that killed the whole backend seconds after
     startup (WinError 10048, measured 2026-07-28). The peer surface is
     optional; the Web UI is not."""
-    import os
     import socket
 
     import ssl
@@ -451,7 +507,7 @@ async def _serve_p2p(port: int) -> None:
     from uvicorn.protocols.http.auto import AutoHTTPProtocol
     import serving
     from serving import PeerSurfaceConfig, Server, peer_protocol
-    from tls_gen import ensure_cert
+    from tls_gen import load_bound
     from p2p_app import app as peer_app
     from routers import peer_chat
 
@@ -497,15 +553,13 @@ async def _serve_p2p(port: int) -> None:
             http=peer_protocol(AutoHTTPProtocol, per_address=None, **bounds),
         )
     else:
+        global _peer_tls
         from p2p_identity import tls_binding
-        cert_path, key_path = ensure_cert(
-            _Path(os.getenv("SAUTIUM_TLS_DIR", "/app/data/tls")),
-            binding=tls_binding(settings),
-        )
         # The handshake is the protocol's (serving.peer_protocol), so uvicorn
         # serves plain TCP here and never sees the certificate.
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.load_cert_chain(str(cert_path), str(key_path))
+        load_bound(tls, _tls_dir(), tls_binding(settings))
+        _peer_tls = tls
         # Peers that arrive from the gateway — all of them behind Docker
         # Desktop's published port — have no per-address share.
         serving.SHARED_ADDRESSES = frozenset({gateway}) if gateway else frozenset()
@@ -854,7 +908,7 @@ async def lifespan(app: FastAPI):
     # The peer surface: sync protocol only, on its own port (p2p_app.py).
     # Everything a peer is told about this node points here — never at the
     # Web UI port, whose page carries the API secret.
-    global _p2p_server_task, _peer_ready, _lan_discovery
+    global _p2p_server_task, _peer_ready, _lan_discovery, _upnp, _peer_tls
     if settings.serves_peer_surface:
         # Support diagnostics' start-of-life note where this backend ships
         # them (diag_node; a launcher-mode backend's launcher records its own)
@@ -862,6 +916,9 @@ async def lifespan(app: FastAPI):
         diag_node.begin_session()
     announce_port = _peer_port()
     _peer_ready = asyncio.Event()
+    import p2p_identity
+    for follower in (_peer_surface_follows_identity, _announce_user, _gate_follows_identity):
+        p2p_identity.on_change(follower)
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
         _start_host_network()
     if settings.p2p_sync_port:
@@ -992,10 +1049,10 @@ async def lifespan(app: FastAPI):
                     await _dht_service.announce_node()
 
                     # Announce user identity in DHT
-                    if _p2p_identity:
-                        await _dht_service.announce_user(
-                            _p2p_identity["invite_code"]
-                        )
+                    # The identity of this moment, not the start's: an
+                    # account made, or a key rotated, while the DHT was
+                    # still bootstrapping is the one announced
+                    await _announce_user()
 
                     # Advertise the MB dump so dump-less nodes can find this
                     # one as a slice source without a LAN beacon or a
@@ -1295,6 +1352,8 @@ async def lifespan(app: FastAPI):
         await _lan_discovery.stop()
     if _upnp is not None:
         await asyncio.to_thread(_upnp.close_ports)
+        _upnp = None
+    _peer_tls = None
     if _dht_service:
         await _dht_service.stop()
         _dht_service = None

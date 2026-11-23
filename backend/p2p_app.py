@@ -98,15 +98,15 @@ class PeerAuthMiddleware:
 
     def __init__(self, app):
         self.app = app
-        self._own_pubkey = None
 
-    def _own(self):
-        if self._own_pubkey is None:
-            from config import settings
-            from p2p_identity import resolve_identity
-            ident = resolve_identity(settings)
-            self._own_pubkey = (ident or {}).get("public_key_hex", "").lower() or ""
-        return self._own_pubkey
+    def _own(self) -> str:
+        # Asked at each request (p2p_identity keeps the answer): an account
+        # is made, and a key rotated, under this process. Kept here, a
+        # request that came before the account left every later signature
+        # unchecked — no ban, no registry row — until a restart.
+        from config import settings
+        from p2p_identity import resolve_identity
+        return ((resolve_identity(settings) or {}).get("public_key_hex") or "").lower()
 
     async def __call__(self, scope, receive, send):
         from desktop.p2p import contact_log, peer_auth
@@ -174,11 +174,12 @@ class PeerAuthMiddleware:
             _record()
             raise
         body = b"".join(chunks)
-        own = self._own()
 
         def _shape_and_signer():
             # Off the loop: a body is up to its route's cap, and both its
-            # parse and its hash cost per byte.
+            # parse and its hash cost per byte; this node's key is a stat
+            # of its identity file.
+            own = self._own()
             return (contact_log.request_items(raw_target, body),
                     peer_auth.verify_request(headers, own, scope["method"], raw_target, body)
                     if own else (None, None))

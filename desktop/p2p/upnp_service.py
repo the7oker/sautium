@@ -12,6 +12,7 @@ import json
 import logging
 import socket
 import ssl
+import threading
 import urllib.request
 from typing import Callable, Optional, Tuple
 
@@ -160,7 +161,8 @@ class UPnPService:
                 port answers as the peer surface (answers_as_peer_surface):
                 behind a front another process owns it.
             leads_here: (external ip, external port) -> the module's
-                leads_here() check, asked once of each mapping as it is made.
+                leads_here() check, asked of each mapping as it is made and again
+                at recheck().
         """
         self._ports = ports or []
         self._gate = gate
@@ -168,6 +170,9 @@ class UPnPService:
         self._gate_misses = 0
         self._upnp = None
         self._mapped: list[Tuple[int, int]] = []  # (external, internal)
+        # One caller of the router at a time: the renewal runs in the loop's
+        # executor, and the identity's event asks its recheck from a thread
+        self._lock = threading.RLock()
         self._external_ip: Optional[str] = None
 
     @property
@@ -190,6 +195,10 @@ class UPnPService:
 
         Returns external IP if successful, None otherwise.
         """
+        with self._lock:
+            return self._open_ports()
+
+    def _open_ports(self) -> Optional[str]:
         if not HAS_UPNP:
             logger.info("miniupnpc not installed — UPnP disabled")
             return None
@@ -265,28 +274,59 @@ class UPnPService:
         least one mapping is active."""
         if not HAS_UPNP:
             return False
-        if self._gate is not None and self._mapped:
-            # Two renewals in a row: one probe the node's own busy loop was
-            # slow to answer is no reason to drop the mapping for a lease.
-            self._gate_misses = 0 if self._gate() else self._gate_misses + 1
-            if self._gate_misses >= 2:
-                logger.warning("UPnP: %s no longer answers as the peer surface — mapping removed",
-                               self._ports)
-                self.close_ports()
+        with self._lock:
+            if self._gate is not None and self._mapped:
+                # Two renewals in a row: one probe the node's own busy loop was
+                # slow to answer is no reason to drop the mapping for a lease.
+                self._gate_misses = 0 if self._gate() else self._gate_misses + 1
+                if self._gate_misses >= 2:
+                    logger.warning("UPnP: %s no longer answers as the peer surface — mapping removed",
+                                   self._ports)
+                    self.close_ports()
+                    return False
+            if self._upnp and self._mapped:
+                for ext, intn in list(self._mapped):
+                    if not add_mapping(self._upnp, ext, intn):
+                        logger.warning("UPnP: the mapping %d -> %d was not renewed — lost", ext, intn)
+                        self._mapped.remove((ext, intn))
+                if self._mapped:
+                    logger.debug("UPnP: %d mappings renewed", len(self._mapped))
+                    return True
+                logger.info("UPnP: no mapping left after renewal — re-discovering")
+                self._upnp = None
+                self._external_ip = None
+            self.open_ports()
+            return bool(self._mapped)
+
+    def recheck(self) -> bool:
+        """Ask the check from inside again of every mapping held — for the
+        moment the key it is pinned to appears or changes after the mapping
+        was made (an account created under a running node: its first check
+        had no key and learnt nothing). A mapping another node answers on is
+        given back and the next port taken, as at the first map. True where
+        a mapping changed."""
+        with self._lock:
+            if not (self._upnp and self._mapped and self._leads_here):
                 return False
-        if self._upnp and self._mapped:
+            changed = False
             for ext, intn in list(self._mapped):
-                if not add_mapping(self._upnp, ext, intn):
-                    logger.warning("UPnP: the mapping %d -> %d was not renewed — lost", ext, intn)
-                    self._mapped.remove((ext, intn))
-            if self._mapped:
-                logger.debug("UPnP: %d mappings renewed", len(self._mapped))
-                return True
-            logger.info("UPnP: no mapping left after renewal — re-discovering")
-            self._upnp = None
-            self._external_ip = None
-        self.open_ports()
-        return bool(self._mapped)
+                if self._leads_here(self._external_ip, ext) is not False:
+                    continue
+                logger.warning("UPnP: another node answers on the mapped port %d "
+                               "(a forward of the router's own) — mapping removed", ext)
+                try:
+                    self._upnp.deleteportmapping(ext, "TCP")
+                except Exception as e:      # miniupnpc raises bare Exception for a router's error
+                    logger.info(f"UPnP: the mapping of {ext} could not be removed: {e}")
+                self._mapped.remove((ext, intn))
+                changed = True
+                if self._gate is not None and not self._gate():
+                    logger.warning("UPnP: %d does not answer as the peer surface — not mapped again", intn)
+                    continue
+                taken = self._map_port(self._upnp, intn)
+                if taken:
+                    self._mapped.append((taken, intn))
+            return changed
 
     async def keep_mapped(self, internal_port: int, on_external: Callable[[int], None]) -> None:
         """Re-map before the 1-hour lease expires (at 75% of LEASE_DURATION)
@@ -315,14 +355,15 @@ class UPnPService:
 
     def close_ports(self):
         """Remove all UPnP port mappings."""
-        if not self._upnp:
-            return
-        for ext, _ in self._mapped:
-            try:
-                self._upnp.deleteportmapping(ext, "TCP")
-            except Exception:
-                pass
-        if self._mapped:
-            logger.info(f"UPnP: {len(self._mapped)} mappings removed")
-        self._mapped.clear()
-        self._external_ip = None
+        with self._lock:
+            if not self._upnp:
+                return
+            for ext, _ in self._mapped:
+                try:
+                    self._upnp.deleteportmapping(ext, "TCP")
+                except Exception:
+                    pass
+            if self._mapped:
+                logger.info(f"UPnP: {len(self._mapped)} mappings removed")
+            self._mapped.clear()
+            self._external_ip = None

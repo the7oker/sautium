@@ -21,6 +21,7 @@ import datetime
 import ipaddress
 import logging
 import os
+import ssl
 import socket
 from pathlib import Path
 
@@ -300,3 +301,14 @@ def ensure_cert(
 
     _generate_cert(cert_path, key_path, binding)
     return cert_path, key_path
+
+
+def load_bound(ctx: ssl.SSLContext, data_dir: Path | str, binding: tuple | None = None) -> Path:
+    """Put the peer-surface certificate for `binding` into `ctx` — at the
+    surface's start, and again when the node's identity appears or changes
+    under a surface that keeps listening. A context's chain loaded again is
+    what every later handshake presents; a connection already made keeps the
+    one it was made under. Returns the certificate's path."""
+    cert_path, key_path = ensure_cert(data_dir, binding)
+    ctx.load_cert_chain(str(cert_path), str(key_path))
+    return cert_path
