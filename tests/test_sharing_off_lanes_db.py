@@ -181,8 +181,8 @@ def test_a_click_asks_for_its_name_in_the_stream_s_one_form(node, monkeypatch):
     asked = []
 
     class _Source:
-        def __init__(self, url, peer=None):
-            pass
+        def __init__(self, url, peer=None, remote=False):
+            assert remote               # a catalogue source is a peer, with or without an identity here
 
         def get_health(self):
             return {}
