@@ -42,8 +42,33 @@ logger = logging.getLogger(__name__)
 _PREVIEW_BEHIND = 1   # instant "previous"
 
 # The states in which the output holds a slot open: its way in is its own
-# until it leaves the slot (PlaybackManager._reread_ways_in)
+# until it leaves the slot (PlaybackManager._reread_ways_in) — unless all it
+# does there is wait for a stream that has not come (_sounding)
 _SOUNDING = ("playing", "paused", "loading", "unknown")
+
+# How long the play path's one stat is waited for — the folder look's own
+# patience (scanner.LOOK_PATIENCE_S): a dead network mount answers a stat
+# never, and a Play's worker is not its to hold.
+_STAT_PATIENCE_S = 3.0
+
+
+def _opens(path: str) -> bool:
+    """Whether a file of this node opens now: one stat, on a thread of its
+    own, waited for no longer than _STAT_PATIENCE_S. One that has not
+    answered by then does not open now."""
+    answer: list = []
+
+    def ask() -> None:
+        try:
+            os.stat(path)
+        except OSError:
+            answer.append(False)
+        else:
+            answer.append(True)
+    look = threading.Thread(target=ask, daemon=True, name="queue-look")
+    look.start()
+    look.join(_STAT_PATIENCE_S)
+    return bool(answer) and answer[0]
 
 
 class OutputHeld(ConnectionError):
@@ -1241,13 +1266,15 @@ class PlaybackManager:
         that reads none as it mirrors (every one but HQPlayer, whose own
         mirror reads each slot's): a copy here opens as a file — a streamed
         album may list a track owned on another album — else its stream.
-        While a folder of the library does not answer (gone_prefixes), a
-        slot that is a file is read too: one under that folder is no way
-        in. With every folder answering a file slot is what the route that
-        made it found here, and no copy is asked about."""
+        While a folder of the library does not answer (gone_prefixes), or
+        the latest look did not find a file (substitute.unopened), a slot
+        that is a file is read too: such a file is no way in. Otherwise a
+        file slot is what the route that made it found here, and no copy is
+        asked about."""
         if backend is None or backend.id == "hqplayer":
             return
-        kinds = ("track", "file") if gone_prefixes() else ("track",)
+        narrowed = gone_prefixes() or substitute.unopened()
+        kinds = ("track", "file") if narrowed else ("track",)
         read = [it for it in items if it.source.get("kind") in kinds]
         if not read:
             return
@@ -1255,53 +1282,89 @@ class PlaybackManager:
             it.play = play
 
     @staticmethod
-    def _first_opens(backend: PlayerBackend, items: list, *, held: bool = False) -> None:
+    def _first_opens(backend: PlayerBackend, items: list, *, held: bool = False) -> bool:
         """The play path's own look, beside the events (reach_changed): a
         folder can stop answering with no event — a network share, a root
-        that is itself a mount point. Before an output is handed a start —
-        a new queue played, a play intent on the queue the node holds
-        (before_start) — the file that start would open is asked for once,
-        where the slot's way in is a file of this node the node takes for
-        reachable (a new slot that is the track itself is read for it: its
-        copy here opens as a file; `held`: a slot of the queue, whose way in
-        is read already); a miss is a producer's observation — the folder
-        is looked at (scanner.check_folder, waited for no longer than the
-        look's patience) — and the slots' ways in are read after it. Outside
-        the queue lock: this is the one place the play path asks the file
-        system."""
+        that is itself a mount point — and a file can leave a folder that
+        answers (deleted or moved outside Sautium, its row kept until a
+        Rescan). Before an output is handed a start — a new queue played, a
+        play intent on the queue the node holds (before_start) — the file
+        that start would open is asked for once (_opens), where the slot's
+        way in is a file of this node the node takes for reachable (a new
+        slot that is the track itself is read for it: its copy here opens
+        as a file; `held`: a slot of the queue, whose way in is read
+        already). A miss is a producer's observation: the folder is looked
+        at (scanner.check_folder, waited for no longer than the look's
+        patience). Where the folder then answers, that file alone does not
+        open now — this look's observation (substitute.observe), under
+        which the slot is read again: the next copy that would open is
+        asked the same way, until one opens or none is left (a stream, or
+        nothing). What an earlier look found is asked again from nothing,
+        so a file put back is its slot's way in again. Returns whether the
+        observation is another one than before: the caller reads the ways
+        in after it. Outside the queue lock: this is the one place the play
+        path asks the file system."""
         if not items:
-            return
-        src = items[0].opener() if held else items[0].source
-        if not held and src.get("kind") != "file" and substitute.by_copies(items[0]):
-            src = substitute.native_plays(items[:1], backend.id,
-                                          getattr(backend, "endpoint_id", None))[0] or src
-        if src.get("kind") != "file" or any(src["path"].startswith(g) for g in gone_prefixes()):
-            return
-        if not src["path"].startswith(settings.library_db_root() + "/"):
-            return                      # no file of the music folder: the look would say nothing of it
-        try:
-            os.stat(settings.translate_to_local_path(src["path"]))
-        except OSError:
-            from scanner import check_folder
-            check_folder(wait=True)
+            return False
+        it = items[0]
+        before = substitute.unopened()
+        missed: set = set()
+        substitute.observe(missed)
+        endpoint = getattr(backend, "endpoint_id", None)
+        root = settings.library_db_root() + "/"
+        # read against the copies only where that says more than the slot does:
+        # a file slot nothing was observed of is its own file
+        fresh = bool(before) or (not held and it.source.get("kind") != "file")
+        src = it.opener() if held else it.source
+        while True:
+            if fresh and substitute.by_copies(it):
+                src = substitute.native_plays([it], backend.id, endpoint)[0] or it.source
+            src = src.get("file", src)      # a file HQPlayer is handed prepared is that file
+            path = src.get("path") if src.get("kind") == "file" else None
+            if (path is None or path in missed or not path.startswith(root)
+                    or any(path.startswith(g) for g in gone_prefixes())):
+                break       # no file of the music folder the node takes for reachable
+            if _opens(settings.translate_to_local_path(path)):
+                break
+            if not missed:
+                from scanner import check_folder
+                check_folder(wait=True)
+                if any(path.startswith(g) for g in gone_prefixes()):
+                    break   # its folder does not answer: the recorded fact says the rest
+            missed.add(path)
+            substitute.observe(missed)
+            fresh = True
+        return substitute.unopened() != before
 
     @staticmethod
     def _refuse_if_none_opens(backend: PlayerBackend, items: list) -> None:
         """Slots about to be started none of which opens here now, on a node
         that streams nothing, are refused before the output is asked
-        (NotHere) — only while a folder of the library does not answer: with
-        every folder answering the routes' own split is the whole of it. A
+        (NotHere) — only while a folder of the library does not answer, or
+        the latest look did not find a file: otherwise the routes' own split
+        is the whole of it. A
         slot that does not open: a stream to come, or one the lane already
         said nothing brings (streaming off)."""
-        if not items or not gone_prefixes() or substitute.streams():
+        if not items or not (gone_prefixes() or substitute.unopened()) or substitute.streams():
             return
         plays = ([it.play for it in items] if backend.id != "hqplayer" else
                  substitute.native_plays(items, backend.id, getattr(backend, "endpoint_id", None)))
         if all(p is not None and ((p.get("kind") == "pending" and not p.get("prepare"))
-                                  or (p.get("kind") == "unplayable" and p.get("code") == "off"))
+                                  or (p.get("kind") == "unplayable"
+                                      and p.get("code") in ("off", "not_here")))
                for p in plays):
-            albums = {it.album for it in items}
-            raise NotHere("disk", albums.pop() if len(albums) == 1 else None)
+            # Its true why, by the first of them that is a file of the
+            # owner's: under a folder that does not answer, or — its copy
+            # away, the file not found by the look — not there. With no such
+            # slot among them nothing here is "not here": what does not
+            # stream is the output's to say, in streaming's own words
+            gone = gone_prefixes()
+            own = [it for it in items if it.source.get("kind") == "file"]
+            if not own:
+                return
+            why = "disk" if any(own[0].source["path"].startswith(g) for g in gone) else "away"
+            albums = {it.album for it in own}
+            raise NotHere(why, albums.pop() if len(albums) == 1 else None)
 
     def _start_slot(self) -> Optional[int]:
         """The slot a Play would hand the output a start of, from its latest
@@ -1339,12 +1402,40 @@ class PlaybackManager:
         if not items:
             return
         was = gone_prefixes()
-        self._first_opens(backend, items, held=True)
-        if gone_prefixes() != was:
-            # the look's own record follows on a thread: the start needs it now
-            self.reach_changed()
+        moved = self._first_opens(backend, items, held=True)
+        if moved or gone_prefixes() != was:
+            # the look's own record follows on a thread: the start needs it
+            # now — as it does a file the look alone did not find, which is
+            # no way in of its slot from here on (another copy, its stream).
+            # Never behind a queue edit in flight — a play intent waits for
+            # none: the edit's own mirror reads what it hands the output
+            # under the same record and observation, and the queue's slots
+            # are read once it is done, on the thread the record's change uses
+            if self._mutate_lock.acquire(blocking=False):
+                try:
+                    self.reach_changed()
+                finally:
+                    self._mutate_lock.release()
+            else:
+                threading.Thread(target=self.reach_followed, daemon=True,
+                                 name="queue-reach").start()
         if not tapped:
             self._refuse_if_none_opens(backend, items)
+
+    def before_step(self, backend: PlayerBackend, step: int) -> None:
+        """Next (`step` 1) or Previous (-1) is about to hand the output a
+        start of the slot beside the one it is on — beside the spot a Play
+        would resume, where the status names one: the same one look at the
+        file that start would open (before_start, as a tap on that row).
+        Not while a queue mutation is in flight, as for a tap: the slots
+        move under it, and the output carries the word out on the queue it
+        is handed."""
+        if self.queue.view()[2]:
+            return
+        status = self._latest_status
+        at = (status.get("resume") or {}).get("index") or status.get("track_index")
+        if isinstance(at, int) and 1 <= at + step <= len(self.queue):
+            self.before_start(backend, at + step)
 
     def replace_queue(self, items: list[QueueItem], *, play: bool,
                       archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
@@ -1597,24 +1688,43 @@ class PlaybackManager:
         untouched: a file that does not open here now is a stream to come,
         and the same slot is its file again — no question — when the folder
         is back. The output follows by queue_changed("rebind"), the status
-        carries the new playlist version, the lane looks at its window. With
-        no output attached nothing is read: the attach reads every slot's."""
+        carries the new playlist version, the lane looks at its window; a
+        start that waited for the stream of a slot whose file is back is
+        told as a landing tells it (slot_ready). With no output attached
+        nothing is read: the attach reads every slot's."""
+        settled = None
         with self._output_mutation(lambda: self._active) as backend:
             if backend is None:
                 return
+            status = self._latest_status
+            waited = (self.queue.item_at(status.get("track_index"))
+                      if status.get("state") == "loading" else None)
+            if waited is not None and waited.opener().get("kind") != "pending":
+                waited = None
             changed = self._reread_ways_in(backend)
             if not changed:
                 return
             logger.info("%d queued slot(s) open another way: what is reachable here changed",
                         len(changed))
             self._rebound(backend)
+            if waited is not None and waited.opener().get("kind") != "pending":
+                settled = waited
+        if settled is not None:
+            # the start that waited for this slot's stream goes on what the
+            # slot opens now — told as a landing is, once the mutation is over
+            self._slot_ready(settled)
 
     def _sounding(self) -> Optional[QueueItem]:
-        """The slot the output plays, is paused on or is loading."""
+        """The slot the output plays, is paused on or is loading — but one
+        it only waits on for a stream that has not come: nothing of that
+        slot is open, and its file coming back is its way in at once."""
         status = self._latest_status
         if status.get("state") not in _SOUNDING:
             return None
-        return self.queue.item_at(status.get("track_index"))
+        item = self.queue.item_at(status.get("track_index"))
+        if item is not None and item.opener().get("kind") == "pending":
+            return None
+        return item
 
     def _reread_ways_in(self, backend: PlayerBackend) -> list:
         """Read again, for `backend`, the way in of every slot that is read
@@ -1772,7 +1882,7 @@ manager = PlaybackManager()
 
 # Re-binds the queue on sautium_files_removed (the media_files delete
 # trigger, a Rescan that sets a copy aside as away, an import while copies
-# are away) and on every (re)connect. A burst — a CUE reconcile commits per
+# are away, the canon's rewrite of a track's uuid) and on every (re)connect. A burst — a CUE reconcile commits per
 # image — folds into few passes. The manager is looked up at each call.
 _files_listener = Listener("queue-files-listener", ("sautium_files_removed",),
                            on_notify=lambda notifies: manager.rebind_files(),
@@ -1786,6 +1896,7 @@ def reach_changed() -> None:
     open album or shelf reads its payload again on) — and the queue reads
     its slots' ways in again (PlaybackManager.reach_changed). The manager
     is looked up at the call."""
+    substitute.observe(())      # the folder's answer moved: a look's word of one file is over
     manager.wake_sse()
     manager.reach_followed()
 

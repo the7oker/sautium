@@ -416,11 +416,18 @@ See:
   recorded observation; its change is the queue's event,
   `PlaybackManager.reach_changed` — the slot the output sounds is read when
   the output leaves it), and a file that does not open here now — its
-  folder not answering, its copy away — is never a way in: the slot keeps
+  folder not answering, its copy away, or the file itself not found by the
+  one look a start takes at the file it would open (`substitute.observe`:
+  the latest look's observation, never a second definition of "here") — is
+  never a way in: the slot keeps
   its origin and streams like a phantom, the demo channel's one listen
   included, or is refused where nothing streams (`sql_queries.HERE`; the
   play routes' one split, 409 `not_here`), and is its file again, with no
-  question, when the file is back. How an owned file reaches HQPlayer is read off its
+  question, when the file is back. A slot an automatic fill queued (radio,
+  Play similar: `QueueItem.whole`) never streams for want of its file
+  unless `radio.streamed` is on — it is a gap of its slot until the file
+  is back. A slot that is a file is read by its `media_file_id`, never by
+  the track uuid its enqueue saw (the canon rewrites it). How an owned file reaches HQPlayer is read off its
   address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
   on this machine by path, anywhere else as a stream from the media proxy
   — a share the HQPlayer would mount is an extra setup for the same bytes,

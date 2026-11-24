@@ -383,14 +383,27 @@ def test_a_library_file_asked_for_here_speaks_for_the_music_folder(tmp_path, mon
     said = []
     monkeypatch.setitem(sys.modules, "scanner", types.SimpleNamespace(
         check_folder=lambda wait=False: said.append("looked at"),
-        folder_seen=lambda unreachable: said.append(("answers", not unreachable))))
+        folder_seen=lambda unreachable: said.append(("answers", not unreachable)),
+        of_music_folder=lambda path: str(path).startswith(str(tmp_path / "music") + "/")))
     proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k",
                        bind_host="127.0.0.1")
     proxy.start()
     port = proxy._httpd.server_address[1]
-    track = tmp_path / "t.flac"
+    (tmp_path / "music").mkdir()
+    track = tmp_path / "music" / "t.flac"
     track.write_bytes(b"x" * 1000)
     tok = proxy.register_file(str(track), "audio/flac")
+    # a row of a folder the library has left: served or missing, it says
+    # nothing of the music folder
+    old = tmp_path / "old-library" / "t.flac"
+    old.parent.mkdir()
+    old.write_bytes(b"x" * 10)
+    old_tok = proxy.register_file(str(old), "audio/flac")
+    assert proxy.materialize_file(old_tok, None)[0] == str(old)
+    old.unlink()
+    with pytest.raises(OSError):
+        proxy.materialize_file(old_tok, None)
+    assert said == []
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/file/{tok}", timeout=5) as r:
             assert r.status == 200 and len(r.read()) == 1000

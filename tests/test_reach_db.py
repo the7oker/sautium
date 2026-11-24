@@ -192,6 +192,7 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     monkeypatch.setattr(streaming_service, "_proxy", proxy)
     monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
     monkeypatch.setattr(streaming_service, "providers_preferred", lambda: [prov])
+    monkeypatch.setattr(streaming_service, "providers_registered", lambda: True)
     monkeypatch.setattr(streaming_service, "note_provider_health", lambda silent, answered: False)
     monkeypatch.setattr(player, "_chain_cache", {})
     monkeypatch.setattr(player, "_refusals", {})
@@ -274,6 +275,71 @@ def test_an_away_copy_with_no_other_streams_and_a_copy_here_stands_in_for_it(nod
     assert native_plays([track], "browser", None) == [{"kind": "pending"}]
 
 
+def _canon_rewrites(node, scratch_dsn, old: str, new: str) -> None:
+    """The canon's own rewrite of a track's uuid (a rename, or a merge into
+    a track that exists), committed — with no event of the queue's."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from canon.identity import _update_track_uuid
+    engine = create_engine(scratch_dsn)
+    with Session(engine) as db:
+        _update_track_uuid(db, old, new)
+        db.commit()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("how", ["rename", "merge"])
+def test_a_queued_file_whose_tracks_uuid_the_canon_rewrote_still_opens_as_its_file(
+        node, scratch_dsn, how):
+    """A slot that is a file is read by what it is — its media_files row —
+    never by the uuid its enqueue saw: the canon rewrites that uuid under
+    the queue (ON UPDATE CASCADE, a merge), and the file is there all the
+    same. On the stub output and through the HQPlayer mirror's call shape;
+    its other copies are those of the track the file belongs to now."""
+    from playback.queue import items_for_media_ids
+    from playback.substitute import native_plays
+    twin = node["copy"](0, "twin/01.flac")          # a second copy, the canon's to move too
+    items = _queue(node)
+    it, old = items[0], items[0].track_id
+    new = str(uuid.uuid4()) if how == "rename" else node["phantoms"][0]
+    _canon_rewrites(node, scratch_dsn, old, new)
+    assert it.track_id == old                       # nothing told the queue
+    assert native_plays([it], "browser", None) == [None]
+    assert native_plays([it], "hqplayer", 7) == [None]
+    # the folder gone: the other copy of the track the file belongs to now
+    # stands in for it; back, its own file again — as any slot's
+    node["gone"](True)
+    node["mgr"].reach_changed()
+    assert it.play["media_file_id"] == twin
+    node["gone"](False)
+    node["mgr"].reach_changed()
+    assert it.play is None and it.opener()["path"].endswith("/NW/01.flac")
+    assert items_for_media_ids(node["files"][:1])[0].track_id == new
+
+
+def test_a_slot_takes_its_files_track_when_the_canon_rewrote_it(node, scratch_dsn):
+    """Play tracking keys on the slot's track uuid, and a listen against a
+    uuid that is gone is no row: the canon's rewrite wakes the queue's read
+    of the file layer at its commit (the files listener's channel), and
+    there a slot whose file belongs to another track now takes that
+    track's uuid."""
+    items = _queue(node)
+    it, old, new = items[0], items[0].track_id, str(uuid.uuid4())
+    heard = psycopg2.connect(scratch_dsn)
+    heard.autocommit = True
+    heard.cursor().execute("LISTEN sautium_files_removed")
+    _canon_rewrites(node, scratch_dsn, old, new)
+    assert _wait(lambda: (heard.poll(), bool(heard.notifies))[1])   # the rewrite's own wake
+    heard.close()
+    node["out"].changed.clear()
+    node["mgr"].rebind_files()
+    assert it.track_id == new and it.media_file_id == node["files"][0] and it.play is None
+    assert items[1].track_id == node["tracks"][1]
+    assert node["out"].changed == ["rebind"]
+    node["mgr"].rebind_files()                      # nothing left to take: nothing changes
+    assert node["out"].changed == ["rebind"]
+
+
 def _ranked(node, track: int, hqp_id, gone: list) -> list:
     from db_pool import db_query
     from sql_queries import TRACK_FILES, best_rip_order, owned_rank
@@ -328,7 +394,7 @@ def test_with_no_folder_gone_a_copy_query_plans_as_it_did(node):
 
     def nodes(sql: str) -> list:
         cur.execute("EXPLAIN (COSTS OFF) " + sql,
-                    {"ids": [node["tracks"][0]], "hqp_id": None, "gone": []})
+                    {"ids": [node["tracks"][0]], "mids": [], "hqp_id": None, "gone": []})
         kept, under = [], None
         for line in (r[0] for r in cur.fetchall()):
             indent = len(line) - len(line.lstrip())
@@ -554,6 +620,189 @@ def test_a_play_of_which_nothing_opens_where_nothing_streams_is_refused_before_t
         mgr.replace_queue(items_for_media_ids(node["files"]), play=True)
     assert refused.value.why == "disk"
     assert out.replaced == [] and mgr.queue.snapshot() == old       # the old queue intact
+
+
+def test_a_file_gone_from_a_folder_that_answers_is_no_way_in_of_its_slot(node):
+    """A file deleted or moved outside Sautium keeps its row until a
+    Rescan's yes, and its folder answers: the look before a start finds the
+    file missing, the folder there — and that slot alone goes out as a
+    stream, never as the path that does not open. An observation of one
+    moment: the file put back, the next start's look finds it and the slot
+    is its file again."""
+    import scanner
+    from playback import substitute
+    mgr, out = node["mgr"], node["out"]
+    first = node["root"] / "NW" / "01.flac"
+    first.unlink()
+    items = _queue(node, play=True)
+    assert scanner.gone_prefixes() == []                    # the folder answers
+    assert out.replaced == [["pending", "file"]]            # that slot alone
+    assert [it.source["kind"] for it in items] == ["file", "file"]
+    assert substitute.unopened() == {node["db_root"] + "/NW/01.flac"}
+    # Play pressed on the queue held, the file still gone: still no way in
+    out.changed.clear()
+    mgr.before_start(out)
+    assert _streams(items[0]) and out.changed == []
+    first.write_bytes(b"fLaC")                              # put back
+    mgr.before_start(out)
+    assert items[0].play is None and out.changed == ["rebind"]
+    assert substitute.unopened() == frozenset()
+
+
+def test_a_file_the_look_did_not_find_gives_way_to_another_copy_that_is_here(node):
+    twin = node["copy"](0, "twin/01.flac")
+    (node["root"] / "NW" / "01.flac").unlink()
+    items = _queue(node, play=True)
+    assert items[0].play["media_file_id"] == twin and items[1].play is None
+    assert node["out"].replaced == [["file", "file"]]
+
+
+def test_a_play_of_a_file_the_look_did_not_find_where_nothing_streams_is_refused_in_words(node):
+    """Its true why: the folder answers, so it is not its disk — the file
+    is not there."""
+    from playback.manager import NotHere
+    from playback.queue import items_for_media_ids
+    mgr, out, player = node["mgr"], node["out"], node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    (node["root"] / "NW" / "01.flac").unlink()
+    with pytest.raises(NotHere) as refused:
+        mgr.replace_queue(items_for_media_ids(node["files"][:1]), play=True)
+    assert player._output_error(refused.value).detail == {
+        "reason": "not_here", "why": "away",
+        "message": "Night Walks cannot play until its files are back."}
+    assert out.replaced == [] and len(mgr.queue) == 0
+    # with a slot beside it that opens the queue plays, and the slot is passed
+    items = _queue(node, play=True)
+    assert out.replaced == [["pending", "file"]]
+    assert _wait(lambda: (items[0].play or {}).get("code") == "off")    # its row says why
+
+
+def test_next_and_previous_take_the_look_at_the_slot_they_would_start(node):
+    """Next and Previous hand the output a start as a tap on that row does:
+    the same one look at the file it would open, before the output is
+    asked."""
+    mgr, out, player = node["mgr"], node["out"], node["player"]
+    items = _queue(node)
+    node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "playing", "track_index": 1})
+    second = node["root"] / "NW" / "02.flac"
+    second.unlink()
+    assert player.next_track()["ok"]
+    assert _streams(items[1]) and items[0].play is None
+    second.write_bytes(b"fLaC")
+    mgr.before_start(out, 2)                        # a tap on its row: the file is back
+    assert items[1].play is None
+    node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "playing", "track_index": 2})
+    (node["root"] / "NW" / "01.flac").unlink()
+    assert player.previous_track()["ok"]
+    assert _streams(items[0]) and items[1].play is None
+
+
+def test_the_look_before_a_start_never_waits_behind_a_queue_edit_in_flight(node):
+    """A play intent waits for no queue edit: what its look found is read
+    into the queue once the edit is done — on a thread of its own, as the
+    folder's recorded change is — and the Play goes on meanwhile."""
+    mgr, out = node["mgr"], node["out"]
+    items = _queue(node)
+    (node["root"] / "NW" / "01.flac").unlink()
+    looked = threading.Event()
+    held, release = threading.Event(), threading.Event()
+
+    def edit():                                     # a queue edit still committing
+        with mgr._mutate_lock:
+            held.set()
+            release.wait(10)
+    threading.Thread(target=edit, daemon=True).start()
+    assert held.wait(5)
+    try:
+        threading.Thread(target=lambda: (mgr.before_start(out), looked.set()), daemon=True).start()
+        assert looked.wait(5)                       # the Play's look came back with the edit in flight
+        assert items[0].play is None
+    finally:
+        release.set()
+    assert _wait(lambda: _streams(items[0]))        # read once the edit was done
+
+
+def test_a_refusal_names_no_disk_for_slots_that_were_never_files(node):
+    """A held queue of streamed tracks, streaming off, the folder gone: none
+    of it is "on a disk that is not connected" — the manager refuses nothing
+    in those words, and the rows say what streaming says."""
+    mgr, out, player = node["mgr"], node["out"], node["player"]
+    queries = player._phantom_track_queries(node["phantoms"][:2])
+    mgr.replace_queue(player.queue_mod.items_for_streamed(
+        [queries[t] for t in node["phantoms"][:2]]), play=False)
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    node["gone"](True)
+    mgr.reach_changed()
+    mgr.before_start(out)                                   # no NotHere
+
+
+def test_no_provider_answering_right_now_is_not_a_node_that_streams_nothing(node):
+    """Every provider aside or cooling down is "no provider answers right
+    now" — the play routes' own words at a tap — never "cannot play until
+    its disk is connected": this node streams."""
+    from fastapi import HTTPException
+    from playback import substitute
+    player = node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    assert substitute.streams()
+    node["gone"](True)
+    for route in _every_route(node):
+        with pytest.raises(HTTPException) as refused:
+            route()
+        assert refused.value.status_code == 503
+        assert "No streaming provider is available right now" in str(refused.value.detail)
+    assert len(node["mgr"].queue) == 0
+    node["monkeypatch"].setattr(node["streaming"], "providers_registered", lambda: False)
+    assert not substitute.streams()
+
+
+def test_a_start_that_only_waits_for_a_stream_goes_on_its_file_when_the_folder_is_back(node):
+    """A slot nothing sounds yet is not held: the folder back, the slot the
+    start waits on is its file at once, and the waiting start is told as a
+    landing tells it."""
+    mgr, out = node["mgr"], node["out"]
+    items = _queue(node)
+    node["gone"](True)
+    mgr.reach_changed()
+    assert _streams(items[0])
+    node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "loading", "track_index": 1})
+    told = []
+    node["monkeypatch"].setattr(out, "slot_ready", lambda index, item=None: told.append((index, item)))
+    node["gone"](False)
+    mgr.reach_changed()
+    assert items[0].play is None and mgr._reach_owed is None
+    assert told == [(1, items[0])]
+
+
+def test_an_expected_refusal_of_play_tracks_is_no_error_in_the_log(node, caplog):
+    import logging
+    from fastapi import HTTPException
+    player = node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    _pull_the_disk(node)
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as refused:
+        player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
+    assert refused.value.status_code == 409 and refused.value.detail["reason"] == "not_here"
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_the_look_waits_for_a_stat_no_longer_than_its_patience(node, monkeypatch):
+    """A dead network mount answers a stat never: the Play's worker waits
+    for it no longer than the look's patience, and a file that did not
+    answer does not open now."""
+    import os
+    from playback import manager as manager_mod
+    hang, real = threading.Event(), os.stat
+    monkeypatch.setattr(manager_mod, "_STAT_PATIENCE_S", 0.2)
+    monkeypatch.setattr(os, "stat", lambda p, *a, **kw: (hang.wait(10), real(p, *a, **kw))[1]
+                        if str(p).endswith("01.flac") else real(p, *a, **kw))
+    try:
+        t0 = time.monotonic()
+        assert manager_mod._opens(str(node["root"] / "NW" / "01.flac")) is False
+        assert time.monotonic() - t0 < 2
+        assert manager_mod._opens(str(node["root"] / "NW" / "02.flac")) is True
+    finally:
+        hang.set()
 
 
 def test_a_first_file_that_is_there_asks_the_folder_nothing(node, monkeypatch):
@@ -799,9 +1048,9 @@ def test_where_nothing_streams_the_routes_refuse_before_the_queue_or_the_output(
             "message": "Night Walks cannot play until its files are back."}
     assert _refusals(node, _every_route(node)) == [(409, away)] * 6
     assert mgr.queue.snapshot() == old and out.replaced == []
-    # a provider gone is the same as the library off
+    # no provider registered is the same as the library off
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: True)
-    node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    node["monkeypatch"].setattr(node["streaming"], "providers_registered", lambda: False)
     assert _refusals(node, _every_route(node)[:1]) == [(409, away)]
 
 
@@ -891,6 +1140,8 @@ def test_the_pages_ask_whether_this_node_streams(node):
     player = node["player"]
     assert player.reach() == {"streams": True}
     node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    assert player.reach() == {"streams": True}       # none answers right now: it streams all the same
+    node["monkeypatch"].setattr(node["streaming"], "providers_registered", lambda: False)
     assert player.reach() == {"streams": False}
 
 
@@ -949,6 +1200,24 @@ def test_a_tile_says_of_an_album_that_is_out_what_its_page_says(node):
 
 
 # -- the threat (§3.5): his own album through the demo channel --------------------
+
+
+def test_a_shelf_asks_about_the_albums_its_tiles_show_by_the_tiles_one_definition(node):
+    """The marks of the tiles on the page, whatever page brought them: asked
+    by album id when what is reachable changes — the same definition the
+    tiles were drawn by (album_away), a not-owned album never among them."""
+    from routers import home
+
+    def away() -> dict:
+        return home.albums_away(home.AlbumsShown(ids=[node["owned"], node["streamed"]]))
+    assert away() == {"not_here": {}}
+    node["gone"](True)
+    assert away() == {"not_here": {node["owned"]: "disk"}}
+    assert _tiles(node)["new"] == "disk"
+    node["gone"](False)
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
+                        (node["variant"],))
+    assert away() == {"not_here": {node["owned"]: "away"}}
 
 
 def test_an_owned_track_streamed_for_want_of_its_file_spends_the_demo_listen_like_any_other(node):

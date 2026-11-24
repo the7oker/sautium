@@ -756,7 +756,10 @@ implementation details live in the code, DB and git history.
   keeps its ten. A radio slot is `QueueItem.whole`: its chain never holds
   the excerpt provider, so a full link that fails (or a demo listen spent
   since the batch) makes the slot fail and be walked past, never a 30 s
-  clip. The batch is appended whole, in one mutation (since 2026-11-22,
+  clip. Since 2026-11-24 the owner's own files in a batch (and in Play
+  similar) carry the mark too: one whose file is not here now is a gap of
+  its slot, a stream — whole — only while the switch is on. The batch is
+  appended whole, in one mutation (since 2026-11-22,
   QUEUE-STREAM body 1): no tap lands inside it; its streams come in the
   queue's order through the fetch lane. With the switch off and nothing of
   the owner's like the seed, radio's start answers in words that name the

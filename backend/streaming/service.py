@@ -448,6 +448,15 @@ def providers_aside() -> list:
             if (aside := p.stepped_aside()) is not None]
 
 
+def providers_registered() -> bool:
+    """Whether any provider is registered at all, on offer or not: a node
+    with none streams nothing (no build of the demo channel yet, no plugin),
+    while one whose every provider has stepped aside or is cooling down
+    only has none that answers right now."""
+    registry = _registry
+    return registry is not None and bool(registry.enabled())
+
+
 def providers_preferred() -> list:
     """The providers on offer, best first: full-length before excerpts, and
     lossless before lossy within that. The per-track resolve waterfall tries

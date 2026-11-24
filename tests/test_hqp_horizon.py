@@ -68,6 +68,7 @@ def lane(fake, monkeypatch):
     proxy = streaming_service._proxy
     monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
     monkeypatch.setattr(streaming_service, "providers_preferred", lambda: [prov])
+    monkeypatch.setattr(streaming_service, "providers_registered", lambda: True)
     monkeypatch.setattr(substitute, "native_plays", lambda items, output_id, endpoint_id: [
         substitute._stream_play(it) if it.source.get("kind") == "track" else None for it in items])
     monkeypatch.setattr(player, "_phantom_track_query", lambda tid, album_id=None: TrackQuery(

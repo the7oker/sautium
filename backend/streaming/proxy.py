@@ -69,18 +69,20 @@ _REQUEST_READ_S = 10.0
 _REQUEST_HEAD_S = 15.0
 
 
-def _library_file(*, missing: bool) -> None:
+def _library_file(path: str, *, missing: bool) -> None:
     """A file of the library asked for here — by a DLNA renderer, by an
     HQPlayer on another machine — speaks for the music folder exactly as one
     asked for by the browser does (routers/media.py): found missing, the
     folder is looked at, not waited for (scanner.check_folder — the moment a
     dropped mount becomes visible; its record is the notice's and the
     queue's event); served as it lies on disk, the folder answers
-    (scanner.folder_seen — never a cache file's word). Read off the process's
-    own scanner, never imported here: one that never loaded it looks at no
-    folder (playback.queue.gone_prefixes)."""
+    (scanner.folder_seen — never a cache file's word) — a file of that
+    folder only (scanner.of_music_folder): a row of another folder says
+    nothing of this one. Read off the process's own scanner, never imported
+    here: one that never loaded it looks at no folder
+    (playback.queue.gone_prefixes)."""
     scanner = sys.modules.get("scanner")
-    if scanner is None:
+    if scanner is None or not scanner.of_music_folder(path):
         return
     if missing:
         scanner.check_folder()
@@ -551,10 +553,10 @@ class MediaProxy:
             found = self._materialize(fe, q, ss)
         except Exception:
             if not os.path.exists(fe.path):
-                _library_file(missing=True)
+                _library_file(fe.path, missing=True)
             raise
         if found[0] == fe.path:
-            _library_file(missing=False)
+            _library_file(fe.path, missing=False)
         return found
 
     @staticmethod

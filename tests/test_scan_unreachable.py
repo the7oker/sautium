@@ -303,6 +303,18 @@ def test_only_the_librarys_own_files_speak_for_the_folder(cur, library, tmp_path
     media._serve_disk(owned, "audio/flac", _NoRange(), library=True)
     assert heard(timeout=0.5) == []               # never once per request
 
+    # A row of a folder the library has left (another one picked, its rows
+    # there until a Rescan): served, it does not say this folder answers
+    for f in (library / "A").iterdir():
+        f.unlink()
+    (library / "A").rmdir()
+    assert scanner.library_unreachable() and heard() == ["sautium_notices"]
+    elsewhere = tmp_path / "old-library" / "01.flac"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(b"x" * 16)
+    media._serve_disk(str(elsewhere), "audio/flac", _NoRange(), library=True)
+    assert heard(timeout=0.5) == [] and scanner._folder_unreachable is True
+
 
 def test_opening_the_library_looks_and_wakes_the_notices_on_a_change(
         cur, library, main_module, heard):

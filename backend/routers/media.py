@@ -45,9 +45,10 @@ def _serve_disk(path: str, mime: str, request: Request, library: bool = False):
     """Range-stream a file on disk (owned original, or a cached Opus
     transcode). `library`: the file is the library's own original — the only
     kind that speaks for the music folder (a cache file says nothing about
-    it), and only when that changes what the notices show, never once per
-    range request."""
-    from scanner import check_folder, folder_seen
+    it, nor does a row of a folder the library has left), and only when that
+    changes what the notices show, never once per range request."""
+    from scanner import check_folder, folder_seen, of_music_folder
+    library = library and of_music_folder(path)
     try:
         total = os.path.getsize(path)
     except OSError:
