@@ -86,6 +86,12 @@ class FakeHqp:
         self.replies: dict[str, str] = {}
         self.escape_brackets = escape_brackets
         self.commands: list[tuple] = []
+        # Who sent what, as each command is carried out: (the peer port of
+        # its connection, the command, its attributes) — another controller
+        # on a connection of its own (test_roon_coexistence.FakeRoon) is told
+        # from the node by it
+        self.received: list[tuple] = []
+        self._peer = threading.local()
         # Status polls after a Play during which the position stays at 0 — a
         # long filter initialising before any audio leaves.
         self.start_polls = 0
@@ -246,6 +252,7 @@ class FakeHqp:
                         fake._log_wire(conn, "close", None)
 
             def _serve(self, conn, epoch):
+                fake._peer.port = self.client_address[1]
                 buf = ""
                 while True:
                     try:
@@ -482,6 +489,7 @@ class FakeHqp:
     def _dispatch(self, cmd: str, attrs: dict) -> str:
         with self._lock:
             self.commands.append((cmd, attrs))
+            self.received.append((getattr(self._peer, "port", None), cmd, attrs))
             if cmd in self.replies:
                 return self.replies[cmd]
             if self.filter_names is not None and cmd in ("GetFilters", "SetFilter", "State"):
