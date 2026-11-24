@@ -103,6 +103,62 @@
     if (st.state === 'failed') return `Doesn't stream here — ${streamReason(st.reason)}`;
     return '';
   }
+  // The owner's own music with no file that opens here now — its disk out
+  // (`why` 'disk': its folder does not answer) or its copy away (a Rescan
+  // found none of its files): what the album says of it, and what a refused
+  // tap says as a toast (a route's 409 `not_here`). Drafts for the words
+  // sitting (PI-NODE-2D-DESIGN §9.1).
+  const NOT_HERE = {
+    disk: {
+      title: 'On a disk that is not connected',
+      streams: 'Playing it now streams it: each track once in full, then 30-second excerpts — until the disk is back.',
+      waits: 'It cannot play until the disk is connected.',
+      part: 'Some tracks are on a disk that is not connected',
+      partStreams: 'Playing them now streams them: each track once in full, then 30-second excerpts — until the disk is back.',
+      partWaits: 'They cannot play until the disk is connected.',
+      button: 'Its disk is not connected',
+    },
+    away: {
+      title: 'Your copy is away',
+      streams: 'Playing it now streams it: each track once in full, then 30-second excerpts — until its files are back.',
+      waits: 'It cannot play until its files are back.',
+      part: 'Your copy of some tracks is away',
+      partStreams: 'Playing them now streams them: each track once in full, then 30-second excerpts — until their files are back.',
+      partWaits: 'They cannot play until their files are back.',
+      button: 'Your copy is away',
+    },
+  };
+  function notHereWords(why) {
+    return NOT_HERE[why] || NOT_HERE.disk;
+  }
+  // What an owned album's page shows of files that do not open here now
+  // (albums.py: `away` when none of its picked files does, `away_part` when
+  // some do not; each with `why` and whether this node `streams`): null when
+  // every file is here — the page as it always was — else the header's two
+  // lines, whether the rows out stream (by track uuid, as a not-owned
+  // track's) or wait, and whether Play and Queue are refused on the page
+  // itself: an album all out on a node that streams nothing.
+  function albumOut(d) {
+    const out = (d.is_owned !== false && (d.away || d.away_part)) || null;
+    if (!out) return null;
+    const words = notHereWords(out.why);
+    const all = !!d.away;
+    const streams = !!out.streams;
+    return {
+      all, streams,
+      title: all ? words.title : words.part,
+      text: all ? (streams ? words.streams : words.waits)
+                : (streams ? words.partStreams : words.partWaits),
+      noPlay: all && !streams,
+      button: words.button,
+    };
+  }
+  // The row of one track of it: 'file' (as always), 'stream' or 'waits'
+  function albumRowKind(t, out) {
+    if (t.here !== false || !out) return 'file';
+    return out.streams ? 'stream' : 'waits';
+  }
+
   // The states of the slots `msg` names, keyed `${index}|${track_id}`
   function streamStates(msg) {
     const out = new Map();
@@ -5296,6 +5352,38 @@
     return 'release_year';
   }
 
+  /* What opens here changes under an open page: the music folder's disk
+     pulled or put back (the notice library.mount_missing begins or ends, on
+     the notices stream every page holds). A screen that shows the owner's
+     files names its payload here (followReach); when the notice flips, the
+     payload is asked again and the screen repainted only if it says
+     otherwise — the same answer touches no DOM. A tile needs the same two
+     things to follow: the URL its payload came from and that payload's text. */
+  function followReach(screen, url, text, rerender) {
+    screen._reach = { url, text, rerender };
+  }
+  async function refreshReach(screen) {
+    const reach = screen._reach;
+    if (!reach) return false;
+    let text;
+    try {
+      const resp = await fetch(reach.url);
+      if (!resp.ok) return false;
+      text = await resp.text();
+    } catch (_) { return false; }      // the node is away: the page's own reconnect repaints
+    if (!screen.isConnected || screen._reach !== reach || text === reach.text) return false;
+    reach.rerender();
+    return true;
+  }
+  let _reachStood = false;
+  function reachNoticeChanged() {
+    const stands = !!notices.get('library.mount_missing');
+    if (stands === _reachStood) return;
+    _reachStood = stands;
+    document.querySelectorAll('.detail-screen').forEach(screen => { refreshReach(screen); });
+  }
+  window.addEventListener('sautium:notices-changed', reachNoticeChanged);
+
   async function renderArtist(root, artistId, selectedMbid) {
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
@@ -5309,7 +5397,9 @@
                   + (selectedMbid ? '&mbid=' + encodeURIComponent(selectedMbid) : '');
       const resp = await fetch(url);
       if (!resp.ok) throw httpError(resp);
-      d = await resp.json();
+      const text = await resp.text();
+      d = JSON.parse(text);
+      followReach(screen, url, text, () => renderArtist(root, artistId, selectedMbid));
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">${unreachableCopy(err, 'Artist not found.')}</p>
@@ -5859,8 +5949,12 @@
           + (selectedVariantId != null ? '?variant_id=' + selectedVariantId : '');
         const resp = await fetch(url);
         if (!resp.ok) throw httpError(resp);
-        d = await resp.json();
+        const text = await resp.text();
+        d = JSON.parse(text);
         if (mySeq !== loadSeq) return;    // a later variant pick owns the screen
+        // What opens here may change under the open page (its disk pulled or
+        // put back): asked again then, repainted only when it says otherwise
+        followReach(screen, url, text, loadAndRender);
       } catch (err) {
         if (mySeq !== loadSeq) return;
         screen.innerHTML = `<div class="placeholder-screen">
@@ -5871,10 +5965,20 @@
       }
 
       const isPhantom = d.is_owned === false;
+      // The owner's album with no file that opens here now (albums.py: `away`
+      // when none does, `away_part` when some do not): its rows stream where
+      // this node streams, by the phantom row's machinery; where it does not,
+      // they wait, and Play says so on the page.
+      const out = albumOut(d);
+      const streamsOut = !!(out && out.streams);
       // Tag the screen so the global preview-events listener can find the open
-      // phantom album by id and re-fetch it (no per-render listener to tear down).
-      if (isPhantom) screen.dataset.phantomAlbumId = albumId;
+      // phantom album by id and re-fetch it (no per-render listener to tear
+      // down) — and an owned album whose rows stream, for the same rows' lines.
+      if (isPhantom || streamsOut) screen.dataset.phantomAlbumId = albumId;
       else delete screen.dataset.phantomAlbumId;
+      // his copy's quality badge is never a stream's (updateStreamQualityBadge)
+      if (isPhantom) delete screen.dataset.ownCopy;
+      else screen.dataset.ownCopy = '1';
       // The Buy CTA — the backend resolves it from the local MusicBrainz facts
       // (`buy.state`: the album's page, the artist's page, absent, unknown).
       // A known absence disables the button; only an unknown falls back to a
@@ -5959,6 +6063,43 @@
         const composers = (t.composers || []).map(c => c.name).join(' · ');
         const composersLine = composers
           ? `<div class="track-artist-line track-composers">${escapeHtml(composers)}</div>` : '';
+        const rowKind = albumRowKind(t, out);
+        if (rowKind === 'stream') {
+          // His own track, no file of it here now: the row streams, as a
+          // not-owned track's does — by track uuid, under this album's id —
+          // and is the local copy again when its file is back.
+          trackParts.push(`
+            <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}"
+                 data-album-id="${escapeHtml(albumId)}">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${composersLine}
+                ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+                <div class="track-buffering" hidden></div>
+              </div>
+              <span class="track-dur"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
+              <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+            </div>
+          `);
+          continue;
+        }
+        if (rowKind === 'waits') {
+          // Nothing streams here: the row waits for its file — dimmed, no tap
+          trackParts.push(`
+            <div class="track-row is-out-track">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${composersLine}
+                ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
+              </div>
+              <span class="track-dur">${fmtDuration(t.duration)}</span>
+              <span class="track-add" aria-hidden="true"></span>
+            </div>
+          `);
+          continue;
+        }
         if (t.location === 'hqplayer') {
           // Held in the HQPlayer's own library, no file here: the row plays
           // by track uuid (play-entities) — natively when that HQPlayer is
@@ -6031,6 +6172,16 @@
         `;
       }
 
+      // The line that says where the copy is and what a tap does now; on an
+      // album all of which is out, Play and Queue are disabled where nothing
+      // streams — the sentence is on the page, never a silent tap.
+      const outHtml = !out ? '' : `
+        <div class="album-out-line" data-album-out>
+          <span class="aol-title">${escapeHtml(out.title)}</span>
+          <span class="aol-text">${escapeHtml(out.text)}</span>
+        </div>`;
+      const noPlayAttr = out && out.noPlay ? ` disabled title="${escapeHtml(out.button)}"` : '';
+
       screen.innerHTML = `
         <div class="album-side">
         <div class="album-hero">
@@ -6055,8 +6206,11 @@
                 + (streamQual ? `<span class="am-hires ${streamQualClass}">${streamQualLabel}</span>` : '')
               : heldOnly
                 ? `<span class="am-demo am-held">HQPlayer</span><span class="am-hires ${qualClass}">${qualLabel}</span>`
-                : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
+                : d.away
+                  ? `<span class="am-demo am-yours">Your copy</span><span class="am-hires ${qualClass}">${qualLabel}</span>`
+                  : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
           </div>
+          ${outHtml}
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
         ${descHtml}
@@ -6075,8 +6229,8 @@
               <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
           ` : `
-            <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
-            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
+            <button class="btn-primary" type="button" data-action="play-all"${noPlayAttr}>${SVG_PLAY} Play all</button>
+            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album"${noPlayAttr}>
               <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
           `}
@@ -6106,8 +6260,26 @@
         albumId, tracks: d.tracks,
         playOrigin: 'album', originAlbumId: albumId,
         phantomAlbumId: isPhantom ? albumId : null,
+        // some of its tracks have no file here now: Play and Queue go by the
+        // album's uuid — each track its best copy that opens, else its stream
+        byAlbum: !!out,
       });
       updatePlayingHighlight();
+
+      if (streamsOut) {
+        // The rows that stream: dimmed where no source has the track, [30s]
+        // where it plays as an excerpt — the phantom rows' own readings. The
+        // quality badge stays his copy's.
+        fetch('/api/player/phantom-availability/' + encodeURIComponent(albumId))
+          .then(r => r.ok ? r.json() : null)
+          .then(body => {
+            if (body && screen.isConnected) {
+              applyPhantomMissing(screen, body.unavailable);
+              applyPhantomExcerpts(screen, body.excerpt);
+            }
+          })
+          .catch(() => {});
+      }
 
       if (isPhantom) {
         // Dim + disable tracks the provider can't stream — up front, no need to
@@ -6903,6 +7075,14 @@
                         text: escapeProfileHtml(msg || 'Streaming is not available on this node.') });
         return false;
       }
+      // The owner's own music with no file here now, on a node that streams
+      // nothing (409 `not_here`): the output is fine — said where the tap was
+      if (detail.reason === 'not_here') {
+        notices.toast({ kind: 'warning', key: 'player.not_here',
+                        title: notHereWords(detail.why).title,
+                        text: escapeProfileHtml(msg || notHereWords(detail.why).waits) });
+        return false;
+      }
       detail = msg;
     }
     if (resp && resp.status === 503) {
@@ -7052,7 +7232,7 @@
   // YouTube). Initial render shows the best case; this corrects it to Lossy /
   // Mostly lossy / Mostly lossless so the badge can't overstate the quality.
   function updateStreamQualityBadge(screen, quality) {
-    if (!screen || !quality) return;
+    if (!screen || !quality || screen.dataset.ownCopy) return;
     const MAP = {
       lossless:        ['Lossless',        'is-lossless'],
       lossy:           ['Lossy',           'is-lossy'],
@@ -7347,11 +7527,13 @@
         window.maybeClaimRenderer();
         try {
           let resp;
-          if (ctx.albumId && ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')) {
-            // A pick that lives in the HQPlayer's own library has no file id:
-            // the album plays by uuid, the backend picking each track's copy
-            // for the output — natively on that HQPlayer, a stream elsewhere
-            // (the Queue button beside it goes the same way).
+          if (ctx.albumId && (ctx.byAlbum
+              || (ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')))) {
+            // A pick that lives in the HQPlayer's own library has no file id,
+            // and one whose file is not here now names a file that does not
+            // open: the album plays by uuid, the backend picking each track's
+            // copy for the output — natively on that HQPlayer, a stream
+            // elsewhere (the Queue button beside it goes the same way).
             resp = await fetch('/api/player/play-entities', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -7457,15 +7639,16 @@
     // so the bar can stretch into its column.
     screen.querySelectorAll('[data-action="queue-album"]').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        if (e.detail > 1 || !ctx.tracks || !ctx.tracks.length) return;
+        if (e.detail > 1 || btn.disabled || !ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
         const wrap = btn.closest('.album-actions');
         if (!wrap) return;
         if (wrap.classList.contains('is-confirming')) { closeAlbumQueueConfirm(wrap); return; }
-        if (ids.length) { openAlbumQueueConfirm(wrap, ids); return; }
-        // Every picked file lives in the HQPlayer's own library: queue the
-        // album by uuid, the backend picking the copies for the output.
-        if (ctx.albumId && ctx.tracks.some(t => t.location === 'hqplayer')) {
+        if (ids.length && !ctx.byAlbum) { openAlbumQueueConfirm(wrap, ids); return; }
+        // Every picked file lives in the HQPlayer's own library, or some have
+        // no file here now: queue the album by uuid, the backend picking the
+        // copies for the output.
+        if (ctx.albumId && (ctx.byAlbum || ctx.tracks.some(t => t.location === 'hqplayer'))) {
           openAlbumQueueBar(wrap, async (position) => {
             const resp = await fetch('/api/player/queue-entities', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -13453,7 +13636,7 @@
   };
   NOTICE_COPY['library.mount_missing'] = n => ({
     title: 'Music folder unreachable',
-    text: `<span class="num">${escapeHtml(fmtPathForDisplay((n.data && n.data.path) || ''))}</span> is empty or not mounted — your own tracks cannot play until it is back.`,
+    text: `<span class="num">${escapeHtml(fmtPathForDisplay((n.data && n.data.path) || ''))}</span> is empty or not mounted — your own tracks stream or wait until it is back.`,
   });
   // The same failure on three plays in a row (playback/hqp_diagnostics.py):
   // the output, not a track. The facts come from the server; the words here.
@@ -18300,16 +18483,47 @@
   // Draft words for the owner's words review.
   const SAFE_TO_PULL = 'Sautium only reads this disk and writes nothing to it. '
     + 'You can unplug it at any time: its albums are away until it is back.';
+  // While the folder does not answer its albums stream where this node
+  // streams (kept on the row, musicStreams), and wait where it does not:
+  // the row says which. Drafts for the words sitting (PI-NODE-2D-DESIGN §9.1).
   function paintMusicPathRow(row, missing) {
     row.classList.toggle('notice-row', missing);
     row.classList.toggle('kind-error', missing);
     const sub = row.querySelector('.row-stack-sub');
     const line = missing
-      ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
+      ? (row.dataset.musicStreams
+        ? 'Not connected — your own tracks stream or wait, and nothing can be scanned, until it is back.'
+        : 'Not connected — your own tracks cannot play or be scanned until it is back.')
       : row.dataset.musicPullable ? SAFE_TO_PULL
       : MUSIC_FOLDER_LINES[row.dataset.musicFolder] || '';
     if (sub.textContent !== line) sub.textContent = line;
     sub.hidden = !line;
+  }
+  // The Library screen under the notice library.mount_missing (`missing`):
+  // the Music path row's sentence, and — a scan of a folder that does not
+  // answer is refused by the node — "Scan for new" and "Rescan" waiting for
+  // the folder under it; both come back with the notice's end. Whether this
+  // node streams meanwhile is asked once a stretch (GET /api/player/reach).
+  let _nodeStreams = null;        // null: not known for this stretch
+  let _nodeStreamsAsked = false;
+  function paintMusicFolder(missing) {
+    if (!missing) { _nodeStreams = null; _nodeStreamsAsked = false; }
+    const row = document.querySelector('[data-music-path-row]');
+    if (row) {
+      row.dataset.musicStreams = _nodeStreams ? '1' : '';
+      paintMusicPathRow(row, missing);
+    }
+    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"]').forEach(btn => {
+      if (btn.disabled !== missing) btn.disabled = missing;
+    });
+    if (missing && row && !_nodeStreamsAsked) {
+      _nodeStreamsAsked = true;
+      fetch('/api/player/reach').then(r => (r.ok ? r.json() : null)).then(body => {
+        if (!body || !_nodeStreamsAsked) return;
+        _nodeStreams = !!body.streams;
+        if (notices.get('library.mount_missing')) paintMusicFolder(true);
+      }).catch(() => { _nodeStreamsAsked = false; });    // asked again at the next paint
+    }
   }
 
   // A volume plugged into the machine that nothing mounted (backend
@@ -18689,7 +18903,7 @@
         ${actions}
       </section>
     `;
-    paintMusicPathRow(root.querySelector('[data-music-path-row]'), !!notices.get('library.mount_missing'));
+    paintMusicFolder(!!notices.get('library.mount_missing'));
     _wireBack(root);
     const chooseFolder = root.querySelector('[data-action="choose-folder"]');
     if (chooseFolder) chooseFolder.addEventListener('click', () => openMusicFolderSheet(() => renderLibrary(root)));
@@ -18863,7 +19077,7 @@
       const pathRow = root.querySelector('[data-music-path-row]');
       if (pathRow && pathRow.dataset.musicPullable !== (lib.music_folder_pullable ? '1' : '')) {
         pathRow.dataset.musicPullable = lib.music_folder_pullable ? '1' : '';
-        paintMusicPathRow(pathRow, !!notices.get('library.mount_missing'));
+        paintMusicFolder(!!notices.get('library.mount_missing'));
       }
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
@@ -19420,8 +19634,9 @@
       // Targeted updates only — the open screen keeps its DOM.
       const note = document.querySelector('[data-discography-pending]');
       if (note) note.innerHTML = discographyPendingText();
-      const pathRow = document.querySelector('[data-music-path-row]');
-      if (pathRow) paintMusicPathRow(pathRow, !!notices.get('library.mount_missing'));
+      if (document.querySelector('[data-music-path-row]')) {
+        paintMusicFolder(!!notices.get('library.mount_missing'));
+      }
       if (parseHash().startsWith('more/sync')) {
         const content = screenRoot() && screenRoot().querySelector('[data-sync-content]');
         if (content) {

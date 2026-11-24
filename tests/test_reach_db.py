@@ -762,6 +762,13 @@ def test_the_album_payload_says_what_is_here_and_whether_this_node_streams_it(no
     assert away["away_part"] == {"why": "away", "streams": False}
 
 
+def test_the_pages_ask_whether_this_node_streams(node):
+    player = node["player"]
+    assert player.reach() == {"streams": True}
+    node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    assert player.reach() == {"streams": False}
+
+
 # -- the threat (§3.5): his own album through the demo channel --------------------
 
 

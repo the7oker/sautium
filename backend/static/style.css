@@ -2143,6 +2143,15 @@ body.sautium-base {
 .track-row.is-unavailable > * {
   opacity: 0.4;
 }
+/* The owner's track with no file here now, on a node that streams nothing:
+   it waits for its file — read, never tapped. Content faded, the divider
+   kept, as an unavailable row's. */
+.track-row.is-out-track {
+  cursor: default;
+}
+.track-row.is-out-track > * {
+  opacity: 0.4;
+}
 /* "Buffering…" under a phantom track title while it streams (in-place, no flicker). */
 .track-buffering {
   font-size: var(--text-caption);
@@ -2675,6 +2684,20 @@ body.sautium-base {
 }
 .album-meta-row .am-demo ~ .am-hires {
   margin-left: calc(6 * var(--px));
+}
+/* Where the owner's copy is when none of its files opens here now, and what
+   a tap does meanwhile: two lines under the meta row, the first the fact. */
+.album-out-line {
+  display: flex;
+  flex-direction: column;
+  gap: calc(2 * var(--px));
+  margin-top: calc(10 * var(--px));
+  font-size: calc(13 * var(--px));
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+.album-out-line .aol-title {
+  color: var(--color-text);
 }
 .am-hires.is-hires {
   color: var(--color-hires);

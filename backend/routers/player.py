@@ -3033,6 +3033,14 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 # appended as its fetch lands, which let a later tap land in between.
 
 
+@router.get("/reach")
+def reach():
+    """Whether this node streams now: what the owner's music with no file
+    here plays as — a stream, or nothing until its files are back — for the
+    pages' words about a folder that does not answer."""
+    return {"streams": substitute.streams()}
+
+
 def _gone() -> list:
     """The stored-path prefixes of the folders that do not answer now — the
     `gone` every copy-picking query takes (sql_queries.HERE)."""

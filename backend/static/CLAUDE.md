@@ -591,7 +591,9 @@ never wakes the channel itself (on a flapping share it would wake itself
 without end; a change only a request's derivation saw reaches the open
 tabs with the next wake). Its producers do, when their answer differs from
 what the notices show: a scan's refusal, the prune, Library opened, a
-library file served or found missing — never a transcode-cache file — and
+library file served or found missing — never a transcode-cache file — the
+folder watcher's loss and the first file of a new queue found missing
+(since 2026-11-24), and
 so does a look the readers gave up on if the folder answered after all (a
 disk spinning up). The client diffs snapshots: a key
 that appears or re-arms toasts once — so `since` is the condition's
