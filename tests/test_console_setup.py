@@ -2064,9 +2064,15 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     assert "device-timeout=10s" in said.replace("'\n    L=\"$L\"'", "")
     # the root forgotten, its line left in fstab: nothing printed here (`roots --forget` printed its undo)
     assert _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"]) == ""
-    # a line at that point the setup did not write is the person's own: no step
-    fstab.write_text("/dev/sda1 /mnt/sautium-4A21-0000 exfat ro 0 0\n")
-    assert line_of(old_point) is None and _boot_mount_said(fstab, generated, roots=roots) == ""
+    # a line at that point the setup did not write is the person's own: no step — one that names the
+    # disk otherwise, and one that would mount it for writing or run what is on it (the node's bind
+    # does not make a mount that arrives later read-only)
+    for theirs in ("/dev/sda1 /mnt/sautium-4A21-0000 exfat ro,nosuid,nodev,noexec 0 0",
+                   at_plug.replace("ro,nofail,", "rw,nofail,"), at_plug.replace(",noexec", ""),
+                   at_plug.replace(",nosuid,nodev", "")):
+        fstab.write_text(theirs + "\n")
+        assert line_of(old_point) is None and _boot_mount_said(fstab, generated, roots=roots) == "", theirs
+    assert "a disk mounted at the root itself" not in setup.root_lines(roots, "", {}, [])[1]     # not a step of ours
 
 
 def test_a_roots_label_rides_in_the_override_for_the_node_to_show(checkout, tmp_path, monkeypatch):

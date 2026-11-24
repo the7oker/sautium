@@ -1504,13 +1504,24 @@ def fstab_line(point: str) -> Optional[dict]:
         return None
 
 
+def own_line(line: dict, uuid: str) -> bool:
+    """Whether a line of /etc/fstab at one of the setup's mount points is
+    still as the setup writes one — the disk by its UUID, read-only and with
+    nothing of the disk's run or trusted (the node's bind does not make a
+    mount that arrives later read-only: each mount says so itself), no
+    letter a shell line cannot carry. The setup builds a new line from the
+    options of such a line only; any other is the person's own."""
+    return (line["source"] == f"UUID={uuid}" and "'" not in line["options"]
+            and {"ro", "nosuid", "nodev", "noexec"} <= set(line["options"].split(",")))
+
+
 def old_boot_mount(root: str) -> Optional[dict]:
     """The line an earlier setup wrote for `root`, where the root is that
     line's own mount point (/mnt/sautium-<UUID>) and the line is still as the
     setup writes one: {uuid, fstype, options}."""
     match = OLD_BOOT_MOUNT_POINT.fullmatch(root)
     line = fstab_line(root) if match else None
-    if line is None or line["source"] != f"UUID={match.group(1)}" or "'" in line["options"]:
+    if line is None or not own_line(line, match.group(1)):
         return None
     return {"uuid": match.group(1), "fstype": line["fstype"], "options": line["options"]}
 
@@ -1602,7 +1613,7 @@ def boot_mount_steps(roots: List[str], labels: Dict[str, str], shown: Optional[s
             say(f"Music disk at {point}: " + ("mounted whenever it is plugged in." if wants.is_symlink() or wants.exists()
                                               else "its line is in /etc/fstab, and systemd has not read it yet — "
                                                    "run: sudo systemctl daemon-reload"))
-        elif systemd < WANTED_BY_SINCE or line["source"] != f"UUID={uuid}" or "'" in line["options"]:
+        elif systemd < WANTED_BY_SINCE or not own_line(line, uuid):
             say(f"Music disk at {point}: mounted at a start of the machine only.")
         else:
             options = ",".join(o for o in line["options"].split(",") if not o.startswith("x-systemd.device-timeout="))
