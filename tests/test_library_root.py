@@ -24,6 +24,11 @@ mount_watch.py; PI-NODE-2B §4.3).
   read-only word. A root that is a disk goes by the label the setup read; a
   root that is an empty folder and no disk is said at the start and listed
   as empty.
+- Since PI-NODE-2D (§2, §5, §9.3): a disk the setup's fstab line mounts lies
+  in the disks' folder and is listed as the automount's own; the automount's
+  two words for a volume no one filesystem is found on; an empty root is
+  lost only where the library holds copies from it, else new; a folder's
+  listing names the disk it lies on. Real mounts: test_roots_real_mounts.py.
 On a real PostgreSQL where a row is read or written; skipped without one.
 """
 
@@ -131,6 +136,30 @@ def test_the_places_are_the_named_folder_and_each_disk_that_is_there(tree):
     assert disk["size_bytes"] > 0
 
 
+def test_a_disk_the_setups_fstab_line_mounts_is_listed_as_the_automounts_own(tmp_path, monkeypatch):
+    """Since 2026-11-24 the line mounts at the automount's point for its disk
+    (PI-NODE-2D §2). On a machine with no automount the line's block made the
+    folder and its labels' folder, and wrote the label: the one root is the
+    disks' folder, the disk a row like any other — and no root is the disk."""
+    disks = tmp_path / "media" / "sautium"
+    (disks / ".names").mkdir(parents=True)                         # what the block makes: no .unread, no rule
+    (disks / "4A21-0000" / "Music").mkdir(parents=True)
+    (disks / ".names" / "4A21-0000").write_text("Elements\n")
+    (disks / "0398-3084").mkdir()                                  # a line's mount point whose disk is out
+    monkeypatch.setattr(settings, "sautium_library_roots", str(disks))
+    monkeypatch.setattr(settings, "sautium_library_root_labels", "")
+    monkeypatch.setattr(settings, "music_library_path", "")
+    monkeypatch.setattr(library_root, "_mounts", lambda: {str(disks / "4A21-0000"): True})
+    assert library_root._disks_folder(str(disks)) and library_root.unread_folders() == []
+    (place,) = library_root.folders()["places"]
+    assert (place["path"], place["kind"], place["name"], place["label"], place["read_only"]) == (
+        str(disks / "4A21-0000"), "disk", "4A21-0000", "Elements", True)
+    assert library_root.pullable(str(disks / "4A21-0000" / "Music"))
+    assert not library_root._gone(str(disks), {})                  # every disk out: not a library gone
+    assert library_root.folders(str(disks / "4A21-0000" / "Music"))["parent"] == str(disks / "4A21-0000")
+    assert library_root.folders(str(disks / "4A21-0000"))["parent"] is None        # up from a disk: the places
+
+
 def test_a_label_is_read_bounded_and_never_through_a_link(tree):
     names = tree.disks / ".names"
     (names / "long").write_text("L" * 5000)
@@ -152,6 +181,11 @@ def test_a_folders_listing_is_its_real_folders_and_a_count_of_its_music(tree):
     assert jazz["parent"] == str(tree.music)
     disk = library_root.folders(str(tree.disks / "4A21-0000"))
     assert disk["parent"] is None and disk["audio_files"] == 1
+    # the disk a folder lies on, for a page to name the place by: the mount point's own name is a UUID
+    assert top["disk"] is None and jazz["disk"] is None
+    on = library_root.folders(str(tree.disks / "4A21-0000" / "Rock"))["disk"]
+    assert (on["path"], on["name"], on["label"]) == (str(tree.disks / "4A21-0000"), "4A21-0000", "Elements <b>")
+    assert on["size_bytes"] > 0 and disk["disk"] == on
     for refused in (str(tree.outside), str(tree.music / "Jazz" / "way-out"),
                     str(tree.music / "none"), str(tree.music / "Jazz" / "Album" / "01.flac")):
         with pytest.raises(library_root.Refused):
@@ -475,7 +509,24 @@ def test_an_unread_volume_is_a_place_that_cannot_be_opened(tree, unread):
     places = library_root.folders()["places"]
     assert [p["kind"] for p in places] == ["folder", "disk", "unread"]
     assert places[-1] == {"path": None, "name": "sda1", "kind": "unread", "label": "Elements",
-                          "size_bytes": None, "format": "NTFS", "mounts": True, "driver": None}
+                          "size_bytes": None, "format": "NTFS", "mounts": True, "driver": None, "unclear": None}
+
+
+@pytest.mark.parametrize("word", ["ambivalent", "unknown"])
+def test_a_volume_no_one_filesystem_is_found_on_is_read_by_the_automounts_own_word(tree, unread, word):
+    """The automount's two words where blkid names no filesystem (PI-NODE-2D
+    §5): the marks of more than one, or none. The file keeps its four lines —
+    no label, no driver — and the word, never a format, chooses the sentence."""
+    _volume(unread, "sda1", word)
+    (volume,) = library_root.unread()
+    assert (volume["unclear"], volume["format"], volume["mounts"], volume["label"], volume["driver"]) == (
+        word, None, False, None, None)
+    place = library_root.folders()["places"][-1]
+    assert (place["kind"], place["path"], place["unclear"]) == ("unread", None, word)
+    # a type blkid did name is never one of the two, whatever a stick calls itself
+    for named in ("ntfs", "apfs", "zfs_member", "Unknown", "ambivalent2", "unknown\x00"):
+        (unread / "sda1").write_bytes(f"{BOOT}\n{named}\nLabel\n-\n".encode())
+        assert library_root.unread()[0]["unclear"] is None, named
 
 
 def _readable(fd: int, seconds: float) -> bool:
@@ -547,13 +598,18 @@ def test_an_unread_volume_is_a_notice_that_leaves_with_its_file(tree, unread, db
     path = _volume(unread, "sda1", "ntfs", "Elements <b>", driver="ntfs-3g")
     (item,) = notices().values()
     assert (item["key"], item["kind"], item["until"]) == ("disk.unread.sda1", "warning", None)
-    assert item["data"] == {"label": "Elements <b>", "format": "NTFS", "mounts": True, "driver": "ntfs-3g"}
+    assert item["data"] == {"label": "Elements <b>", "format": "NTFS", "mounts": True, "driver": "ntfs-3g",
+                            "unclear": None}
     onset = item["since"]
     # plugged in again: another file, another onset — news for the toast
     path.unlink()
     assert notices() == {}
     os.utime(_volume(unread, "sda1", "ntfs", "Elements <b>"), (1_800_000_000, 1_800_000_000))
     assert notices()["disk.unread.sda1"]["since"] != onset
+    # a volume the automount found no one filesystem on: the notice carries its word for the page's sentence
+    _volume(unread, "sdb1", "ambivalent")
+    assert notices()["disk.unread.sdb1"]["data"] == {"label": None, "format": None, "mounts": False, "driver": None,
+                                                     "unclear": "ambivalent"}
 
 
 # -- what a disk is, and what can be pulled (§9, §13) ---------------------------------------------
@@ -618,13 +674,43 @@ def test_only_a_folder_on_a_disk_mounted_read_only_can_be_pulled(tree, monkeypat
 
 # -- a root that is gone (§6.3) -------------------------------------------------------------------
 
-def test_a_root_that_is_an_empty_folder_and_no_disk_lists_as_empty(tree, monkeypatch):
+def _copy_under(cursor, folder) -> str:
+    """A copy the library holds from `folder`; the album's id, to remove it by."""
+    import uuid
+    album = str(uuid.uuid4())
+    cursor.execute("INSERT INTO albums (id, title) VALUES (%s, 'Held')", (album,))
+    cursor.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s)", (album, str(folder)))
+    return album
+
+
+def test_a_root_that_is_an_empty_folder_and_no_disk_lists_as_empty(tree, db, monkeypatch):
     gone = tree.top / "mnt" / "sautium-5678-EF01"
     gone.mkdir(parents=True)
     monkeypatch.setattr(settings, "sautium_library_roots", f"{tree.music}:{tree.disks}:{gone}")
     places = {p["path"]: p for p in library_root.folders()["places"]}
     assert places[str(gone)]["kind"] == "folder" and places[str(gone)]["empty"] is True
     assert places[str(tree.music)]["empty"] is False
+    # An empty folder the library never read a copy under is new, not lost (PI-NODE-2C F2): `held`
+    # tells them apart, and is asked only of an empty one
+    assert places[str(gone)]["held"] is False and places[str(tree.music)]["held"] is None
+    albums = [_copy_under(db, str(gone) + "-beside" + "/Album"), _copy_under(db, tree.music / "Jazz" / "Album")]
+    assert not library_root._held(str(gone))               # a folder whose name only begins like the root's
+    albums.append(_copy_under(db, gone / "Rock" / "Album"))
+    try:
+        assert library_root._held(str(gone)) and library_root._held(str(gone) + "/")
+        assert {p["path"]: p for p in library_root.folders()["places"]}[str(gone)]["held"] is True
+        # a copy at an HQPlayer under the same folder's name is not this node's file
+        db.execute("DELETE FROM albums WHERE id = %s", (albums.pop(),))
+        db.execute("INSERT INTO hqp_endpoints (name) VALUES ('box') RETURNING id")
+        endpoint = db.fetchone()[0]
+        album = _copy_under(db, tree.top / "elsewhere")
+        albums.append(album)
+        db.execute("UPDATE album_variants SET location = 'hqplayer', hqp_endpoint_id = %s, directory_path = %s "
+                   "WHERE album_id = %s", (endpoint, str(gone / "Rock" / "Album"), album))
+        assert not library_root._held(str(gone))
+    finally:
+        db.execute("DELETE FROM albums WHERE id = ANY(%s::uuid[])", (albums,))
+        db.execute("DELETE FROM hqp_endpoints WHERE name = 'box'")
     # its disk mounted: a disk, whatever it holds
     monkeypatch.setattr(library_root, "_mounts", lambda: {str(gone): True})
     assert library_root.folders()["places"][-1]["kind"] == "disk"
@@ -637,7 +723,17 @@ def test_the_start_says_which_root_is_gone_and_how_to_forget_it(tree, db, monkey
     gone = tree.top / "mnt" / "sautium-5678-EF01"
     gone.mkdir(parents=True)
     monkeypatch.setattr(settings, "sautium_library_roots", f"{tree.music}:{tree.disks}:{gone}")
+    caplog.set_level("INFO")
     library_root.apply()
-    said = [r.getMessage() for r in caplog.records if "is empty" in r.getMessage()]
-    assert said == [f"music root {gone} is empty: its disk is not mounted, or the folder was removed; "
-                    f"its albums are away. Forget it on the machine: ./sautium roots --forget {gone}"]
+    said = [(r.levelname, r.getMessage()) for r in caplog.records if "is empty" in r.getMessage()]
+    # a folder nothing was ever read under is new: no warning of a library away (PI-NODE-2C F2)
+    assert said == [("INFO", f"music root {gone} is empty: nothing is in it yet")]
+    caplog.clear()
+    album = _copy_under(db, gone / "Album")
+    try:
+        library_root.apply()
+    finally:
+        db.execute("DELETE FROM albums WHERE id = %s", (album,))
+    said = [(r.levelname, r.getMessage()) for r in caplog.records if "is empty" in r.getMessage()]
+    assert said == [("WARNING", f"music root {gone} is empty: its disk is not mounted, or the folder was removed; "
+                                f"its albums are away. Forget it on the machine: ./sautium roots --forget {gone}")]

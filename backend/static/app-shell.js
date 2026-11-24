@@ -18313,16 +18313,27 @@
   }
 
   // A volume plugged into the machine that nothing mounted (backend
-  // library_root.unread: `d` is {label, format, mounts, driver}): the toast's
-  // words and the folder sheet's row, from one place. `mounts` — the format
-  // is one the machine mounts, so this mount failed; otherwise the format is
-  // one Sautium does not read. NTFS tried with the kernel's driver (`ntfs3`)
-  // is a machine without ntfs-3g, which opens what Windows formats: the
-  // setup shows how to add it. The label is a stranger's text: escaped, as
-  // every string returned is HTML.
+  // library_root.unread: `d` is {label, format, mounts, driver, unclear}):
+  // the toast's words and the folder sheet's row, from one place. `mounts` —
+  // the format is one the machine mounts, so this mount failed; otherwise the
+  // format is one Sautium does not read. NTFS tried with the kernel's driver
+  // (`ntfs3`) is a machine without ntfs-3g, which opens what Windows formats:
+  // the setup shows how to add it. `unclear` — the machine found no one
+  // filesystem on the volume: the marks of two (`ambivalent`), or none
+  // (`unknown`); such a volume gave no label, and `named` is what the row
+  // calls it. The label is a stranger's text: escaped, as every string
+  // returned is HTML.
   // Draft words for the owner's words review.
   function unreadDiskCopy(d) {
     const title = 'A disk could not be read';
+    if (d.unclear) {
+      const row = 'Sautium cannot tell what is on it.';
+      const sub = d.unclear === 'ambivalent'
+        ? 'It carries the marks of two formats (a quick format over an older one); '
+          + 'formatting it again in full on your computer clears them.'
+        : 'It may be empty, or in a format this machine does not know.';
+      return { title, text: `A disk — ${row} ${sub}`, named: 'A disk', row, sub };
+    }
     const name = d.label ? escapeHtml(d.label) : 'This disk';
     const format = d.format ? escapeHtml(d.format) : null;
     if (!d.mounts) {
@@ -18352,20 +18363,39 @@
       const c = unreadDiskCopy(p);
       return `
       <div class="manage-tokens-row" data-unread style="cursor:default;">
-        <span style="text-align:left;">${escapeHtml(p.label || 'Disk')} ${dim(`— ${c.row}`)}${under(c.sub)}</span>
+        <span style="text-align:left;">${c.named || escapeHtml(p.label || 'Disk')} ${dim(`— ${c.row}`)}${under(c.sub)}</span>
       </div>`;
     }
     const disk = p.kind === 'disk';
-    // a disk no automount named (a root that is a disk itself) goes by its
-    // label, else by its path
-    const label = disk ? (p.label || (p.name === p.path ? fmtPathForDisplay(p.path) : 'Disk')) : p.name;
-    const size = disk && p.size_bytes ? ` ${dim(`— ${escapeHtml(fmtBytes(p.size_bytes))}`)}` : '';
+    const size = disk && p.size_bytes ? escapeHtml(fmtBytes(p.size_bytes)) : '';
+    // A disk goes by its label. One with none, mounted in the disks' folder,
+    // is named by what it is and its size — its mount point's name is its
+    // UUID, which is nothing to a person; a root that is a disk itself, as a
+    // folder, goes by its path.
+    const head = disk && !p.label && p.name !== p.path
+      ? `USB disk${size ? ` · ${size}` : ''}`
+      : `${escapeHtml(disk ? (p.label || fmtPathForDisplay(p.path)) : p.name)}${size ? ` ${dim(`— ${size}`)}` : ''}`;
+    // An empty folder the library holds copies from lost them (`held`); one
+    // it never read is new
     const line = disk && p.read_only ? SAFE_TO_PULL
-      : p.empty ? 'Empty — its disk is not mounted, or the folder was removed.' : '';
+      : !p.empty ? ''
+      : p.held ? 'Empty — its disk is not mounted, or the folder was removed.'
+      : 'Empty — nothing is in it yet.';
     return `
       <button class="manage-tokens-row" type="button" data-path="${escapeHtml(p.path)}">
-        <span style="text-align:left;">${escapeHtml(label)}${size}${line ? under(line) : ''}</span><span class="chev">›</span>
+        <span style="text-align:left;">${head}${line ? under(line) : ''}</span><span class="chev">›</span>
       </button>`;
+  }
+
+  // Where the folder sheet stands, as a person names the place: on a disk,
+  // the disk (its label, or "USB disk") and the folders down from it — never
+  // the mount point's path, whose last part is the disk's UUID. `disk`: the
+  // disk the folder lies on (backend library_root.folders), null under a
+  // folder named at setup; a root that is a disk itself and has no label
+  // goes by its path, as in the list.
+  function _folderCrumb(at, disk) {
+    if (!disk || !(disk.label || disk.name)) return fmtPathForDisplay(at);
+    return [disk.label || 'USB disk', ...at.slice(disk.path.length).split('/').filter(Boolean)].join(' › ');
   }
 
   /* The folder sheet of a node that reads its music under roots (backend
@@ -18395,7 +18425,7 @@
           <button class="profile-btn primary" data-use hidden>Use this folder</button>
           <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">
-            Sautium can read every disk plugged into this machine. It writes to none of them.
+            Sautium reads the disks listed here and writes to none of them.
           </p>
         </div>
       </div>`;
@@ -18444,7 +18474,7 @@
       }
       const count = `${fmtNum(data.folders.length)} folder${data.folders.length === 1 ? '' : 's'} · `
         + `${fmtNum(data.audio_files)}${data.capped ? '+' : ''} audio file${data.audio_files === 1 ? '' : 's'}`;
-      crumb.textContent = `${fmtPathForDisplay(at)} — ${count}`;
+      crumb.textContent = `${_folderCrumb(at, data.disk)} — ${count}`;
       drawnPlaces = null;
       list.innerHTML = `
         <button class="manage-tokens-row" type="button" data-up><span>‹ Back</span><span></span></button>`

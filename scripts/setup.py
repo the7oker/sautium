@@ -66,7 +66,6 @@ DOCKER_MIN, COMPOSE_MIN = (25, 0), (2, 24)
 FOREIGN_FILESYSTEMS = {"exfat", "vfat", "msdos", "ntfs", "ntfs3", "fuseblk"}
 # Free space Docker's data root needs for what the preset builds and keeps
 NEED_GB = {"nano": 8, None: 25}
-SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}")
 SMALL_FILE = 4096
 
 
@@ -164,14 +163,22 @@ def read_line(path: str) -> str:
         return ""
 
 
+def file_size(path: str) -> Optional[int]:
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
 def swaps(proc_swaps: str, lsblk_json: str, sysfs: str = "/sys/block",
-          source_of=lambda path: mount_of(path).get("source", "")) -> List[dict]:
+          source_of=lambda path: mount_of(path).get("source", ""), size_of=file_size) -> List[dict]:
     """Where this machine swaps to, from /proc/swaps and sysfs alone: each
     swap as {path, kind: file | partition | zram, medium} — and for a zram
     device with a backing file (Raspberry Pi OS writes idle pages of its
     compressed swap to one, which /proc/swaps does not show) `writeback`,
-    the file's path, its `medium` and `written_mb`, what the kernel counted
-    as written there since the machine started."""
+    the file's path, its `medium`, its `size_bytes` (None where it cannot be
+    read) and `written_mb`, what the kernel counted as written there since
+    the machine started."""
     def medium(device: str) -> str:
         return machine_tier.storage_medium(device_chain(device, lsblk_json), sysfs)
 
@@ -192,6 +199,7 @@ def swaps(proc_swaps: str, lsblk_json: str, sysfs: str = "/sys/block",
                 stat = read_line(f"{sysfs}/{name}/bd_stat").split()
                 swap["writeback"] = {
                     "path": file or backing, "medium": medium(source_of(file) if file else backing),
+                    "size_bytes": size_of(file) if file else None,
                     # bd_stat's third figure: 4 KiB units written to the backing device
                     "written_mb": int(stat[2]) * 4 / 1024 if len(stat) == 3 and stat[2].isdigit() else None}
             found.append(swap)
@@ -352,6 +360,13 @@ AUTOMOUNT_RULE = """\
 # into a reader that was already plugged in is a "change", never an "add".
 ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
 ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
+# A volume the system names no filesystem on at all (none found, or the marks
+# of two: a quick format over an older one) is the script's to say; one that
+# is named and is no filesystem of files (swap, an encrypted volume) is not.
+# No size: a card reader's empty slot. Never an optical drive: an empty tray
+# and an audio CD are no volume a format was lost on.
+ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", KERNEL!="sr[0-9]*", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
+ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
 """
 
 AUTOMOUNT_UNIT = """\
@@ -379,7 +394,11 @@ ExecStop=/usr/local/lib/sautium/automount unmount %I
 # (so that "NTFS, and no ntfs-3g here" is told from "ntfs-3g refused it"),
 # each cut here and read as a stranger's text there
 # (backend/library_root.py). The unit stays active for such a volume, so
-# that its stop at the pull takes the file away.
+# that its stop at the pull takes the file away. Where blkid names no
+# filesystem the type line is one of the script's own two words:
+# `ambivalent` (the low-level probe finds the marks of more than one — its
+# exit 8), `unknown` (it finds none — its exit 2; said only of a volume that
+# can be one of files, see the script).
 AUTOMOUNT_SCRIPT = """\
 #!/bin/sh
 # Sautium: mount a plugged disk read-only under {base}/<its UUID>, for the
@@ -444,6 +463,42 @@ if [ "$(lsblk -n -o NAME "$dev" 2>/dev/null | wc -l)" -gt 1 ]; then exit 0; fi
 
 type=$(blkid -o value -s TYPE "$dev" || true)
 uuid=$(blkid -o value -s UUID "$dev" || true)
+if [ -z "$type" ]; then
+    # No filesystem the system names. The person plugged a disk in and is
+    # owed why it shows nothing — but never for what is no volume of files:
+    # an eMMC's own areas; an empty reader slot and an extended partition's
+    # container (under 1 MiB)
+    case "$name" in mmcblk*boot*|mmcblk*rpmb) exit 0 ;; esac
+    size=$(lsblk -n -d -b -o SIZE "$dev" 2>/dev/null | head -n 1 | tr -d ' ' || true)
+    case "$size" in ""|*[!0-9]*) exit 0 ;; esac
+    [ "$size" -ge 1048576 ] || exit 0
+    probe=0
+    blkid -p "$dev" >/dev/null 2>&1 || probe=$?
+    case "$probe" in
+        8)  type=ambivalent
+            unread "it carries the marks of more than one filesystem (wipefs lists them)" - ;;
+        2)  ;;
+        *)  echo "sautium-automount: $name: no filesystem named, and blkid -p answered $probe" >&2
+            exit 0 ;;
+    esac
+    # None found. Beside other partitions, only one whose type is for data:
+    # a disk Windows partitioned carries a reserved partition with nothing on
+    # it next to its NTFS one, and others a boot or recovery partition —
+    # nobody put music there. A disk's only volume is said whatever its type.
+    if [ "$dev_disk" != "$name" ] && [ "$(lsblk -n -o NAME "/dev/$dev_disk" 2>/dev/null | wc -l)" -gt 2 ]; then
+        parttype=$(lsblk -n -d -o PARTTYPE "$dev" 2>/dev/null | head -n 1 | tr -d ' ' | tr 'A-F' 'a-f' || true)
+        case "$parttype" in
+            ebd0a0a2-b9e5-4433-87c0-68b6b72699c7) ;;    # GPT: Microsoft basic data (FAT, exFAT, NTFS)
+            0fc63daf-8483-4772-8e79-3d69d8477de4) ;;    # Linux filesystem
+            933ac7e1-2eb4-4f13-b844-0e14e2aef915) ;;    # Linux /home
+            48465300-0000-11aa-aa11-00306543ecac) ;;    # Apple HFS+
+            7c3457ef-0000-11aa-aa11-00306543ecac) ;;    # Apple APFS
+            0x1|0x4|0x6|0x7|0xb|0xc|0xe|0x83|0xaf) ;;   # MBR: FAT, NTFS and exFAT, Linux, HFS
+            *) exit 0 ;;
+        esac
+    fi
+    unread "no filesystem is found on it" -
+fi
 safe="ro,nosuid,nodev,noexec"
 owned="uid=${{OWNER%%:*}},gid=${{OWNER##*:}},fmask=0133,dmask=0022"
 # FAT keeps its stamps in local time: pinned to UTC, a file's stamp is the
@@ -457,7 +512,7 @@ case "$type" in
     ntfs)  if command -v ntfs-3g >/dev/null 2>&1; then fs=ntfs-3g; else fs=ntfs3; fi
            opts="$safe,$owned" ;;
     ext4)  fs=ext4;  opts="$safe,noload" ;;
-    ""|swap|crypto_LUKS|LVM2_member|linux_raid_member|zfs_member) exit 0 ;;   # no filesystem of files
+    swap|crypto_LUKS|LVM2_member|linux_raid_member|zfs_member) exit 0 ;;   # no filesystem of files
     *) unread "not a format this script mounts (FAT, exFAT, NTFS, ext4)" - ;;
 esac
 case "$uuid" in ""|*[!A-Za-z0-9-]*) unread "it has no UUID to name its mount point by" - ;; esac
@@ -513,7 +568,8 @@ def automount_installed() -> bool:
 def automount_stale(files: Dict[str, Path], places: Dict[str, str] = None) -> bool:
     """Whether an installed automount is not the one this setup writes: any
     of the three files differs from its bytes here (an earlier release's
-    script knows no ntfs-3g and says nothing of a disk it could not mount)."""
+    script knows no ntfs-3g, or says nothing of a disk it could not mount or
+    of one it finds no one filesystem on)."""
     def same(kind: str) -> bool:
         try:
             with open((places or AUTOMOUNT_PLACES)[kind], "rb") as f:
@@ -541,8 +597,8 @@ def automount_block(files: Dict[str, Path], update: bool = False) -> None:
         title, why = ("Plugged disks: an update of the automount",
                       "The three small files that mount a plugged disk are an earlier release's. This release's\n"
                       "open a disk formatted by Windows where the old ones could not, and tell Sautium of a disk\n"
-                      "they could not open. A disk that is plugged in now stays as it is until it is plugged in\n"
-                      "again.\n")
+                      "they could not open or tell the format of. A disk that is plugged in now stays as it is\n"
+                      "until it is plugged in again.\n")
     block(title, why + f"Read them first: {files['rule'].parent}/",
           [f"A={shlex.quote(str(files['rule'].parent))}",
            f"B={AUTOMOUNT_BASE}",
@@ -729,9 +785,17 @@ def root_state(root: str, mount_points: List[str]) -> str:
         return "there"
 
 
-def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str]) -> List[str]:
+def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
+               stepped: Optional[List[str]] = None, held: Optional[Dict[str, bool]] = None) -> List[str]:
     """What `status` and `roots` say of each root: there, empty or gone, what
-    is mounted on or under it, its label."""
+    is mounted on or under it, its label. A root that is itself a mount point
+    is named as that — the node holds what was mounted there at its start —,
+    and `stepped` are the roots the setup has a step for (the line of before
+    2026-11-24, whose mount point is the root whether its disk is in or out;
+    a disk someone mounted by hand). `held`: for each empty root, whether the
+    node's library holds copies from it (held_by_the_node) — one it never
+    read is a new folder, not a library that is away; where the node gave no
+    answer the root is said as one that may have lost its music."""
     mounted = mounts_under(roots, findmnt_rn)
     points = [mount_target(line) for line in mounted]
     lines = []
@@ -739,13 +803,31 @@ def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str]) -> Lis
         state = root_state(root, points)
         if root == AUTOMOUNT_BASE and state == "gone":
             lines.append(f"Music root {root}: plugged disks — the automount is not installed (./sautium shows how)")
+        elif root != AUTOMOUNT_BASE and (root in points or (OLD_BOOT_MOUNT_POINT.fullmatch(root)
+                                                            and root in (stepped or []))):
+            lines.append(f"Music root {root}: a disk mounted at the root itself — Sautium sees it only as it was "
+                         "when Sautium started" + (" (./sautium shows the step)" if root in (stepped or []) else ""))
         elif state == "there":
             label = f'  "{printable(labels[root])}"' if labels.get(root) else ""
             lines.append(f"Music root {root}: there{label}" + ("  (plugged disks)" if root == AUTOMOUNT_BASE else ""))
+        elif state == "empty" and (held or {}).get(root) is False:
+            lines.append(f"Music root {root}: empty — nothing is in it yet")
         else:
             lines.append(f"Music root {root}: {state} — its disk is not mounted, or the folder was removed. "
                          f"Its albums show as away. To forget it: ./sautium roots --forget {shlex.quote(root)}")
     return lines + ["  mounted: " + printable(line) for line in mounted]
+
+
+def held_by_the_node() -> Optional[Dict[str, bool]]:
+    """For each root the node lists as an empty folder: whether its library
+    holds copies from under it. The node's own answer (the folder sheet's
+    listing), read as a stranger's; None where it gave none."""
+    asked = signed_get("/api/settings/library/folders")
+    places = asked.get("places") if isinstance(asked, dict) else None
+    if not isinstance(places, list):
+        return None
+    return {p["path"]: p["held"] for p in places
+            if isinstance(p, dict) and isinstance(p.get("path"), str) and isinstance(p.get("held"), bool)}
 
 
 def chosen_roots(music: Optional[str], held: List[str], docker_root: Optional[str] = None) -> List[str]:
@@ -1052,7 +1134,7 @@ def setup_code() -> Optional[str]:
     if raw is None or len(raw) > 64:
         return None
     text = raw.decode("ascii", "replace").strip()
-    return text if SETUP_CODE.fullmatch(text) else None
+    return text if agent.SETUP_CODE.fullmatch(text) else None
 
 
 def qr(text: str) -> Optional[str]:
@@ -1108,8 +1190,9 @@ def swap_lines(found: List[dict], step: bool) -> None:
         back = swap.get("writeback")
         if back and not step and back["medium"] in machine_tier.CARD_MEDIA:
             written = "" if back["written_mb"] is None else f": {back['written_mb']:.0f} MB written there since this start"
+            size = "" if back.get("size_bytes") is None else f" (a {back['size_bytes'] / 1024 ** 3:.1f} GB file)"
             say(f"Swap: compressed memory ({os.path.basename(swap['path'])}), with idle pages written back to "
-                f"{printable(back['path'])} on {machine_tier.MEDIA[back['medium']]}{written}.")
+                f"{printable(back['path'])}{size} on {machine_tier.MEDIA[back['medium']]}{written}.")
 
 
 def last_screen(m: dict, preset: Optional[str]) -> None:
@@ -1201,8 +1284,22 @@ FSTAB_FILESYSTEMS = {
 }
 # Since this systemd a line of fstab can name the unit that wants its mount
 WANTED_BY_SINCE = 245
-BOOT_MOUNT_POINT = re.compile(r"/mnt/sautium-([0-9A-Za-z-]{4,40})")
+# Where the setup's line mounts a music disk: the automount's own point for
+# that disk, under the one root the node has for disks. A root is then never
+# a mount point — bound into a container made while the disk was in, a mount
+# point is the disk's filesystem itself, and the node sees neither its pull
+# nor its return (PI-NODE-2D §2). Until 2026-11-24 the line mounted at
+# /mnt/sautium-<UUID> and that point was a root: OLD_BOOT_MOUNT_POINT.
+BOOT_MOUNT_POINT = re.compile(re.escape(AUTOMOUNT_BASE) + r"/([0-9A-Za-z-]{4,40})")
+OLD_BOOT_MOUNT_POINT = re.compile(r"/mnt/sautium-([0-9A-Za-z-]{4,40})")
 GENERATOR_DIR = "/run/systemd/generator"
+# Where the automount's script keeps which point it mounted a device at
+AUTOMOUNT_STATE = "/run/sautium-automount"
+NAMES_DIR = ".names"
+# What is true of a root that lies on a disk's own mount, said wherever one is met
+SEEN_AT_START = "Sautium sees what is mounted there when Sautium starts."
+NOT_SEEN_LATER = ("A disk unplugged or put back while Sautium runs is not seen until Sautium is started\n"
+                  "again (./sautium).")
 
 
 def disk_filesystem(device: str) -> str:
@@ -1252,18 +1349,22 @@ def fstab_driver(fstype: str) -> str:
 
 def boot_mount(real: str, findmnt_json: str, uid: int, gid: int, disk_type=disk_filesystem,
                systemd: int = WANTED_BY_SINCE) -> Optional[dict]:
-    """For a folder on a disk the desktop mounts: the /etc/fstab line that
-    mounts that disk itself instead (boot_line) — where it then lies, the
-    folder's path there, and the device the desktop holds now, by a name a
-    command can carry. None where the mount cannot be read whole, is the
-    system's own disk, or is not a filesystem the automount knows.
-    `findmnt_json`: `findmnt -J -o SOURCE,TARGET,FSTYPE,UUID -T <folder>`. A
-    mount through FUSE says `fuseblk` for NTFS and exFAT alike: there
-    `disk_type(device)` says which."""
+    """For a folder on a disk something else mounts (a desktop, a person's
+    own command): the /etc/fstab line that mounts that disk itself instead
+    (boot_line) — where it then lies, the folder's path there and under the
+    disk, the disk's label, and the device held now, by a name a command can
+    carry. None where the mount cannot be read whole, is the system's own
+    disk, or is not a filesystem the automount knows.
+    `findmnt_json`: `findmnt -J -o SOURCE,TARGET,FSTYPE,UUID,LABEL -T <folder>`.
+    A mount through FUSE says `fuseblk` for NTFS and exFAT alike: there
+    `disk_type(device)` says which. The label is a stranger's text that the
+    block carries between single quotes: one with a single quote is not
+    carried, and its disk goes by its UUID."""
     try:
         mount = json.loads(findmnt_json)["filesystems"][0]
         target, fstype, uuid = str(mount["target"]), str(mount["fstype"]), str(mount["uuid"] or "")
         source = str(mount.get("source") or "")
+        label = cut_label(str(mount.get("label") or ""))
     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         return None
     if target == "/" or not re.fullmatch(r"[0-9A-Za-z-]{4,40}", uuid):
@@ -1275,10 +1376,11 @@ def boot_mount(real: str, findmnt_json: str, uid: int, gid: int, disk_type=disk_
         fstype = disk_type(device)
     if fstype not in FSTAB_FILESYSTEMS:
         return None
-    point = f"/mnt/sautium-{uuid}"
+    point = f"{AUTOMOUNT_BASE}/{uuid}"
     line = boot_line(uuid, point, fstab_driver(fstype), FSTAB_FILESYSTEMS[fstype][1].format(uid=uid, gid=gid), systemd)
-    return {"point": point, "line": line, "folder": point + real[len(target.rstrip("/")):], "device": device,
-            "at_plug": systemd >= WANTED_BY_SINCE}
+    under = real[len(target.rstrip("/")):].strip("/")
+    return {"uuid": uuid, "point": point, "line": line, "folder": f"{point}/{under}".rstrip("/"), "under": under,
+            "device": device, "label": "" if "'" in label else label, "at_plug": systemd >= WANTED_BY_SINCE}
 
 
 def in_pieces(line: str, width: int = 68) -> List[str]:
@@ -1307,44 +1409,88 @@ def in_pieces(line: str, width: int = 68) -> List[str]:
 def boot_mount_undo(point: str) -> List[str]:
     # The mount point in a variable: with a 36-character UUID in it the sed
     # line would be long enough to be wrapped on its way to a root terminal
-    return [f"P={point}", 'sudo umount "$P"',
-            'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab',     # sed's address for that one line
-            'sudo rmdir "$P"', "sudo systemctl daemon-reload"]
+    lines = [f"P={point}", 'sudo umount "$P"',
+             'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab',     # sed's address for that one line
+             'sudo rmdir "$P"']
+    match = BOOT_MOUNT_POINT.fullmatch(point)
+    if match:
+        lines.append(f"sudo rm -f {AUTOMOUNT_BASE}/{NAMES_DIR}/{match.group(1)}")
+    return lines + ["sudo systemctl daemon-reload"]
 
 
 def boot_mounts(fstab_targets: str) -> List[str]:
     """The mount points of this setup's own fstab lines, of `findmnt --fstab
-    -n -o TARGET`'s answer: what `remove` prints the undo of."""
-    return [t for t in fstab_targets.split() if BOOT_MOUNT_POINT.fullmatch(t)]
+    -n -o TARGET`'s answer — where it mounts a disk now and where it did
+    until 2026-11-24: what `remove` prints the undo of."""
+    return [t for t in fstab_targets.split() if BOOT_MOUNT_POINT.fullmatch(t) or OLD_BOOT_MOUNT_POINT.fullmatch(t)]
 
 
-def boot_mount_block(music: str, found: dict) -> None:
-    # The desktop holds the disk now, mounted for writing: the same disk is
-    # not mounted read-only beside that, so its hold is let go first
+def let_go(found: dict, mounted_at: List[str], state: str = AUTOMOUNT_STATE) -> List[str]:
+    """The commands that let go of the disk's present holds, so that the
+    line's own mount can take it: the same disk is not mounted read-only
+    beside a mount for writing. Where Sautium's automount holds it (its state
+    file names the point) its unit is stopped — the unit's own stop unmounts
+    and removes its label file, and no later pull's stop then takes the
+    line's mount point and label with it. Any other hold (a desktop's, a
+    person's own mount) goes by `umount` of the device, which names no
+    folder: a mount point's name may be the disk's label, a stranger's text.
+    `mounted_at`: where the disk is mounted now."""
+    steps, others = [], list(mounted_at)
+    name = os.path.basename(os.path.realpath(found["device"]))
+    if re.fullmatch(r"[A-Za-z0-9]+", name):
+        raw = read_small(Path(state) / name) or b""
+        own = f"{AUTOMOUNT_BASE}/{raw.decode('ascii', 'replace').strip()}"
+        if raw.strip() and own in others:
+            steps.append(f"sudo systemctl stop sautium-automount@{name}.service")
+            others.remove(own)
+    if others:
+        steps.append(f"sudo umount {found['device']}")
+    return steps
+
+
+def line_steps(found: dict) -> List[str]:
+    """What puts a music disk's line into /etc/fstab and mounts it, in order:
+    the folder disks are mounted in and its labels' folder (there already
+    beside the automount), the mount point (systemd makes a mount unit's
+    point itself; this one is for the `mount` below), the disk's label where
+    it has one — the file the automount leaves for a disk it mounts, which
+    the node reads as a stranger's text —, the line, its mount. The label
+    goes in as data on tee's input, between single quotes where a shell
+    reads each letter as itself."""
+    label = [f"T='{found['label']}'",
+             'printf \'%s\\n\' "$T" | sudo tee "$B/.names/$U" >/dev/null'] if found["label"] else []
+    return [f"B={AUTOMOUNT_BASE}", f"U={found['uuid']}",
+            f'sudo install -d -m 0755 "$B" "$B/{NAMES_DIR}"',
+            'sudo mkdir -p "$B/$U"',
+            *label,
+            *in_pieces(found["line"]),
+            # its own line whatever the file's last one ends with
+            "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab",
+            "sudo systemctl daemon-reload",
+            'sudo mount "$B/$U"']
+
+
+def named(found: dict) -> str:
+    """The disk and the folder on it as the folder sheet shows them."""
+    disk = f'"{printable(found["label"])}"' if found["label"] else "the disk"
+    return f"{disk} › {printable(found['under'])}" if found["under"] else disk
+
+
+def boot_mount_block(found: dict, why: str, mounted_at: List[str], whose: str = "its present") -> None:
+    hold = let_go(found, mounted_at)
     if found["at_plug"]:
         title = "The music disk, mounted whenever it is plugged in"
-        when = (f"Sautium starts with the machine, before that. This mounts the same disk read-only at\n"
-                f"{found['point']} whenever it is plugged in — at a start of the machine and later (a\n"
-                "disk that is not plugged in holds nothing back; plugged in, it appears in Sautium by itself).\n")
+        when = (f"This mounts the same disk read-only at {found['point']} whenever it is\n"
+                "plugged in — at a start of the machine and later. Sautium sees it come and go there by itself.")
     else:
         title = "The music disk, mounted when the machine starts"
-        when = ("Sautium starts with the machine, before that. This mounts the same disk at every start,\n"
-                f"read-only, at {found['point']}, before Sautium starts (a disk that is not plugged in holds\n"
-                "the start back ten seconds at most). This system's systemd is older than 245: the disk is\n"
-                "mounted at a start of the machine only — plugged in later, it waits for the next start.\n")
-    block(title,
-          f"{music} is on a disk this machine's desktop mounts only while you are signed in to it.\n"
-          + when + "Close anything that has a file of the disk open first: the desktop's hold is let go here.",
-          [f"sudo umount {found['device']}",
-           f"sudo mkdir -p {found['point']}",
-           *in_pieces(found["line"]),
-           # its own line whatever the file's last one ends with
-           "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab",
-           "sudo systemctl daemon-reload",
-           f"sudo mount {found['point']}"],
-          boot_mount_undo(found["point"]))
-    say(f"To check it:  findmnt --fstab {found['point']}")
-    say()
+        when = (f"This mounts the same disk at every start, read-only, at {found['point']},\n"
+                "before Sautium starts (a disk that is not plugged in holds the start back ten seconds at most).\n"
+                "This system's systemd is older than 245: the disk is mounted at a start of the machine only —\n"
+                "plugged in later, it waits for the next start.")
+    if hold:
+        when += f"\nClose anything that has a file of the disk open first: {whose} hold is let go here."
+    block(title, why + "\n" + when, hold + line_steps(found), boot_mount_undo(found["point"]))
 
 
 def fstab_line(point: str) -> Optional[dict]:
@@ -1358,53 +1504,57 @@ def fstab_line(point: str) -> Optional[dict]:
         return None
 
 
-def boot_mount_steps(roots: List[str], generator_dir: str = GENERATOR_DIR) -> None:
-    """For each root that is one of this setup's own fstab mount points: say
-    that its disk is mounted at every plug — read off systemd's own
-    generated units, which anyone may read — or print what makes it so. A
-    line written before the plug option (PI-NODE-2B's) acts at a start of
-    the machine only: its undo and the new line are one block."""
-    systemd = systemd_version()
-    for root in roots:
-        match = BOOT_MOUNT_POINT.fullmatch(root)
-        line = fstab_line(root) if match else None
-        if line is None:
-            continue
-        uuid = match.group(1)
-        wants = Path(generator_dir) / (unit_name(f"/dev/disk/by-uuid/{uuid}", "device") + ".wants") / unit_name(root, "mount")
-        if plug_option(uuid) in line["options"].split(","):
-            say(f"Music disk at {root}: " + ("mounted whenever it is plugged in." if wants.is_symlink() or wants.exists()
-                                             else "its line is in /etc/fstab, and systemd has not read it yet — "
-                                                  "run: sudo systemctl daemon-reload"))
-        elif systemd < WANTED_BY_SINCE or line["source"] != f"UUID={uuid}" or "'" in line["options"]:
-            say(f"Music disk at {root}: mounted at a start of the machine only.")
-        else:
-            options = ",".join(o for o in line["options"].split(",") if not o.startswith("x-systemd.device-timeout="))
-            new = f"UUID={uuid} {root} {line['fstype']} {options},{plug_option(uuid)} 0 0"
-            block("The music disk, mounted whenever it is plugged in (optional)",
-                  f"The line of /etc/fstab that mounts the music disk at {root} acts at a start of the\n"
-                  "machine only: plugged in later, the disk waits for the next start. This puts in its place a\n"
-                  "line that mounts the disk whenever it is plugged in — at a start of the machine and later.\n"
-                  "It acts from the disk's next plug.",
-                  [f"P={root}",
-                   'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab',
-                   *in_pieces(new),
-                   "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab",
-                   "sudo systemctl daemon-reload"],
-                  boot_mount_undo(root))
+def own_line(line: dict, uuid: str) -> bool:
+    """Whether a line of /etc/fstab at one of the setup's mount points is
+    still as the setup writes one — the disk by its UUID, read-only and with
+    nothing of the disk's run or trusted (the node's bind does not make a
+    mount that arrives later read-only: each mount says so itself), no
+    letter a shell line cannot carry. The setup builds a new line from the
+    options of such a line only; any other is the person's own."""
+    return (line["source"] == f"UUID={uuid}" and "'" not in line["options"]
+            and {"ro", "nosuid", "nodev", "noexec"} <= set(line["options"].split(",")))
+
+
+def old_boot_mount(root: str) -> Optional[dict]:
+    """The line an earlier setup wrote for `root`, where the root is that
+    line's own mount point (/mnt/sautium-<UUID>) and the line is still as the
+    setup writes one: {uuid, fstype, options}."""
+    match = OLD_BOOT_MOUNT_POINT.fullmatch(root)
+    line = fstab_line(root) if match else None
+    if line is None or not own_line(line, match.group(1)):
+        return None
+    return {"uuid": match.group(1), "fstype": line["fstype"], "options": line["options"]}
+
+
+def mount_point_of(real: str) -> Optional[str]:
+    """Where the disk `real` lies on is mounted; None for the system's own."""
+    target = out(run(["findmnt", "-n", "-o", "TARGET", "-T", real])).splitlines()
+    return target[0] if target and target[0] not in ("", "/") else None
 
 
 def mounted_outside_fstab(real: str) -> Optional[str]:
     """The mount point of the disk `real` lies on, where that disk is not the
-    system's own and no line of /etc/fstab mounts it: after a restart of the
-    machine the folder is not there until someone mounts the disk again, and
-    the node — which is given the folder itself — does not start without it."""
-    target = out(run(["findmnt", "-n", "-o", "TARGET", "-T", real])).splitlines()
-    if not target or target[0] in ("", "/"):
+    system's own and no line of /etc/fstab mounts it."""
+    target = mount_point_of(real)
+    if target is None or run(["findmnt", "--fstab", "-n", target]).returncode == 0:
         return None
-    if run(["findmnt", "--fstab", "-n", target[0]]).returncode == 0:
+    return target
+
+
+def disk_of(real: str, systemd: int) -> Optional[dict]:
+    """For a folder on a disk no line of /etc/fstab mounts, and not under the
+    folder Sautium's disks are mounted in: the setup's own line for that disk
+    (boot_mount) and where the disk is mounted now (`mounted_at`). None where
+    the setup has no line to offer: the system's disk, someone's own line, a
+    network share, a filesystem the automount does not know."""
+    if real == AUTOMOUNT_BASE or real.startswith(AUTOMOUNT_BASE + "/") or mounted_outside_fstab(real) is None:
         return None
-    return target[0]
+    found = boot_mount(real, out(run(["findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID,LABEL", "-T", real])),
+                       os.getuid(), os.getgid(), systemd=systemd)
+    if found is not None:
+        held = out(run(["findmnt", "-rn", "-o", "TARGET", "-S", f"UUID={found['uuid']}"]))
+        found["mounted_at"] = [mount_target(line) for line in held.splitlines() if line]
+    return found
 
 
 def desktop_mounted(real: str) -> bool:
@@ -1415,14 +1565,120 @@ def desktop_mounted(real: str) -> bool:
         len(parts) > 4 and parts[1:3] == ("run", "media"))
 
 
-def root_steps(args, state: dict, automount: bool = True) -> None:
+def moved_block(root: str, old: dict, label: str, systemd: int) -> dict:
+    """An install whose line mounts its disk at the root itself: the old
+    line's undo and the line at the new point, as one step. The line keeps
+    its own options; one written before the plug option gains it."""
+    uuid = old["uuid"]
+    point = f"{AUTOMOUNT_BASE}/{uuid}"
+    options = old["options"].split(",")
+    if systemd >= WANTED_BY_SINCE and plug_option(uuid) not in options:
+        options = [o for o in options if not o.startswith("x-systemd.device-timeout=")] + [plug_option(uuid)]
+    found = {"uuid": uuid, "point": point, "label": "" if "'" in label else label, "under": "",
+             "line": f"UUID={uuid} {point} {old['fstype']} {','.join(options)} 0 0"}
+    block("The music disk, mounted " + ("whenever it is plugged in" if plug_option(uuid) in options
+                                        else "when the machine starts") + " (optional)",
+          f"The line of /etc/fstab that mounts the music disk at {root} gives Sautium the\n"
+          "mount point itself: a disk pulled or put back while Sautium runs is not seen. This moves it to\n"
+          f"{point}, where Sautium sees it come and go. Its albums will show as away\n"
+          "once and be found again at the new place; nothing is analysed again.",
+          boot_mount_undo(root)[:-1] + line_steps(found), boot_mount_undo(point))
+    return found
+
+
+def boot_mount_steps(roots: List[str], labels: Dict[str, str], shown: Optional[str] = None,
+                     generator_dir: str = GENERATOR_DIR) -> None:
+    """What the setup says, or prints as a root step, of the disks a line of
+    /etc/fstab mounts for the node, and of a root that is a disk's own mount.
+
+    Each of this setup's lines at the point where it mounts a disk now: that
+    its disk is mounted at every plug — read off systemd's own generated
+    units, which anyone may read — or what makes it so (a line written for a
+    systemd older than 245 acts at a start of the machine only: its undo and
+    the new line are one block).
+
+    A root that is a mount point (the line of before 2026-11-24, a disk a
+    person mounted by hand): the block that moves its disk under the folder
+    disks are mounted in, and what follows it. `shown`: the mount point of a
+    disk whose block this run printed already."""
+    systemd = systemd_version()
+    for point in boot_mounts(out(run(["findmnt", "--fstab", "-n", "-o", "TARGET"]))):
+        match = BOOT_MOUNT_POINT.fullmatch(point)
+        line = fstab_line(point) if match else None
+        if line is None:
+            continue
+        uuid = match.group(1)
+        wants = Path(generator_dir) / (unit_name(f"/dev/disk/by-uuid/{uuid}", "device") + ".wants") / unit_name(point, "mount")
+        if plug_option(uuid) in line["options"].split(","):
+            say(f"Music disk at {point}: " + ("mounted whenever it is plugged in." if wants.is_symlink() or wants.exists()
+                                              else "its line is in /etc/fstab, and systemd has not read it yet — "
+                                                   "run: sudo systemctl daemon-reload"))
+        elif systemd < WANTED_BY_SINCE or not own_line(line, uuid):
+            say(f"Music disk at {point}: mounted at a start of the machine only.")
+        else:
+            options = ",".join(o for o in line["options"].split(",") if not o.startswith("x-systemd.device-timeout="))
+            new = f"UUID={uuid} {point} {line['fstype']} {options},{plug_option(uuid)} 0 0"
+            block("The music disk, mounted whenever it is plugged in (optional)",
+                  f"The line of /etc/fstab that mounts the music disk at {point} acts at a start of the\n"
+                  "machine only: plugged in later, the disk waits for the next start. This puts in its place a\n"
+                  "line that mounts the disk whenever it is plugged in — at a start of the machine and later.\n"
+                  "It acts from the disk's next plug.",
+                  [f"P={point}",
+                   'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab',
+                   *in_pieces(new),
+                   "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab",
+                   "sudo systemctl daemon-reload"],
+                  boot_mount_undo(point))
+    for root in roots:
+        if root == AUTOMOUNT_BASE:
+            continue
+        old = old_boot_mount(root)
+        if old is not None:
+            found = moved_block(root, old, labels.get(root, ""), systemd)
+        else:
+            found = disk_of(root, systemd)
+            if found is None or found["point"] == shown:
+                continue
+            boot_mount_block(found, f"{root} is {on_a_mount(root)}: {SEEN_AT_START}", found["mounted_at"])
+        follows(root, found)
+
+
+def follows(root: str, found: dict) -> None:
+    """What follows the block that moves a root's disk under the folder disks
+    are mounted in: the root, an empty folder from then on, is forgotten —
+    which writes the override again (the disks' folder bound, where the block
+    made it) and makes the node again — and the folder is chosen at its new
+    place."""
+    say(f"Then run:  ./sautium roots --forget {shlex.quote(root)}")
+    say(f"and choose {named(found)} as the music folder in Sautium (More › Library).")
+    say()
+
+
+def on_a_mount(real: str) -> Optional[str]:
+    """How a root that lies on a disk's own mount is said — the mount point
+    itself, or a folder of a disk no line of /etc/fstab mounts. None for a
+    folder of the system's own disk, of a disk a line of /etc/fstab mounts
+    above it (there at every start), or under the folder disks are mounted in."""
+    target = mount_point_of(real)
+    if target is None or real == AUTOMOUNT_BASE or real.startswith(AUTOMOUNT_BASE + "/"):
+        return None
+    if target == real:
+        return "a mount point"
+    if run(["findmnt", "--fstab", "-n", target]).returncode == 0:
+        return None
+    return f"on a disk mounted at {printable(target)}, which no line of /etc/fstab mounts"
+
+
+def root_steps(args, state: dict, automount: bool = True, disk: Optional[dict] = None) -> None:
     """The optional root steps: each printed once as a whole block, then —
     where a person is at the terminal — waited for and checked. Declined,
     each leaves a working node. `--yes` never waits. No automount is offered
     to an install that reads its music by its .env line: plugged disks
     appear under a root, and it has none. An automount an earlier release
     installed is offered again as an update; `state` remembers that it was
-    stale, for the run that finds it current (cmd_setup)."""
+    stale, for the run that finds it current (cmd_setup). `disk`: the line
+    for the disk the --music folder is on (disk_of), printed here and checked
+    by the caller."""
     uid, gid = os.getuid(), os.getgid()
     user = os.environ.get("USER") or str(uid)
     shown = []
@@ -1439,7 +1695,8 @@ def root_steps(args, state: dict, automount: bool = True) -> None:
         say()
         say("Plugged disks: this machine's desktop mounts them itself, under /media/<your name>, while you")
         say("are signed in to it — so Sautium's own automount is not offered here. Name such a disk's music")
-        say("folder with --music; Sautium reads it while the desktop has it mounted.")
+        say("folder with --music: the setup then prints the step that mounts that disk for Sautium whenever it")
+        say("is plugged in.")
     files = automount_files(agent.host_dir(ROOT) / "automount", uid, gid) if automount and not desktop else None
     if files and not installed:
         automount_block(files)
@@ -1461,6 +1718,11 @@ def root_steps(args, state: dict, automount: bool = True) -> None:
             say()
             say(why)
             say("Install the package ntfs-3g with this system's package manager.")
+    if disk is not None:
+        boot_mount_block(disk, disk["why"], disk["mounted_at"], "the desktop's" if disk["desktop"] else "its present")
+        if not disk["desktop"]:
+            follows(disk["real"], disk)
+        shown.append("music disk")
     if not shown:
         return
     if not args.yes and sys.stdin.isatty():
@@ -1520,31 +1782,27 @@ def cmd_setup(args) -> int:
     preset = birth_of(held, args.preset, machine_tier.birth_preset(
         m["ram_gib"], m["docker_root_medium"], m["docker_root_free_gb"])[0], volume)
     by_line = keeps_music_line(held)
-    if (args.music and not by_line and os.path.isdir(args.music)
-            and desktop_mounted(os.path.realpath(args.music)) and desktop_automounter()
-            and mounted_outside_fstab(os.path.realpath(args.music))):
-        # A disk the desktop mounted (no line of fstab does, and it is not
-        # the system's own). Bound as it is, the node would not start
-        # whenever the disk is not mounted — every start of the machine
-        # before someone signs in
-        real = os.path.realpath(args.music)
-        found = boot_mount(real, out(run(["findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID", "-T", real])),
-                           os.getuid(), os.getgid(), systemd=systemd_version())
-        if found is None:
-            raise Stop(f"--music {args.music}: it is on a disk this machine's desktop mounts only while you are "
-                       "signed in, and Sautium starts with the machine. Mount the disk at every start (a line of "
-                       "/etc/fstab: read-only, nofail) and name the folder where it then lies")
-        boot_mount_block(args.music, found)
-        # The root is the mount point, which is there with or without the
-        # disk: a folder ON the disk would be a bind Docker refuses whenever
-        # the disk is not plugged in, and the node would not start at all
-        under = found["folder"][len(found["point"]):].strip("/")
-        raise Stop(f"then run:  ./sautium --music {found['point']}"
-                   + (f"\nand choose {printable(under)} as the music folder in Sautium (More › Library)" if under else ""))
     if by_line and args.music:
         raise Stop("this install reads its music where MUSIC_LIBRARY_PATH in .env says, and --music is for an "
                    "install that picks its folder in Sautium. To change over, delete that line from .env and run "
                    "this again: Sautium then reads the whole library again from the folder you choose")
+    music, disk = args.music, None
+    if music and os.path.isdir(music):
+        # A folder on a disk no line of /etc/fstab mounts (a desktop mounted
+        # it, or a person by hand): the setup's own line for that disk, which
+        # mounts it under the folder the node reads disks in
+        real = os.path.realpath(music)
+        desktop = desktop_mounted(real) and desktop_automounter() and mounted_outside_fstab(real) is not None
+        disk = disk_of(real, systemd_version())
+        if disk is None and desktop:
+            raise Stop(f"--music {music}: it is on a disk this machine's desktop mounts only while you are "
+                       "signed in, and Sautium starts with the machine. Mount the disk at every start (a line of "
+                       "/etc/fstab: read-only, nofail) and name the folder where it then lies")
+        if disk is not None:
+            disk["desktop"], disk["real"] = desktop, real
+            disk["why"] = (f"{music} is on a disk this machine's desktop mounts only while you are signed in to it.\n"
+                           "Sautium starts with the machine, before that." if desktop
+                           else f"{music} is {on_a_mount(real)}: {SEEN_AT_START}")
     say(f"This machine: {machine_line(m, preset)}. Change it later in Sautium: More › Profile.")
     need = NEED_GB[preset]
     if not volume and m["docker_root_free_gb"] is not None and m["docker_root_free_gb"] < need:
@@ -1563,18 +1821,34 @@ def cmd_setup(args) -> int:
     state = load_state()
     host = agent.host_dir(ROOT)
     host.mkdir(mode=0o700, exist_ok=True)
-    root_steps(args, state, automount=not by_line)
+    root_steps(args, state, automount=not by_line, disk=disk)
 
     if not by_line:
-        roots = chosen_roots(args.music, held_roots(ROOT / ROOTS_OVERRIDE), m.get("docker_root"))
-        loose = mounted_outside_fstab(os.path.realpath(args.music)) if args.music else None
-        if loose:
-            say(f"Note: {args.music} is on a disk mounted at {printable(loose)}, which no line of /etc/fstab mounts.")
-            say("If that disk is not mounted when this machine starts, Sautium does not start: mount the disk")
-            say("and run  docker compose up -d  in this folder. (A disk mounted at every start by other means")
-            say("than /etc/fstab is fine.)")
+        # A folder on a disk the desktop mounts is never a root: its bind
+        # would be made by Docker whenever the disk is out — a folder of
+        # root's in the desktop's own place for that disk. With the line
+        # pasted its disk lies under the folder the node reads disks in, and
+        # the folder named is chosen there, in the Web UI. (A disk someone
+        # mounted by hand stays the root it was named as until it is
+        # forgotten: `follows`.)
+        moved = disk is not None and disk["desktop"] and fstab_line(disk["point"]) is not None
+        if disk is not None and disk["desktop"] and not moved:
+            raise Stop(f"the music disk is not set, so Sautium would not read {music}: paste the block above, "
+                       f"then run ./sautium again and choose {named(disk)} as the music folder in Sautium "
+                       "(More › Library)")
+        roots = chosen_roots(None if moved else music, held_roots(ROOT / ROOTS_OVERRIDE), m.get("docker_root"))
         write_roots(roots)
-        boot_mount_steps(roots)
+        boot_mount_steps(roots, held_labels(ROOT / ROOTS_OVERRIDE), shown=disk["point"] if disk else None)
+        if moved:
+            say(f"Then choose {named(disk)} as the music folder in Sautium (More › Library).")
+        elif disk is None and music and os.path.realpath(music) in roots:
+            # A mount the setup has no line for (someone's own line of
+            # /etc/fstab, a network share): taken as it is, and said. Never
+            # its parent: that would be a root the person did not name.
+            said = on_a_mount(os.path.realpath(music))
+            if said:
+                say(f"{music} is {said}: {SEEN_AT_START}")
+                say(NOT_SEEN_LATER)
         (ROOT / "data" / "no-library").mkdir(parents=True, exist_ok=True)
     assistant = args.assistant or ("claude" if held.get("SAUTIUM_IMAGE_ASSISTANT_CLI") == "1" else "none")
     plan = env_plan(held, preset=preset, asked_preset=args.preset, ram_gib=m["ram_gib"],
@@ -1621,7 +1895,7 @@ def cmd_pair(args) -> int:
     refuse_root()
     answer = signed_get("/api/auth/pin")
     code = str((answer or {}).get("code", ""))
-    if not SETUP_CODE.fullmatch(code):
+    if not agent.SETUP_CODE.fullmatch(code):
         raise Stop("the node gave no pairing code: it must be running (docker compose up -d) and have "
                    "its account (open its address and create it first)")
     addresses = own_addresses()
@@ -1724,7 +1998,10 @@ def say_roots() -> List[str]:
     """The roots as `status` and `roots` say them; the roots themselves."""
     override = ROOT / ROOTS_OVERRIDE
     roots = held_roots(override)
-    for line in root_lines(roots, out(run(["findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"])), held_labels(override)):
+    systemd = systemd_version()
+    stepped = [r for r in roots if r != AUTOMOUNT_BASE and (old_boot_mount(r) or disk_of(r, systemd))]
+    for line in root_lines(roots, out(run(["findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"])), held_labels(override),
+                           stepped, held_by_the_node()):
         say(line)
     return roots
 
@@ -1755,7 +2032,8 @@ def cmd_roots(args) -> int:
         say(f"Forgotten: Sautium no longer reads {root}. The folder itself is untouched.")
     else:
         say(f"Forgotten: Sautium will no longer read {root} from its next start. The folder itself is untouched.")
-    if BOOT_MOUNT_POINT.fullmatch(root) and fstab_line(root):
+    old = OLD_BOOT_MOUNT_POINT.fullmatch(root)
+    if old and fstab_line(root):
         say()
         say("A line of /etc/fstab still mounts its disk there. To take that back too (paste into a terminal")
         say("that may use sudo):")
@@ -1765,6 +2043,11 @@ def cmd_roots(args) -> int:
         say()
     elif root_state(root, []) == "empty" and os.stat(root).st_uid == 0 and not os.path.ismount(root):
         say(f"The empty folder left in its place is root's: sudo rmdir {shlex.quote(root)}")
+    moved_to = f"{AUTOMOUNT_BASE}/{old.group(1)}" if old else None
+    if moved_to and fstab_line(moved_to) and not os.path.ismount(moved_to):
+        # The node that held the old mount point held the disk with it: a
+        # mount asked for while it ran may have found the disk busy
+        say(f"Its disk is not mounted at {moved_to} now: plug it in again, and it appears in Sautium.")
     return 0
 
 
@@ -1840,6 +2123,14 @@ def cmd_remove(args) -> int:
     for point in boot_mounts(out(run(["findmnt", "--fstab", "-n", "-o", "TARGET"]))):
         for line in boot_mount_undo(point):
             say("    " + line)
+    if os.path.isdir(AUTOMOUNT_BASE):
+        # The folder disks were mounted in, which the automount's block and
+        # the fstab line's block both make: last, and only while it is empty
+        # (rmdir removes nothing that holds anything — a disk still mounted
+        # there keeps its folder)
+        inside = [f"{AUTOMOUNT_BASE}/{name}" for name in (NAMES_DIR, ".unread")
+                  if os.path.isdir(f"{AUTOMOUNT_BASE}/{name}")]
+        say("    sudo rmdir " + " ".join(inside + [AUTOMOUNT_BASE]))
     say()
     if args.data and sys.stdin.isatty():
         # Last, and only after the data went by the nickname: the folder itself

@@ -138,8 +138,13 @@ KEPT_MAX = 1024 * 1024
 KEPT_LOGS = 3
 KEPT_NAME = re.compile(r"backend-\d{8}-\d{6}-(?:update|undo|setup)\.log")
 # The setup code a node logs at each start until its account exists
-# (backend/device_auth._SETUP_CODE_FORM): never in a diagnostics report
+# (backend/device_auth._SETUP_CODE_FORM, held to it by a test; the console
+# setup reads the code by this same form): never in a diagnostics report or a
+# kept log. What stands in its place is not of the code's form — the letters
+# "XXXX-XXXX" were, so a text that had been scrubbed still read, by the form,
+# as one that held a code (PI-NODE-2C F5: the setup's kept log, checked so).
 SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){1}")
+SCRUBBED = "[setup code removed]"
 
 UNIT = "sautium-host-agent"
 STARTER_NAME = "sautium-host-agent"
@@ -976,7 +981,7 @@ def resume(state: dict, now: float, root: Path = None) -> Optional[Tuple[str, st
 
 
 def _scrub(text: str) -> str:
-    return SETUP_CODE.sub("XXXX-XXXX", text)
+    return SETUP_CODE.sub(SCRUBBED, text)
 
 
 def _tail_cut(text: str, limit: int) -> str:
@@ -1288,10 +1293,13 @@ def unit_dir() -> Path:
     return Path(base) / "systemd" / "user"
 
 
-def install(root: Path = None, systemctl=None) -> int:
+def install(root: Path = None, systemctl=None, by_hand: bool = False) -> int:
     """The agent for this checkout, as the person: its folder, the channel's
     key, the requests folder, the starter, the units. Run again, it writes
-    the starter and the units again and keeps the key."""
+    the starter and the units again and keeps the key. `by_hand`: installed
+    by this file's own command, not by the console setup — which prints the
+    lingering step among its own root steps and starts the node next, so
+    neither is said to it a second time."""
     root = root or ROOT
     if os.geteuid() == 0:
         raise SystemExit("[host-agent] run install as the person who owns the checkout, not as root")
@@ -1341,12 +1349,13 @@ def install(root: Path = None, systemctl=None) -> int:
     ctl("enable", f"{UNIT}-boot.service")
     ctl("enable", "--now", f"{UNIT}.path")
     print(f"The host agent is installed for {root}.")
-    user = os.environ.get("USER") or str(os.getuid())
-    linger = _run(["loginctl", "show-user", user, "-p", "Linger", "--value"], cwd=root, check=False)
-    if linger.stdout.decode().strip() != "yes":
-        print("It runs while you are logged in. To keep it running with nobody logged in, the "
-              f"machine's administrator runs once:\n    sudo loginctl enable-linger {user}")
-    print("The node learns of the agent when it is made again: docker compose up -d")
+    if by_hand:
+        user = os.environ.get("USER") or str(os.getuid())
+        linger = _run(["loginctl", "show-user", user, "-p", "Linger", "--value"], cwd=root, check=False)
+        if linger.stdout.decode().strip() != "yes":
+            print("It runs while you are logged in. To keep it running with nobody logged in, the "
+                  f"machine's administrator runs once:\n    sudo loginctl enable-linger {user}")
+        print("The node learns of the agent when it is made again: docker compose up -d")
     return 0
 
 
@@ -1385,7 +1394,7 @@ def main(argv: List[str]) -> int:
     if args.command == "selftest":
         return selftest()
     if args.command == "install":
-        return install()
+        return install(by_hand=True)
     if args.command == "uninstall":
         return uninstall()
     return status()

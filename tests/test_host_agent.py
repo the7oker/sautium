@@ -372,10 +372,16 @@ def test_a_check_answers_what_the_survey_found(monkeypatch):
 def test_a_diagnostics_report_carries_no_setup_code():
     # A code of before 2026-11-19 had three groups: scrubbed too, as two of them and a tail
     text = "setup code: K7QM-ZP4X\nan older one: K7QM-ZP4X-9HTR\nnot one: K7QM ZP4X\n"
-    assert ha._scrub(text) == "setup code: XXXX-XXXX\nan older one: XXXX-XXXX-9HTR\nnot one: K7QM ZP4X\n"
+    scrubbed = ha._scrub(text)
+    assert scrubbed == ("setup code: [setup code removed]\nan older one: [setup code removed]-9HTR\n"
+                        "not one: K7QM ZP4X\n")
     sys.path.insert(0, str(REPO / "backend"))
     import device_auth
     assert ha.SETUP_CODE.pattern == device_auth._SETUP_CODE_FORM.pattern
+    # What stands in a code's place is not of a code's form: a scrubbed text reads as one, by the form
+    # the node writes and by every form it takes a typed code in (PI-NODE-2C F5)
+    assert ha.SETUP_CODE.search(ha.SCRUBBED) is None and device_auth.setup_candidates(ha.SCRUBBED) == []
+    assert ha.SETUP_CODE.search(ha._scrub("the code is K7QM-ZP4X (a new one at each start)")) is None
 
 
 def test_the_agent_and_the_node_agree_on_the_verbs_and_their_answers():
@@ -560,6 +566,28 @@ def test_install_makes_the_folders_the_key_the_starter_and_the_units(tmp_path, m
     assert ha.channel_key(root) == key
 
 
+def test_only_a_hand_install_is_told_of_lingering_and_of_making_the_node_again(tmp_path, monkeypatch, capsys):
+    """The console setup prints the lingering step among its own root steps
+    and starts the node next: said again by the agent's install, the step was
+    printed twice, with a line after it that was stale there (PI-NODE-2C F3)."""
+    root = tmp_path / "sautium"
+    root.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(ha, "_run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"no", b""))
+    assert ha.install(root, systemctl=lambda *args: None) == 0                 # as the setup calls it
+    assert capsys.readouterr().out == f"The host agent is installed for {root}.\n"
+    monkeypatch.setattr(ha, "install", lambda root=None, systemctl=None, by_hand=False: print(f"by hand: {by_hand}") or 0)
+    assert ha.main(["install"]) == 0 and capsys.readouterr().out == "by hand: True\n"
+    monkeypatch.undo()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(ha, "_run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"no", b""))
+    assert ha.install(root, systemctl=lambda *args: None, by_hand=True) == 0
+    said = capsys.readouterr().out
+    assert "    sudo loginctl enable-linger " in said and "docker compose up -d" in said
+
+
 def test_install_refuses_root_a_strange_path_and_a_requests_folder_docker_made(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr(os, "geteuid", lambda: 0)
@@ -585,6 +613,27 @@ def _mounts(spec: dict) -> list:
 
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.wsl.yml", "docker-compose.mac.yml",
                  "docker-compose.pi.yml")
+
+
+@pytest.mark.parametrize("name", COMPOSE_FILES)
+def test_postgres_is_stopped_so_that_it_outlives_the_backends_own_stop(name):
+    """At the machine's shutdown Docker stops every container at once, each
+    by its own signal and grace. The image stops PostgreSQL by SIGINT — a
+    fast shutdown, which cut the backend's connections while it was saving
+    (2026-11-23: "DHT: state save failed", "Application shutdown failed").
+    SIGTERM is its smart shutdown, which waits for its clients; the grace is
+    longer than the backend's, so a backend that hangs is killed first and
+    PostgreSQL still ends cleanly (PI-NODE-2D §8.3; shown with two containers
+    stopped at once before the files changed)."""
+    yaml = pytest.importorskip("yaml")
+    services = yaml.safe_load((REPO / name).read_text(encoding="utf-8"))["services"]
+
+    def seconds(value):
+        assert str(value).endswith("s") and str(value)[:-1].isdigit(), value
+        return int(str(value)[:-1])
+    assert services["postgres"]["stop_signal"] == "SIGTERM"
+    assert seconds(services["postgres"]["stop_grace_period"]) > seconds(services["backend"]["stop_grace_period"])
+    assert "stop_signal" not in services["backend"]            # the backend's handlers are SIGTERM's
 
 
 @pytest.mark.parametrize("name", COMPOSE_FILES)
@@ -1251,7 +1300,8 @@ def test_the_outgoing_log_is_kept_private_scrubbed_and_bounded(checkout, monkeyp
     assert path.name.endswith("-update.log")
     assert stat.S_IMODE(path.stat().st_mode) == 0o600 and stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     text = path.read_text()
-    assert text.startswith("backend  | line 0\n") and "K7QM-ZP4X" not in text and "XXXX-XXXX" in text
+    assert text.startswith("backend  | line 0\n") and "K7QM-ZP4X" not in text
+    assert text.endswith("backend  | setup code: [setup code removed]\n") and ha.SETUP_CODE.search(text) is None
     assert [p.name for p in path.parent.iterdir()] == [path.name]         # no half-written file beside it
     # more than a mebibyte: its end, from a line's start
     _logged(monkeypatch, b"".join(b"backend  | %07d %s\n" % (n, b"x" * 80) for n in range(20000)))

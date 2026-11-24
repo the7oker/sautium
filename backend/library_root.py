@@ -2,8 +2,10 @@
 (PI-NODE-2B §4.3).
 
 A node its console setup made is given ROOTS: the folders it may read music
-from — where the machine's automount puts plugged disks, a folder named at
-setup — each bound into the container read-only at its own host path
+from — the folder the machine mounts music disks in (its automount, or the
+setup's line of /etc/fstab for one disk: the same point for a disk whoever
+mounts it), a folder named at setup — each bound into the container
+read-only at its own host path
 (`SAUTIUM_LIBRARY_ROOTS`, from the setup's compose override, which no
 container can write). The path the library stores is then the path an
 HQPlayer on the same machine opens, with no translation. Under those roots
@@ -57,7 +59,10 @@ NAMES_DIR = ".names"
 # A volume no driver mounted, as the automount's script leaves it beside the
 # disks (`<root>/.unread/<kernel name>`): the boot it belongs to, the
 # filesystem's type as blkid names it, the label, the driver the mount was
-# tried with ("-": none, the type is one the script never mounts) — four lines
+# tried with ("-": none, the type is one the script never mounts) — four lines.
+# Where blkid names no filesystem the type line is one of the script's own two
+# words (since 2026-11-24, PI-NODE-2D §5): the marks of more than one
+# filesystem, or none found
 UNREAD_DIR = ".unread"
 UNREAD_BYTES_MAX = 256
 BOOT_ID = "/proc/sys/kernel/random/boot_id"
@@ -74,6 +79,7 @@ _FORMATS = {"vfat": ("FAT", True), "exfat": ("exFAT", True), "ntfs": ("NTFS", Tr
             "apfs": ("APFS", False), "hfsplus": ("HFS+", False), "hfs": ("HFS+", False),
             "btrfs": ("Btrfs", False), "xfs": ("XFS", False), "ext2": ("ext2/3", False),
             "ext3": ("ext2/3", False)}
+_NO_ONE_FILESYSTEM = frozenset({"ambivalent", "unknown"})
 
 
 class Refused(ValueError):
@@ -133,10 +139,14 @@ def apply() -> None:
     logger.info("music folder: %s (roots: %s)", path or "not chosen", ", ".join(roots()))
     mounts = _mounts()
     for root in roots():
-        if _gone(root, mounts):
+        if not _gone(root, mounts):
+            continue
+        if _held(root):
             logger.warning("music root %s is empty: its disk is not mounted, or the folder was removed; "
                            "its albums are away. Forget it on the machine: ./sautium roots --forget %s",
                            root, shlex.quote(root))
+        else:
+            logger.info("music root %s is empty: nothing is in it yet", root)
 
 
 def choose(path: str) -> str:
@@ -209,7 +219,9 @@ def unread() -> List[Dict[str, Any]]:
     automount left them: {device (the kernel's name), format (a name from
     the fixed map, None for a type outside it), mounts (the automount mounts
     that type: this one failed), driver (what its mount was tried with, None
-    where none was), label, since}. A file of another boot (a
+    where none was), unclear (`ambivalent` or `unknown` where the automount
+    found no one filesystem on the volume — the marks of two, or none —,
+    else None), label, since}. A file of another boot (a
     power cut left it) says nothing about now and is not listed; neither is
     anything that is not the automount's small regular file."""
     try:
@@ -236,14 +248,17 @@ def unread() -> List[Dict[str, Any]]:
             driver = lines[3].strip() if len(lines) > 3 else ""
             found.append({"device": name, "format": fmt, "mounts": mounts, "label": label,
                           "driver": driver if driver in _DRIVERS else None,
+                          "unclear": fs if fs in _NO_ONE_FILESYSTEM else None,
                           "since": datetime.fromtimestamp(read[1], timezone.utc).isoformat()})
     return found
 
 
 def _root_labels() -> Dict[str, str]:
-    """The labels the setup read for the roots that are disks themselves (a
-    disk its fstab line mounts: no automount leaves a `.names` entry for it,
-    and a container cannot ask blkid): root → label, a stranger's text."""
+    """The labels the setup read for the roots that are disks themselves — a
+    mount point a person named, or the setup's own fstab line of before
+    2026-11-24, which mounted its disk at the root (nothing leaves a `.names`
+    entry for such a disk, and a container cannot ask blkid): root → label, a
+    stranger's text. A disk mounted in the disks' folder has its label there."""
     try:
         named = json.loads(settings.sautium_library_root_labels or "{}")
     except ValueError:
@@ -301,10 +316,24 @@ def _gone(root: str, mounts: Dict[str, bool]) -> bool:
         return False
 
 
+def _held(root: str) -> bool:
+    """Whether the library holds a copy from under `root`: what tells a root
+    that lost its music (its disk out, its folder removed) from a folder
+    named a moment ago with nothing in it yet. Under roots a copy's stored
+    folder is the path this process reads."""
+    row = db_query_one("""
+        SELECT EXISTS (SELECT 1 FROM album_variants
+                        WHERE location = 'local'
+                          AND (directory_path = %s OR starts_with(directory_path, %s))) AS held""",
+                       (root, root.rstrip("/") + "/"))
+    return bool(row["held"])
+
+
 def _disk_points(mounts: Dict[str, bool]) -> List[tuple]:
     """(path, root, name) of each disk a choice can start at: every one
-    mounted in the automount's folder, and every root that is a disk itself
-    (name None: no automount named it)."""
+    mounted in the disks' folder — by the automount or by a line of
+    /etc/fstab, alike — and every root that is a disk itself (name None:
+    nothing named it)."""
     points = []
     for root in roots():
         if not os.path.isdir(root):
@@ -369,12 +398,15 @@ def _count_audio(folder: str) -> Dict[str, Any]:
 
 def folders(under: Optional[str] = None) -> Dict[str, Any]:
     """The picker's listing. With no `under`: where a choice can start — each
-    root that is a folder of music itself (`empty` where its disk is out or
-    the folder was removed), each disk mounted beneath a root (the
-    automount's folder) or as a root, with its label and size — and, last,
-    each volume plugged in that nothing mounted (kind "unread": no path, a
-    row to read, never to open). With `under`: that folder's own folders,
-    its audio count, and the way back up."""
+    root that is a folder of music itself (`empty` where nothing is in it,
+    and then `held`: the library holds copies from it, so its disk is out or
+    the folder was removed — else it is new), each disk mounted beneath a
+    root (the disks' folder) or as a root, with its label and size — and,
+    last, each volume plugged in that nothing mounted (kind "unread": no
+    path, a row to read, never to open). With `under`: that folder's own
+    folders, its audio count, the way back up, and the disk it lies on
+    (`disk`: its path, label and size; None under a folder named at setup) —
+    what a page names the place by, where the path holds a UUID."""
     if not picks():
         raise Refused("This node's music folder is named where the node was set up")
     if under is None:
@@ -392,12 +424,13 @@ def folders(under: Optional[str] = None) -> Dict[str, Any]:
                               for path, of, name in points if of == root)
             else:
                 # a folder named at setup: itself the place
+                empty = _gone(root, mounts)
                 places.append({"path": root, "name": root, "kind": "folder", "label": None,
-                               "size_bytes": None, "empty": _gone(root, mounts)})
+                               "size_bytes": None, "empty": empty, "held": _held(root) if empty else None})
         # A volume nothing mounted is a place that cannot be opened: no path
         places.extend({"path": None, "name": volume["device"], "kind": "unread", "label": volume["label"],
                        "size_bytes": None, "format": volume["format"], "mounts": volume["mounts"],
-                       "driver": volume["driver"]}
+                       "driver": volume["driver"], "unclear": volume["unclear"]}
                       for volume in unread())
         return {"under": None, "places": places, "chosen": settings.music_library_path or None}
     real = within(under)
@@ -408,16 +441,21 @@ def folders(under: Optional[str] = None) -> Dict[str, Any]:
         names = _subfolders(real)
     except OSError as e:
         raise Refused(f"That folder could not be read ({e.strerror or e})")
-    # Up from a root, or from a disk in the automount's folder, is the list of places
+    # Up from a root, or from a disk in the disks' folder, is the list of places
     top = real in roots() or (parent in roots() and _disks_folder(parent))
+    on = next(((path, root, name) for path, root, name in _disk_points(_mounts())
+               if real == path or real.startswith(path.rstrip("/") + "/")), None)
     return {"under": real,
             "parent": None if top else parent,
+            "disk": on and {"path": on[0], "name": on[2], "size_bytes": _size(on[0]),
+                            "label": _label(on[1], on[2]) if on[2] else _root_labels().get(on[0])},
             "folders": [{"name": name, "path": os.path.join(real, name)} for name in names],
             "chosen": settings.music_library_path or None,
             **_count_audio(real)}
 
 
 def _disks_folder(root: str) -> bool:
-    """`root` is the automount's folder (it carries the labels' folder): the
-    place disks appear in, not itself a folder of music."""
+    """`root` is the folder disks are mounted in (it carries the labels'
+    folder, which the automount's install and the setup's fstab block both
+    make): the place disks appear in, not itself a folder of music."""
     return os.path.isdir(os.path.join(root, NAMES_DIR))
