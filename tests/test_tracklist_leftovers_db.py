@@ -161,13 +161,19 @@ def test_a_phantom_a_peers_record_and_an_album_with_a_copy_are_untouched(conn, s
     s.cur.execute("INSERT INTO hqp_endpoints (name) VALUES ('box') RETURNING id")
     s.cur.execute("""INSERT INTO album_variants (album_id, directory_path, location, hqp_endpoint_id)
                      VALUES (%s, '/smb/held', 'hqplayer', %s)""", (albums["held"], s.cur.fetchone()[0]))
+    # an album the seed picked, owned before the seed and never bound, its copy removed since: the
+    # mint and the album merges spare a seed's pick everywhere, and so does this step
+    tracks = [s.track("Picked I", artist), s.track("Picked II", artist)]
+    albums["picked"] = s.album("A Seed's Pick", artist)
+    s.slots(albums["picked"], tracks, source="tag")
+    s.cur.execute("INSERT INTO seed_picks (album_id, tier, rank) VALUES (%s, 1, 1)", (albums["picked"],))
     before = (s.titles("albums"), s.titles("tracks"), {k: s.slot_count(a) for k, a in albums.items()})
 
     assert _step(scratch_dsn) == {"albums": 0, "slots": 0, "tracks": 0, "artists": 0}
 
     assert (s.titles("albums"), s.titles("tracks"),
             {k: s.slot_count(a) for k, a in albums.items()}) == before
-    assert before[2] == {"phantom": 2, "peer": 2, "imported": 1, "owned": 2, "held": 1}
+    assert before[2] == {"phantom": 2, "peer": 2, "imported": 1, "owned": 2, "held": 1, "picked": 2}
 
 
 def test_the_start_runs_it_once_and_says_what_it_removed(conn, scratch_dsn, monkeypatch, caplog):
