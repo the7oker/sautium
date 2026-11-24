@@ -9,8 +9,9 @@ database system is shutting down") and the run's routing table was lost with
 "DHT: state save failed".
 
 A test cannot signal the suite's PostgreSQL, so the same state is made for
-one database: `ALTER DATABASE … ALLOW_CONNECTIONS false` — every connection
-it has goes on being served, and no new one is taken. The case under the
+one database: `ALTER DATABASE … ALLOW_CONNECTIONS false`, asked from another
+database of the cluster — every connection it has goes on being served, and
+no new one is taken. The case under the
 real signal, PostgreSQL's and the backend's containers stopped at once, is
 the slice's lab table (stop_lab_dht.sh, node_stop_lab.sh).
 
@@ -23,6 +24,7 @@ the slice's lab table (stop_lab_dht.sh, node_stop_lab.sh).
 
 import asyncio
 import importlib
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -30,27 +32,51 @@ import pytest
 psycopg2 = pytest.importorskip("psycopg2")
 
 from desktop.p2p.dht_state import DhtStateStore  # noqa: E402
+from tests.conftest import PG, SESSION_DATABASE  # noqa: E402
 
 
 @pytest.fixture
 def admin(scratch_dsn):
-    """A connection of the test's own, made before any is refused: it reads
-    who is connected and puts the database back."""
-    conn = psycopg2.connect(scratch_dsn)
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute("SELECT current_database()")
-        name = cur.fetchone()[0]
-        cur.execute("TRUNCATE p2p_dht_state")
-        yield SimpleNamespace(cur=cur, name=name)
-        cur.execute(f'ALTER DATABASE "{name}" ALLOW_CONNECTIONS true')
-    conn.close()
+    """Two connections of the test's own, made before any is refused: one in
+    another database of the cluster, which says who is connected to the
+    scratch one and whether it takes new connections (PostgreSQL does not
+    let a database be closed from inside it), one in the scratch database to
+    read what was saved. Every store a test made is closed at its end."""
+    name = scratch_dsn.rsplit("/", 1)[1]
+    reader = psycopg2.connect(scratch_dsn)
+    outside = psycopg2.connect(dbname=SESSION_DATABASE, **PG)
+    reader.autocommit = outside.autocommit = True
+    stores = []
+
+    def store():
+        stores.append(DhtStateStore(scratch_dsn))
+        return stores[-1]
+    with reader.cursor() as read, outside.cursor() as cur:
+        read.execute("TRUNCATE p2p_dht_state")
+        read.execute("SELECT pg_backend_pid()")
+        try:
+            yield SimpleNamespace(cur=cur, read=read, name=name, own=read.fetchone()[0], store=store)
+        finally:
+            cur.execute(f'ALTER DATABASE "{name}" ALLOW_CONNECTIONS true')
+            for made in stores:
+                made.close()
+    reader.close()
+    outside.close()
 
 
 def _others(admin) -> set:
-    admin.cur.execute("SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
-                      "AND pid <> pg_backend_pid()")
+    """The connections to the scratch database but the test's own reader."""
+    admin.cur.execute("SELECT pid FROM pg_stat_activity WHERE datname = %s AND pid <> %s", (admin.name, admin.own))
     return {pid for (pid,) in admin.cur.fetchall()}
+
+
+def _left(admin, pids: set) -> bool:
+    """Whether those connections are gone from the server — which ends a
+    backend a moment after its client closed, or after it was cut."""
+    deadline = time.monotonic() + 10
+    while _others(admin) & pids and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _others(admin) & pids
 
 
 def _takes_no_new_connection(admin) -> None:
@@ -58,26 +84,26 @@ def _takes_no_new_connection(admin) -> None:
 
 
 def _saved(admin):
-    admin.cur.execute("SELECT state FROM p2p_dht_state WHERE id = 1")
-    row = admin.cur.fetchone()
+    admin.read.execute("SELECT state FROM p2p_dht_state WHERE id = 1")
+    row = admin.read.fetchone()
     return bytes(row[0]) if row else None
 
 
 def test_the_store_saves_through_the_connection_it_has_held_since_its_load(scratch_dsn, admin):
-    store = DhtStateStore(scratch_dsn)
+    store = admin.store()
     assert store.load() is None                                # the service's start
     held = _others(admin)
     assert len(held) == 1
     store.save(b"a periodic save")
     assert store.load() == b"a periodic save" and _others(admin) == held      # one connection, kept
     _takes_no_new_connection(admin)                            # PostgreSQL told to stop
-    with pytest.raises(psycopg2.OperationalError):
-        DhtStateStore(scratch_dsn).save(b"through a connection opened for the save")
+    with pytest.raises(psycopg2.OperationalError, match="not currently accepting connections"):
+        admin.store().save(b"through a connection opened for the save")
     store.save(b"the routing table at the stop")
     assert _saved(admin) == b"the routing table at the stop" and _others(admin) == held
     # let go after the save: a PostgreSQL that waits for its clients waits for this one no longer
     store.close()
-    assert _others(admin) == set()
+    assert _left(admin, held)
     store.close()                                              # again: nothing to do
 
 
@@ -87,9 +113,11 @@ def test_the_services_stop_saves_through_the_held_connection_and_then_lets_it_go
     monkeypatch.setattr(module, "lt", SimpleNamespace(
         save_state_flags_t=SimpleNamespace(save_dht_state=1),
         write_session_params_buf=lambda state: state), raising=False)
-    svc = module.DHTService(sharing_enabled=lambda: True, state_store=DhtStateStore(scratch_dsn))
+    svc = module.DHTService(sharing_enabled=lambda: True, state_store=admin.store())
     assert svc._state_store.load() is None                     # as start() does, before the session is made
     svc._session = SimpleNamespace(session_state=lambda flags: b"the run's routing table", pause=lambda: None)
+    held = _others(admin)
+    assert len(held) == 1
     _takes_no_new_connection(admin)
 
     async def stop():
@@ -97,21 +125,24 @@ def test_the_services_stop_saves_through_the_held_connection_and_then_lets_it_go
         await svc.stop()
     asyncio.run(stop())
     assert _saved(admin) == b"the run's routing table"
-    assert _others(admin) == set()
+    assert _left(admin, held)
 
 
 def test_a_connection_cut_under_the_store_is_made_again_at_the_next_call(scratch_dsn, admin):
-    store = DhtStateStore(scratch_dsn)
+    store = admin.store()
     store.save(b"before")
-    (first,) = _others(admin)
-    admin.cur.execute("SELECT pg_terminate_backend(%s)", (first,))            # PostgreSQL restarted under the node
+    first = _others(admin)
+    assert len(first) == 1
+    admin.cur.execute("SELECT pg_terminate_backend(%s)", tuple(first))        # PostgreSQL restarted under the node
+    assert _left(admin, first)
     store.save(b"after")                                       # the periodic save finds it, and connects anew
-    (second,) = _others(admin)
-    assert second != first and _saved(admin) == b"after"
+    second = _others(admin)
+    assert len(second) == 1 and second != first and _saved(admin) == b"after"
     # cut again, and no new connection taken: nothing to save through, and the caller is told
     _takes_no_new_connection(admin)
-    admin.cur.execute("SELECT pg_terminate_backend(%s)", (second,))
-    with pytest.raises(psycopg2.OperationalError):
+    admin.cur.execute("SELECT pg_terminate_backend(%s)", tuple(second))
+    assert _left(admin, second)
+    with pytest.raises(psycopg2.OperationalError, match="not currently accepting connections"):
         store.save(b"lost")
     admin.cur.execute(f'ALTER DATABASE "{admin.name}" ALLOW_CONNECTIONS true')
     assert store.load() == b"after"                            # and the store works on
