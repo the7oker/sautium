@@ -367,11 +367,19 @@ ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}==
 # and an audio CD are no volume a format was lost on.
 ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", KERNEL!="sr[0-9]*", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
 ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
+# A USB card reader keeps its device when the card is pulled, with no size.
+# systemd is told the device is not there then (as it is told of an optical
+# drive with no disc), so the unit bound to it stops with the card — what it
+# mounted is unmounted, what it said of a card is taken back — and the next
+# card starts it afresh. The state follows the medium, not the reader.
+ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ATTR{size}=="0", ENV{SYSTEMD_READY}="0"
 """
 
 AUTOMOUNT_UNIT = """\
 # Sautium: one plugged disk, mounted read-only while it is there
-# (written by ./sautium; installed by the person, as root).
+# (written by ./sautium; installed by the person, as root). Bound to the
+# disk's device: it stops when the device goes — a disk pulled, or a card
+# pulled from a reader that stays (the rule says such a device is not there).
 [Unit]
 Description=Sautium: a plugged disk, mounted read-only (%I)
 BindsTo=dev-%i.device
@@ -1041,6 +1049,21 @@ def backend_container() -> str:
     return out(run(agent.compose_cmd(ROOT) + ["ps", "--all", "-q", "backend"]))
 
 
+def postgres_remade() -> bool:
+    """Whether `up` would make PostgreSQL's container again: its service, as
+    the compose files and .env define it now, is not the one its running
+    container was made from — by compose's own hash of the service, which it
+    keeps as a label on the container. (A PG_* line of .env that moved with
+    the machine's memory; a release that changed the service's lines.)"""
+    held = out(run(agent.compose_cmd(ROOT) + ["ps", "-q", "--status", "running", "postgres"])).split()
+    if not held:
+        return False
+    wanted = out(run(agent.compose_cmd(ROOT) + ["config", "--hash", "postgres"])).split()
+    made_from = out(run(["docker", "inspect", "--format",
+                         '{{index .Config.Labels "com.docker.compose.config-hash"}}', held[0]]))
+    return len(wanted) == 2 and bool(made_from) and made_from != wanted[1]
+
+
 def start() -> None:
     say("Starting Sautium (its first start prepares the database: a few minutes) …")
     # `up` makes the backend's container again where its image or its lines
@@ -1049,6 +1072,16 @@ def start() -> None:
     # update's kept log out
     before = backend_container()
     kept = agent.take_log(ROOT, "setup") if before else None
+    if before and postgres_remade() and node_running():
+        # PostgreSQL is stopped by its smart shutdown, which waits for its
+        # clients to leave: made again under a running backend it would wait
+        # its whole grace out and be killed. The backend goes first, as at
+        # the host agent's update, and `up` starts it again.
+        stopped = run(agent.compose_cmd(ROOT) + ["stop", "backend"], timeout=120)
+        if stopped.returncode != 0:
+            said = stopped.stderr.decode("utf-8", "replace").strip().splitlines()
+            say("  the node could not be stopped before its database is made again: "
+                + (printable(said[-1]) if said else "docker compose said nothing"))
     result = run(agent.compose_cmd(ROOT) + ["up", "-d", "--no-build", "--wait", "--wait-timeout", "2400"],
                  timeout=2500)
     if kept is not None:
@@ -1504,15 +1537,37 @@ def fstab_line(point: str) -> Optional[dict]:
         return None
 
 
+def mounted_safely(options: str) -> bool:
+    """Whether a line's options mount its disk read-only and with nothing of
+    the disk's run or trusted — as mount(8) reads them: left to right, a
+    later word undoing an earlier one. `rw`, `suid`, `dev` and `exec` each
+    undo one of the four; `defaults` is all of those at once; `user` and
+    `users` bring nosuid, nodev and noexec with them, `owner` and `group`
+    the first two."""
+    safe = {"ro": False, "nosuid": False, "nodev": False, "noexec": False}
+    undone_by = {"rw": "ro", "suid": "nosuid", "dev": "nodev", "exec": "noexec"}
+    for word in options.split(","):
+        if word in safe:
+            safe[word] = True
+        elif word in undone_by:
+            safe[undone_by[word]] = False
+        elif word == "defaults":
+            safe = dict.fromkeys(safe, False)
+        elif word in ("user", "users", "owner", "group"):
+            safe["nosuid"] = safe["nodev"] = True
+            if word in ("user", "users"):
+                safe["noexec"] = True
+    return all(safe.values())
+
+
 def own_line(line: dict, uuid: str) -> bool:
     """Whether a line of /etc/fstab at one of the setup's mount points is
     still as the setup writes one — the disk by its UUID, read-only and with
-    nothing of the disk's run or trusted (the node's bind does not make a
-    mount that arrives later read-only: each mount says so itself), no
+    nothing of the disk's run or trusted in effect (the node's bind does not
+    make a mount that arrives later read-only: each mount says so itself), no
     letter a shell line cannot carry. The setup builds a new line from the
     options of such a line only; any other is the person's own."""
-    return (line["source"] == f"UUID={uuid}" and "'" not in line["options"]
-            and {"ro", "nosuid", "nodev", "noexec"} <= set(line["options"].split(",")))
+    return line["source"] == f"UUID={uuid}" and "'" not in line["options"] and mounted_safely(line["options"])
 
 
 def old_boot_mount(root: str) -> Optional[dict]:
@@ -1532,28 +1587,71 @@ def mount_point_of(real: str) -> Optional[str]:
     return target[0] if target and target[0] not in ("", "/") else None
 
 
+def someone_mounts(target: str) -> bool:
+    """Whether the mount at `target` is one a person set up to be there: a
+    line of /etc/fstab, a .mount or .automount unit somebody wrote (systemd
+    names a unit file for it — for a mount it merely saw being made, a
+    desktop's or a hand's, it names none), an automount point of any kind
+    (autofs under the filesystem). Such a mount is the person's own, not the
+    setup's to move."""
+    if run(["findmnt", "--fstab", "-n", target]).returncode == 0:
+        return True
+    units = out(run(["systemctl", "show", "-p", "FragmentPath", "--value",
+                     unit_name(target, "mount"), unit_name(target, "automount")]))
+    if units.strip():
+        return True
+    return "autofs" in out(run(["findmnt", "-rn", "-o", "FSTYPE", "--mountpoint", target])).split()
+
+
 def mounted_outside_fstab(real: str) -> Optional[str]:
     """The mount point of the disk `real` lies on, where that disk is not the
-    system's own and no line of /etc/fstab mounts it."""
+    system's own and neither a line of /etc/fstab nor a unit of someone's
+    mounts it (someone_mounts): a desktop mounted it, or a hand."""
     target = mount_point_of(real)
-    if target is None or run(["findmnt", "--fstab", "-n", target]).returncode == 0:
+    if target is None or someone_mounts(target):
         return None
     return target
 
 
+# What a person plugs in and pulls, by the medium lsblk's own columns say
+# (machine_tier.storage_medium — the one reader of them): what the automount's
+# rule takes. A disk or an SSD in a USB case says it is not removable and is
+# pulled as a stick is; a card is one in the slot. Never an NVMe, a SATA disk
+# or eMMC: an internal disk is the person's to mount, and a line that mounted
+# it "whenever it is plugged in" would mount it a second time at every start.
+PULLED_MEDIA = ("sd_card", "usb_stick", "usb_disk")
+
+
+def pulled_disk(device: str, lsblk_json: str, system_source: str, sysfs: str = "/sys/block") -> bool:
+    """Whether `device` lies on a disk a person plugs in and pulls
+    (PULLED_MEDIA) that is not the medium the system itself runs from.
+    `lsblk_json`: `lsblk -J -o NAME,RM,TRAN,ROTA`; `system_source`: the
+    device mounted at /."""
+    chain = device_chain(os.path.realpath(device), lsblk_json)
+    if machine_tier.storage_medium(chain, sysfs) not in PULLED_MEDIA:
+        return False
+    system = device_chain(system_source, lsblk_json)
+    return not system or system[0].get("name") != chain[0].get("name")
+
+
 def disk_of(real: str, systemd: int) -> Optional[dict]:
-    """For a folder on a disk no line of /etc/fstab mounts, and not under the
-    folder Sautium's disks are mounted in: the setup's own line for that disk
-    (boot_mount) and where the disk is mounted now (`mounted_at`). None where
-    the setup has no line to offer: the system's disk, someone's own line, a
-    network share, a filesystem the automount does not know."""
+    """For a folder on a removable disk that nobody set up a mount for (a
+    desktop mounted it, or a hand), and not under the folder Sautium's disks
+    are mounted in: the setup's own line for that disk (boot_mount) and where
+    the disk is mounted now (`mounted_at`). None where the setup has no line
+    to offer, and only says what the mount means (on_a_mount): the system's
+    disk, a disk that is not pulled (an internal one, however it is mounted),
+    someone's own line or unit, a network share, a filesystem the automount
+    does not know."""
     if real == AUTOMOUNT_BASE or real.startswith(AUTOMOUNT_BASE + "/") or mounted_outside_fstab(real) is None:
         return None
     found = boot_mount(real, out(run(["findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID,LABEL", "-T", real])),
                        os.getuid(), os.getgid(), systemd=systemd)
-    if found is not None:
-        held = out(run(["findmnt", "-rn", "-o", "TARGET", "-S", f"UUID={found['uuid']}"]))
-        found["mounted_at"] = [mount_target(line) for line in held.splitlines() if line]
+    if found is None or not pulled_disk(found["device"], out(run(["lsblk", "-J", "-o", "NAME,RM,TRAN,ROTA"])),
+                                        mount_of("/").get("source", "")):
+        return None
+    held = out(run(["findmnt", "-rn", "-o", "TARGET", "-S", f"UUID={found['uuid']}"]))
+    found["mounted_at"] = [mount_target(line) for line in held.splitlines() if line]
     return found
 
 
@@ -1664,7 +1762,7 @@ def on_a_mount(real: str) -> Optional[str]:
         return None
     if target == real:
         return "a mount point"
-    if run(["findmnt", "--fstab", "-n", target]).returncode == 0:
+    if someone_mounts(target):
         return None
     return f"on a disk mounted at {printable(target)}, which no line of /etc/fstab mounts"
 

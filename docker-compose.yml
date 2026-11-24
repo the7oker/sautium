@@ -77,10 +77,15 @@ services:
     # failed", "Application shutdown failed"). The grace is longer than the
     # backend's: the backend saves and goes inside its own - killed there if
     # it hangs, which closes its connections too - and PostgreSQL then ends
-    # cleanly. A connection asked for after the signal is refused, so a stop
-    # saves through the connections the backend already holds. Stopped ALONE
-    # while the backend still runs, PostgreSQL waits this grace out and is
-    # killed: stop the backend first, as `docker compose stop` does.
+    # cleanly. A connection asked for after the signal is REFUSED: whatever
+    # the backend writes at its stop must go through a connection it holds
+    # already - its pool's, a worker's own, and for the DHT's routing table
+    # the one its store keeps from the start for that save
+    # (desktop/p2p/dht_state.py; until 2026-11-24 it connected per call, and
+    # the stop's save was the one refused). Stopped ALONE while the backend
+    # still runs, PostgreSQL waits this grace out and is killed: the backend
+    # goes first - as `docker compose stop`, the host agent's update and
+    # ./sautium (where a run makes PostgreSQL again) do.
     stop_signal: SIGTERM
     stop_grace_period: 30s
     # Loopback-only: postgres is never accessed from outside the host.

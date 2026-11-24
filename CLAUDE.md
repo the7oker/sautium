@@ -676,7 +676,8 @@ See:
   `poll()` on the mount table (`backend/mount_watch.py`), never a timer. The
   setup never runs `sudo`: it prints root steps (lingering; the automount,
   not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
-  `--music` folder on a disk such a desktop — or a person by hand — mounts).
+  `--music` folder on a removable disk such a desktop — or a person by hand —
+  mounts).
   `SAUTIUM_BIRTH_PRESET`
   (`nano`) is read once per database (`db_migrate`, `birth_preset_v1`).
   Since 2026-11-22 (PI-NODE-2C): a root's bind makes its own folder
@@ -704,7 +705,10 @@ See:
   override. An install whose line mounts at `/mnt/sautium-<UUID>` (that point
   its root) is named by `status` and `roots` and offered the move as one
   block; a `--music` folder that is someone's own mount point is taken as
-  named and said — never its parent, which the person did not name. The
+  named and said — never its parent, which the person did not name; the
+  setup's own line is offered only for a disk a person pulls (USB storage, a
+  card in the slot, by `machine_tier.storage_medium`) that nobody set up a
+  mount for (a line of fstab, a `.mount`/`.automount` unit, autofs). The
   automount says a volume blkid names no filesystem on, too: the type line of
   its `.unread` file is then `ambivalent` (`blkid -p` exits 8: the marks of
   more than one filesystem, a quick format over an older one) or `unknown`
@@ -712,7 +716,10 @@ See:
   beside other partitions of one whose partition type is for data (a
   Windows-partitioned disk's reserved partition, a boot or recovery one, an
   eMMC's own areas, a reader's empty slot and anything under 1 MiB are
-  silent).
+  silent). The unit ends with the medium, not the reader: a USB card reader
+  that stays when its card is pulled keeps its device at size 0, and the rule
+  says that device is not there (`SYSTEMD_READY=0`), so what was mounted or
+  said of the card goes with it and the next card starts the unit afresh.
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
   names it). `config.build_identity()` is the one reader — `/config`,
