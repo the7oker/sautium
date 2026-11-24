@@ -539,3 +539,83 @@ def test_a_file_retagged_off_a_track_other_copies_hold_takes_its_slot_along(cur,
                      JOIN albums al ON al.id = at.album_id JOIN tracks t ON t.id = at.track_id
                     ORDER BY 1""")
     assert cur.fetchall() == [("Best Of", "Song (Live)", 7), ("LP", "Song", 1)]
+
+
+def _pick(cur, title):
+    cur.execute("INSERT INTO seed_picks (album_id, tier, rank) SELECT id, 1, 1 FROM albums WHERE title = %s",
+                (title,))
+
+
+def _picked(cur):
+    cur.execute("SELECT al.title FROM seed_picks sp JOIN albums al ON al.id = sp.album_id")
+    return [r[0] for r in cur.fetchall()]
+
+
+def test_a_picks_album_stays_behind_its_retagged_copy(cur, library, template):
+    """An album the seed picked is not nothing apart from its copy: its
+    tracklist is the seed's to export. Re-tagged whole, the copy moves and
+    the album stays with its slots and its pick, as every album did before
+    2026-11-24 (PI-NODE-2D, review round 1 B2)."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2)]
+    _scan()
+    _materialise(cur)
+    _pick(cur, "LP")
+    for f in files:
+        _tag(f, album="LP (fixed)")
+    _scan()
+    assert _album_rows(cur) == [("LP", 0, ["tag", "tag"]), ("LP (fixed)", 1, [])]
+    assert _picked(cur) == ["LP"]
+
+
+@pytest.mark.parametrize("picked", [True, False], ids=["picked", "not-picked"])
+def test_a_folder_retagged_into_two_albums_leaves_only_a_pick_behind(cur, library, template, picked):
+    """The files of one album re-tagged as two: each half moves to its own
+    album. The album they left goes with the slots their tags wrote — unless
+    the seed picked it, whose slots are not the copy's to take."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2, 3, 4)]
+    _scan()
+    _materialise(cur)
+    if picked:
+        _pick(cur, "LP")
+    for n, f in enumerate(files):
+        _tag(f, album="North" if n < 2 else "South", tracknumber=n % 2 + 1)
+    _scan()
+    halves = [("North", 1, []), ("South", 1, [])]
+    assert _album_rows(cur) == ([("LP", 0, ["tag"] * 4)] if picked else []) + halves
+    assert _picked(cur) == (["LP"] if picked else [])
+
+
+@pytest.mark.parametrize("held_by", ["mb", "pick"])
+def test_a_superseded_copy_leaves_an_album_its_tracklist_holds(cur, library, template, held_by):
+    """The CUE supersede's album delete asked only for copies: an album
+    MusicBrainz wrote a tracklist for went with its slots when a sheet's
+    removal emptied its copy, and so would a pick's. It asks for slots as
+    every other album delete does."""
+    _clean(cur)
+    d = library / "A" / "Live"
+    _flac(template, d / "image.flac", "The Whole Set", "Aurora", "Live (image)", track=1)
+    sheet = d / "image.cue"
+    sheet.write_text('PERFORMER "Aurora"\nTITLE "Live"\nFILE "image.flac" WAVE\n'
+                     '  TRACK 01 AUDIO\n    TITLE "Open"\n    INDEX 01 00:00:00\n'
+                     '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 01 00:01:00\n')
+    _scan()
+    if held_by == "mb":
+        cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position)
+                       SELECT av.album_id, mf.track_id, 1, mf.track_number
+                         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id""")
+    else:
+        _materialise(cur)
+        _pick(cur, "Live")
+    slots = ["mb", "mb"] if held_by == "mb" else ["tag", "tag"]
+    assert _album_rows(cur) == [("Live", 1, slots)]
+
+    sheet.unlink()
+    assert _scan()["superseded"] == 2
+    assert _album_rows(cur) == [("Live", 0, slots), ("Live (image)", 1, [])]
+    cur.execute("SELECT title FROM tracks ORDER BY 1")
+    assert cur.fetchall() == [("Open",), ("The Whole Set",), ("Two",)]
+    assert _picked(cur) == (["Live"] if held_by == "pick" else [])

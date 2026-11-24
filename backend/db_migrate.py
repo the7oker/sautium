@@ -118,8 +118,9 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      2026-11-24, PI-NODE-2D) removes once the albums a removed copy left
      behind while no tracklist slot said who wrote it: those with no copy, no
      release group, not imported and with no imported slot — their slots,
-     then those slots' tracks that nothing else refers to, then the albums
-     and the artists nothing credits any more. Rows the owner sees, so it is
+     then those slots' tracks that nothing else refers to, then the albums,
+     and nothing else (an artist left credited by nothing stays, as a minted
+     similar does). Rows the owner sees, so it is
      his yes for this one named step (the same day), not a rule: from then on
      a removal takes the slots its files' tags wrote itself
      (album_tracks.source, scanner.drop_tag_slots). It needs no column of
@@ -317,28 +318,19 @@ def _remove_tracklist_leftovers(conn) -> dict:
     predicate over the whole of `album_tracks` or `tracks` — their slots,
     then THEIR tracks that nothing else refers to (ORPHAN_TRACK_SQL: one
     owned on another album, with analysis, a listen or lyrics stays), then
-    the albums, then the artists those rows credited that nothing credits any
-    more (the removal's own sweep, track_credits named). No file goes, so no
-    track's derived composers change. Returns the counts."""
+    the albums. That is all the yes named: an artist those rows credited and
+    nothing credits any more stays — a row of the shape a minted similar has,
+    with its bio, tags and similars — until a removal of the owner's own
+    takes it; the links and credits of a row that goes cascade with it
+    (track_credits by its track; its RESTRICT is on the artist). Returns the
+    counts."""
     from canon.identity import ORPHAN_TRACK_SQL
-    from credits import CREDITS_LOCK_KEY
-    from sql_queries import ARTIST_UNCREDITED
     with conn.cursor() as cur:
-        cur.execute("SELECT pg_advisory_xact_lock(%s)", (CREDITS_LOCK_KEY,))
         cur.execute(f"SELECT al.id::text FROM albums al WHERE {_TRACKLIST_LEFTOVERS}")
         albums = [r[0] for r in cur.fetchall()]
         cur.execute("SELECT DISTINCT track_id::text FROM album_tracks WHERE album_id = ANY(%s::uuid[])",
                     (albums,))
         tracks = [r[0] for r in cur.fetchall()]
-        # links and credits cascade with the rows: read before the deletes
-        cur.execute("""
-            SELECT artist_id::text FROM track_artists WHERE track_id = ANY(%(t)s::uuid[])
-            UNION
-            SELECT artist_id::text FROM track_credits WHERE track_id = ANY(%(t)s::uuid[])
-            UNION
-            SELECT artist_id::text FROM album_artists WHERE album_id = ANY(%(a)s::uuid[])
-        """, {"t": tracks, "a": albums})
-        artists = [r[0] for r in cur.fetchall()]
         counts = {}
         cur.execute("DELETE FROM album_tracks WHERE album_id = ANY(%s::uuid[])", (albums,))
         counts["slots"] = cur.rowcount
@@ -349,11 +341,8 @@ def _remove_tracklist_leftovers(conn) -> dict:
                           AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id)""",
                     (albums,))
         counts["albums"] = cur.rowcount
-        cur.execute(f"""DELETE FROM artists ar WHERE ar.id = ANY(%s::uuid[])
-                          AND {ARTIST_UNCREDITED.format(a='ar')}""", (artists,))
-        counts["artists"] = cur.rowcount
     conn.commit()
-    return {k: counts[k] for k in ("albums", "slots", "tracks", "artists")}
+    return {k: counts[k] for k in ("albums", "slots", "tracks")}
 
 
 def _repair_naive_listen_times(conn) -> int:

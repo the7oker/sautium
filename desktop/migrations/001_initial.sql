@@ -835,8 +835,9 @@ CREATE TABLE IF NOT EXISTS album_tracks (
     -- slot the mint confirms is 'mb' from then on. The removal of a copy
     -- takes the 'tag' slots its files alone held, so the album and its
     -- tracks go with it instead of staying as a phantom built from the
-    -- person's tags (PI-NODE-2D, 2026-11-24). Local: no payload column
-    -- (seal_guard_album_tracks), never exported.
+    -- person's tags (PI-NODE-2D, 2026-11-24) — but for an album the seed
+    -- picked (seed_picks), whose slots stay and hold it. Local: no payload
+    -- column (seal_guard_album_tracks), never exported.
     source tracklist_source NOT NULL DEFAULT 'mb',
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,

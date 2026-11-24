@@ -4605,6 +4605,24 @@ ever fill on a node with the streaming library off.
   supersede, and an HQPlayer library's forget — whose files write no slot
   but may be the last to hold one a removed local copy wrote. The plan is
   the removal rolled back, so the question's counts name what goes.
+- **An album the seed picked keeps its slots.** On the node that builds the
+  seed the picks are its own albums and their slots the materialiser's, so
+  the removal of a pick's copy would have taken the album and, by cascade,
+  the pick — and the next seed export would have missed it. Every other
+  deleter spares a pick (the mint, the album merges, the reconcile), and
+  `seed_picks` is emptied only by "Remove phantom layer". The rule is one
+  definition, in what "a slot that is its copy's own" means
+  (`scanner.OWN_SLOT`: the files' tags wrote it, not a peer's, in an album
+  the seed did not pick), read by `drop_tag_slots` and by the re-tag's
+  "alone": a pick's album stays behind its copy, held by its sealed slots,
+  as every album did before this — still exportable — and the question says
+  a copy. In the album deletes it would have left a pick with no tracklist.
+  The CUE supersede's album delete asked only for copies and now asks for
+  slots as the others do: an album MusicBrainz wrote a tracklist for, or a
+  pick, no longer goes with its slots when a sheet's removal empties its
+  copy. The re-read's split of a merged work re-derives the slots the
+  merged track's files made, and no longer deletes MusicBrainz's and a
+  peer's with them.
 - **The backfill is conservative** (in the column's delta): `tag` where the
   slot is the node's own, a file of the album names it whole — track, disc,
   position, length — and it is no older than the album's first copy. In
@@ -4627,7 +4645,10 @@ ever fill on a node with the streaming library off.
   shape only a copy that went leaves; the mint always has a release group,
   the seed and a share write `imported`. A leftover that has a release
   group cannot be told from a phantom and stays one; an album the seed
-  picked is spared here as everywhere.
+  picked is spared here as everywhere. The step takes what the yes named —
+  the slots, their tracks nothing else refers to, the albums — and no
+  artist: one left credited by nothing stays, as a minted similar does,
+  with its bio, tags and similars.
 
 ### New is what entered last (2026-11-24)
 
