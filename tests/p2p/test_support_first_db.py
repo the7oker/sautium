@@ -38,6 +38,7 @@ def _who(name):
 
 
 ME, OLD_ME, MASTER = _who("me"), _who("me"), _who("Sautium")
+EARLIER_MASTER = _who("Sautium")                # the pin before a rotation
 
 
 @pytest.fixture
@@ -306,16 +307,69 @@ def test_the_handshake_wakes_the_stream_even_when_what_follows_it_fails(conn, sc
     assert asyncio.run(scene()) is True
 
 
-def test_a_voucher_of_a_master_key_no_longer_pinned_rides_no_drop(conn, scratch_dsn, master, drops):
-    """Review round 1: a release that changed the pin leaves the voucher the
-    old key signed; the drop goes without one (the small share), not refused."""
+def test_a_voucher_an_earlier_master_key_signed_rides_and_the_worker_judges_it(conn, scratch_dsn,
+                                                                              master, drops):
+    """Review rounds 1-2: which master keys sign is the Worker's to say
+    (MASTER_VOUCHER_KEYS keeps the previous one after a planned rotation),
+    so the voucher a release's earlier pin signed rides the drop."""
     from desktop.p2p import chat_wire
     fid = _resolved_master(conn, ME.pub)
     _write(conn, fid)
     client = _client(scratch_dsn)
-    client.store.keep_mail_voucher(chat_wire.make_mail_voucher(OLD_ME.key.sign, ME.pub))
+    earlier = chat_wire.make_mail_voucher(EARLIER_MASTER.key.sign, ME.pub)
+    client.store.keep_mail_voucher(earlier)
 
     async def scene():
         await client._mailbox_deposit(fid, await client._pending_for(fid))
     asyncio.run(scene())
-    assert [d["voucher"] for d in drops.made] == [None]
+    assert [d["voucher"] for d in drops.made] == [earlier]
+
+
+def test_a_voucher_the_worker_refuses_is_forgotten_and_the_drop_goes_without_one(
+        conn, scratch_dsn, master, monkeypatch, caplog):
+    """Review round 2: after a rotation because the old key may be known, the
+    Worker takes the new key alone — the kept voucher is a 403; the node
+    forgets it and the drop goes again without one, kept."""
+    from desktop.p2p import chat_wire
+    fid = _resolved_master(conn, ME.pub)
+    _write(conn, fid)
+    client = _client(scratch_dsn)
+    earlier = chat_wire.make_mail_voucher(EARLIER_MASTER.key.sign, ME.pub)
+    client.store.keep_mail_voucher(earlier)
+    made = []
+
+    async def deposit(session, **kw):
+        made.append(kw["voucher"])
+        if kw["voucher"] is not None:
+            return mailbox_client.Deposit(False, None, "invalid voucher")
+        return mailbox_client.Deposit(True, {"stored": True}, None)
+    monkeypatch.setattr(mailbox_client, "deposit", deposit)
+    caplog.set_level(logging.INFO, logger=cc.__name__)
+
+    async def scene():
+        return await client._mailbox_deposit(fid, await client._pending_for(fid))
+    assert asyncio.run(scene()) == "kept in the master's mailbox"
+    assert made == [earlier, None]
+    assert client.store.mail_voucher(ME.pub) is None
+    assert "refused the voucher this node kept" in caplog.text
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM p2p_messages WHERE parked_at IS NOT NULL")
+        assert cur.fetchone()[0] == 1
+
+
+def test_a_kept_deposit_cuts_the_masters_rest_short(conn, scratch_dsn, master, drops, monkeypatch):
+    """Review round 2, L4's other half: the master stream's rest between
+    dials ends within the kept cap the moment a drop is kept, so the
+    drain's ping meets a stream that is up."""
+    monkeypatch.setattr(cc, "KEPT_RECONNECT_CAP_S", 0.05)
+    fid = _resolved_master(conn, ME.pub)
+    _write(conn, fid)
+    client = _client(scratch_dsn)
+
+    async def scene():
+        rest = asyncio.create_task(client._rest_master(300))
+        await asyncio.sleep(0)
+        await client._mailbox_deposit(fid, await client._pending_for(fid))
+        await asyncio.wait_for(rest, 5)
+        return rest.done()
+    assert asyncio.run(scene()) is True

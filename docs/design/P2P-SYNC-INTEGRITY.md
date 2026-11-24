@@ -1327,7 +1327,9 @@ rotation only): a drop with a valid voucher takes the caps above; one
 without, or with one past its expiry (the answer says `voucher: expired`),
 also takes the unvouched share — 10 an address and 250 a day
 (`MAIL_UNVOUCHED_*`), to 0 once no released client drops without one; an
-invalid voucher is a 403. A flood of fresh certificates spends that share at
+invalid voucher is a 403 — the node forgets that voucher and drops again
+without one (which master keys sign is the Worker's to say, so a node keeps
+the pin's voucher and lets the Worker judge it after a rotation). A flood of fresh certificates spends that share at
 most. The expiry is how a ban acts: the master stops renewing. And the
 client deposits only while the master's row is bound to the key it signs
 with now, or names none (a row from before the binding was kept, or one a

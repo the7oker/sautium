@@ -1530,8 +1530,7 @@ class ChatClient:
     async def _reconnect_cap(self, is_master: bool) -> float:
         """The longest wait before a relay's stream is dialled again: shorter
         for the master's while a message waits kept for Support (L4)."""
-        if is_master and any(m.get("parked_at") and m["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
-                             for m in await self._db(self.store.get_pending_messages)):
+        if is_master and await self._db(self.store.kept_for, master_node.MASTER_PUBKEY_HEX):
             return KEPT_RECONNECT_CAP_S
         return RECONNECT_CAP_S
 
@@ -1945,13 +1944,10 @@ class ChatClient:
                                                               ident.public_key_hex):
             return "waiting for Support to accept this node's current key"
         outcome = "kept in the master's mailbox"
-        # The voucher kept for our key, while the master it names is the one
-        # pinned now (a release that changed the pin leaves an older one:
-        # without it, a drop takes the small share rather than a refusal)
+        # The voucher kept for our key. Which master keys sign one is the
+        # Worker's to say (MASTER_VOUCHER_KEYS: after a planned rotation the
+        # previous key's too), so one an older pin signed rides as well.
         voucher = await self._db(self.store.mail_voucher, ident.public_key_hex)
-        if voucher and not chat_wire.mail_voucher_holds(voucher, ident.public_key_hex,
-                                                        master_pubkey, _verify):
-            voucher = None
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
                                          headers={"Accept-Encoding": "gzip"}) as session:
             for msg in messages:
@@ -1964,18 +1960,24 @@ class ChatClient:
                 except Exception as e:
                     logger.error(f"Encrypt for mailbox failed: {e}")
                     return "the message could not be sealed for the mailbox"
-                result = await mailbox_client.deposit(
-                    session, master_pubkey=master_pubkey,
-                    sender_pubkey=self.store.public_key_hex, sign=ident.sign,
-                    encrypted=encrypted, timestamp_iso=sent_at,
-                    message_uuid=msg["message_uuid"], voucher=voucher,
-                    worker_url=mailbox_client.WORKER_URL)
+                def drop(v):
+                    return mailbox_client.deposit(
+                        session, master_pubkey=master_pubkey,
+                        sender_pubkey=self.store.public_key_hex, sign=ident.sign,
+                        encrypted=encrypted, timestamp_iso=sent_at,
+                        message_uuid=msg["message_uuid"], voucher=v,
+                        worker_url=mailbox_client.WORKER_URL)
+                result = await drop(voucher)
+                if result.refusal == "invalid voucher" and voucher is not None:
+                    # A key the Worker no longer takes signed it (a rotation
+                    # because the old key may be known): forgotten, and this
+                    # drop and the rest go without one, in the small share
+                    logger.warning("The master's mailbox refused the voucher this node kept (%s…): "
+                                   "forgotten, the drop goes without one", ident.public_key_hex[:16])
+                    await self._db(self.store.forget_mail_voucher, voucher)
+                    voucher = None
+                    result = await drop(None)
                 if not result.kept:                # the outbox keeps the rest
-                    if result.refusal == "invalid voucher":
-                        # No voucher the master signed for this key is invalid:
-                        # one this node kept is wrong, said loudly
-                        logger.warning("The master's mailbox refused this node's voucher (%s…)",
-                                       ident.public_key_hex[:16])
                     return (f"the master's mailbox refused it: {result.refusal}" if result.refusal
                             else "the master's mailbox is unreachable")
                 await self._db(self.store.mark_parked, msg["id"])

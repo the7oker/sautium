@@ -399,17 +399,20 @@ def reserved_name_refusal() -> Optional[str]:
     """At start, after the migrations and before the key is recorded: the
     words a node refuses to start with when it is about to make its account
     from P2P_USERNAME under the reserved nickname with a key that is not
-    Support's — None otherwise. Only a start that MAKES the account: one whose
-    database already names the key this pair derives (a node made by its
-    .env before the reservation) keeps starting (B-132)."""
+    Support's — None otherwise. Only a start that MAKES the account, its
+    database naming no identity yet (B-132, the design session's narrowing):
+    a node made by its .env before the reservation keeps starting, with its
+    key or after a new P2P_PASSWORD (a holder's rotation keeps the name)."""
+    import master_node
     from config import settings
-    if not settings.p2p_username:
+    from desktop.node_identity import is_reserved_username
+    if not settings.p2p_username or not is_reserved_username(settings.p2p_username):
         return None
     d = _identity_dir()
     if d is not None and (d / "node_ed25519.key").exists():
         return None                       # the folder's key is the account, not the env's
     pubkey = _expected_pubkey()
-    if pubkey is None or _may_take_name(settings.p2p_username, pubkey):
+    if pubkey is None or pubkey == master_node.MASTER_PUBKEY_HEX.lower() or _holds_identity():
         return None
     return (f"P2P_USERNAME names the reserved nickname {settings.p2p_username}, and this node's "
             "key is not Support's — the node does not start; choose another nickname in .env")

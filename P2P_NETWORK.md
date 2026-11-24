@@ -333,7 +333,9 @@ name, a start that makes its account from `P2P_USERNAME`, the launcher's
 account step, and the Worker's first binding of a key to a name (`admit`, 403
 `this name is reserved`). An account that holds it keeps it: signing in,
 restoring, a rotation that keeps the name, a node made by its `.env` before the
-reservation, a key the Worker already holds under it. Support is told by its
+reservation (with its key, or a new `P2P_PASSWORD`), a key the Worker already
+holds under it — the Worker binds a name to a key and knows no rotation, so a
+holder's new key is refused there (an accepted gap). Support is told by its
 pinned key, never by this name; what the name alone carries is the Worker's
 mails ("`<name>` invites you to Sautium").
 

@@ -160,6 +160,31 @@ def test_the_launchers_surface_vouchers_alike(master_db, scratch_dsn, monkeypatc
         assert sync_server.SyncServer._mail_voucher(server, who.pub) is None, who.name
 
 
+def test_the_launchers_stream_connect_carries_it_and_checks_a_key_new_here_once(master_db, scratch_dsn,
+                                                                                monkeypatch):
+    """Review round 2: the launcher's mirror of the stream connect's voucher."""
+    from desktop.p2p import sync_server
+    store = ChatService(scratch_dsn, MASTER.key.private_bytes_raw(), MASTER.pub)
+    monkeypatch.setattr(node_identity, "get_private_key_raw", lambda: MASTER.key.private_bytes_raw())
+    gate = _Gate(master_db)
+    server = SimpleNamespace(_chat_service=store, _identity_gate=lambda: gate)
+    server._mail_voucher = lambda pk: sync_server.SyncServer._mail_voucher(server, pk)
+    stream = sync_server.SyncServer._stream_mail_voucher
+
+    async def scene():
+        known = await stream(server, _request(None), GOOD.pub)
+        unchecked = await stream(server, _request(None), UNVERIFIED.pub)
+        checked = await stream(server, _request(({"pubkey": UNVERIFIED.pub}, None)), UNVERIFIED.pub)
+        again = await stream(server, _request(({"pubkey": UNVERIFIED.pub}, None)), UNVERIFIED.pub)
+        return known, unchecked, checked, again
+    known, unchecked, checked, again = asyncio.run(scene())
+    assert chat_wire.mail_voucher_holds(known, GOOD.pub, MASTER.pub, _verify)
+    assert unchecked is None
+    assert chat_wire.mail_voucher_holds(checked, UNVERIFIED.pub, MASTER.pub, _verify)
+    assert chat_wire.mail_voucher_holds(again, UNVERIFIED.pub, MASTER.pub, _verify)
+    assert gate.asked == [UNVERIFIED.pub]
+
+
 def test_a_node_keeps_the_newest_voucher_for_its_key_and_its_drop_carries_that_one(master_db,
                                                                                    scratch_dsn):
     store = ChatService(scratch_dsn, GOOD.key.private_bytes_raw(), GOOD.pub)

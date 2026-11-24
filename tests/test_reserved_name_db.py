@@ -227,6 +227,14 @@ def test_a_node_made_by_its_env_before_this_release_keeps_starting(db, pin, tmp_
     assert device_auth.reserved_name_refusal() is None
 
 
+def test_a_node_made_by_its_env_keeps_starting_after_a_new_password(db, pin, tmp_path, monkeypatch):
+    """Review round 2: the env's new P2P_PASSWORD derives another key — the
+    holder's rotation, which keeps the name; the database names the old one."""
+    _record(db, _Key("sautium").pub)
+    _env_node(monkeypatch, _Key("sautium"), tmp_path)
+    assert device_auth.reserved_name_refusal() is None
+
+
 def test_the_master_and_any_other_name_start(db, pin, tmp_path, monkeypatch):
     _env_node(monkeypatch, pin, tmp_path)
     assert device_auth.reserved_name_refusal() is None
