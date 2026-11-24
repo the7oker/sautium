@@ -43,7 +43,7 @@ import threading
 from typing import Callable, Optional
 
 from db_pool import db_query
-from playback.queue import file_source
+from playback.queue import file_source, gone_prefixes
 from sql_queries import HERE, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,20 @@ _COPIES_SQL = f"""
     LEFT JOIN hqp_library_files hf ON f.location = 'hqplayer' AND hf.id = f.id
     ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
 """
+
+
+def by_copies(item) -> bool:
+    """A slot whose way in is read against its track's copies
+    (native_plays)."""
+    return bool(item.track_id) and item.source.get("kind") in _BY_TRACK
+
+
+def streams() -> bool:
+    """Whether a slot with no file here can stream on this node now:
+    streaming is up and a provider stands in its order — what a play route
+    asks before it queues a stream."""
+    from streaming import service as streaming_service
+    return streaming_service.is_enabled() and bool(streaming_service.providers_preferred())
 
 
 def _file_play(r: dict) -> dict:
@@ -169,11 +183,9 @@ def native_plays(items: list, output_id: Optional[str],
     that does not answer) is never a way in: a slot whose own file is one
     takes the best copy that is here, else streams — its origin (`source`)
     untouched, so the same read gives None again once the file opens."""
-    owned = [it for it in items
-             if it.track_id and it.source.get("kind") in _BY_TRACK]
+    owned = [it for it in items if by_copies(it)]
     by_track: dict = {}
     if owned:
-        from scanner import gone_prefixes
         for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}),
                                         "hqp_id": endpoint_id, "gone": gone_prefixes()}):
             if r["here"]:
@@ -182,7 +194,7 @@ def native_plays(items: list, output_id: Optional[str],
     for it in items:
         src = it.source
         kind = src.get("kind")
-        if kind not in _BY_TRACK or not it.track_id:
+        if not by_copies(it):
             out.append(None)
             continue
         rows = by_track.get(it.track_id, [])

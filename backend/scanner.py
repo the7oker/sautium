@@ -138,15 +138,16 @@ def _look(ticket: int, wake: bool) -> bool:
 
 
 # The folder's state, two ways: the last answer recorded (looks and
-# observations, ordered by when they started) and what the notices were last
-# given. The notices derive on every wake of every stream, so they share one
+# observations, ordered by when they started) — what gone_prefixes reads, and
+# a change of it is the queue's event (playback.manager.reach_changed) — and
+# what the notices were last given. The notices derive on every wake of every stream, so they share one
 # look, run by a worker thread, and wait for it a few seconds at most — a look
 # that takes longer reads as a dead mount. Their look never wakes the channel:
 # on a share that flaps it would wake itself without end, so a change only a
 # request's derivation saw reaches the tabs already open with the next wake.
 # Producers do wake it, when their answer differs from what the notices show:
 # a scan's refusal, the prune, Library opened, a library file served or found
-# missing. And a look the readers gave up on wakes them if the folder answered
+# missing, the folder watcher's loss, the first file of a new queue missing. And a look the readers gave up on wakes them if the folder answered
 # after all: a disk spinning up is not a dead mount.
 LOOK_PATIENCE_S = 3.0
 _folder = threading.Condition()
@@ -179,6 +180,7 @@ def _record(unreachable: bool, ticket: int, wake: bool) -> None:
             return
         _recorded = ticket
         back = _folder_unreachable and not unreachable
+        moved = _folder_unreachable != unreachable
         _folder_unreachable = unreachable
         wake = wake and unreachable != _shown
         if wake:
@@ -190,6 +192,13 @@ def _record(unreachable: bool, ticket: int, wake: bool) -> None:
         import library_watch
         threading.Thread(target=library_watch.folder_back, daemon=True,
                          name="library-watch-rearm").start()
+    if moved:
+        # What opens here changed (gone_prefixes): the queue reads its
+        # slots' ways in again — in a process that holds one, off this thread
+        playback = sys.modules.get("playback.manager")
+        if playback is not None:
+            threading.Thread(target=playback.reach_changed, daemon=True,
+                             name="queue-reach").start()
 
 
 def folder_seen(unreachable: bool) -> None:
@@ -215,15 +224,23 @@ def gone_prefixes() -> List[str]:
     return [settings.library_db_root() + "/"] if gone else []
 
 
-def check_folder() -> None:
-    """A producer's look that nobody waits for (Library opened, a library
-    file found missing): the worker looks and wakes the notices if the
-    answer differs from what they show."""
+def check_folder(wait: bool = False) -> None:
+    """A producer's look (Library opened, a library file found missing, the
+    folder watcher's loss): the worker looks and wakes the notices if the
+    answer differs from what they show. Nobody waits for it but the play
+    path (`wait`): the file a new queue starts with is missing, and what
+    opens instead is read once the folder has answered — waited for no
+    longer than LOOK_PATIENCE_S; a slower answer is recorded when it
+    comes, and that record is the queue's event."""
     global _look_wanted, _look_wakes_wanted
     _ensure_worker()
     with _folder:
         _look_wanted = _look_wakes_wanted = True
         _folder.notify_all()
+        if wait:
+            # a look under way began before this miss: the one after it
+            after = _looks_done + (1 if _looking else 0)
+            _folder.wait_for(lambda: _looks_done > after, timeout=LOOK_PATIENCE_S)
 
 
 def folder_unreachable_now() -> bool:

@@ -16,6 +16,7 @@ the version (playback.substitute.Lane.slots).
 """
 
 import logging
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -26,6 +27,18 @@ from hqplayer_client import file_path_to_uri
 from sql_queries import HERE, best_rip_order
 
 logger = logging.getLogger(__name__)
+
+def gone_prefixes() -> list:
+    """scanner.gone_prefixes() — the stored-path prefixes of the folders
+    that do not answer now — as the play path reads it: the list is that
+    module's recorded observation, so a process that never loaded the
+    scanner has looked at no folder and holds none (the backend looks at
+    its start, PlaybackManager.init_from_settings). Never an import here:
+    the first one reads the catalogue, and this runs under the queue's
+    lock."""
+    scanner = sys.modules.get("scanner")
+    return scanner.gone_prefixes() if scanner is not None else []
+
 
 # Provider-resolved track durations for phantom tracks MusicBrainz has NO length
 # for — DISPLAY ONLY, deliberately never written to album_tracks.length_ms. That
@@ -259,26 +272,32 @@ class CanonicalQueue:
                 self._version += 1
             return moved
 
-    def reread(self, pick, plays) -> list[QueueItem]:
+    def reread(self, pick, plays, hold: Optional[QueueItem] = None) -> tuple[list[QueueItem], bool]:
         """What opens here changed under the queue (PlaybackManager.
         reach_changed): the way in of every slot `pick` names is read again
         through `plays` (the active output's native_plays), the origin
         untouched. A slot whose way in is a file again keeps nothing the
-        stream told of its length (an excerpt's 30 s). Returns the items
-        whose way in changed; the version is bumped when any did."""
+        stream told of its length (an excerpt's 30 s). `hold` — the slot the
+        output sounds — keeps its way in whatever was read. Returns the
+        items whose way in changed, and whether `hold`'s would have; the
+        version is bumped when any did."""
         with self._lock:
             chosen = [it for it in self._items if pick(it)]
             if not chosen:
-                return []
-            changed = []
+                return [], False
+            changed, owed = [], False
             for it, play in zip(chosen, plays(chosen)):
-                if play != it.play:
-                    _set_play(it, play)
-                    changed.append(it)
+                if play == it.play:
+                    continue
+                if it is hold:
+                    owed = True
+                    continue
+                _set_play(it, play)
+                changed.append(it)
             if changed:
                 _file_lengths(changed)
                 self._version += 1
-            return changed
+            return changed, owed
 
     def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
                   bump: bool = True, before=None) -> bool:
@@ -566,7 +585,6 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
              or (it.play or {}).get("media_file_id") is not None]
     if not bound:
         return out
-    from scanner import gone_prefixes
     rows = _db_query(_REBIND_SQL, {
         "gone": gone_prefixes(),
         "mids": [it.media_file_id if it.source.get("kind") == "file" else None

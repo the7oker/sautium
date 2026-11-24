@@ -120,6 +120,9 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     (root / "NW").mkdir(parents=True)
     monkeypatch.setattr(settings, "music_library_path", str(root))
     monkeypatch.setattr(settings, "music_host_path", None)
+    # The folder's state is process state: each test starts with it answering,
+    # once the look worker is idle (a look still running would land here)
+    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
     for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0)):
         monkeypatch.setattr(scanner, name, value)
     pool = psycopg2.pool.ThreadedConnectionPool(1, 6, dsn=scratch_dsn, options="-c timezone=UTC")
@@ -195,6 +198,8 @@ def node(scratch_dsn, monkeypatch, tmp_path):
            "phantoms": phantoms, "variant": variant, "root": root, "db_root": db_root,
            "gone": gone, "copy": copy, "streaming": streaming_service, "monkeypatch": monkeypatch}
     prov.land(*phantoms, *tracks)
+    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
+    _wait(lambda: not [t for t in threading.enumerate() if t.name == "queue-reach"])
     conn.close()
     pool.closeall()
 
@@ -339,3 +344,204 @@ def test_a_slot_that_streams_for_want_of_a_file_shows_a_streams_state(node):
     assert streamed(it)
     it.play = {"kind": "pending", "prepare": "transcode", "file": dict(it.source)}
     assert not streamed(it)             # a copy here, prepared for HQPlayer
+
+
+# -- the event, and who hears it (§3.3) -----------------------------------------
+
+
+def _queue(node, *, play=False):
+    from playback.queue import items_for_media_ids
+    items = items_for_media_ids(node["files"])
+    node["mgr"].replace_queue(items, play=play)
+    return items
+
+
+def _streams(it) -> bool:
+    return it.opener().get("kind") in ("pending", "proxy")
+
+
+def test_a_recorded_change_rereads_the_queue_once_and_the_folders_return_is_the_local_copy_again(node):
+    """The mount table, the watcher's loss, a file found missing: each
+    records the folder's answer, and a change of it is the queue's event —
+    one re-read, one new version, the output told once, the status carrying
+    it; the origins untouched, so the folder's return gives every slot its
+    own file back with no question."""
+    import scanner
+    mgr, out = node["mgr"], node["out"]
+    items = _queue(node)
+    origins = [dict(it.source) for it in items]
+    mgr._latest_status = {"state": "stopped", "track_index": 0}
+    out.changed.clear()
+    v = mgr.queue.version
+
+    scanner.folder_seen(True)                       # a producer's observation: the folder is gone
+    assert _wait(lambda: out.changed == ["rebind"])
+    assert all(_streams(it) for it in items) and mgr.queue.version == v + 1
+    assert _wait(lambda: mgr.latest_status.get("playlist_version") == v + 1)
+    assert [it.source for it in items] == origins
+    # each row says what its stream does, and the lane looked at its window
+    assert _wait(lambda: [s["index"] for s in mgr.slots_message()["slots"]] == [1, 2])
+    assert _wait(lambda: set(node["tracks"]) <= set(node["prov"].asked))
+    scanner.folder_seen(True)                       # said again: nothing changed, nothing is read
+    assert not _wait(lambda: len(out.changed) > 1, timeout=0.5)
+
+    scanner.folder_seen(False)                      # a library file served: it answers again
+    assert _wait(lambda: out.changed == ["rebind", "rebind"])
+    assert all(it.play is None for it in items) and mgr.queue.version == v + 2
+    assert [it.source for it in items] == origins
+    assert _wait(lambda: mgr.slots_message()["slots"] == [])
+
+
+def test_the_slot_the_output_sounds_keeps_its_way_in_until_the_output_leaves_it(node):
+    """The output's own end of the file it plays is the output's: a way in
+    swapped under the sounding slot would be that slot started over. It is
+    read when the output moves on — the next Play of it streams."""
+    import scanner
+    from playback.base import PlaybackStatus
+    mgr, out = node["mgr"], node["out"]
+    first, second = _queue(node)
+    mgr._on_backend_status(out, PlaybackStatus(state="playing", position=3.0, length=200.0,
+                                               queue_index=1))
+    scanner.folder_seen(True)
+    assert _wait(lambda: _streams(second))
+    assert first.play is None and mgr._reach_owed is first
+    mgr._on_backend_status(out, PlaybackStatus(state="playing", position=4.0, length=200.0,
+                                               queue_index=1))
+    assert not _wait(lambda: first.play is not None, timeout=0.5)       # still sounding
+    mgr._on_backend_status(out, PlaybackStatus(state="playing", position=0.0, length=200.0,
+                                               queue_index=2))
+    assert _wait(lambda: _streams(first))
+    assert mgr._reach_owed is None
+
+
+def test_a_new_queue_while_the_folder_is_gone_reads_its_file_slots(node):
+    """A file slot committed while the folder does not answer is read as
+    any slot's: no window in which the output is handed a path that does
+    not open."""
+    from playback.queue import items_for_media_ids
+    mgr = node["mgr"]
+    node["gone"](True)
+    items = _queue(node)
+    assert all(_streams(it) for it in items)
+    more = items_for_media_ids(node["files"][:1])
+    mgr.append(more)
+    assert _streams(more[0]) and more[0].source["kind"] == "file"
+
+
+def _pull_the_disk(node) -> None:
+    """The folder as a pulled disk leaves it: there, and empty — with no
+    event, as a share that died or a root that is itself a mount point."""
+    for f in (node["root"] / "NW").iterdir():
+        f.unlink()
+    (node["root"] / "NW").rmdir()
+
+
+def test_a_play_whose_first_file_is_missing_looks_at_the_folder_and_streams(node):
+    """The play path's own look, one stat of the file about to be opened: a
+    miss is a producer's observation, and the output is handed the queue as
+    it reads after it — never the path that does not open."""
+    import scanner
+    mgr, out = node["mgr"], node["out"]
+    _pull_the_disk(node)
+    assert scanner.gone_prefixes() == []            # nothing told the node
+    items = _queue(node, play=True)
+    assert scanner.gone_prefixes() == [node["db_root"] + "/"]
+    assert out.replaced == [["pending", "pending"]]
+    assert [it.source["kind"] for it in items] == ["file", "file"]
+    assert mgr.queue.snapshot() == items
+
+
+def test_a_play_of_which_nothing_opens_where_nothing_streams_is_refused_before_the_output(node):
+    from playback.manager import NotHere
+    from playback.queue import items_for_media_ids
+    mgr, out = node["mgr"], node["out"]
+    old = _queue(node)
+    out.replaced.clear()
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    _pull_the_disk(node)
+    with pytest.raises(NotHere) as refused:
+        mgr.replace_queue(items_for_media_ids(node["files"]), play=True)
+    assert refused.value.why == "disk"
+    assert out.replaced == [] and mgr.queue.snapshot() == old       # the old queue intact
+
+
+def test_a_first_file_that_is_there_asks_the_folder_nothing(node, monkeypatch):
+    import scanner
+    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: pytest.fail("the folder was looked at"))
+    items = _queue(node, play=True)
+    assert node["out"].replaced == [["file", "file"]] and all(it.play is None for it in items)
+
+
+def test_a_copy_set_away_streams_its_queued_slot_and_is_its_file_again_when_back(node):
+    """Q4, in the queue: a slot on an away file with no other copy keeps
+    its file as its origin and streams; the copy back, it is that file."""
+    mgr, out, cur = node["mgr"], node["out"], node["cur"]
+    first, second = _queue(node)
+    out.changed.clear()
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    mgr.rebind_files()                              # as the Rescan's notify does
+    assert _streams(first) and _streams(second)
+    assert (first.media_file_id, first.source["kind"], out.changed) == (node["files"][0], "file", ["rebind"])
+    cur.execute("UPDATE album_variants SET absent_since = NULL WHERE id = %s", (node["variant"],))
+    mgr.rebind_files()
+    assert first.play is None and second.play is None
+    assert out.changed == ["rebind", "rebind"]
+    mgr.rebind_files()                              # nothing moved: nothing told
+    assert out.changed == ["rebind", "rebind"]
+
+
+def test_a_slot_back_on_its_file_shows_the_files_length_not_the_excerpts(node):
+    """A stream's landing writes its own length on the slot (an excerpt's
+    30 s): the file back, the slot shows the file's."""
+    mgr = node["mgr"]
+    first, _second = _queue(node)
+    node["gone"](True)
+    mgr.reach_changed()
+    assert _streams(first)
+    first.duration_seconds, first.excerpt = 30.0, True
+    node["gone"](False)
+    mgr.reach_changed()
+    assert (first.play, first.duration_seconds, first.excerpt) == (None, 200.0, False)
+
+
+def test_the_start_looks_at_the_folder_before_the_first_queue_is_read(node, monkeypatch):
+    """Q3: the list is this process's observation, made again at each start
+    before the persisted queue is restored and its ways in read."""
+    import scanner
+    from dataclasses import asdict
+    from playback.manager import PlaybackManager
+    from playback.queue import items_for_media_ids
+    from routers import settings as settings_router
+    stored = {"items": [asdict(it) for it in items_for_media_ids(node["files"])]}
+    monkeypatch.setattr(settings_router, "_read",
+                        lambda key: {"player.queue": stored, "output.type": "browser"}.get(key))
+    monkeypatch.setattr(PlaybackManager, "_schedule_persist", lambda self: None)
+    _pull_the_disk(node)
+    fresh = PlaybackManager()
+    known = []
+    restore = fresh._restore_persisted_queue
+
+    def restoring():
+        known.append(scanner.gone_prefixes())
+        restore()
+    monkeypatch.setattr(fresh, "_restore_persisted_queue", restoring)
+    fresh.init_from_settings()
+    try:
+        assert known == [[node["db_root"] + "/"]]
+        assert [it.source["kind"] for it in fresh.queue.snapshot()] == ["file", "file"]
+        assert all(_streams(it) for it in fresh.queue.snapshot())
+    finally:
+        fresh.activate(None)
+
+
+def test_the_folder_watchers_loss_is_a_look_at_the_folder(node, monkeypatch):
+    import library_watch
+    import scanner
+    looked = []
+    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: looked.append(wait))
+    monkeypatch.setattr(library_watch, "_source", None)
+    monkeypatch.setattr(library_watch, "_state", dict(library_watch._state))
+    library_watch._lost("unmounted")
+    assert looked == [False]
+    library_watch._lost("the watch limit", library_watch.NO_EVENTS)      # no word about the folder
+    assert looked == [False]
