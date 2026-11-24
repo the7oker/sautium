@@ -4498,9 +4498,11 @@ catalogue: the scan compared paths only, Rescan included
   good. Few tracks is no incomplete album: only the album's own words make
   it wait.
 - **Arrival is the file's birth here.** A copy keeps its source's mtime, so
-  "New in my collection" orders by the birth time on this disk (statx,
-  CreationTime, st_birthtime), else the first read — never the mtime.
-  Through WSL's drvfs and Docker Desktop's 9p there is no birth time.
+  a file's arrival is its birth time on this disk (statx, CreationTime,
+  st_birthtime), else the first read — never the mtime. Through WSL's drvfs
+  and Docker Desktop's 9p there is no birth time. Since 2026-11-24 it
+  orders "New in my collection" inside one scan only; between scans the
+  entry into the library decides (below, "New is what entered last").
 
 ### The identity worker belongs to the process, not to a file (2026-11-18)
 
@@ -4578,6 +4580,86 @@ QUEUE-STREAM-DESIGN (private) holds the reading and the answers.
 - **The demo ledger reads the way in** (`QueueItem.stream_token`), never how
   a slot was queued: a demo-channel listen through a slot that streams for a
   copy this output cannot reach was never spent before (since 2026-11-01).
+
+### A tracklist slot says who wrote it (2026-11-24)
+
+After "Remove albums that are away" a box held 18 copies, 436 albums and
+4 161 tracks with no file (PI-NODE-2D, F21): `album_tracks` has three
+writers — the MusicBrainz mint, the materialiser that writes an owned
+album's tracklist from its files' tags for the seal, and the seed's and a
+share's rows — and no column said which wrote a row. The removal keeps an
+album while a slot holds it, so a removed copy left its album and tracks
+behind as a phantom built from the person's own tags, which nothing would
+ever fill on a node with the streaming library off.
+
+- **`album_tracks.source`** (`tracklist_source`: `mb` | `tag`, default
+  `mb`). The materialiser is the only writer of `tag`; the mint's upsert
+  sets `mb` — a slot MusicBrainz confirms is MusicBrainz's from then on; the
+  seed's and a share's rows keep the default (`imported` tells them apart).
+  Local: no payload column of the seal, never exported.
+- **A removal of files takes the `tag` slots they alone held** — of the
+  albums and tracks of the files it took, where no file here or at an
+  HQPlayer is left of that album for that track (`scanner.drop_tag_slots`) —
+  then the tracks, the copies and the album by the rules that stood. Three
+  removals do: the scanner's (a Rescan's yes, the Away row), the CUE
+  supersede, and an HQPlayer library's forget — whose files write no slot
+  but may be the last to hold one a removed local copy wrote. The plan is
+  the removal rolled back, so the question's counts name what goes.
+- **The backfill is conservative** (in the column's delta): `tag` where the
+  slot is the node's own, a file of the album names it whole — track, disc,
+  position, length — and it is no older than the album's first copy. In
+  doubt a slot is MusicBrainz's and stays: a wrong `mb` costs what F21
+  cost, a wrong `tag` would cost a phantom its slot until the artist's next
+  reconcile. On the reference library the design's SELECT classed about
+  40 200 of 41 700 owned slots as the files'; the backfill itself was run
+  on seeded rows only.
+- **A re-tag left the same shape.** `scanner.move_albums` let an album
+  follow its re-tagged copy only when no slot held it — and every album a
+  signing pass had met holds its own files' slots, so a title fixed in all
+  an album's files left the old album behind with no file. The slots its
+  own files' tags wrote no longer count as a tracklist the album holds apart
+  from its copy; from an album that stays (MusicBrainz's slots, another
+  copy), the moved files' `tag` slots go with them. So does the slot of a
+  track one file was re-titled off while another copy still holds the track.
+- **The rows already left are removed once**, at the owner's yes for the
+  one named step (`db_migrate`'s `tracklist_leftovers_v1`): the albums with
+  no copy, no release group, not imported and with no imported slot — a
+  shape only a copy that went leaves; the mint always has a release group,
+  the seed and a share write `imported`. A leftover that has a release
+  group cannot be told from a phantom and stays one.
+
+### New is what entered last (2026-11-24)
+
+"New in my collection" ordered albums by their files' birth time alone
+(LIBRARY-WATCH, 2026-11-17). On a box with two sticks it put the later one
+below: an exFAT stick keeps the day its files were copied onto it, ntfs-3g
+keeps none (the arrival is then the first read) — the stick scanned sixteen
+minutes after the other sorted two days before it (PI-NODE-2D, F15). The
+owner's rule: by entry into the database.
+
+- **`album_variants.entered_at`: the start of the scan round that made the
+  copy's row** — one instant for every copy one round makes (one run of the
+  scan queue's worker over one merged request is one call of
+  `scan_and_import`, which takes it at its entry; an HQPlayer library's sync
+  is a round of its own). Written at the copy's insert and never after: a
+  re-read in place, a canon move of the album, files joining the copy later
+  do not make it new; a copy split off by a re-tag takes its source's. Not
+  `created_at`, which inside a long scan runs in walk order — the alphabet.
+- **Inside one round the files' birth time decides.** A first scan of a
+  whole library is one round, and the only evidence of what came to the disk
+  last is the files' own. So the shelf's key is `(entered_at,
+  COALESCE(arrived_at, entered_at), album_id)`, of the album's newest copy
+  here, else of its newest at an HQPlayer; the cursor is that whole key, and
+  the index is that key (`idx_album_variants_entered_desc`), so a page reads
+  a page of it. The query before grouped every copy on every request and no
+  index could order it.
+- **No shelf reshuffled at the update**: the backfill gives a copy made
+  before this its arrival (else its row's creation); the rule governs what
+  enters from then on. A scan cut short and resumed is two rounds — what the
+  second made sorts above the first's.
+- The cold-start Recommendations and the assistant's "recently added"
+  recipes follow the same order; the album page's date of a copy stays its
+  files' arrival.
 
 ## Known Gotchas
 

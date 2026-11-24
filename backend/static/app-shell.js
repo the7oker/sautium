@@ -3502,7 +3502,7 @@
   // One implementation so the two affordances can't drift on what a page is.
   //
   // `initialCursor` is an opaque object echoed verbatim back into the next
-  // request as query params — `{before, before_id}` for Home's new-in-library,
+  // request as query params — `{before, before_arrived, before_id}` for Home's new-in-library,
   // `{seed, offset}` for Discovery shuffle, `{offset}` for a Discovery result
   // block. The server decides the cursor shape; the utility just plumbs it
   // through. `opts.baseParams` is a URLSearchParams the cursor rides on top of:

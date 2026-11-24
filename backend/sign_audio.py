@@ -320,13 +320,17 @@ def _materialize_owned_tracklists(cur) -> int:
     Runs before every signing pass, so a fresh scan's rows are sealed by the
     same pass that notices them; returns the track ids of the rows it minted
     so a scoped pass seals them too. Phantom rows need no materializing — the
-    MB mint wrote them — they seal once the track carries signable analysis."""
+    MB mint wrote them — they seal once the track carries signable analysis.
+
+    Its rows say whose they are (`source = 'tag'`, this function the only
+    writer of it): the removal of a copy takes the slots its files alone
+    held (scanner.drop_tag_slots), a slot MusicBrainz wrote stays."""
     cur.execute("""
         INSERT INTO album_tracks
-            (album_id, track_id, disc, position, recording_mbid, length_ms)
+            (album_id, track_id, disc, position, recording_mbid, length_ms, source)
         SELECT av.album_id, mf.track_id, COALESCE(mf.disc_number, 1),
                mf.track_number, mf.recording_mbid,
-               (mf.duration_seconds * 1000)::int
+               (mf.duration_seconds * 1000)::int, 'tag'
         FROM media_files mf
         JOIN album_variants av ON av.id = mf.album_variant_id
         WHERE mf.track_number IS NOT NULL

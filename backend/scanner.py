@@ -481,7 +481,8 @@ def _ensure_album(db: Session, album_id: str, title: str, credit: str,
 
 def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink,
                     stats: Dict[str, int], progress_cb: Optional[callable] = None,
-                    cancel_check: Optional[callable] = None) -> None:
+                    cancel_check: Optional[callable] = None,
+                    entered_at: Optional[datetime] = None) -> None:
     """Phase 2 of a scan: canonical entities and file rows from extracted
     metadata. ``entries`` = ``(dir_path, metadata)`` — the directory in DB
     form (the variant key) and the metadata as extract_metadata returns it
@@ -489,9 +490,16 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     Single-threaded with entity caches, one savepoint per file, a commit
     every 100 files; counts into ``stats`` (added, errors, unique_tracks).
     cancel_check stops after the current file, keeping what was committed.
+
+    ``entered_at`` is the start of the round this import belongs to (a scan
+    round, an HQPlayer library's sync): every copy the round makes carries
+    that one instant (album_variants.entered_at), written at the copy's
+    insert and never after. An import called on its own is a round of its
+    own.
     """
     for key in ("added", "errors", "unique_tracks"):
         stats.setdefault(key, 0)
+    entered_at = entered_at or datetime.now(timezone.utc)
 
     def _report(msg: str):
         if progress_cb:
@@ -647,6 +655,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                                 is_lossless=metadata.get("is_lossless", True),
                                 location=sink.location,
                                 hqp_endpoint_id=sink.hqp_endpoint_id,
+                                entered_at=entered_at,
                             )
                             db.add(variant)
                             db.flush()
@@ -1024,6 +1033,12 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
                                    {"id": row.id})
                         stats["moved"] = stats.get("moved", 0) + (track != row.track_id)
+                        if track != row.track_id:
+                            # the slot this file's tags wrote for the track it
+                            # left, where no other file of its album holds it:
+                            # it would keep the position from the track the
+                            # file is on now
+                            drop_tag_slots(db, [row.album_id], [row.track_id])
                     if row.stat_mtime_ns is not None and (
                             row.stat_mtime_ns != (st.mtime_ns if st else None)
                             or row.file_size_bytes != md.get("file_size_bytes")):
@@ -1094,9 +1109,11 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
     the folder's shape did) move to the album of their new group, by the
     folder rule (_Albums.resolve). A copy all of whose files move to one
     group moves whole (_merge_album_variants), and an album left with no
-    other copy follows it (_update_album_uuid: sessions' album origins,
-    descriptions, genres and its seal with it) — so a title fixed in all an
-    album's files renames the album rather than leaving an empty one. A copy
+    other copy and no tracklist but the one its own files' tags wrote follows
+    it (_update_album_uuid: sessions' album origins, descriptions, genres,
+    those slots and its seal with it) — so a title fixed in all an album's
+    files renames the album rather than leaving an empty one; from an album
+    that stays, the slots the moved files' tags wrote go with them. A copy
     or an album left holding nothing goes, as the CUE supersede drops what
     it leaves: nothing the owner sees is removed — the files are there under
     their new album. Returns how many files moved."""
@@ -1114,6 +1131,8 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                                   {"v": vid}).scalars())
             groups = {group_key(t, c) for _f, t, c, _d in files}
             _f0, title, credit, _disc = files[0]
+            tracks = list(db.execute(text(f"SELECT DISTINCT track_id FROM {table} WHERE id = ANY(:f)"),
+                                     {"f": [f for f, *_ in files]}).scalars())
             with db.begin_nested():
                 if held <= {f for f, *_ in files} and len(groups) == 1:
                     target, minted = albums.resolve(v.directory_path, title, credit,
@@ -1121,9 +1140,15 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                     if minted:
                         _ensure_album(db, target, title, credit)
                     if target != v.album_id:
+                        # The slots its own files' tags wrote are the copy's,
+                        # not a tracklist the album holds apart from it: with
+                        # them counted, every album a signing pass had met
+                        # stayed behind its re-tagged copy as an album with
+                        # no file (PI-NODE-2D item 5).
                         alone = not db.execute(text("""
                             SELECT EXISTS (SELECT 1 FROM album_variants WHERE album_id = :a AND id <> :v)
-                                OR EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a)"""),
+                                OR EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a
+                                                                        AND (source = 'mb' OR imported))"""),
                             {"a": v.album_id, "v": vid}).scalar()
                         if alone:
                             # the old album's credits are its raw tags' (or the
@@ -1133,6 +1158,7 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                             _update_album_uuid(db, v.album_id, target)
                         else:
                             _merge_album_variants(db, target, variant_ids=[vid])
+                            drop_tag_slots(db, [v.album_id], tracks)
                         if minted:
                             # minted from (title, credit): its credit is that one, not
                             # the one the merge brought along from the old album
@@ -1162,15 +1188,16 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                             dest = db.execute(text("""
                                 INSERT INTO album_variants (album_id, directory_path, raw_title, raw_artist,
                                                             location, hqp_endpoint_id, sample_rate,
-                                                            bit_depth, is_lossless)
+                                                            bit_depth, is_lossless, entered_at)
                                 SELECT :a, :d, :t, :c, location, hqp_endpoint_id, sample_rate,
-                                       bit_depth, is_lossless
+                                       bit_depth, is_lossless, entered_at
                                   FROM album_variants WHERE id = :v RETURNING id"""),
                                 {"a": target, "d": v.directory_path, "t": t, "c": c, "v": vid}).scalar()
                             albums.forget(v.directory_path)
                         db.execute(text(f"UPDATE {table} SET album_variant_id = :dest WHERE id = :f"),
                                    {"dest": dest, "f": fid})
                         touched_albums.update({v.album_id, target})
+                    drop_tag_slots(db, [v.album_id], tracks)
                     db.execute(text("""DELETE FROM album_variants av WHERE av.id = :v
                                          AND NOT EXISTS (SELECT 1 FROM media_files WHERE album_variant_id = :v)
                                          AND NOT EXISTS (SELECT 1 FROM hqp_library_files
@@ -1785,6 +1812,9 @@ class LibraryScanner:
             Dictionary with statistics (processed, added, skipped, reread,
             errors).
         """
+        # One call is one round of the scan queue (main._scan_round): its
+        # start is the instant every copy it makes enters the library at.
+        round_started = datetime.now(timezone.utc)
         stats = {
             "processed": 0,
             "added": 0,
@@ -2028,7 +2058,8 @@ class LibraryScanner:
         if rereads:
             reread_metadata(rereads, assignments, stats, moves, touched_albums)
         import_metadata(new_entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
-                        cancel_check=None if cancelled_in_phase1 else cancel_check)
+                        cancel_check=None if cancelled_in_phase1 else cancel_check,
+                        entered_at=round_started)
         # The rows of the same folders whose folder now makes another album
         # of them: the shape changed as files arrived or were re-tagged.
         if existing:
@@ -2075,6 +2106,14 @@ class LibraryScanner:
                           AND NOT EXISTS (SELECT 1 FROM media_files mf
                                           WHERE mf.track_id = x.track_id)
                     """), {"tids": tids})
+                vids = list(superseded_variants)
+                affected_albums = list(db.execute(text("""
+                    SELECT DISTINCT album_id FROM album_variants
+                    WHERE id = ANY(:vids)
+                """), {"vids": vids}).scalars())
+                # the slot a superseded row's tags wrote would hold its track —
+                # and its position, against the slice that takes it
+                drop_tag_slots(db, affected_albums, tids)
                 r = db.execute(text(f"""
                     DELETE FROM tracks t WHERE t.id = ANY(CAST(:tids AS uuid[]))
                       AND {ORPHAN_TRACK_SQL.format(t='t')}
@@ -2089,11 +2128,6 @@ class LibraryScanner:
                 # from what is left; one left with no file keeps them
                 derive_composers(db, tids)
 
-                vids = list(superseded_variants)
-                affected_albums = list(db.execute(text("""
-                    SELECT DISTINCT album_id FROM album_variants
-                    WHERE id = ANY(:vids)
-                """), {"vids": vids}).scalars())
                 db.execute(text("""
                     DELETE FROM album_variants WHERE id = ANY(:vids)
                       AND NOT EXISTS (SELECT 1 FROM media_files mf
@@ -2513,6 +2547,28 @@ def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
     return missing
 
 
+def drop_tag_slots(db: Session, album_ids: Sequence[Any], track_ids: Sequence[Any]) -> int:
+    """The tracklist slots this node's own files wrote
+    (album_tracks.source = 'tag', sign_audio._materialize_owned_tracklists)
+    for `track_ids` in `album_ids`, where no file is left — here or at an
+    HQPlayer — of a copy of that album for that track. Called by a removal
+    of files, after their delete and before the tracks', and by a move of
+    files out of an album (move_albums): a slot whose one author was a file
+    that went goes with it, so the track and the album go by the rules that
+    stand instead of staying as a phantom built from the person's tags. A
+    slot MusicBrainz wrote ('mb') and a peer's (`imported`) are never its to
+    take. Returns how many went."""
+    return db.execute(text("""
+        DELETE FROM album_tracks at
+         WHERE at.source = 'tag' AND NOT at.imported
+           AND at.album_id = ANY(CAST(:albums AS uuid[]))
+           AND at.track_id = ANY(CAST(:tracks AS uuid[]))
+           AND NOT EXISTS (SELECT 1 FROM owned_files f
+                             JOIN album_variants av ON av.id = f.album_variant_id
+                            WHERE av.album_id = at.album_id AND f.track_id = at.track_id)
+    """), {"albums": [str(a) for a in album_ids], "tracks": [str(t) for t in track_ids]}).rowcount
+
+
 def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool,
                  progress_cb: Optional[callable], cancel_check: Optional[callable],
                  bound: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
@@ -2566,6 +2622,11 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         """), {"t": [str(t) for t in track_ids], "a": [str(a) for a in album_ids]})]
 
         db.query(MediaFile).filter(MediaFile.id.in_(missing_ids)).delete(synchronize_session=False)
+
+        # The same scope, a second time: the slots these files' tags wrote, in
+        # these albums, for these tracks — never "every slot no file backs",
+        # which is the whole phantom layer's tracklists.
+        drop_tag_slots(db, album_ids, track_ids)
 
         # Only true orphans go (canon.identity.ORPHAN_TRACK_SQL): embeddings +
         # analysis_sources cascade with the track, and neither the node's own
