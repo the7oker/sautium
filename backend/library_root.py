@@ -2,8 +2,10 @@
 (PI-NODE-2B §4.3).
 
 A node its console setup made is given ROOTS: the folders it may read music
-from — where the machine's automount puts plugged disks, a folder named at
-setup — each bound into the container read-only at its own host path
+from — the folder the machine mounts music disks in (its automount, or the
+setup's line of /etc/fstab for one disk: the same point for a disk whoever
+mounts it), a folder named at setup — each bound into the container
+read-only at its own host path
 (`SAUTIUM_LIBRARY_ROOTS`, from the setup's compose override, which no
 container can write). The path the library stores is then the path an
 HQPlayer on the same machine opens, with no translation. Under those roots
@@ -241,9 +243,11 @@ def unread() -> List[Dict[str, Any]]:
 
 
 def _root_labels() -> Dict[str, str]:
-    """The labels the setup read for the roots that are disks themselves (a
-    disk its fstab line mounts: no automount leaves a `.names` entry for it,
-    and a container cannot ask blkid): root → label, a stranger's text."""
+    """The labels the setup read for the roots that are disks themselves — a
+    mount point a person named, or the setup's own fstab line of before
+    2026-11-24, which mounted its disk at the root (nothing leaves a `.names`
+    entry for such a disk, and a container cannot ask blkid): root → label, a
+    stranger's text. A disk mounted in the disks' folder has its label there."""
     try:
         named = json.loads(settings.sautium_library_root_labels or "{}")
     except ValueError:
@@ -303,8 +307,9 @@ def _gone(root: str, mounts: Dict[str, bool]) -> bool:
 
 def _disk_points(mounts: Dict[str, bool]) -> List[tuple]:
     """(path, root, name) of each disk a choice can start at: every one
-    mounted in the automount's folder, and every root that is a disk itself
-    (name None: no automount named it)."""
+    mounted in the disks' folder — by the automount or by a line of
+    /etc/fstab, alike — and every root that is a disk itself (name None:
+    nothing named it)."""
     points = []
     for root in roots():
         if not os.path.isdir(root):
@@ -418,6 +423,7 @@ def folders(under: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _disks_folder(root: str) -> bool:
-    """`root` is the automount's folder (it carries the labels' folder): the
-    place disks appear in, not itself a folder of music."""
+    """`root` is the folder disks are mounted in (it carries the labels'
+    folder, which the automount's install and the setup's fstab block both
+    make): the place disks appear in, not itself a folder of music."""
     return os.path.isdir(os.path.join(root, NAMES_DIR))

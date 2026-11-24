@@ -661,7 +661,8 @@ See:
   `poll()` on the mount table (`backend/mount_watch.py`), never a timer. The
   setup never runs `sudo`: it prints root steps (lingering; the automount,
   not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
-  `--music` folder on a disk such a desktop mounts). `SAUTIUM_BIRTH_PRESET`
+  `--music` folder on a disk such a desktop — or a person by hand — mounts).
+  `SAUTIUM_BIRTH_PRESET`
   (`nano`) is read once per database (`db_migrate`, `birth_preset_v1`).
   Since 2026-11-22 (PI-NODE-2C): a root's bind makes its own folder
   (`create_host_path`), so a root that is gone never stops the node's start —
@@ -678,6 +679,17 @@ See:
   preset reads the MEDIUM under Docker's data (`machine_tier.storage_medium`:
   a microSD card or a USB stick is born Nano, an SSD in a USB case is not),
   and a swap file on a card is said with its root step.
+  Since 2026-11-24 (PI-NODE-2D): **a root is never a mount point the setup
+  makes** — the fstab line mounts its disk at `/media/sautium/<UUID>`, the
+  automount's own point for that disk (its label in `.names/<UUID>`, written
+  by the block), under the one root the node has for disks; bound into a
+  container made while the disk was in, a mount point was the disk's
+  filesystem itself, and the node saw neither its pull nor its return. A disk
+  keeps its path whoever mounts it, and a disk added later changes no
+  override. An install whose line mounts at `/mnt/sautium-<UUID>` (that point
+  its root) is named by `status` and `roots` and offered the move as one
+  block; a `--music` folder that is someone's own mount point is taken as
+  named and said — never its parent, which the person did not name.
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
   names it). `config.build_identity()` is the one reader — `/config`,

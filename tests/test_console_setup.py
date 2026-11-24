@@ -336,28 +336,53 @@ def test_a_first_run_makes_a_node_that_picks_its_folder(machine_ready, tmp_path)
     assert setup.load_state()["done"] is True
 
 
-def test_a_folder_on_a_disk_no_fstab_line_mounts_is_said(machine_ready, monkeypatch, tmp_path, capsys):
-    music = tmp_path / "Music"
-    music.mkdir()
-    answers = {("findmnt", "-n", "-o", "TARGET", "-T"): (0, b"/mnt/usb\n"), ("findmnt", "--fstab", "-n"): (1, b"")}
-
+def _findmnt(answers):
+    """setup.run with findmnt's answers of the test's own: {leading args: (exit, output)}."""
     def run(args, **kw):
         code, said = next((v for k, v in answers.items() if tuple(args[:len(k)]) == k), (0, b""))
         return subprocess.CompletedProcess(args, code, said, b"")
-    monkeypatch.setattr(setup, "run", run)
+    return run
+
+
+def test_a_folder_that_lies_on_a_mount_the_setup_has_no_line_for_is_taken_and_said(
+        machine_ready, monkeypatch, tmp_path, capsys):
+    """Someone's own line of /etc/fstab, a network share, a disk mounted by
+    hand that cannot be read whole: the folder is the root, as named — never
+    its parent — and the setup says what a mount point means to a node that
+    holds it from its start (PI-NODE-2D §2.5). It said "Sautium does not
+    start" of such a disk until the roots' binds made their own folders."""
+    music = tmp_path / "Music"
+    music.mkdir()
+    at_start = "Sautium sees what is mounted there when Sautium starts."
+    later = ("A disk unplugged or put back while Sautium runs is not seen until Sautium is started\n"
+             "again (./sautium).")
+    # a folder ON a disk no line of fstab mounts, whose mount findmnt cannot name whole
+    answers = {("findmnt", "-n", "-o", "TARGET", "-T"): (0, b"/mnt/usb\n"), ("findmnt", "--fstab", "-n"): (1, b"")}
+    monkeypatch.setattr(setup, "run", _findmnt(answers))
     assert setup.mounted_outside_fstab(str(music)) == "/mnt/usb"
     assert setup.main(["--music", str(music), "--yes"]) == 0
     said = capsys.readouterr().out
-    assert "is on a disk mounted at /mnt/usb, which no line of /etc/fstab mounts" in said
-    assert "Sautium does not start: mount the disk" in said and "docker compose up -d" in said
-    # The system's own disk, or one fstab mounts: nothing to say
-    answers[("findmnt", "--fstab", "-n")] = (0, b"/mnt/usb /dev/sda1 ext4\n")
-    assert setup.mounted_outside_fstab(str(music)) is None
-    answers[("findmnt", "-n", "-o", "TARGET", "-T")] = (0, b"/\n")
-    answers[("findmnt", "--fstab", "-n")] = (1, b"")
+    assert f"{music} is on a disk mounted at /mnt/usb, which no line of /etc/fstab mounts: {at_start}\n{later}\n" in said
+    assert "does not start" not in said and "sudo" not in said
+    assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [str(music), setup.AUTOMOUNT_BASE]
+    # the folder IS a mount point, by a line of fstab the person wrote (or a share's own mount)
+    answers[("findmnt", "-n", "-o", "TARGET", "-T")] = (0, str(music).encode() + b"\n")
+    answers[("findmnt", "--fstab", "-n")] = (0, str(music).encode() + b" /dev/sdb1 ext4\n")
     assert setup.mounted_outside_fstab(str(music)) is None
     assert setup.main(["--music", str(music), "--yes"]) == 0
-    assert "no line of /etc/fstab" not in capsys.readouterr().out
+    said = capsys.readouterr().out
+    assert f"{music} is a mount point: {at_start}\n{later}\n" in said and "sudo" not in said
+    assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [str(music), setup.AUTOMOUNT_BASE]
+    # its parent is no folder of music: refused where a person names it, never taken in their place
+    for parent in ("/mnt", "/media", "/srv"):
+        assert setup.root_refusal(parent, machine_ready.root) is not None
+    # A folder of a disk fstab mounts above it, and one of the system's own disk: nothing to say
+    for target in (b"/mnt/usb\n", b"/\n"):
+        answers[("findmnt", "-n", "-o", "TARGET", "-T")] = (0, target)
+        assert setup.mounted_outside_fstab(str(music)) is None
+        assert setup.main(["--music", str(music), "--yes"]) == 0
+        said = capsys.readouterr().out
+        assert "mount point" not in said and "no line of /etc/fstab" not in said
 
 
 def test_an_install_made_by_hand_keeps_its_music_line(machine_ready, monkeypatch, tmp_path, capsys):
@@ -380,50 +405,111 @@ def test_an_install_made_by_hand_keeps_its_music_line(machine_ready, monkeypatch
     assert "delete that line from .env" in capsys.readouterr().out and machine_ready.ran == []
 
 
-def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine_ready, monkeypatch, capsys):
-    """Bound as it is, the node would not start before someone signs in to
-    the desktop: the setup prints the one fstab line and stops, and names the
-    folder to give it afterwards."""
-    found = json.dumps({"filesystems": [{"source": "/dev/sda1", "target": "/media/pi/Elements",
-                                         "fstype": "exfat", "uuid": "4A21-0000"}]})
-    plan = setup.boot_mount("/media/pi/Elements/Music/Jazz", found, 1000, 1000)
+ELEMENTS = {"source": "/dev/sda1", "target": "/media/pi/Elements", "fstype": "exfat", "uuid": "4A21-0000",
+            "label": "Elements"}
+PLUG_4A21 = ",x-systemd.before=docker.service,x-systemd.wanted-by=dev-disk-by\\x2duuid-4A21\\x2d0000.device 0 0"
+LINE_4A21 = ("UUID=4A21-0000 /media/sautium/4A21-0000 exfat ro,nofail,nosuid,nodev,noexec,uid=1000,gid=1000,"
+             "fmask=0133,dmask=0022" + PLUG_4A21)
+
+
+def _mount(**over):
+    return json.dumps({"filesystems": [dict(ELEMENTS, **over)]})
+
+
+def test_the_line_mounts_a_music_disk_at_the_automounts_own_point():
+    """The line's mount point is /media/sautium/<UUID> — where the automount
+    would put that disk, under the one root the node has for disks — so no
+    root is a mount point. At /mnt/sautium-<UUID>, which was then given as a
+    root, a container made while the disk was in held the disk's filesystem:
+    a pull was never seen and the disk never came back (PI-NODE-2D §2, F16)."""
+    plan = setup.boot_mount("/media/pi/Elements/Music/Jazz", _mount(), 1000, 1000)
     # The disk's own device unit wants the mount: it starts at every plug, not only at a start of the
     # machine. `nofail` stays for a systemd that does not know the option; nothing waits for the device
-    systemd = ",x-systemd.before=docker.service,x-systemd.wanted-by=dev-disk-by\\x2duuid-4A21\\x2d0000.device 0 0"
     assert plan == {
-        "point": "/mnt/sautium-4A21-0000", "folder": "/mnt/sautium-4A21-0000/Music/Jazz", "device": "/dev/sda1",
-        "at_plug": True,
-        "line": "UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat "
-                "ro,nofail,nosuid,nodev,noexec,uid=1000,gid=1000,fmask=0133,dmask=0022" + systemd}
-    ext4 = setup.boot_mount("/media/pi/disk", json.dumps({"filesystems": [{
-        "source": "/dev/sda1; reboot", "target": "/media/pi/disk", "fstype": "ext4",
-        "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}), 1000, 1000)
-    assert ext4["line"].endswith(
-        " ext4 ro,nofail,nosuid,nodev,noexec,noload,x-systemd.before=docker.service,x-systemd.wanted-by="
+        "uuid": "4A21-0000", "point": "/media/sautium/4A21-0000", "folder": "/media/sautium/4A21-0000/Music/Jazz",
+        "under": "Music/Jazz", "device": "/dev/sda1", "label": "Elements", "at_plug": True, "line": LINE_4A21}
+    assert setup.BOOT_MOUNT_POINT.fullmatch(plan["point"]).group(1) == "4A21-0000"
+    assert not setup.BOOT_MOUNT_POINT.fullmatch("/media/sautium") and not setup.BOOT_MOUNT_POINT.fullmatch(
+        "/media/sautium/4A21-0000/Music")
+    # … and its mount unit is the automount's point's own, as systemd names it
+    assert setup.unit_name(plan["point"], "mount") == "media-sautium-4A21\\x2d0000.mount"
+    ext4 = setup.boot_mount("/media/pi/disk", _mount(source="/dev/sda1; reboot", target="/media/pi/disk", fstype="ext4",
+                                                     uuid="0a1b2c3d-0000-4000-8000-000000000000", label=None),
+                            1000, 1000)
+    assert ext4["line"] == (
+        "UUID=0a1b2c3d-0000-4000-8000-000000000000 /media/sautium/0a1b2c3d-0000-4000-8000-000000000000 ext4 "
+        "ro,nofail,nosuid,nodev,noexec,noload,x-systemd.before=docker.service,x-systemd.wanted-by="
         "dev-disk-by\\x2duuid-0a1b2c3d\\x2d0000\\x2d4000\\x2d8000\\x2d000000000000.device 0 0")
     assert "device-timeout" not in ext4["line"]
+    assert (ext4["folder"], ext4["under"], ext4["label"]) == (ext4["point"], "", "")
+    # A device name no command carries: the disk is named by its UUID's own link
+    assert ext4["device"] == "/dev/disk/by-uuid/0a1b2c3d-0000-4000-8000-000000000000"
     # A systemd that does not know the option (under 245) gets the line of before, and is told so
-    old = setup.boot_mount("/media/pi/Elements/Music/Jazz", found, 1000, 1000, systemd=241)
+    old = setup.boot_mount("/media/pi/Elements/Music/Jazz", _mount(), 1000, 1000, systemd=241)
     assert old["line"].endswith(",x-systemd.before=docker.service,x-systemd.device-timeout=10s 0 0")
     assert "wanted-by" not in old["line"] and old["at_plug"] is False
-    # A device name no command carries: the disk is named by its UUID's own link
-    assert ext4["folder"] == ext4["point"]
-    assert ext4["device"] == "/dev/disk/by-uuid/0a1b2c3d-0000-4000-8000-000000000000"
-    # A mount through FUSE says `fuseblk` for NTFS and exFAT alike: the disk itself says which
-    fuse = json.dumps({"filesystems": [{"source": "/dev/sdb1", "target": "/media/pi/E", "fstype": "fuseblk",
-                                        "uuid": "4A21-0000"}]})
+
+
+def test_a_label_is_a_strangers_text_cut_and_one_with_a_quote_is_not_carried():
+    """The block writes the label between single quotes; a disk whose label
+    holds one goes by its UUID."""
+    assert setup.boot_mount("/media/pi/x", _mount(target="/media/pi/x", label="It's \"live\""), 1000, 1000)["label"] == ""
+    hostile = 'My "disk" ${HOME} $(reboot); \\ # Му\x1b[31m\n'
+    found = setup.boot_mount("/media/pi/x", _mount(target="/media/pi/x", label=hostile), 1000, 1000)
+    assert found["label"] == 'My "disk" ${HOME} $(reboot); \\ # Му[31m'
+    steps = setup.line_steps(found)
+    written = subprocess.run(["sh", "-c", "\n".join(steps[steps.index(f"T='{found['label']}'"):][:2]).replace(
+        '| sudo tee "$B/.names/$U" >/dev/null', "")], capture_output=True, text=True, cwd="/")
+    assert written.stdout == found["label"] + "\n" and written.stderr == ""     # each letter as itself
+    # no label: no label step, and nothing of the disk's own words in the block
+    bare = setup.line_steps(setup.boot_mount("/media/pi/x", _mount(target="/media/pi/x", label=None), 1000, 1000))
+    assert not any(line.startswith("T=") or ".names/$U" in line for line in bare)
+    assert setup.named({"label": "", "under": "Music"}) == "the disk › Music"
+    assert setup.named({"label": "Elements", "under": ""}) == '"Elements"'
+
+
+def test_the_block_lets_go_of_the_disks_present_hold_first(tmp_path, monkeypatch):
+    """A desktop's by umount of the device; the automount's by stopping its
+    unit, whose own stop unmounts and removes its label file — else a later
+    pull's stop would take the line's mount point and label with it (§2.3)."""
+    found = setup.boot_mount("/media/pi/Elements/Music", _mount(), 1000, 1000)
+    state = tmp_path / "state"
+    state.mkdir()
+    assert setup.let_go(found, ["/media/pi/Elements"], str(state)) == ["sudo umount /dev/sda1"]
+    assert setup.let_go(found, [], str(state)) == []                  # the disk is out: nothing holds it
+    (state / "sda1").write_text("4A21-0000\n")
+    assert setup.let_go(found, ["/media/sautium/4A21-0000"], str(state)) == [
+        "sudo systemctl stop sautium-automount@sda1.service"]
+    # held twice — the automount's point and a desktop's: the unit first, then the device's one mount left
+    assert setup.let_go(found, ["/media/sautium/4A21-0000", "/media/pi/Elements"], str(state)) == [
+        "sudo systemctl stop sautium-automount@sda1.service", "sudo umount /dev/sda1"]
+    # a state file that names another point (a second volume claiming the UUID) is not this mount's
+    (state / "sda1").write_text("4A21-0000-sda1\n")
+    assert setup.let_go(found, ["/media/sautium/4A21-0000"], str(state)) == ["sudo umount /dev/sda1"]
+    (state / "sda1").unlink()
+    (state / "sda1").symlink_to(tmp_path / "elsewhere")              # root's folder; read as a stranger's all the same
+    assert setup.let_go(found, ["/media/sautium/4A21-0000"], str(state)) == ["sudo umount /dev/sda1"]
+
+
+def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_line_and_is_chosen_under_the_disks_folder(
+        machine_ready, monkeypatch, capsys):
+    """Bound as it is, the node would not see the disk before someone signs
+    in to the desktop: the setup prints the one fstab line. Pasted, the disk
+    lies under the folder the node reads disks in and the node is given no
+    new root; not pasted, the setup stops — a folder ON a disk the desktop
+    mounts is never a root."""
+    fuse = _mount(source="/dev/sdb1", target="/media/pi/E", fstype="fuseblk")
     asked = []
     # NTFS by the automount's own choice: ntfs-3g where it is installed, the kernel's driver where not
     for on_disk, driver, has_3g in (("exfat", "exfat", True), ("ntfs", "ntfs-3g", True), ("ntfs", "ntfs3", False)):
         monkeypatch.setattr(setup, "ntfs_3g", lambda h=has_3g: h)
         line = setup.boot_mount("/media/pi/E", fuse, 1000, 1000, disk_type=lambda d, t=on_disk: asked.append(d) or t)
-        assert f" /mnt/sautium-4A21-0000 {driver} ro,nofail," in line["line"], on_disk
+        assert f" /media/sautium/4A21-0000 {driver} ro,nofail," in line["line"], on_disk
     assert asked == ["/dev/sdb1"] * 3
     assert setup.boot_mount("/media/pi/E", fuse, 1000, 1000, disk_type=lambda d: "") is None
     # The system's own disk (a plain folder under /media): never an fstab line for the root filesystem
-    assert setup.boot_mount("/media/music/flac", json.dumps({"filesystems": [{
-        "source": "/dev/mmcblk0p2", "target": "/", "fstype": "ext4", "uuid": "0a1b2c3d-0000-4000-8000-000000000000"}]}),
-        1000, 1000) is None
+    assert setup.boot_mount("/media/music/flac", _mount(source="/dev/mmcblk0p2", target="/", fstype="ext4",
+                                                        uuid="0a1b2c3d-0000-4000-8000-000000000000"), 1000, 1000) is None
     # What cannot be read whole, a filesystem the automount does not know, a UUID that is not one: no line
     for bad in ("", "{}", json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "btrfs", "uuid": "abcd-ef"}]}),
                 json.dumps({"filesystems": [{"target": "/media/pi/x", "fstype": "vfat", "uuid": "4A21 0000; reboot"}]}),
@@ -443,46 +529,132 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_boot_mount_first(machine
     assert setup.root_refusal("/media/hdd", machine_ready.root) is None
     assert setup.root_refusal("/media/pi/Elements/Music", machine_ready.root) is None
     assert setup.root_refusal("/run/media/pi/Elements/Music", machine_ready.root) is None
-    monkeypatch.setattr(setup, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, found.encode(), b""))
+
+    fstab = {"pasted": False}
+    answers = {("findmnt", "-n", "-o", "TARGET", "-T"): (0, b"/media/pi/Elements\n"),
+               ("findmnt", "--fstab", "-n", "-o", "TARGET"): (0, b"/\n"),
+               ("findmnt", "--fstab", "-n"): (1, b""),
+               ("findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID,LABEL", "-T"): (0, _mount().encode()),
+               ("findmnt", "-rn", "-o", "TARGET", "-S", "UUID=4A21-0000"): (0, b"/media/pi/Elements\n")}
+
+    def run(args, **kw):
+        if args[:3] == ["findmnt", "--fstab", "-J"]:
+            line = {"source": "UUID=4A21-0000", "fstype": "exfat", "options": LINE_4A21.split()[3]}
+            return subprocess.CompletedProcess(args, 0, json.dumps({"filesystems": [line]}).encode() if (
+                fstab["pasted"] and args[-1] == "/media/sautium/4A21-0000") else b"", b"")
+        if fstab["pasted"] and args[:5] == ["findmnt", "--fstab", "-n", "-o", "TARGET"]:
+            return subprocess.CompletedProcess(args, 0, b"/\n/media/sautium/4A21-0000\n", b"")
+        return _findmnt(answers)(args, **kw)
+    monkeypatch.setattr(setup, "run", run)
     monkeypatch.setattr(setup, "desktop_automounter", lambda: True)
-    monkeypatch.setattr(setup, "mounted_outside_fstab", lambda real: "/media/pi/Elements")
     monkeypatch.setattr(setup.os, "getuid", lambda: 1000)       # the person, wherever the suite runs
     monkeypatch.setattr(setup.os, "getgid", lambda: 1000)
     assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 1
     said = capsys.readouterr().out
     pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
-    commands = [line for line in pasted if line.startswith("sudo ") or "| sudo tee" in line]
-    # The desktop's hold let go first: the same disk is not mounted read-only beside a mount for writing
-    assert commands[:5] == [
-        "sudo umount /dev/sda1", "sudo mkdir -p /mnt/sautium-4A21-0000",
+    undo = pasted.index("P=/media/sautium/4A21-0000")
+    commands = [line for line in pasted[:undo] if not line.startswith(("L=", "T="))]
+    # In the block's order (§2.3): the desktop's hold let go — the same disk is not mounted read-only
+    # beside a mount for writing —, the folder disks are mounted in and its labels' folder, the mount
+    # point, the label, the line, systemd told, the mount
+    assert commands == [
+        "sudo umount /dev/sda1", "B=/media/sautium", "U=4A21-0000",
+        'sudo install -d -m 0755 "$B" "$B/.names"', 'sudo mkdir -p "$B/$U"',
+        'printf \'%s\\n\' "$T" | sudo tee "$B/.names/$U" >/dev/null',
         "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab",
-        "sudo systemctl daemon-reload", "sudo mount /mnt/sautium-4A21-0000"]
+        "sudo systemctl daemon-reload", 'sudo mount "$B/$U"']
+    assert "T='Elements'" in pasted[:undo]
     # The line itself is built in short pieces — a line a terminal or a chat wrapped arrives as two
     # commands — and the pieces build the very line (PI-NODE-2B item 8, W2)
     pieces = [line for line in pasted if line.startswith(("L='", 'L="$L"\''))]
     assert len(pieces) > 1 and max(len(line) for line in pasted) <= 76, pasted
-    assert "whenever it is plugged in — at a start of the machine and later" in said
     built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
-    assert built == ("UUID=4A21-0000 /mnt/sautium-4A21-0000 exfat ro,nofail,nosuid,nodev,noexec,uid=1000,"
-                     "gid=1000,fmask=0133,dmask=0022" + systemd)
-    # its undo, the mount point in a variable
-    assert "P=/mnt/sautium-4A21-0000" in pasted and 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in commands
-    assert "Elements" not in " ".join(commands)        # the volume's own name is in no root command
-    # The root to name is the mount point — there with or without the disk — and the folder on it is
-    # chosen in the Web UI: a bind of a folder ON the disk would stop the node's start without the disk
-    assert "then run:  ./sautium --music /mnt/sautium-4A21-0000\n" in said
-    assert "and choose Music as the music folder in Sautium" in said
-    assert "--music /mnt/sautium-4A21-0000/Music" not in said
+    assert built == LINE_4A21
+    assert ("/media/pi/Elements/Music is on a disk this machine's desktop mounts only while you are signed in to it.\n"
+            "Sautium starts with the machine, before that.\n"
+            "This mounts the same disk read-only at /media/sautium/4A21-0000 whenever it is\n"
+            "plugged in — at a start of the machine and later. Sautium sees it come and go there by itself.\n"
+            "Close anything that has a file of the disk open first: the desktop's hold is let go here.\n") in said
+    # its undo: the line, the mount point and the label the block wrote
+    assert pasted[undo:] == [
+        "P=/media/sautium/4A21-0000", 'sudo umount "$P"', 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab',
+        'sudo rmdir "$P"', "sudo rm -f /media/sautium/.names/4A21-0000", "sudo systemctl daemon-reload"]
+    # the volume's own name is in no root command: it goes in as data, on tee's input
+    assert "Elements" not in " ".join(line for line in pasted if "sudo" in line)
+    assert "nofail" in built and "no effect" not in said               # §8.6: nothing said of the generator's warning
+    # Not pasted (--yes never waits): never a root, and the setup says what to do and stops
+    assert ("./sautium: the music disk is not set, so Sautium would not read /media/pi/Elements/Music: paste the "
+            "block above, then run ./sautium again and choose \"Elements\" › Music as the music folder in Sautium "
+            "(More › Library)") in said
     assert machine_ready.ran == [] and not (machine_ready.root / ".env").exists()
-    # The same path where nothing of a desktop mounted it — a Lite system, a disk fstab already mounts, a
-    # plain folder of the system's disk: an ordinary root, no fstab line
-    for desktop, loose in ((False, "/media/pi/Elements"), (True, None)):
-        monkeypatch.setattr(setup, "desktop_automounter", lambda d=desktop: d)
-        monkeypatch.setattr(setup, "mounted_outside_fstab", lambda real, l=loose: l)
+    assert not (machine_ready.root / "host" / "compose.roots.yml").exists()
+
+    # Pasted while the setup waited: the disk is the line's, under the folder the node reads disks in.
+    # No root is added for it, the node is made, and the folder is chosen in the Web UI
+    fstab["pasted"] = True
+    assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 0
+    said = capsys.readouterr().out
+    assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [setup.AUTOMOUNT_BASE]
+    assert "Then choose \"Elements\" › Music as the music folder in Sautium (More › Library).\n" in said
+    assert "Music disk at /media/sautium/4A21-0000: " in said and "not set" not in said
+    assert machine_ready.ran == ["build", "start", ("screen", "nano")]
+    (machine_ready.root / ".env").unlink()
+    fstab["pasted"] = False
+    # The same path where nothing of a desktop mounted it and fstab already mounts its disk, or a plain
+    # folder of the system's disk: an ordinary root, no fstab line
+    for fstab_names, target in ((0, b"/media/pi/Elements\n"), (1, b"/\n")):
+        answers[("findmnt", "--fstab", "-n")] = (fstab_names, b"")
+        answers[("findmnt", "-n", "-o", "TARGET", "-T")] = (0, target)
         monkeypatch.setattr(setup, "root_refusal", lambda path, **kw: None)
         assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 0
-        assert "sudo tee -a /etc/fstab" not in capsys.readouterr().out          # no boot-mount block
+        assert "sudo tee -a /etc/fstab" not in capsys.readouterr().out          # no block
+        assert "/media/pi/Elements/Music" in setup.held_roots(machine_ready.root / "host" / "compose.roots.yml")
         (machine_ready.root / ".env").unlink()
+        (machine_ready.root / "host" / "compose.roots.yml").unlink()
+
+
+def test_a_disk_someone_mounted_by_hand_is_offered_the_line_and_taken_as_named_meanwhile(
+        machine_ready, monkeypatch, tmp_path, capsys):
+    """A --music folder that is a removable disk's own mount point, which no
+    line of /etc/fstab names (§2.5): the setup's block instead of the
+    sentence. Declined, the folder is a root as before; and a later run, and
+    `status`, still say there is a step."""
+    music = tmp_path / "usb"
+    music.mkdir()
+    mount = _mount(target=str(music), label="It's mine")
+    answers = {("findmnt", "-n", "-o", "TARGET", "-T"): (0, str(music).encode() + b"\n"),
+               ("findmnt", "--fstab", "-n", "-o", "TARGET"): (0, b"/\n"),
+               ("findmnt", "--fstab", "-n"): (1, b""),
+               ("findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID,LABEL", "-T"): (0, mount.encode()),
+               ("findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"): (0, f"{music} exfat rw\n".encode()),
+               ("findmnt", "-rn", "-o", "TARGET", "-S", "UUID=4A21-0000"): (0, str(music).encode() + b"\n")}
+    monkeypatch.setattr(setup, "run", _findmnt(answers))
+    monkeypatch.setattr(setup.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(setup.os, "getgid", lambda: 1000)
+    assert setup.main(["--music", str(music), "--yes"]) == 0
+    said = capsys.readouterr().out
+    assert said.count("── The music disk, mounted whenever it is plugged in") == 1       # once in a run
+    assert (f"{music} is a mount point: Sautium sees what is mounted there when Sautium starts.\n"
+            "This mounts the same disk read-only at /media/sautium/4A21-0000 whenever it is\n") in said
+    assert "its present hold is let go here" in said and "    sudo umount /dev/sda1\n" in said
+    assert "T=" not in said                              # a label with a quote: the disk goes by its UUID
+    assert "is not seen until Sautium is started" not in said          # the block, instead of the sentence
+    assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [str(music), setup.AUTOMOUNT_BASE]
+    # … and a later run with no folder named offers it again, with what follows it
+    assert setup.main(["--yes"]) == 0
+    said = capsys.readouterr().out
+    assert said.count("── The music disk, mounted whenever it is plugged in") == 1
+    assert f"Then run:  ./sautium roots --forget {music}\n" in said
+    assert "and choose the disk as the music folder in Sautium (More › Library).\n" in said
+    monkeypatch.setattr(setup, "docker_state", lambda: ("ok", "Docker"))
+    monkeypatch.setattr(setup.agent, "head", lambda root: "c" * 40)
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:local")
+    monkeypatch.setattr(setup, "tailnet_address", lambda: None)
+    monkeypatch.setattr(setup, "undervoltage_now", lambda: False)
+    monkeypatch.setattr(setup.agent, "compose_cmd", lambda root=None: ["docker", "compose"])
+    assert setup.main(["status"]) == 0
+    assert (f"Music root {music}: a disk mounted at the root itself — Sautium sees it only as it was when "
+            "Sautium started (./sautium shows the step)\n") in capsys.readouterr().out
 
 
 def test_a_desktop_that_mounts_disks_itself_is_not_given_a_second_automount(checkout, monkeypatch, capsys):
@@ -686,6 +858,21 @@ def test_a_folder_inside_a_root_already_read_is_not_bound_again(tmp_path, capsys
     other = tmp_path / "Music2"                      # a name that only begins like a root's is another folder
     other.mkdir()
     assert setup.chosen_roots(str(other), held) == [str(music), str(other), setup.AUTOMOUNT_BASE]
+
+
+def test_a_disk_under_the_disks_folder_adds_no_root(tmp_path, monkeypatch, capsys):
+    """Mounted by the automount or by the setup's line, a disk lies under the
+    one root the node has for disks: naming a folder on it binds nothing new
+    — and so a disk added later needs no change of the override, no restart."""
+    base = tmp_path / "media" / "sautium"
+    (base / "4A21-0000" / "Music").mkdir(parents=True)
+    monkeypatch.setattr(setup, "AUTOMOUNT_BASE", str(base))
+    for named in (base / "4A21-0000", base / "4A21-0000" / "Music"):
+        assert setup.chosen_roots(str(named), []) == [str(base)]
+        assert f"{named} is inside {base}, which this node already reads" in capsys.readouterr().out
+    text = setup.roots_override([str(base)])
+    assert text.count("- type: bind") == 1 and "propagation: rslave" in text and "4A21" not in text
+    assert "SAUTIUM_LIBRARY_ROOT_LABELS" not in text          # the label is the file beside the disk, not the override's
 
 
 def test_the_node_reads_the_roots_the_override_names():
@@ -1237,16 +1424,21 @@ def test_remove_takes_what_runs_and_keeps_the_data(installed, capsys):
 
 
 def test_remove_prints_the_undo_of_a_boot_mount_the_setup_printed(installed, monkeypatch, capsys):
-    fstab = b"/\n/boot/firmware\n/mnt/sautium-4A21-0000\n/mnt/sautium-x; reboot\n/mnt/music\n"
+    """Of both shapes: the line at the automount's point, with the label the
+    block wrote there, and the line of before 2026-11-24 at /mnt/sautium-<UUID>."""
+    fstab = (b"/\n/boot/firmware\n/mnt/sautium-4A21-0000\n/mnt/sautium-x; reboot\n/mnt/music\n"
+             b"/media/sautium/0398-3084\n/media/sautium\n/media/sautium/0398-3084/Music\n/media/other/0398-3084\n")
     monkeypatch.setattr(setup, "run", lambda args, **kw: installed.asked.append(args) or subprocess.CompletedProcess(
         args, 0, fstab if args[:2] == ["findmnt", "--fstab"] else b"", b""))
-    assert setup.boot_mounts(fstab.decode()) == ["/mnt/sautium-4A21-0000"]
+    assert setup.boot_mounts(fstab.decode()) == ["/mnt/sautium-4A21-0000", "/media/sautium/0398-3084"]
     assert setup.main(["remove"]) == 0
-    said = capsys.readouterr().out
-    for line in ("    P=/mnt/sautium-4A21-0000", '    sudo umount "$P"',
-                 '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab', '    sudo rmdir "$P"'):
-        assert line in said, line
-    assert "reboot" not in said and "/mnt/music" not in said
+    pasted = [line[4:] for line in capsys.readouterr().out.splitlines() if line.startswith("    ")]
+    sed = 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab'
+    assert pasted[-11:] == [
+        "P=/mnt/sautium-4A21-0000", 'sudo umount "$P"', sed, 'sudo rmdir "$P"', "sudo systemctl daemon-reload",
+        "P=/media/sautium/0398-3084", 'sudo umount "$P"', sed, 'sudo rmdir "$P"',
+        "sudo rm -f /media/sautium/.names/0398-3084", "sudo systemctl daemon-reload"]
+    assert not any("reboot" in line or "/mnt/music" in line or "other" in line for line in pasted)
 
 
 def test_the_data_goes_only_after_the_nodes_nickname(installed, monkeypatch, capsys):
@@ -1329,10 +1521,13 @@ def test_the_boot_mount_lines_are_short_and_build_the_very_line(fstype, uuid):
     characters, twice in the line): no piece and no undo line long enough to
     be wrapped, and the pieces put together are the line byte for byte."""
     found = setup.boot_mount(f"/media/pi/Disk/Music", json.dumps({"filesystems": [
-        {"source": "/dev/sda1", "target": "/media/pi/Disk", "fstype": fstype, "uuid": uuid}]}), 1000, 1000)
+        {"source": "/dev/sda1", "target": "/media/pi/Disk", "fstype": fstype, "uuid": uuid,
+         "label": "W" * 32}]}), 1000, 1000)               # the longest label a filesystem here carries (NTFS)
     pieces = setup.in_pieces(found["line"])
-    lines = pieces + setup.boot_mount_undo(found["point"])
+    lines = setup.line_steps(found) + setup.boot_mount_undo(found["point"])
     assert max(len(line) for line in lines) <= 76, lines
+    assert [line for line in setup.line_steps(found) if line.startswith("L=")] == pieces
+    assert found["point"] == f"/media/sautium/{uuid}"
     built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
     assert built == found["line"]
     # The undo's sed address, as the shell hands it to sed: that one line of fstab and no other
@@ -1372,12 +1567,13 @@ def test_systemds_own_generator_makes_the_disks_device_want_the_mount(tmp_path, 
                           env={"SYSTEMD_FSTAB": str(fstab), "PATH": os.environ["PATH"]})
     assert done.returncode == 0, done.stderr
     mount = setup.unit_name(found["point"], "mount")
+    assert mount.startswith("media-sautium-") and mount.endswith(".mount")
     device = setup.unit_name(f"/dev/disk/by-uuid/{uuid}", "device")
     assert (out / mount).is_file() and f"What=/dev/disk/by-uuid/{uuid}" in (out / mount).read_text()
     assert (out / f"{device}.wants" / mount).is_symlink()
     assert not (out / "local-fs.target.wants" / mount).exists() and not (out / "local-fs.target.requires" / mount).exists()
     # … which is where the setup itself looks, after the paste, with no root
-    said = _boot_mount_said(found, fstab, out)
+    said = _boot_mount_said(fstab, out)
     assert said == f"Music disk at {found['point']}: mounted whenever it is plugged in.\n"
     escape = shutil.which("systemd-escape")
     if escape:                                         # the names are systemd's own
@@ -1385,23 +1581,25 @@ def test_systemds_own_generator_makes_the_disks_device_want_the_mount(tmp_path, 
                               text=True).stdout.strip() == mount
 
 
-def _boot_mount_said(found, fstab, generated, systemd=257):
-    """boot_mount_steps for the one root, over an fstab and a generator
-    folder of the test's own (findmnt reads the file by -F)."""
+def _boot_mount_said(fstab, generated, systemd=257, roots=("/srv/music", "/media/sautium"), labels=None):
+    """boot_mount_steps over an fstab and a generator folder of the test's
+    own (findmnt reads the file by -F); nothing is mounted for the roots."""
     import contextlib
     import io
     real = setup.run
 
     def run(args, **kw):
         if args[:2] == ["findmnt", "--fstab"]:
-            args = args[:2] + ["-F", str(fstab)] + args[2:]
+            return real(args[:2] + ["-F", str(fstab)] + args[2:], **kw)
         if args[:2] == ["systemctl", "--version"]:
             return subprocess.CompletedProcess(args, 0, f"systemd {systemd} (x)\n".encode(), b"")
+        if args[0] == "findmnt":                             # no root lies on a mount of its own
+            return subprocess.CompletedProcess(args, 1, b"", b"")
         return real(args, **kw)
     setup.run = run
     try:
         with contextlib.redirect_stdout(io.StringIO()) as said:
-            setup.boot_mount_steps(["/srv/music", found["point"], setup.AUTOMOUNT_BASE], str(generated))
+            setup.boot_mount_steps(list(roots), labels or {}, generator_dir=str(generated))
     finally:
         setup.run = real
     return said.getvalue()
@@ -1421,10 +1619,10 @@ def test_a_boot_mount_line_of_before_is_offered_its_replacement(tmp_path):
         1000, 1000, systemd=241)["line"]
     fstab, generated = tmp_path / "fstab", tmp_path / "generated"
     fstab.write_text(f"PARTUUID=abc-02 / ext4 defaults,noatime 0 1\n{before}\n")
-    said = _boot_mount_said(found, fstab, generated)
+    said = _boot_mount_said(fstab, generated)
     pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
     assert "whenever it is plugged in — at a start of the machine and later" in said
-    assert pasted[:2] == ["P=/mnt/sautium-4A21-0000", 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab']
+    assert pasted[:2] == ["P=/media/sautium/4A21-0000", 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab']
     pieces = [line for line in pasted if line.startswith(("L='", 'L="$L"\''))]
     built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
     assert built == found["line"]                       # the old line's own options, the timeout gone
@@ -1432,14 +1630,14 @@ def test_a_boot_mount_line_of_before_is_offered_its_replacement(tmp_path):
     assert not any(line.startswith(("sudo umount", "sudo mount")) for line in pasted[:pasted.index("sudo systemctl daemon-reload")])
     # The new line pasted, systemd not told yet
     fstab.write_text(found["line"] + "\n")
-    assert "systemd has not read it yet — run: sudo systemctl daemon-reload" in _boot_mount_said(found, fstab, generated)
+    assert "systemd has not read it yet — run: sudo systemctl daemon-reload" in _boot_mount_said(fstab, generated)
     # A systemd that does not know the option: the old line is what it has
     fstab.write_text(before + "\n")
-    assert _boot_mount_said(found, fstab, generated, systemd=241) == (
-        "Music disk at /mnt/sautium-4A21-0000: mounted at a start of the machine only.\n")
+    assert _boot_mount_said(fstab, generated, systemd=241) == (
+        "Music disk at /media/sautium/4A21-0000: mounted at a start of the machine only.\n")
     # No line of the setup's in fstab (undone, or mounted by other means): nothing said
     fstab.write_text("PARTUUID=abc-02 / ext4 defaults 0 1\n")
-    assert _boot_mount_said(found, fstab, generated) == ""
+    assert _boot_mount_said(fstab, generated) == ""
 
 
 def test_status_names_the_disks_mounted_under_the_roots():
@@ -1481,13 +1679,88 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
         f"Music root {there}: there",
         f"Music root {empty}: empty — its disk is not mounted, or the folder was removed. Its albums show as away. "
         f"To forget it: ./sautium roots --forget {empty}",
-        f'Music root {mounted}: there  "Elements <b>"',
+        # a root that is a mount point holds what was mounted there when the node started (§2.5)
+        f"Music root {mounted}: a disk mounted at the root itself — Sautium sees it only as it was when Sautium "
+        "started",
         f"Music root {gone}: gone — its disk is not mounted, or the folder was removed. Its albums show as away. "
         f"To forget it: ./sautium roots --forget {gone}",
         f"Music root {tmp_path}/plugged: plugged disks — the automount is not installed (./sautium shows how)",
         f"  mounted: {mounted} exfat ro,nosuid", f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
     (tmp_path / "plugged").mkdir()                   # installed, no disk plugged in: not a library gone
     assert f"Music root {tmp_path}/plugged: there  (plugged disks)" in setup.root_lines(roots, "", {})
+    # … and where the setup has a step for it, that is said
+    assert setup.root_lines([str(mounted)], table, {}, [str(mounted)])[0].endswith(
+        "when Sautium started (./sautium shows the step)")
+    # a disk the line mounts under the automount's folder is listed under that root: where it is
+    under = setup.root_lines([setup.AUTOMOUNT_BASE], table, {})
+    assert under == [f"Music root {tmp_path}/plugged: there  (plugged disks)",
+                     f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
+
+
+def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_moved(tmp_path, monkeypatch, capsys):
+    """Until 2026-11-24 the line mounted at /mnt/sautium-<UUID> and that
+    point was the root. `roots` and `status` name it, with the disk in or
+    out; ./sautium prints one block — the old line's undo and the line at the
+    new point, with the label — and says what follows (PI-NODE-2D §2.4)."""
+    old_point = "/mnt/sautium-4A21-0000"
+    # the line as PI-NODE-2C wrote it, and as PI-NODE-2B did (a start of the machine only)
+    at_plug = LINE_4A21.replace("/media/sautium/4A21-0000", old_point)
+    at_boot = at_plug.split(",x-systemd.wanted-by=")[0] + ",x-systemd.device-timeout=10s 0 0"
+    fstab, generated = tmp_path / "fstab", tmp_path / "generated"
+    fstab.write_text(f"PARTUUID=abc-02 / ext4 defaults,noatime 0 1\n{at_plug}\n")
+    roots = ["/srv/music", old_point, "/media/sautium"]
+
+    def line_of(point):
+        real = setup.run
+        setup.run = lambda args, **kw: real(args[:2] + ["-F", str(fstab)] + args[2:], **kw)
+        try:
+            return setup.old_boot_mount(point)
+        finally:
+            setup.run = real
+    if shutil.which("findmnt") is None:
+        pytest.skip("no findmnt on this system")
+    assert line_of(old_point) == {"uuid": "4A21-0000", "fstype": "exfat", "options": at_plug.split()[3]}
+    assert line_of("/mnt/music") is None and line_of("/media/sautium/4A21-0000") is None
+    # named whether its disk is in or out: the mount point is the root either way
+    for table in (f"{old_point} exfat ro,nosuid\n", ""):
+        assert setup.root_lines(roots, table, {old_point: "Elements"}, [old_point])[1] == (
+            "Music root /mnt/sautium-4A21-0000: a disk mounted at the root itself — Sautium sees it only as it "
+            "was when Sautium started (./sautium shows the step)")
+    said = _boot_mount_said(fstab, generated, roots=roots, labels={old_point: "Elements"})
+    assert said.count("Paste into a terminal that may use sudo:") == 1                 # one block
+    assert ("The line of /etc/fstab that mounts the music disk at /mnt/sautium-4A21-0000 gives Sautium the\n"
+            "mount point itself: a disk pulled or put back while Sautium runs is not seen. This moves it to\n"
+            "/media/sautium/4A21-0000, where Sautium sees it come and go. Its albums will show as away\n"
+            "once and be found again at the new place; nothing is analysed again.\n") in said
+    pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
+    undo = pasted.index("P=/media/sautium/4A21-0000")
+    assert [line for line in pasted[:undo] if not line.startswith("L=")] == [
+        "P=/mnt/sautium-4A21-0000", 'sudo umount "$P"', 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab',
+        'sudo rmdir "$P"', "B=/media/sautium", "U=4A21-0000", 'sudo install -d -m 0755 "$B" "$B/.names"',
+        'sudo mkdir -p "$B/$U"', "T='Elements'", 'printf \'%s\\n\' "$T" | sudo tee "$B/.names/$U" >/dev/null',
+        "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab", "sudo systemctl daemon-reload", 'sudo mount "$B/$U"']
+    pieces = [line for line in pasted[:undo] if line.startswith("L=")]
+    built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
+    assert built == LINE_4A21 and max(len(line) for line in pasted) <= 76
+    assert ("Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n"
+            'and choose "Elements" as the music folder in Sautium (More › Library).\n') in said
+    # a line of before the plug option gains it at its move; an older systemd keeps the line it has
+    fstab.write_text(at_boot + "\n")
+    said = _boot_mount_said(fstab, generated, roots=roots)
+    pieces = [line[4:] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\''))]
+    assert subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True,
+                          text=True).stdout == LINE_4A21
+    assert "T=" not in said and "and choose the disk as the music folder" in said     # no label known: none written
+    said = _boot_mount_said(fstab, generated, systemd=241, roots=roots)
+    assert "── The music disk, mounted when the machine starts (optional) ──" in said
+    assert " /media/sautium/4A21-0000 exfat " in "".join(
+        line[4:].split("'")[1] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\'')))
+    assert "device-timeout=10s" in said.replace("'\n    L=\"$L\"'", "")
+    # the root forgotten, its line left in fstab: nothing printed here (`roots --forget` printed its undo)
+    assert _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"]) == ""
+    # a line at that point the setup did not write is the person's own: no step
+    fstab.write_text("/dev/sda1 /mnt/sautium-4A21-0000 exfat ro 0 0\n")
+    assert line_of(old_point) is None and _boot_mount_said(fstab, generated, roots=roots) == ""
 
 
 def test_a_roots_label_rides_in_the_override_for_the_node_to_show(checkout, tmp_path, monkeypatch):
@@ -1569,6 +1842,9 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     said = capsys.readouterr().out
     assert "    P=/mnt/sautium-4A21-0000" in said and '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in said
     assert "from its next start" in said and started == ["start"]          # a stopped node is not started
+    # … and where its disk has the line at the new point and is not mounted there (the node that held
+    # the old mount point held the disk too), that is said
+    assert "Its disk is not mounted at /media/sautium/4A21-0000 now: plug it in again" in said
     assert setup.held_roots(override) == [str(music), setup.AUTOMOUNT_BASE]
     # The empty folder Docker made where a root's folder was is root's: its rmdir is the person's
     made = tmp_path / "Made"

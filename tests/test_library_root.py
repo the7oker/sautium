@@ -131,6 +131,30 @@ def test_the_places_are_the_named_folder_and_each_disk_that_is_there(tree):
     assert disk["size_bytes"] > 0
 
 
+def test_a_disk_the_setups_fstab_line_mounts_is_listed_as_the_automounts_own(tmp_path, monkeypatch):
+    """Since 2026-11-24 the line mounts at the automount's point for its disk
+    (PI-NODE-2D §2). On a machine with no automount the line's block made the
+    folder and its labels' folder, and wrote the label: the one root is the
+    disks' folder, the disk a row like any other — and no root is the disk."""
+    disks = tmp_path / "media" / "sautium"
+    (disks / ".names").mkdir(parents=True)                         # what the block makes: no .unread, no rule
+    (disks / "4A21-0000" / "Music").mkdir(parents=True)
+    (disks / ".names" / "4A21-0000").write_text("Elements\n")
+    (disks / "0398-3084").mkdir()                                  # a line's mount point whose disk is out
+    monkeypatch.setattr(settings, "sautium_library_roots", str(disks))
+    monkeypatch.setattr(settings, "sautium_library_root_labels", "")
+    monkeypatch.setattr(settings, "music_library_path", "")
+    monkeypatch.setattr(library_root, "_mounts", lambda: {str(disks / "4A21-0000"): True})
+    assert library_root._disks_folder(str(disks)) and library_root.unread_folders() == []
+    (place,) = library_root.folders()["places"]
+    assert (place["path"], place["kind"], place["name"], place["label"], place["read_only"]) == (
+        str(disks / "4A21-0000"), "disk", "4A21-0000", "Elements", True)
+    assert library_root.pullable(str(disks / "4A21-0000" / "Music"))
+    assert not library_root._gone(str(disks), {})                  # every disk out: not a library gone
+    assert library_root.folders(str(disks / "4A21-0000" / "Music"))["parent"] == str(disks / "4A21-0000")
+    assert library_root.folders(str(disks / "4A21-0000"))["parent"] is None        # up from a disk: the places
+
+
 def test_a_label_is_read_bounded_and_never_through_a_link(tree):
     names = tree.disks / ".names"
     (names / "long").write_text("L" * 5000)
