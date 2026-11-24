@@ -274,6 +274,69 @@ def test_an_away_copy_with_no_other_streams_and_a_copy_here_stands_in_for_it(nod
     assert native_plays([track], "browser", None) == [{"kind": "pending"}]
 
 
+def _canon_rewrites(node, scratch_dsn, old: str, new: str) -> None:
+    """The canon's own rewrite of a track's uuid (a rename, or a merge into
+    a track that exists), committed — with no event of the queue's."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    from canon.identity import _update_track_uuid
+    engine = create_engine(scratch_dsn)
+    with Session(engine) as db:
+        _update_track_uuid(db, old, new)
+        db.commit()
+    engine.dispose()
+
+
+@pytest.mark.parametrize("how", ["rename", "merge"])
+def test_a_queued_file_whose_tracks_uuid_the_canon_rewrote_still_opens_as_its_file(
+        node, scratch_dsn, how):
+    """A slot that is a file is read by what it is — its media_files row —
+    never by the uuid its enqueue saw: the canon rewrites that uuid under
+    the queue (ON UPDATE CASCADE, a merge), and the file is there all the
+    same. On the stub output and through the HQPlayer mirror's call shape;
+    its other copies are those of the track the file belongs to now."""
+    from playback.queue import items_for_media_ids
+    from playback.substitute import native_plays
+    items = _queue(node)
+    it, old = items[0], items[0].track_id
+    new = str(uuid.uuid4()) if how == "rename" else node["phantoms"][0]
+    _canon_rewrites(node, scratch_dsn, old, new)
+    assert it.track_id == old                       # nothing told the queue
+    assert native_plays([it], "browser", None) == [None]
+    assert native_plays([it], "hqplayer", 7) == [None]
+    # the folder gone and back: a stream, then its own file again — as any slot's
+    node["gone"](True)
+    node["mgr"].reach_changed()
+    assert _streams(it)
+    node["gone"](False)
+    node["mgr"].reach_changed()
+    assert it.play is None and it.opener()["path"].endswith("/NW/01.flac")
+    # a second copy of the track the file belongs to now stands in for it
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
+                        (node["variant"],))
+    twin = node["copy"](0, "twin/01.flac")
+    node["cur"].execute("UPDATE media_files SET track_id = %s WHERE id = %s", (new, twin))
+    assert native_plays([it], "browser", None)[0]["media_file_id"] == twin
+    assert items_for_media_ids(node["files"][:1])[0].track_id == new
+
+
+def test_a_slot_takes_its_files_track_when_the_canon_rewrote_it(node, scratch_dsn):
+    """Play tracking keys on the slot's track uuid, and a listen against a
+    uuid that is gone is no row: at the queue's next read of the file layer
+    (rebind_files — a file event, the restore of a persisted queue) a slot
+    whose file belongs to another track now takes that track's uuid."""
+    items = _queue(node)
+    it, old, new = items[0], items[0].track_id, str(uuid.uuid4())
+    _canon_rewrites(node, scratch_dsn, old, new)
+    node["out"].changed.clear()
+    node["mgr"].rebind_files()
+    assert it.track_id == new and it.media_file_id == node["files"][0] and it.play is None
+    assert items[1].track_id == node["tracks"][1]
+    assert node["out"].changed == ["rebind"]
+    node["mgr"].rebind_files()                      # nothing left to take: nothing changes
+    assert node["out"].changed == ["rebind"]
+
+
 def _ranked(node, track: int, hqp_id, gone: list) -> list:
     from db_pool import db_query
     from sql_queries import TRACK_FILES, best_rip_order, owned_rank

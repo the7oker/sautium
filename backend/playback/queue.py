@@ -531,12 +531,20 @@ def _item_from_media_row(r: dict) -> QueueItem:
 # (sql_queries.HERE); with none, it keeps its file as its origin, and its
 # way in is read as any slot's whose file does not open here now
 # (playback.substitute.native_plays: a stream).
+#
+# The track asked about is the one the slot's FILE belongs to now (`track`),
+# the slot's own `track_id` only where that file's row is gone: the canon
+# rewrites a track's uuid under the queue (canon.identity._update_track_uuid
+# — a rename, a merge, a split) with no event of the queue's, and a slot
+# read by the uuid its enqueue saw would find no copy and no track. A slot
+# whose file's track is another now takes that uuid (`track_moved`): play
+# tracking keys on it, and a listen against a uuid that is gone is no row.
 _AWAY_FILE = """EXISTS (SELECT 1 FROM media_files af
                      JOIN album_variants av ON av.id = af.album_variant_id
                      WHERE af.id = {m} AND av.absent_since IS NOT NULL)
             AND EXISTS (SELECT 1 FROM media_files pf
                         JOIN album_variants pv ON pv.id = pf.album_variant_id
-                        WHERE pf.track_id = s.track_id AND pv.absent_since IS NULL)"""
+                        WHERE pf.track_id = s.track AND pv.absent_since IS NULL)"""
 
 _REBIND_SQL = f"""
     WITH q AS (
@@ -547,11 +555,14 @@ _REBIND_SQL = f"""
                s.pmid IS NOT NULL AND (NOT EXISTS (
                    SELECT 1 FROM media_files mf WHERE mf.id = s.pmid)
                    OR {_AWAY_FILE.format(m='s.pmid')}) AS play_gone
-        FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[])
-             WITH ORDINALITY AS s(mid, pmid, track_id, album_id, slot)
+        FROM (SELECT u.*, COALESCE((SELECT mf.track_id FROM media_files mf WHERE mf.id = u.mid),
+                                   u.track_id) AS track
+              FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[])
+                   WITH ORDINALITY AS u(mid, pmid, track_id, album_id, slot)) s
     )
-    SELECT q.slot, q.origin_gone,
-           EXISTS (SELECT 1 FROM tracks t WHERE t.id = q.track_id) AS track_kept,
+    SELECT q.slot, q.origin_gone, q.track::text AS track,
+           q.track IS DISTINCT FROM q.track_id AS track_moved,
+           EXISTS (SELECT 1 FROM tracks t WHERE t.id = q.track) AS track_kept,
            c.id, c.file_path, c.file_format, c.duration_seconds,
            c.cue_start_seconds, c.cue_end_seconds
     FROM q
@@ -560,12 +571,12 @@ _REBIND_SQL = f"""
                mf.duration_seconds, mf.cue_start_seconds, mf.cue_end_seconds
         FROM media_files mf
         JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE q.origin_gone AND mf.track_id = q.track_id
+        WHERE q.origin_gone AND mf.track_id = q.track
         ORDER BY (NOT {HERE}), (av.album_id = q.album_id) DESC NULLS LAST,
                  {best_rip_order('mf')}
         LIMIT 1
     ) c ON true
-    WHERE q.origin_gone OR q.play_gone
+    WHERE q.origin_gone OR q.play_gone OR q.track IS DISTINCT FROM q.track_id
 """
 
 
@@ -578,7 +589,9 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
     phantom); a track that went with its file has left the catalogue, and
     the slot stays under its old name as an inert foreign entry. A slot whose
     way in (`play`) named a gone file changes nothing else — `{}`, its play
-    is re-read. None for every other slot."""
+    is re-read. A slot whose file belongs to another track now (the canon
+    rewrote the uuid) takes that track's uuid, with whatever else it
+    changes. None for every other slot."""
     out: list[Optional[dict]] = [None] * len(items)
     bound = [(i, it) for i, it in enumerate(items)
              if (it.source.get("kind") == "file" and it.media_file_id is not None)
@@ -595,15 +608,16 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
     })
     for r in rows:
         i, it = bound[r["slot"] - 1]
+        moved = {"track_id": r["track"]} if r["track_moved"] else {}
         if not r["origin_gone"]:
-            out[i] = {}
+            out[i] = moved
         elif r["id"] is not None:
-            change = {"media_file_id": r["id"], "source": file_source(r)}
+            change = {**moved, "media_file_id": r["id"], "source": file_source(r)}
             if r["duration_seconds"] is not None:
                 change["duration_seconds"] = float(r["duration_seconds"])
             out[i] = change
         elif r["track_kept"]:
-            out[i] = {"media_file_id": None, "source": {"kind": "track"}}
+            out[i] = {**moved, "media_file_id": None, "source": {"kind": "track"}}
         else:
             out[i] = {"track_id": None, "media_file_id": None,
                       "source": {"kind": "uri", "uri": file_path_to_uri(it.source["path"])}}

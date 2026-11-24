@@ -72,7 +72,16 @@ REASONS = {
     "off": "streaming is off on this node",
 }
 
+# Every copy of the tracks asked about: the tracks named (`ids`) and the ones
+# the files named (`mids`) belong to NOW — a file slot is read by what it is,
+# its media_files row: the canon rewrites a track's uuid under a queue that
+# still holds the old one (canon.identity._update_track_uuid).
 _COPIES_SQL = f"""
+    WITH t AS (
+        SELECT unnest(%(ids)s::uuid[]) AS id
+        UNION
+        SELECT o.track_id FROM media_files o WHERE o.id = ANY(%(mids)s::int[])
+    )
     SELECT f.track_id::text AS track_id, f.id, f.location::text AS location, f.hqp_endpoint_id,
            f.here,
            mf.file_path, mf.file_format::text AS file_format,
@@ -82,12 +91,12 @@ _COPIES_SQL = f"""
         SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                mf.is_lossless, mf.sample_rate, mf.bit_depth
         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE mf.track_id = ANY(%(ids)s::uuid[])
+        WHERE mf.track_id = ANY(ARRAY(SELECT id FROM t))
         UNION ALL
         SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id, true,
                hf.is_lossless, hf.sample_rate, hf.bit_depth
         FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
-        WHERE hf.track_id = ANY(%(ids)s::uuid[])
+        WHERE hf.track_id = ANY(ARRAY(SELECT id FROM t))
     ) f
     LEFT JOIN media_files mf ON f.location = 'local' AND mf.id = f.id
     LEFT JOIN hqp_library_files hf ON f.location = 'hqplayer' AND hf.id = f.id
@@ -182,12 +191,22 @@ def native_plays(items: list, output_id: Optional[str],
     A copy that is not here now (sql_queries.HERE: away, or under a folder
     that does not answer) is never a way in: a slot whose own file is one
     takes the best copy that is here, else streams — its origin (`source`)
-    untouched, so the same read gives None again once the file opens."""
+    untouched, so the same read gives None again once the file opens.
+
+    A slot that is a file is read by its file (`media_file_id`), and its
+    other copies are those of the track that file belongs to now: the
+    slot's `track_id` is what the enqueue read, and the canon may have
+    rewritten the track's uuid since."""
     owned = [it for it in items if by_copies(it)]
     by_track: dict = {}
+    track_of: dict = {}             # a slot's own file -> the track it belongs to now
     if owned:
-        for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}),
+        mids = sorted({it.media_file_id for it in owned
+                       if it.source.get("kind") == "file" and it.media_file_id is not None})
+        for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}), "mids": mids,
                                         "hqp_id": endpoint_id, "gone": gone_prefixes()}):
+            if r["location"] == "local":
+                track_of[r["id"]] = r["track_id"]
             if r["here"]:
                 by_track.setdefault(r["track_id"], []).append(r)
     out = []
@@ -197,7 +216,8 @@ def native_plays(items: list, output_id: Optional[str],
         if not by_copies(it):
             out.append(None)
             continue
-        rows = by_track.get(it.track_id, [])
+        track = (track_of.get(it.media_file_id) if kind == "file" else None) or it.track_id
+        rows = by_track.get(track, [])
         local = next((r for r in rows if r["location"] == "local"), None)
         # the slot's own file, where that opens now
         own_file = kind == "file" and any(
