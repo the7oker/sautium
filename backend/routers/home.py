@@ -402,11 +402,17 @@ class _Ranking:
     def _build(self) -> None:
         started = time.monotonic()
         album_ids = _rank_recommendations()
+        took = time.monotonic() - started
+        # Every listen rebuilds it, and a listen is any write of the history
+        # (a two-second tone is one): news is the first build, the ranking
+        # leaving or reaching a cold start, and a build that took over a second
+        news = (not self._built or (album_ids is None) != (self._album_ids is None)
+                or took > 1.0)
         self._album_ids = album_ids
         self._built = True
-        logger.info("Recommendations ranking rebuilt in %.0f ms: %s",
-                    (time.monotonic() - started) * 1000,
-                    "cold start" if album_ids is None else f"{len(album_ids)} albums")
+        logger.log(logging.INFO if news else logging.DEBUG,
+                   "Recommendations ranking rebuilt in %.0f ms: %s", took * 1000,
+                   "cold start" if album_ids is None else f"{len(album_ids)} albums")
 
 
 _ranking = _Ranking()
