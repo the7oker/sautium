@@ -841,7 +841,15 @@ class SyncClient:
     def _import_items(self, category: str, result: dict) -> int:
         """Import a pull response into the local database — a category of
         _IMPORTERS only, whatever a payload names itself (a pull, a push,
-        a share file)."""
+        a share file).
+
+        Records that land are said to the pages with the commit that makes
+        them visible (NOTIFY sautium_library, once a batch): they change the
+        Library's coverage and what the guidance trail asks to analyse,
+        whoever started the exchange and whichever process imports — the
+        launcher's, the backend's, a CLI. A walk's run says its end as well
+        (sync_walk.write_sync_status); until 2026-11-24 that was the only
+        word, and a peer's push or a share file's import said nothing."""
         importer = self._IMPORTERS.get(category)
         if importer is None:
             logger.warning(f"No importer for category: {category}")
@@ -871,6 +879,9 @@ class SyncClient:
                     self._insert_batches_for(conn, result.get("batches") or {},
                                              items)
                 count = importer(conn, items)
+            if count:
+                with conn.cursor() as cur:
+                    cur.execute("NOTIFY sautium_library")
             conn.commit()
         except Exception as e:
             conn.rollback()

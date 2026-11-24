@@ -81,6 +81,7 @@ def _load(headroom: float) -> str:
 
 @pytest.mark.parametrize("channel, woken", [
     ("sautium_sync_done", ["library"]),
+    ("sautium_library", ["library"]),
     ("sautium_identity", ["identity", "trail"]),
     ("sautium_notices", ["notices", "trail"]),
     ("sautium_load", ["streams: load"]),
@@ -102,6 +103,7 @@ def test_a_notify_wakes_the_readers_of_its_channel_and_no_others(trail, monkeypa
 
 def test_the_listener_hears_the_loads_channel():
     assert "sautium_load" in settings_router._sync_listener.channels
+    assert "sautium_library" in settings_router._sync_listener.channels
     from desktop.p2p import load_meter
     assert load_meter.CHANNEL == "sautium_load"
     assert json.loads(load_meter.message({"headroom": 0.4}, {"mode": "shadow"})) == {

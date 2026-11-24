@@ -401,6 +401,12 @@ codex_cli.auth.on_change(_codex_signin_changed)
 #
 #   sautium_sync_done — a P2P sync ended (sync_walk): the Library stream, so
 #     the Settings screen re-fetches last_sync_at / items_received.
+#   sautium_library — the Library's state moved where no thread of this
+#     backend's could call notify_library_subscribers(): records an import
+#     landed (sync_client.SyncClient._import_items — a pull's batch, a peer's
+#     push, a share file, in the launcher's process, this one's or a CLI's),
+#     a file's structural rows (seed_import.insert_structural): the Library
+#     stream.
 #   sautium_identity — the node's network state for its pages (identity
 #     proof progress, the reachability verdict, what Support knows, the
 #     Support row's moments, the account's email verified): the identity
@@ -420,7 +426,7 @@ _load_said: Optional[Dict[str, Any]] = None
 def _on_sync_notify(notifies: list) -> None:
     global _load_said
     channels = {note.channel for note in notifies}
-    if "sautium_sync_done" in channels:
+    if channels & {"sautium_sync_done", "sautium_library"}:
         notify_library_subscribers()
     if "sautium_notices" in channels:
         notify_notice_subscribers()
@@ -435,8 +441,8 @@ def _on_sync_notify(notifies: list) -> None:
 
 
 _sync_listener = Listener("sync-sse-listener",
-                          ("sautium_sync_done", "sautium_identity", "sautium_notices",
-                           load_meter.CHANNEL),
+                          ("sautium_sync_done", "sautium_library", "sautium_identity",
+                           "sautium_notices", load_meter.CHANNEL),
                           _on_sync_notify)
 
 
