@@ -2181,6 +2181,11 @@ answers. Where it lives:
 - **HQPlayer Desktop, macOS**: data in `~/.hqplayer/`; with logging on the log
   is `HQPlayer6Desktop.log` beside `settings.xml` (Desktop 6, the test Mac,
   2026-10-18).
+- **HQPlayer Desktop, Linux**: the same — `~/.hqplayer/HQPlayer6Desktop.log`
+  beside `settings.xml`, off on a first start (`<log enabled="0"/>`) until
+  logging is turned on in its settings (Desktop 6.2.1 on Raspberry Pi OS
+  trixie, 2026-11-24). Reached from another machine it has no source here,
+  and the sheet's note names this path with the Windows one.
 - **HQPlayer Embedded / HQPlayer OS**: `GET http://<box>:8088/log` — plain
   text, the whole log since hqplayerd started, **no login** (verified
   2026-10-02 on HQPlayer OS, Embedded 6.1.0 / engine 6.2.3; the other admin
