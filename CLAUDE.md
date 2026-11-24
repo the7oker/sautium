@@ -114,8 +114,8 @@ See:
   removes such rows, once a database, at the owner's own yes of 2026-11-24
   for that named step: `db_migrate`'s `tracklist_leftovers_v1` completes
   removals he had confirmed — the albums they left with no copy, no release
-  group and no imported row or slot, their slots, and those slots' tracks
-  nothing else refers to.
+  group and no imported row or slot (never one the seed picked), their
+  slots, and those slots' tracks nothing else refers to.
 - **No mocking the database or external enrichment APIs in tests** that are
   supposed to verify DB behavior. Integration tests that run against a real
   pgvector DB catch migration-and-query mismatches that mocks hide.

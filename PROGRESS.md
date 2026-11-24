@@ -4626,7 +4626,8 @@ ever fill on a node with the streaming library off.
   no copy, no release group, not imported and with no imported slot — a
   shape only a copy that went leaves; the mint always has a release group,
   the seed and a share write `imported`. A leftover that has a release
-  group cannot be told from a phantom and stays one.
+  group cannot be told from a phantom and stays one; an album the seed
+  picked is spared here as everywhere.
 
 ### New is what entered last (2026-11-24)
 

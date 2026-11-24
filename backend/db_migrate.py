@@ -300,11 +300,14 @@ def _cut_over_bindings(conn) -> dict:
 # makes an album and its copy in one transaction — so only a copy that went
 # (removed, or moved to the album its files were re-tagged to) leaves this
 # shape. A leftover that has a release group cannot be told from a phantom
-# and is not in it.
+# and is not in it; neither is an album the seed picked (owned before the
+# seed and never bound, then removed, it would have the shape): the mint and
+# the album merges spare a seed's pick everywhere, and so does this.
 _TRACKLIST_LEFTOVERS = """
     al.musicbrainz_id IS NULL AND NOT al.imported
     AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
-    AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id AND at.imported)"""
+    AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id AND at.imported)
+    AND NOT EXISTS (SELECT 1 FROM seed_picks sp WHERE sp.album_id = al.id)"""
 
 
 def _remove_tracklist_leftovers(conn) -> dict:
