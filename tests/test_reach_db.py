@@ -25,7 +25,7 @@ pytest.importorskip("sqlalchemy")
 import psycopg2.pool  # noqa: E402
 
 from playback.base import Capabilities, PlayerBackend  # noqa: E402
-from streaming.base import (FetchedAudio, ProviderManifest, ResolvedSource,  # noqa: E402
+from streaming.base import (FetchedAudio, ProviderManifest, Refused, ResolvedSource,  # noqa: E402
                             StreamProvider)
 from streaming.proxy import MediaProxy  # noqa: E402
 
@@ -68,6 +68,7 @@ class _Catalog(StreamProvider):
     def __init__(self):
         self.gates: dict = {}
         self.asked: list = []
+        self.refuse: dict = {}
 
     def fetch(self, query):
         return self._download(self._resolve(query).source_id)
@@ -84,6 +85,8 @@ class _Catalog(StreamProvider):
         unhook()
         if fetching().cancelled.is_set():
             raise FetchCancelled(sid)
+        if sid in self.refuse:
+            raise Refused(self.refuse[sid], f"catalog: {self.refuse[sid]}")
         return FetchedAudio(data=b"fLaC" + b"\x00" * 64, mime="audio/flac", lossless=True)
 
     def land(self, *sids):
@@ -441,19 +444,50 @@ def test_a_manager_reads_its_own_owed_slot(node, monkeypatch):
     assert _wait(lambda: _streams(first))
 
 
-def test_his_queue_whose_folder_went_where_nothing_streams_says_so_on_its_rows_alone(node):
-    """A Nano node: the slots wait, each row saying why. The toast of a
-    Play of streamed tracks that do not stream ("Nothing on … streams
-    here") is for slots tapped as streams — none here."""
+def test_a_play_of_his_files_whose_streams_all_fail_is_said_once_and_each_row_says_its_own(node):
+    """An owned slot streaming because its disk is out shows its stream's
+    state on its row, and a Play whose slots all fail is said once, when the
+    last of them has — whatever each slot was queued as. The run read the
+    slots' origin: a file slot was none of the Play's streams, so nothing
+    of it was said (before that, "all failed" at the first failure)."""
+    mgr, prov = node["mgr"], node["prov"]
+    node["proxy"].link_refused = node["player"].note_refusal
+    for t in node["tracks"]:
+        prov.refuse[t] = "region"
+    _pull_the_disk(node)
+    items = _queue(node, play=True)                 # the look: both slots are streams to come
+    assert [it.source["kind"] for it in items] == ["file", "file"]
+    rows = mgr.playlist()["tracks"]
+    assert [r["id"] for r in rows] == node["files"]
+    assert all(r["stream"]["state"] in ("waiting", "buffering") for r in rows), rows
+
+    prov.land(node["tracks"][0])
+    assert _wait(lambda: items[0].opener().get("kind") == "unplayable")
+    assert mgr.latest_status.get("stream_event") is None        # one of two: nothing said yet
+    prov.land(node["tracks"][1])
+    assert _wait(lambda: mgr.latest_status.get("stream_event") is not None)
+    event = mgr.latest_status["stream_event"]
+    assert (event["kind"], event["all"], event["reason"], event["album"]) == (
+        "not_streamable", True, "region", "Night Walks")
+    assert [r["stream"] for r in mgr.playlist()["tracks"]] == [{"state": "failed", "reason": "region"}] * 2
+    assert not _wait(lambda: mgr.latest_status["stream_event"]["id"] != event["id"], timeout=0.5)   # once
+
+
+def test_his_queue_whose_folder_went_where_nothing_streams_is_said_once_too(node):
+    """A Nano node, the folder gone after a Play that has not sounded yet:
+    the slots wait, each row saying why, and the Play's failure is said
+    once — every slot failed — as for any Play none of whose slots streams."""
     import scanner
     mgr = node["mgr"]
-    items = _queue(node, play=True)                 # a Play that has not sounded yet
+    items = _queue(node, play=True)
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
     scanner.folder_seen(True)
     assert _wait(lambda: all(it.opener().get("kind") == "unplayable" for it in items))
     assert _wait(lambda: [(s["state"], s["reason"]) for s in mgr.slots_message()["slots"]]
                  == [("failed", "off")] * 2)
-    assert mgr.latest_status.get("stream_event") is None
+    assert _wait(lambda: mgr.latest_status.get("stream_event") is not None)
+    event = mgr.latest_status["stream_event"]
+    assert (event["all"], event["reason"]) == (True, "off")
     assert [it.source["kind"] for it in items] == ["file", "file"]
 
 
