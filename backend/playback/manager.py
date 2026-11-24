@@ -720,6 +720,10 @@ class PlaybackManager:
             from playback.substitute import streamed
             items = [it for it in self.queue.snapshot()
                      if it.source.get("kind") == "track" and streamed(it)]
+            if not items:
+                # no slot of the Play was tapped as a stream: the failure is
+                # an owned track's with no file here now, said on its row
+                return
             failed = [it for it in items if id(it) in run["failed"]]
             firsts = items[:2]
             event = None

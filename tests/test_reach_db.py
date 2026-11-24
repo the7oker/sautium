@@ -441,6 +441,22 @@ def test_a_manager_reads_its_own_owed_slot(node, monkeypatch):
     assert _wait(lambda: _streams(first))
 
 
+def test_his_queue_whose_folder_went_where_nothing_streams_says_so_on_its_rows_alone(node):
+    """A Nano node: the slots wait, each row saying why. The toast of a
+    Play of streamed tracks that do not stream ("Nothing on … streams
+    here") is for slots tapped as streams — none here."""
+    import scanner
+    mgr = node["mgr"]
+    items = _queue(node, play=True)                 # a Play that has not sounded yet
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    scanner.folder_seen(True)
+    assert _wait(lambda: all(it.opener().get("kind") == "unplayable" for it in items))
+    assert _wait(lambda: [(s["state"], s["reason"]) for s in mgr.slots_message()["slots"]]
+                 == [("failed", "off")] * 2)
+    assert mgr.latest_status.get("stream_event") is None
+    assert [it.source["kind"] for it in items] == ["file", "file"]
+
+
 def test_a_new_queue_while_the_folder_is_gone_reads_its_file_slots(node):
     """A file slot committed while the folder does not answer is read as
     any slot's: no window in which the output is handed a path that does
