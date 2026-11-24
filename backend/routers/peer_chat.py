@@ -178,6 +178,26 @@ def relay_client_count() -> int:
     return sum(1 for k in _wake.keys() if k in clients)
 
 
+_relay_count_said = 0
+
+
+def _relay_clients_changed() -> None:
+    """A voucher's stream came or went (the peer surface's loop): the Sync
+    screen's "Relaying for" row is told when the number it shows moved — a
+    key's next stream over its last, or one node of an account leaving
+    while another stays, moves nothing. On the events the screen's other
+    network rows ride (routers.settings, the identity subscribers): neither
+    the Library nor the guidance trail reads this number. Until 2026-11-24
+    the row changed at whatever woke the page next."""
+    global _relay_count_said
+    count = relay_client_count()
+    if count == _relay_count_said:
+        return
+    _relay_count_said = count
+    from routers.settings import notify_identity_subscribers
+    notify_identity_subscribers()
+
+
 def relay_has_room() -> bool:
     return relay_client_count() < _relay_cap
 
@@ -721,6 +741,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     if voucher is not None:
         with _relay_lock:
             _relay_clients[pubkey] = voucher
+        _relay_clients_changed()
         if _client_announce_cb:
             try:
                 _client_announce_cb(voucher["invite_code"])
@@ -770,6 +791,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
             if _wake.unregister(pubkey, instance, sub):
                 with _relay_lock:
                     rec = _relay_clients.pop(pubkey, None)
+                _relay_clients_changed()
                 if rec and _client_withdraw_cb:
                     try:
                         _client_withdraw_cb(rec["invite_code"])
