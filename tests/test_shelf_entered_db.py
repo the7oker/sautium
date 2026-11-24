@@ -153,7 +153,7 @@ def test_the_cursor_pages_a_round_of_one_instant_without_a_duplicate_or_a_gap(cu
     assert paged == [a["id"] for a in whole["albums"]] and pages == 5
     # a row of the shelf, as the page reads it
     assert sorted(whole["albums"][0]) == ["artist", "cover_id", "cover_url", "id", "location",
-                                           "media_file_id", "title", "year"]
+                                           "media_file_id", "not_here", "title", "year"]
 
 
 def test_a_cursor_is_whole_or_absent(cur):
