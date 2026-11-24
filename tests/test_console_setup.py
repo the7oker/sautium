@@ -154,9 +154,10 @@ def test_the_swap_is_read_where_proc_swaps_does_not_tell(sysfs, capsys):
     """Raspberry Pi OS's default is compressed swap in memory WITH a file on
     the disk its idle pages are written back to — /proc/swaps lists the zram
     device alone (PI-NODE-2C §8)."""
-    def read(table):
+    def read(table, size=2 * 1024 ** 3):
         return setup.swaps(table, LSBLK, str(sysfs), source_of=lambda path: {
-            "/var/swap": "/dev/mmcblk0p2", "/mnt/ssd/swapfile": "/dev/sdc2"}.get(path, ""))
+            "/var/swap": "/dev/mmcblk0p2", "/mnt/ssd/swapfile": "/dev/sdc2"}.get(path, ""),
+            size_of=lambda path: size)
     (sysfs / "zram0").mkdir()
     (sysfs / "zram0" / "backing_dev").write_text("none\n")
     alone = read(PROC_SWAPS)
@@ -168,13 +169,20 @@ def test_the_swap_is_read_where_proc_swaps_does_not_tell(sysfs, capsys):
     (sysfs / "loop0" / "loop").mkdir(parents=True)
     (sysfs / "loop0" / "loop" / "backing_file").write_text("/var/swap\n")
     (back,) = read(PROC_SWAPS)
-    assert back["writeback"] == {"path": "/var/swap", "medium": "sd_card", "written_mb": 12.0}
+    assert back["writeback"] == {"path": "/var/swap", "medium": "sd_card", "written_mb": 12.0,
+                                 "size_bytes": 2 * 1024 ** 3}
     setup.swap_lines([back], step=True)
     assert capsys.readouterr().out == ""                              # never a root step, nor the last screen
     setup.swap_lines([back], step=False)
     said = capsys.readouterr().out
-    assert "idle pages written back to /var/swap on a microSD card: 12 MB written there" in said
+    # the file's size beside what was written to it: a fact, no step (PI-NODE-2D §8.7)
+    assert said == ("Swap: compressed memory (zram0), with idle pages written back to /var/swap (a 2.0 GB file) "
+                    "on a microSD card: 12 MB written there since this start.\n")
     assert "sudo" not in said
+    # a file that cannot be read has no size to name, and the sentence stands without it
+    setup.swap_lines(read(PROC_SWAPS, size=None), step=False)
+    assert "written back to /var/swap on a microSD card: 12 MB" in capsys.readouterr().out
+    assert setup.file_size(str(sysfs / "zram0" / "bd_stat")) == 27 and setup.file_size(str(sysfs / "none")) is None
     # A swap file or a partition on the card itself, and one on an SSD
     table = PROC_SWAPS.splitlines()[0] + ("\n/var/swap file 1 0 -2\n/dev/mmcblk0p1 partition 1 0 -3\n"
                                          "/mnt/ssd/swapfile file 1 0 -4\n/my\\040swap file 1 0 -5\n")
@@ -712,8 +720,8 @@ class _Docker:
     """`docker compose` as start() asks it: the backend container's id, its
     log, and an `up` that makes the container again or leaves it."""
 
-    def __init__(self, monkeypatch, container, remade):
-        self.container, self.remade, self.asked = container, remade, []
+    def __init__(self, monkeypatch, container, remade, logged=b"backend  | the old container's last lines\n"):
+        self.container, self.remade, self.asked, self.logged = container, remade, [], logged
         monkeypatch.setattr(setup, "run", self.run)
         monkeypatch.setattr(setup.agent, "_run", self.run)
 
@@ -724,7 +732,7 @@ class _Docker:
         if " ps " in text:
             out = self.container.encode()
         elif " logs " in text:
-            out = b"backend  | the old container's last lines\n"
+            out = self.logged
         elif " up " in text and self.remade:
             self.container = "new" + self.container
         return subprocess.CompletedProcess(args, 0, out, b"")
@@ -738,6 +746,37 @@ def test_a_start_that_makes_the_container_again_keeps_the_old_ones_log(checkout,
     assert len(kept) == 1 and kept[0].name.endswith("-setup.log")
     assert kept[0].read_text() == "backend  | the old container's last lines\n"
     assert stat.S_IMODE(kept[0].stat().st_mode) == 0o600
+
+
+def test_the_log_the_setup_keeps_holds_nothing_of_a_setup_codes_form(checkout, monkeypatch, caplog):
+    """PI-NODE-2C F5. The setup run again on a node with no account keeps the
+    outgoing container's log, and that log has the start's line with the
+    code. The scrub ran — and put "XXXX-XXXX" in the code's place, which is
+    itself of the code's form: the kept log still read as holding a code.
+    Here the node's own start writes the line, with a code it mints."""
+    sys.path.insert(0, str(REPO / "backend"))
+    device_auth = pytest.importorskip("device_auth")
+    import logging
+    from config import LOGGING_CONFIG
+    identity = checkout / "data" / "node_identity"
+    for name, value in (("_identity_dir", lambda: identity), ("account_configured", lambda: False),
+                        ("identity_key_on_disk", lambda: False), ("_setup_code", None)):
+        monkeypatch.setattr(device_auth, name, value)
+    with caplog.at_level(logging.WARNING, logger="device_auth"):
+        device_auth.prepare_setup()
+    code = (identity / device_auth.SETUP_CODE_FILE).read_text().strip()
+    (record,) = [r for r in caplog.records if r.name == "device_auth"]
+    said = logging.Formatter(LOGGING_CONFIG["formatters"]["default"]["format"],
+                             LOGGING_CONFIG["formatters"]["default"]["datefmt"]).format(record)
+    assert code in said and device_auth._SETUP_CODE_FORM.fullmatch(code)
+    _Docker(monkeypatch, "abc123", remade=True, logged=f"sautium-backend  | {said}\n".encode())
+    setup.start()
+    (kept,) = setup.agent.kept_logs(checkout)
+    text = kept.read_text()
+    assert kept.name.endswith("-setup.log") and code not in text
+    assert device_auth._SETUP_CODE_FORM.search(text) is None and setup.agent.SETUP_CODE.search(text) is None
+    # the line itself stays, and says what stood there
+    assert "The setup code to create it is [setup code removed] (also in setup_code.txt" in text
 
 
 def test_a_start_that_leaves_the_container_keeps_nothing_and_trims_nothing(checkout, monkeypatch):
@@ -912,10 +951,17 @@ def test_the_setup_code_is_printed_only_as_a_regular_small_file_of_the_codes_for
 
 
 def test_the_agent_and_the_setup_and_the_node_spell_the_code_alike():
+    """One form on the host — the agent's, which the setup reads the code by
+    and the kept log is scrubbed by — and the node's own, the same pattern."""
     backend = (REPO / "backend" / "device_auth.py").read_text(encoding="utf-8")
     assert "SETUP_CODE_GROUPS = 2" in backend
-    assert setup.SETUP_CODE.fullmatch("K7QM-ZP4X") and not setup.SETUP_CODE.fullmatch("K7QM-ZP4X-9HTR")
-    assert setup.agent.SETUP_CODE.fullmatch("K7QM-ZP4X")
+    assert not hasattr(setup, "SETUP_CODE") and SOURCE.count("agent.SETUP_CODE.fullmatch(") == 2
+    assert setup.agent.SETUP_CODE.fullmatch("K7QM-ZP4X") and not setup.agent.SETUP_CODE.fullmatch("K7QM-ZP4X-9HTR")
+    sys.path.insert(0, str(REPO / "backend"))
+    device_auth = pytest.importorskip("device_auth")
+    assert setup.agent.SETUP_CODE.pattern == device_auth._SETUP_CODE_FORM.pattern
+    for _ in range(200):                                # … and every code the node mints is of it
+        assert setup.agent.SETUP_CODE.fullmatch(device_auth._code(device_auth.SETUP_CODE_GROUPS))
 
 
 def test_a_picture_that_is_not_only_blocks_is_not_shown(monkeypatch):

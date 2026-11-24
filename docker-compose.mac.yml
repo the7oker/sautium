@@ -80,6 +80,20 @@ services:
       retries: 5
     restart: unless-stopped
     logging: *bounded-log
+    # Stopped by SIGTERM, PostgreSQL's smart shutdown: it waits for its
+    # clients to leave. At the machine's shutdown Docker stops every container
+    # at once (depends_on orders starts and `compose down`, not that), and the
+    # image's own stop signal (SIGINT, a fast shutdown) cut the backend's
+    # connections while it was still saving (seen 2026-11-23: "DHT: state save
+    # failed", "Application shutdown failed"). The grace is longer than the
+    # backend's: the backend saves and goes inside its own - killed there if
+    # it hangs, which closes its connections too - and PostgreSQL then ends
+    # cleanly. A connection asked for after the signal is refused, so a stop
+    # saves through the connections the backend already holds. Stopped ALONE
+    # while the backend still runs, PostgreSQL waits this grace out and is
+    # killed: stop the backend first, as `docker compose stop` does.
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
     # Loopback-only: postgres is never accessed from outside the host.
     # Inter-container traffic uses the docker network, not this port.
 

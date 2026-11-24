@@ -138,8 +138,13 @@ KEPT_MAX = 1024 * 1024
 KEPT_LOGS = 3
 KEPT_NAME = re.compile(r"backend-\d{8}-\d{6}-(?:update|undo|setup)\.log")
 # The setup code a node logs at each start until its account exists
-# (backend/device_auth._SETUP_CODE_FORM): never in a diagnostics report
+# (backend/device_auth._SETUP_CODE_FORM, held to it by a test; the console
+# setup reads the code by this same form): never in a diagnostics report or a
+# kept log. What stands in its place is not of the code's form — the letters
+# "XXXX-XXXX" were, so a text that had been scrubbed still read, by the form,
+# as one that held a code (PI-NODE-2C F5: the setup's kept log, checked so).
 SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){1}")
+SCRUBBED = "[setup code removed]"
 
 UNIT = "sautium-host-agent"
 STARTER_NAME = "sautium-host-agent"
@@ -976,7 +981,7 @@ def resume(state: dict, now: float, root: Path = None) -> Optional[Tuple[str, st
 
 
 def _scrub(text: str) -> str:
-    return SETUP_CODE.sub("XXXX-XXXX", text)
+    return SETUP_CODE.sub(SCRUBBED, text)
 
 
 def _tail_cut(text: str, limit: int) -> str:

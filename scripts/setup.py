@@ -66,7 +66,6 @@ DOCKER_MIN, COMPOSE_MIN = (25, 0), (2, 24)
 FOREIGN_FILESYSTEMS = {"exfat", "vfat", "msdos", "ntfs", "ntfs3", "fuseblk"}
 # Free space Docker's data root needs for what the preset builds and keeps
 NEED_GB = {"nano": 8, None: 25}
-SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}")
 SMALL_FILE = 4096
 
 
@@ -164,14 +163,22 @@ def read_line(path: str) -> str:
         return ""
 
 
+def file_size(path: str) -> Optional[int]:
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return None
+
+
 def swaps(proc_swaps: str, lsblk_json: str, sysfs: str = "/sys/block",
-          source_of=lambda path: mount_of(path).get("source", "")) -> List[dict]:
+          source_of=lambda path: mount_of(path).get("source", ""), size_of=file_size) -> List[dict]:
     """Where this machine swaps to, from /proc/swaps and sysfs alone: each
     swap as {path, kind: file | partition | zram, medium} — and for a zram
     device with a backing file (Raspberry Pi OS writes idle pages of its
     compressed swap to one, which /proc/swaps does not show) `writeback`,
-    the file's path, its `medium` and `written_mb`, what the kernel counted
-    as written there since the machine started."""
+    the file's path, its `medium`, its `size_bytes` (None where it cannot be
+    read) and `written_mb`, what the kernel counted as written there since
+    the machine started."""
     def medium(device: str) -> str:
         return machine_tier.storage_medium(device_chain(device, lsblk_json), sysfs)
 
@@ -192,6 +199,7 @@ def swaps(proc_swaps: str, lsblk_json: str, sysfs: str = "/sys/block",
                 stat = read_line(f"{sysfs}/{name}/bd_stat").split()
                 swap["writeback"] = {
                     "path": file or backing, "medium": medium(source_of(file) if file else backing),
+                    "size_bytes": size_of(file) if file else None,
                     # bd_stat's third figure: 4 KiB units written to the backing device
                     "written_mb": int(stat[2]) * 4 / 1024 if len(stat) == 3 and stat[2].isdigit() else None}
             found.append(swap)
@@ -1125,7 +1133,7 @@ def setup_code() -> Optional[str]:
     if raw is None or len(raw) > 64:
         return None
     text = raw.decode("ascii", "replace").strip()
-    return text if SETUP_CODE.fullmatch(text) else None
+    return text if agent.SETUP_CODE.fullmatch(text) else None
 
 
 def qr(text: str) -> Optional[str]:
@@ -1181,8 +1189,9 @@ def swap_lines(found: List[dict], step: bool) -> None:
         back = swap.get("writeback")
         if back and not step and back["medium"] in machine_tier.CARD_MEDIA:
             written = "" if back["written_mb"] is None else f": {back['written_mb']:.0f} MB written there since this start"
+            size = "" if back.get("size_bytes") is None else f" (a {back['size_bytes'] / 1024 ** 3:.1f} GB file)"
             say(f"Swap: compressed memory ({os.path.basename(swap['path'])}), with idle pages written back to "
-                f"{printable(back['path'])} on {machine_tier.MEDIA[back['medium']]}{written}.")
+                f"{printable(back['path'])}{size} on {machine_tier.MEDIA[back['medium']]}{written}.")
 
 
 def last_screen(m: dict, preset: Optional[str]) -> None:
@@ -1861,7 +1870,7 @@ def cmd_pair(args) -> int:
     refuse_root()
     answer = signed_get("/api/auth/pin")
     code = str((answer or {}).get("code", ""))
-    if not SETUP_CODE.fullmatch(code):
+    if not agent.SETUP_CODE.fullmatch(code):
         raise Stop("the node gave no pairing code: it must be running (docker compose up -d) and have "
                    "its account (open its address and create it first)")
     addresses = own_addresses()
