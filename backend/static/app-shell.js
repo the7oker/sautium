@@ -9083,10 +9083,10 @@
       window.removeEventListener('sautium:identity', paintIdentity);
       window.removeEventListener('sautium:route', onRoute);
     };
-    const onChat = () => {
+    const onChat = async () => {
       if (!document.contains(threadEl)) return detach();
+      await loadFriend();      // status may have changed — and the bubbles' line reads it
       loadMessages();
-      loadFriend();            // status may have changed
       markRead();
     };
     const onRoute = () => {

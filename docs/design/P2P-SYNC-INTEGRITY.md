@@ -1329,8 +1329,11 @@ also takes the unvouched share — 10 an address and 250 a day
 (`MAIL_UNVOUCHED_*`), to 0 once no released client drops without one; an
 invalid voucher is a 403 — the node forgets that voucher and drops again
 without one (which master keys sign is the Worker's to say, so a node keeps
-the pin's voucher and lets the Worker judge it after a rotation). A flood of fresh certificates spends that share at
-most. The expiry is how a ban acts: the master stops renewing. And the
+the pin's voucher and lets the Worker judge it after a rotation). A flood of
+fresh certificates the master never admitted spends that share at most; a key
+it admits (Support's token is public) earns a voucher by the proof its gate
+verified — that proof is the bar. The expiry is how a ban acts: the master
+stops renewing. And the
 client deposits only while the master's row is bound to the key it signs
 with now, or names none (a row from before the binding was kept, or one a
 404 notice left; `chat_wire.accepts_current_key`, in `_mailbox_deposit`

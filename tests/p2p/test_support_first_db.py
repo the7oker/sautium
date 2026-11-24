@@ -373,3 +373,16 @@ def test_a_kept_deposit_cuts_the_masters_rest_short(conn, scratch_dsn, master, d
         await asyncio.wait_for(rest, 5)
         return rest.done()
     assert asyncio.run(scene()) is True
+
+
+def test_a_drop_whose_voucher_lapsed_at_the_worker_is_said_so(conn, scratch_dsn, master, drops):
+    """Review round 3: alive by this node's clock, expired by the Worker's —
+    kept in the small share, and the path's state says it."""
+    fid = _resolved_master(conn, ME.pub)
+    _write(conn, fid)
+    client = _client(scratch_dsn)
+    drops.answer = mailbox_client.Deposit(True, {"stored": True, "voucher": "expired"}, None)
+
+    async def scene():
+        return await client._mailbox_deposit(fid, await client._pending_for(fid))
+    assert asyncio.run(scene()) == "kept in the master's mailbox, its voucher lapsed at the Worker"

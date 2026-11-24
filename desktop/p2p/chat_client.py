@@ -1980,6 +1980,10 @@ class ChatClient:
                 if not result.kept:                # the outbox keeps the rest
                     return (f"the master's mailbox refused it: {result.refusal}" if result.refusal
                             else "the master's mailbox is unreachable")
+                if (result.answer or {}).get("voucher") == "expired":
+                    # Alive by this node's clock, lapsed by the Worker's: the
+                    # small share took it
+                    outcome = "kept in the master's mailbox, its voucher lapsed at the Worker"
                 await self._db(self.store.mark_parked, msg["id"])
                 self._master_redial.set()
                 logger.info("Message %s kept in the master mailbox", msg["message_uuid"][:8])

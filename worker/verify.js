@@ -678,10 +678,11 @@ async function handleIssuanceStats(request, env) {
       // The master's mailbox drops without its voucher in the current day,
       // against their share: the owner's reading of when that share may go
       // to 0 (SUPPORT-FIRST §2.7). No more of the mailbox than that.
-      mailbox: {
+      // A deployment with no mailbox bound (handleMailboxPut's 503) has none.
+      mailbox: env.MAILBOX ? {
         unvouched_today: (await mailboxCall(env, "/stats")).body.unvouched_today,
         unvouched_per_day: MAIL_UNVOUCHED_PER_DAY,
-      },
+      } : null,
     } };
   }
   return json(statsMemo.body);
