@@ -1583,9 +1583,11 @@ def read_log(source: dict, info: dict, uri: Optional[str] = None) -> dict:
     out = {"source": source["kind"], "where": source.get("where"), "read_at": _iso(time.time()),
            "lines": [], "cause": None, "note": None}
     if source["kind"] == "none":
-        out["note"] = ("HQPlayer runs on another computer; its log is there — on Windows "
-                       "%LOCALAPPDATA%\\HQPlayer\\HQPlayer<version>Desktop.log, on macOS in "
-                       "~/.hqplayer/, written while logging is on in HQPlayer's settings.")
+        major = _major((info or {}).get("version"))
+        name = f"HQPlayer{major}Desktop.log" if major else "HQPlayer<version>Desktop.log"
+        out["note"] = (f"HQPlayer runs on another computer; its log is there — on Windows "
+                       f"%LOCALAPPDATA%\\HQPlayer\\{name}, on Linux and macOS ~/.hqplayer/{name}, "
+                       "written while logging is on in HQPlayer's settings.")
         return out
     try:
         if source["kind"] == "local":

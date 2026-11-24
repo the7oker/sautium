@@ -1069,6 +1069,14 @@ def test_a_desktop_elsewhere_has_no_log_here():
     assert log["lines"] == [] and "%LOCALAPPDATA%" in log["note"]
 
 
+def test_a_desktop_elsewhere_on_linux_is_told_where_its_log_lives():
+    # Desktop 6 on Raspberry Pi OS keeps it in ~/.hqplayer, named by the major version (PI-HQP-1 §11.5)
+    log = diag.read_log({"kind": "none", "where": None}, {"version": "6", "platform": "Linux"})
+    assert "on Linux" in log["note"] and "~/.hqplayer/HQPlayer6Desktop.log" in log["note"]
+    unknown = diag.read_log({"kind": "none", "where": None}, {})
+    assert "~/.hqplayer/HQPlayer<version>Desktop.log" in unknown["note"]
+
+
 def test_the_embedded_log_page_is_read_and_filtered():
     body = "\n".join([*NOISE, "& 2026/10/02 12:48:17 Play (-1/0)",
                       "# 2026/10/02 12:48:18 NAA output network timeout"]).encode()
