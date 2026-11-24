@@ -6060,7 +6060,8 @@ class HqpBackend(PlayerBackend):
         a stream that fails walks on to the next); with none, nothing is
         sent, refused in words. A file is known to open as far as this
         output can tell: one this node holds is looked at by the playback
-        manager before a new queue's start, never here — and HQPlayer
+        manager before a new queue's start and before a Play of the queue
+        held (PlaybackManager.before_start), never here — and HQPlayer
         refusing a file the node can read still answers after the Stop.
         `afresh`: HQPlayer is handed the queue again whatever the mirror
         says (a slot it was never handed, an entry in another shape) — the

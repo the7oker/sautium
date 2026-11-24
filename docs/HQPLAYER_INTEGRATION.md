@@ -812,9 +812,14 @@ comes after the control port answers again — so neither can end the wait.
   afresh — the takeover, at that moment; a stream that fails is walked
   past, onto the next slot that may open; where none does, HQPlayer was
   sent nothing — a Play is refused in words ("nothing from slot 1 on is on
-  this HQPlayer"), and a new queue's rows say each stream failed. A first
-  slot that is a file of this node is the playback
-  manager's to look at before a new queue's start, never the output's; one
+  this HQPlayer"), and a new queue's rows say each stream failed. A slot
+  that is a file of this node is the playback manager's to look at, never
+  the output's — before a new queue's start and, since 2026-11-24, before a
+  Play or a row's tap on the queue the node holds
+  (`PlaybackManager.before_start`): a folder that went with no event is
+  recorded there and the slots' ways in read at once, so the press finds a
+  stream to wait for, or, where this node streams nothing, the Play is
+  refused in words (409 `not_here`) with HQPlayer sent nothing; one
   in that HQPlayer's own library goes at once. Not covered: a file the node
   can read and HQPlayer refuses still answers after the Stop, and so does a
   stream that landed once whose refetch fails. With no other controller a
