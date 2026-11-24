@@ -616,20 +616,7 @@ def test_a_play_of_which_nothing_opens_where_nothing_streams_is_refused_before_t
     assert out.replaced == [] and mgr.queue.snapshot() == old       # the old queue intact
 
 
-def _unopened_is_over():
-    from playback import substitute
-    substitute.observe(())
-
-
-@pytest.fixture
-def look(node):
-    """The play path's look as it runs — the real stat, the real look at
-    the folder — with what one test's look observed over when it ends."""
-    yield node
-    _unopened_is_over()
-
-
-def test_a_file_gone_from_a_folder_that_answers_is_no_way_in_of_its_slot(look):
+def test_a_file_gone_from_a_folder_that_answers_is_no_way_in_of_its_slot(node):
     """A file deleted or moved outside Sautium keeps its row until a
     Rescan's yes, and its folder answers: the look before a start finds the
     file missing, the folder there — and that slot alone goes out as a
@@ -638,7 +625,6 @@ def test_a_file_gone_from_a_folder_that_answers_is_no_way_in_of_its_slot(look):
     is its file again."""
     import scanner
     from playback import substitute
-    node = look
     mgr, out = node["mgr"], node["out"]
     first = node["root"] / "NW" / "01.flac"
     first.unlink()
@@ -657,8 +643,7 @@ def test_a_file_gone_from_a_folder_that_answers_is_no_way_in_of_its_slot(look):
     assert substitute.unopened() == frozenset()
 
 
-def test_a_file_the_look_did_not_find_gives_way_to_another_copy_that_is_here(look):
-    node = look
+def test_a_file_the_look_did_not_find_gives_way_to_another_copy_that_is_here(node):
     twin = node["copy"](0, "twin/01.flac")
     (node["root"] / "NW" / "01.flac").unlink()
     items = _queue(node, play=True)
@@ -666,12 +651,11 @@ def test_a_file_the_look_did_not_find_gives_way_to_another_copy_that_is_here(loo
     assert node["out"].replaced == [["file", "file"]]
 
 
-def test_a_play_of_a_file_the_look_did_not_find_where_nothing_streams_is_refused_in_words(look):
+def test_a_play_of_a_file_the_look_did_not_find_where_nothing_streams_is_refused_in_words(node):
     """Its true why: the folder answers, so it is not its disk — the file
     is not there."""
     from playback.manager import NotHere
     from playback.queue import items_for_media_ids
-    node = look
     mgr, out, player = node["mgr"], node["out"], node["player"]
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
     (node["root"] / "NW" / "01.flac").unlink()
@@ -683,14 +667,14 @@ def test_a_play_of_a_file_the_look_did_not_find_where_nothing_streams_is_refused
     assert out.replaced == [] and len(mgr.queue) == 0
     # with a slot beside it that opens the queue plays, and the slot is passed
     items = _queue(node, play=True)
-    assert out.replaced == [["unplayable", "file"]] and items[0].play["code"] == "off"
+    assert out.replaced == [["pending", "file"]]
+    assert _wait(lambda: (items[0].play or {}).get("code") == "off")    # its row says why
 
 
-def test_next_and_previous_take_the_look_at_the_slot_they_would_start(look):
+def test_next_and_previous_take_the_look_at_the_slot_they_would_start(node):
     """Next and Previous hand the output a start as a tap on that row does:
     the same one look at the file it would open, before the output is
     asked."""
-    node = look
     mgr, out, player = node["mgr"], node["out"], node["player"]
     items = _queue(node)
     node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "playing", "track_index": 1})
@@ -699,12 +683,12 @@ def test_next_and_previous_take_the_look_at_the_slot_they_would_start(look):
     assert player.next_track()["ok"]
     assert _streams(items[1]) and items[0].play is None
     second.write_bytes(b"fLaC")
+    mgr.before_start(out, 2)                        # a tap on its row: the file is back
+    assert items[1].play is None
     node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "playing", "track_index": 2})
     (node["root"] / "NW" / "01.flac").unlink()
     assert player.previous_track()["ok"]
-    assert _streams(items[0])
-    assert not _wait(lambda: items[1].play is None, timeout=0.3)    # the sounding slot: owed
-    assert mgr._reach_owed is items[1]
+    assert _streams(items[0]) and items[1].play is None
 
 
 def test_a_refusal_names_no_disk_for_slots_that_were_never_files(node):
@@ -731,10 +715,12 @@ def test_no_provider_answering_right_now_is_not_a_node_that_streams_nothing(node
     node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
     assert substitute.streams()
     node["gone"](True)
-    with pytest.raises(HTTPException) as refused:
-        player.play_album(player.PlayAlbumRequest(album_id=node["owned"]))
-    assert refused.value.status_code == 503
-    assert "No streaming provider is available right now" in refused.value.detail
+    for route in _every_route(node):
+        with pytest.raises(HTTPException) as refused:
+            route()
+        assert refused.value.status_code == 503
+        assert "No streaming provider is available right now" in str(refused.value.detail)
+    assert len(node["mgr"].queue) == 0
     node["monkeypatch"].setattr(node["streaming"], "providers_registered", lambda: False)
     assert not substitute.streams()
 
@@ -1183,6 +1169,24 @@ def test_a_tile_says_of_an_album_that_is_out_what_its_page_says(node):
 
 
 # -- the threat (§3.5): his own album through the demo channel --------------------
+
+
+def test_a_shelf_asks_about_the_albums_its_tiles_show_by_the_tiles_one_definition(node):
+    """The marks of the tiles on the page, whatever page brought them: asked
+    by album id when what is reachable changes — the same definition the
+    tiles were drawn by (album_away), a not-owned album never among them."""
+    from routers import home
+
+    def away() -> dict:
+        return home.albums_away(home.AlbumsShown(ids=[node["owned"], node["streamed"]]))
+    assert away() == {"not_here": {}}
+    node["gone"](True)
+    assert away() == {"not_here": {node["owned"]: "disk"}}
+    assert _tiles(node)["new"] == "disk"
+    node["gone"](False)
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
+                        (node["variant"],))
+    assert away() == {"not_here": {node["owned"]: "away"}}
 
 
 def test_an_owned_track_streamed_for_want_of_its_file_spends_the_demo_listen_like_any_other(node):

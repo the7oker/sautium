@@ -3214,9 +3214,10 @@ def _reach_segments(rows: list) -> tuple[list, list]:
     from (`track_id`, `album_id`): always for a track with no copy for this
     output at all (`why` None: the caller's _ensure_streaming_ready speaks
     for it), and for an owned track whose copy is not here now (`why`
-    'disk' | 'away') only where this node streams — where it does not, the
-    row is left out with reason `not_here` and its why, as is one no
-    tracklist names (`nowhere`). Returns (segments, left); rows none of
+    'disk' | 'away') only where this node streams (substitute.streams; no
+    provider answering right now is the streaming refusal, as for any
+    stream) — where it does not, the row is left out with reason `not_here`
+    and its why, as is one no tracklist names (`nowhere`). Returns (segments, left); rows none of
     which makes a segment, every one left as not_here, are refused here
     (_not_here) — before the queue or the output is touched."""
     out = [r for r in rows if r.get("id") is None]
@@ -3225,6 +3226,7 @@ def _reach_segments(rows: list) -> tuple[list, list]:
                                if "query" not in r and (streams or not r.get("why"))])
     segments: list[tuple[str, list]] = []
     left: list = []
+    his = False                 # a track of his own became its stream
     for r in rows:
         if r.get("id") is not None:
             _push_segment(segments, "owned", [r])
@@ -3234,6 +3236,7 @@ def _reach_segments(rows: list) -> tuple[list, list]:
                                else queries.get((r["track_id"], r.get("album_id"))))
         if q is not None:
             _push_segment(segments, "phantom", [q])
+            his = his or bool(r.get("why"))
         else:
             left.append({"track_id": r["track_id"], "title": r.get("title"),
                          "reason": "not_here" if away else "nowhere",
@@ -3243,6 +3246,10 @@ def _reach_segments(rows: list) -> tuple[list, list]:
         albums = {t["album"] for t in left}
         name = albums.pop() if len(albums) == 1 else None
         raise _not_here(left[0]["why"], name or (left[0]["title"] if len(left) == 1 else None))
+    if his:
+        # as a not-owned track's tap: a node that streams, none of whose
+        # providers answers right now, says that — in the words it has for it
+        _ensure_streaming_ready()
     return segments, [{k: v for k, v in t.items() if k != "album"} for t in left]
 
 

@@ -132,6 +132,18 @@ def _role_decided(monkeypatch):
     monkeypatch.setattr(master_node, "_role", False)
 
 
+@pytest.fixture(autouse=True)
+def _no_look_left_over():
+    """What the play path's latest look observed of single files is process
+    state (playback.substitute.observe), as a node's is: a test starts with
+    none, as a process does. Read off the modules loaded — a test that never
+    loaded the play path has none."""
+    yield
+    substitute = sys.modules.get("playback.substitute")
+    if substitute is not None:
+        substitute.observe(())
+
+
 def pytest_sessionstart(session):
     if not _recreate(SESSION_DATABASE, create=True):
         return
