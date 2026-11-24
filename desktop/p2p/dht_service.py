@@ -464,6 +464,11 @@ class DHTService:
             self._session.pause()
             del self._session
             self._session = None
+        if self._state_store:
+            # Saved through the connection the store has held since the
+            # start's load (a PostgreSQL told to stop takes no new one), and
+            # only now let go: PostgreSQL waits for its clients to leave
+            self._state_store.close()
         self._announced.clear()
         self._peer_cache.clear()
         logger.info("DHT service stopped")
