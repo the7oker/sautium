@@ -102,3 +102,98 @@ def test_the_hosts_own_client_still_waits_out_the_start_race_and_says_so(peer, n
     assert no_secret == [0.5] * 10
     assert "API secret file not found" in caplog.text
     assert _signed(peer.seen[-1][1]) == []
+
+
+# -- over TLS, end to end --------------------------------------------------------
+#
+# What `remote=True` widened for a node with no identity: its dial of a peer
+# used to end at the certificate (the client carried no pin and the default
+# verification refuses a self-signed one); now the pinned handshake completes
+# against any host whose certificate carries a valid node-key binding, and
+# what follows goes out unsigned. A throwaway peer surface, with a
+# certificate as tls_gen makes one.
+
+class _Surface(_Peer):
+    def do_GET(self):
+        self.server.seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
+        body = json.dumps({"status": "healthy", "node_id": self.server.says}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_POST = do_GET
+
+
+@pytest.fixture
+def surface(tmp_path):
+    """serve(certificate, the node_id its /health says) → its port."""
+    import ssl
+    servers = []
+
+    def serve(cert_pem: bytes, key_pem: bytes, says: str):
+        folder = tmp_path / f"tls{len(servers)}"
+        folder.mkdir()
+        (folder / "c.pem").write_bytes(cert_pem)
+        (folder / "k.pem").write_bytes(key_pem)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(str(folder / "c.pem"), str(folder / "k.pem"))
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Surface)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        srv.seen, srv.says = [], says
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        servers.append(srv)
+        return srv
+    yield serve
+    for srv in servers:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_an_identity_less_client_completes_the_pinned_handshake_and_sends_nothing_signed(
+        surface, no_secret, caplog):
+    from tests.p2p.test_peer_auth import NODE_PUB, _make_cert
+    peer = surface(*_make_cert(), says=NODE_PUB)
+    walk = sync_walk.SyncWalk.__new__(sync_walk.SyncWalk)
+    walk._identity = lambda: None
+    walk.dead = sync_walk.DeadAddresses()
+    with caplog.at_level(logging.DEBUG, logger="desktop.api_client"):
+        api = asyncio.run(walk.connect_peer(f"127.0.0.1:{peer.server_port}"))    # a discovered address
+        assert api is not None and api.peer_pubkey == NODE_PUB and api.peer is None
+        # what a walk and a slice cycle then ask of it
+        assert api.sync_holdings() == {"status": "healthy", "node_id": NODE_PUB}
+        assert api.sync_inventory(["00000000-0000-4000-8000-000000000001"]) is not None
+        assert api.mb_slice(["an artist"]) is not None
+        assert api.gate_pay("sync.pull") is None                # a quote is never asked for, nor paid
+    assert [path for path, _ in peer.seen] == ["/health", "/api/sync/holdings", "/api/sync/inventory",
+                                               "/api/mb/slice"]
+    assert all(_signed(headers) == [] for _, headers in peer.seen)
+    assert no_secret == [] and "API secret" not in caplog.text
+    assert not walk.dead.backing_off(f"127.0.0.1:{peer.server_port}")
+
+
+def test_an_identity_less_client_is_refused_what_any_peer_client_is(surface, no_secret):
+    """The pin is the client's, whatever it can sign with: no binding in the
+    certificate, a binding that does not verify, a /health naming another
+    node, a key other than the one expected — each ends the dial, and
+    nothing is asked after it."""
+    from tests.p2p.test_peer_auth import NODE_PUB, OTHER, OTHER_PUB, _make_cert
+    unbound = surface(*_make_cert(bound=False), says=NODE_PUB)
+    tampered = surface(*_make_cert(tamper_sig=True), says=NODE_PUB)
+    lying = surface(*_make_cert(), says=OTHER_PUB)              # bound to NODE, /health names OTHER
+    other = surface(*_make_cert(bind_key=OTHER), says=OTHER_PUB)
+    walk = sync_walk.SyncWalk.__new__(sync_walk.SyncWalk)
+    walk._identity = lambda: None
+    walk.dead = sync_walk.DeadAddresses()
+    for srv in (unbound, tampered, lying):
+        assert asyncio.run(walk.connect_peer(f"127.0.0.1:{srv.server_port}")) is None
+        assert walk.dead.backing_off(f"127.0.0.1:{srv.server_port}")
+    assert unbound.seen == [] and tampered.seen == []           # ended at the handshake: no request reached them
+    assert [path for path, _ in lying.seen] == ["/health"]
+    # the master hint's address may be one key's alone
+    assert asyncio.run(walk.connect_peer(f"127.0.0.1:{other.server_port}", expected_pubkey=NODE_PUB)) is None
+    assert other.seen == []
+    api = asyncio.run(walk.connect_peer(f"127.0.0.1:{other.server_port}", expected_pubkey=OTHER_PUB))
+    assert api is not None and api.peer_pubkey == OTHER_PUB
+    assert no_secret == []
