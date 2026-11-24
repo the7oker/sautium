@@ -5403,10 +5403,12 @@
   }
 
   /* What opens here changes under an open page: the music folder's disk
-     pulled or put back (the notice library.mount_missing begins or ends, on
-     the notices stream every page holds). A screen that shows the owner's
-     files names its payload here (followReach); when the notice flips, the
-     payload is asked again and the screen repainted only if it says
+     pulled or put back. The node says what is reachable now as a key on
+     the stream every page holds (`reach`: the folder's recorded answer —
+     what the payloads themselves read; never the notice, whose readers may
+     say "unreachable" before a slow look has). A screen that shows the
+     owner's files names its payload here (followReach); when the key is
+     another, the payload is asked again and the screen repainted only if it says
      otherwise — the same answer touches no DOM. Any screen may follow (a
      shelf of tiles as well): it names the URL its payload came from, that
      payload's text and how it is drawn again. */
@@ -5428,17 +5430,23 @@
     reach.rerender();
     return true;
   }
-  let _reachStood = false;
-  function reachNoticeChanged() {
-    const stands = !!notices.get('library.mount_missing');
-    if (stands === _reachStood) return;
-    _reachStood = stands;
+  // The key the node last said (the `reach` message of the page's stream:
+  // at every connect, and when the recorded answer changes). The first one
+  // a page hears is the state it loaded in; a later, other one — a change,
+  // or what moved while the page slept — asks the followers again.
+  let _reachKey = null;
+  function reachChanged(said) {
+    const key = (said && said.key) || '';
+    const first = _reachKey === null;
+    if (key === _reachKey) return;
+    _reachKey = key;
+    if (first) return;
     _reachScreens.forEach(screen => {
       if (screen.isConnected) refreshReach(screen);
       else _reachScreens.delete(screen);     // a screen left: it follows nothing
     });
   }
-  window.addEventListener('sautium:notices-changed', reachNoticeChanged);
+  window.addEventListener('sautium:reach', e => reachChanged(e.detail));
 
   async function renderArtist(root, artistId, selectedMbid) {
     const screen = document.createElement('div');

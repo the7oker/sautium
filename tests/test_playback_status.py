@@ -238,6 +238,7 @@ def test_the_status_a_connection_opens_with_carries_the_floor_of_its_events(monk
         assert before < floor < new_id()
         slots = json.loads((await stream.__anext__())[6:])
         assert slots["t"] == "slots" and slots["d"] == {"version": mgr.queue.version, "slots": []}
+        assert json.loads((await stream.__anext__())[6:])["t"] == "reach"
         assert json.loads((await stream.__anext__())[6:])["t"] == "notice"
         assert json.loads((await stream.__anext__())[6:])["t"] == "identity"
         mgr._push_status({"state": "stopped", "output": {}, "output_event": {"id": new_id(), "kind": "refused"}})

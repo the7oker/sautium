@@ -190,14 +190,13 @@ REACH = "\n".join([
     "const _reachScreens = new Set();",
     _block("function followReach(screen, url, text, rerender) {"),
     _block("async function refreshReach(screen) {"),
-    "let _reachStood = false;",
-    _block("function reachNoticeChanged() {"),
+    "let _reachKey = null;",
+    _block("function reachChanged(said) {"),
 ])
 
 REACH_DRIVER = REACH + r"""
-let notice = null, served = 'payload-1';
+let served = 'payload-1';
 const fetched = [];
-const notices = { get: key => (key === 'library.mount_missing' ? notice : null) };
 const fetch = url => { fetched.push(url); return Promise.resolve({ ok: true, text: () => Promise.resolve(served) }); };
 const screen = { isConnected: true };
 const left = { isConnected: false };                 // a screen the person left
@@ -208,20 +207,28 @@ followReach(screen, '/api/albums/a', served, paint);
 const settle = async () => { for (let i = 0; i < 4; i++) await new Promise(r => setTimeout(r, 0)); };
 (async () => {
   const steps = [];
-  const step = async () => { reachNoticeChanged(); await settle(); steps.push([fetched.length, painted]); };
-  await step();                                       // no notice: nothing asked
-  notice = { since: 't1' }; await step();             // it begins, the payload says the same
-  await step();                                       // another snapshot, the notice standing
-  notice = null; served = 'payload-2'; await step();  // it ends, the payload differs
-  notice = { since: 't2' }; served = 'payload-3'; await step();
+  const said = async key => { reachChanged({ key }); await settle(); steps.push([fetched.length, painted]); };
+  await said('');                                     // the connect's word: the state the page loaded in
+  await said('');                                     // a reconnect, nothing moved
+  await said('9f2c');                                 // the folder went; the payload says the same
+  await said('9f2c');
+  served = 'payload-2'; await said('');               // it is back; the payload differs
+  served = 'payload-3'; await said('9f2c');
   console.log(JSON.stringify(steps));
 })();
 """
 
 
-def test_a_flip_of_the_notice_asks_the_open_screens_payload_again_and_repaints_only_a_change():
-    assert _node(REACH_DRIVER) == [[0, 0], [1, 0], [1, 0], [2, 1], [3, 2]]     # [asked, drawn]
+def test_a_new_word_of_what_is_reachable_asks_the_open_screens_payload_again_and_repaints_only_a_change():
+    """The page follows the node's own word of what is reachable (`reach`
+    on its stream — the recorded answer the payloads read), never the
+    notice: a notice shown by a reader that gave up on a slow look flips
+    nothing the payload reads, and the look landing later flipped no notice."""
+    assert _node(REACH_DRIVER) == [[0, 0], [0, 0], [1, 0], [1, 0], [2, 1], [3, 2]]     # [asked, drawn]
     # the album and the artist screens name their payload
     assert "followReach(screen, url, text, loadAndRender);" in SOURCE
     assert "followReach(screen, url, text, () => renderArtist(root, artistId, selectedMbid));" in SOURCE
-    assert "window.addEventListener('sautium:notices-changed', reachNoticeChanged);" in SOURCE
+    assert "window.addEventListener('sautium:reach', e => reachChanged(e.detail));" in SOURCE
+    assert "reachNoticeChanged" not in SOURCE
+    player = (REPO_ROOT / "backend" / "static" / "player.js").read_text(encoding="utf-8")
+    assert "window.dispatchEvent(new CustomEvent('sautium:reach', { detail: msg.d }));" in player

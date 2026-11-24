@@ -638,6 +638,49 @@ def test_the_folder_watchers_loss_is_a_look_at_the_folder(node, monkeypatch):
     assert looked == [False]
 
 
+def test_the_pages_hear_the_recorded_answer_change_whatever_the_notice_said(node, monkeypatch):
+    """The page's stream says what is reachable as a key — at connect and
+    when the recorded answer changes. A notices reader that gave up on a
+    slow look shows the notice while nothing is recorded: no word then; the
+    look landing "gone" later flips no notice, and is the word the open
+    album reads its payload again on (it went unheard before)."""
+    import asyncio
+    import json
+    import scanner
+    from playback import manager as manager_mod
+    from routers import settings as settings_router
+    player = node["player"]
+    monkeypatch.setattr(settings_router, "_notices_state", lambda: {})
+    monkeypatch.setattr(settings_router, "identity_event", lambda: {"status": None})
+
+    async def run():
+        stream = (await player.events_stream(tab=None)).body_iterator
+
+        async def said(kind):
+            while True:
+                msg = json.loads((await asyncio.wait_for(stream.__anext__(), 10))[6:])
+                if msg["t"] == kind:
+                    return msg["d"]
+        assert await said("reach") == {"key": ""}
+        await said("identity")
+        scanner._shown = True                       # a reader gave up: the notice shows
+        assert manager_mod.reach_key() == ""
+        scanner._record(True, scanner._next_ticket(), wake=False)      # the look lands: gone
+        gone = await said("reach")
+        assert gone["key"] and node["db_root"] not in gone["key"]
+        scanner.folder_seen(False)
+        assert await said("reach") == {"key": ""}
+        reading = asyncio.ensure_future(stream.__anext__())
+        await asyncio.sleep(0.05)
+        reading.cancel()
+        try:
+            await reading
+        except (StopAsyncIteration, asyncio.CancelledError):
+            pass
+
+    asyncio.run(run())
+
+
 # -- the routes (§3.4) ------------------------------------------------------------
 
 

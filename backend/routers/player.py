@@ -36,7 +36,7 @@ from playback.hqp_link import Building, Dropped, NotAnswering
 from playback.hqp_meter import meter as hqp_meter
 from playback import substitute
 from playback.manager import (NotHere, OutputHeld, QueueChanged, active_hqp_endpoint, manager,
-                              said_with)
+                              reach_key, said_with)
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
@@ -1349,6 +1349,13 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
             # with the queue version it was read at; again whenever it moves
             last_slots = manager.slots_version
             yield "data: " + json.dumps({"t": "slots", "d": manager.slots_message()}) + "\n\n"
+            # What is reachable here now — the recorded answer of the music
+            # folder, as a key: at connect and whenever it changes (its
+            # record wakes this stream). A screen that shows the owner's
+            # files reads its payload again on a new key; the notice says
+            # the same to the person, but may say it before the look has
+            last_reach = reach_key()
+            yield "data: " + json.dumps({"t": "reach", "d": {"key": last_reach}}) + "\n\n"
             # Notices travel as the whole active set, never as single
             # events: the client diffs it, so a tab that was asleep learns
             # what is true now rather than replaying what happened. The
@@ -1411,6 +1418,9 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                         yield ("data: "
                                + json.dumps({"t": "slots", "d": manager.slots_message()})
                                + "\n\n")
+                    if reach_key() != last_reach:
+                        last_reach = reach_key()
+                        yield "data: " + json.dumps({"t": "reach", "d": {"key": last_reach}}) + "\n\n"
                 if "preview" in kinds:
                     # Drain coalesced pings so one re-fetch covers the burst.
                     while not preview_q.empty():

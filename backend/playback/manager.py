@@ -19,6 +19,7 @@ mirror leaves (a replace that plays) goes once it is let go
 (`PlayerBackend.queue_start`) — HQPlayer may build a start for minutes.
 """
 
+import hashlib
 import logging
 import os
 import threading
@@ -1775,10 +1776,23 @@ _files_listener = Listener("queue-files-listener", ("sautium_files_removed",),
 
 def reach_changed() -> None:
     """scanner._record's follower, on a thread of its own: the recorded
-    answer of the music folder changed, and the queue reads its slots' ways
-    in again (PlaybackManager.reach_changed). The manager is looked up at
-    the call."""
+    answer of the music folder changed. The pages' streams are woken — each
+    says what is reachable now (reach_key: the `reach` message, which an
+    open album or shelf reads its payload again on) — and the queue reads
+    its slots' ways in again (PlaybackManager.reach_changed). The manager
+    is looked up at the call."""
+    manager.wake_sse()
     manager.reach_followed()
+
+
+def reach_key() -> str:
+    """What does not answer now, as a page compares it: empty while every
+    folder answers, else a digest of the gone prefixes (no path leaves the
+    node in it) — the recorded fact itself, the one the album payload and
+    the play routes read, so a page that follows it never waits on the
+    notice, whose readers may say "unreachable" before the look has."""
+    gone = gone_prefixes()
+    return hashlib.sha256("\n".join(gone).encode()).hexdigest()[:12] if gone else ""
 
 
 def start_files_listener() -> None:
