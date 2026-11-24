@@ -1608,7 +1608,8 @@ def _major(version: Optional[str]) -> Optional[int]:
 
 
 _MOUNT_HINT = ("On a Docker node, set HQPLAYER_DATA_DIR in .env to HQPlayer's folder on the "
-               "host (on Windows %LOCALAPPDATA%\\HQPlayer) and recreate the container.")
+               "host (on Windows %LOCALAPPDATA%\\HQPlayer, on Linux and macOS ~/.hqplayer) and "
+               "recreate the container.")
 
 
 def _local_log(info: dict) -> tuple:

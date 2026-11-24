@@ -1059,6 +1059,8 @@ def test_logging_off_and_an_empty_mount_say_so(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "hqplayer_data_dir", str(tmp_path))
     log = diag.read_log({"kind": "local", "where": str(tmp_path)}, {"version": "6"})
     assert log["lines"] == [] and "HQPLAYER_DATA_DIR" in log["note"]
+    # a Docker node beside a Desktop on a Linux host (a Pi) is told that host's folder too
+    assert "on Linux and macOS ~/.hqplayer" in log["note"]
     (tmp_path / "settings.xml").write_text('<hqplayer><log enabled="0"/></hqplayer>')
     log = diag.read_log({"kind": "local", "where": str(tmp_path)}, {"version": "6"})
     assert "off" in log["note"]
@@ -1071,7 +1073,7 @@ def test_a_desktop_elsewhere_has_no_log_here():
 
 def test_a_desktop_elsewhere_on_linux_is_told_where_its_log_lives():
     # Desktop 6 on Raspberry Pi OS keeps it in ~/.hqplayer, named by the major version (PI-HQP-1 §11.5)
-    log = diag.read_log({"kind": "none", "where": None}, {"version": "6", "platform": "Linux"})
+    log = diag.read_log({"kind": "none", "where": None}, {"version": "6"})
     assert "on Linux" in log["note"] and "~/.hqplayer/HQPlayer6Desktop.log" in log["note"]
     unknown = diag.read_log({"kind": "none", "where": None}, {})
     assert "~/.hqplayer/HQPlayer<version>Desktop.log" in unknown["note"]
