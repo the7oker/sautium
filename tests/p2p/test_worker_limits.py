@@ -749,3 +749,18 @@ def test_a_wave_of_births_does_not_raise_their_multiplier():
     last = _run("ledger")["last"]
     assert last["n_glob1"] == 60                           # counted, never priced
     assert last["m_shadow"] == 1
+
+
+# --- the nickname Sautium (B-132) ---------------------------------------------
+
+def test_a_new_key_cannot_speak_under_sautium_or_a_name_that_reads_as_it():
+    r = _run("reserved")
+    reserved = [403, "this name is reserved"]
+    assert r["newKey"] == reserved and r["lookAlike"] == reserved and r["lowerCase"] == reserved
+    assert r["beside"][0] == 200
+
+
+def test_support_and_a_key_that_held_the_name_before_keep_speaking_under_it():
+    r = _run("reserved")
+    assert r["master"][0] == 200
+    assert r["holder"][0] == 200

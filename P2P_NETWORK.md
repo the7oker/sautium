@@ -323,6 +323,20 @@ takes, one parse on every node (`chat_wire.parse_share`, whitespace dropped):
 a code, short or long, `#<uuid>` (an invite link) or `#i-<token>` (a mailed
 invite).
 
+**The nickname Sautium is kept for Support** (since 2026-11-24, B-132): no new
+account takes it, nor a name that reads as it once case, `-`/`_` and the ASCII
+look-alikes (`0 1 l 5`) are folded (`node_identity.username_skeleton`; the
+shape rule admits no other script). The boundaries: the Web UI's setup (refused
+before any derivation, unless the key may decide — a node meant to be the
+master, or one whose records already name an identity), a rotation into the
+name, a start that makes its account from `P2P_USERNAME`, the launcher's
+account step, and the Worker's first binding of a key to a name (`admit`, 403
+`this name is reserved`). An account that holds it keeps it: signing in,
+restoring, a rotation that keeps the name, a node made by its `.env` before the
+reservation, a key the Worker already holds under it. Support is told by its
+pinned key, never by this name; what the name alone carries is the Worker's
+mails ("`<name>` invites you to Sautium").
+
 **Key rotation** (name or password change — SHIPPED 2026-09-10). Both are
 KDF inputs, so either change is a new key; the old one is kept:
 1. `node_identity.rotate_identity(dir, name, password, anonymous)` derives

@@ -4,7 +4,7 @@
 // the Worker code actually does (test_birth_cert.py, test_worker_limits.py).
 //
 // usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--scenario NAME] [--armed]
-//                                [--owed-timeout MS]
+//                                [--owed-timeout MS] [--worker PATH]
 //        node worker_harness.mjs <authority_seed_hex> <email_pepper> --serve [--stamp-brake N]
 //                                [--master-seed HEX]
 // Without --serve: runs one scenario (default: contract) and prints one JSON
@@ -37,7 +37,9 @@ const armed = harnessArgs.includes("--armed");
 const owedTimeoutAt = harnessArgs.indexOf("--owed-timeout");
 const masterSeedAt = harnessArgs.indexOf("--master-seed");
 const here = dirname(fileURLToPath(import.meta.url));
-const workerPath = resolve(here, "../../worker/verify.js");
+// --worker names another verify.js to drive: an older release's, for a rollout's middle state.
+const workerAt = harnessArgs.indexOf("--worker");
+const workerPath = workerAt >= 0 ? resolve(harnessArgs[workerAt + 1]) : resolve(here, "../../worker/verify.js");
 
 const hex = (u8) => Array.from(u8).map((b) => b.toString(16).padStart(2, "0")).join("");
 const unhex = (h) => new Uint8Array(h.match(/../g).map((x) => parseInt(x, 16)));
@@ -1811,6 +1813,33 @@ async function mailboxDrops() {
 }
 
 // -------------------------------------------------------------------------
+// names: the nickname Sautium is kept for Support (B-132)
+// -------------------------------------------------------------------------
+
+async function reservedNames() {
+  const out = {};
+  const speak = async (key, name, ip) => {
+    await issue(key, { ip });
+    const r = await sendCode(key, name, `${key.pubHex.slice(0, 8)}@example.org`, { ip });
+    return [r.status, r.body.error ?? null];
+  };
+  out.newKey = await speak(await newKey(), "Sautium", "198.51.100.140");
+  out.lookAlike = await speak(await newKey(), "SAUTlUM", "198.51.100.141");
+  out.lowerCase = await speak(await newKey(), "sautium", "198.51.100.142");
+  out.beside = await speak(await newKey(), "SautiumFan", "198.51.100.143");
+  out.master = await speak(master, "Sautium", "198.51.100.144");
+  // a key that spoke under the name before the reservation keeps it
+  const holder = await newKey();
+  const hmacKey = await subtle.importKey("raw", new TextEncoder().encode(emailPepper),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const token = hex(new Uint8Array(await subtle.sign("HMAC", hmacKey, new TextEncoder().encode("name:sautium"))));
+  limiterShard("names").db.prepare("INSERT INTO names (pubkey, name, seen) VALUES (?, ?, ?)")
+    .run(holder.pubHex, token, Date.now());
+  out.holder = await speak(holder, "sautium", "198.51.100.145");
+  return out;
+}
+
+// -------------------------------------------------------------------------
 // armed: the stamp budget as a refusal (--armed)
 // -------------------------------------------------------------------------
 
@@ -2130,6 +2159,7 @@ const scenarios = {
   names: nameRetention, mailbox: mailboxFull, shards: shardFailure, history: issuanceHistory,
   drops: mailboxDrops, armed: armedStamps, vectors: inviteVectors, owners: inviteOwners,
   reserve: reserveShare, smallorder: smallOrder, told: toldOnce, owed: owedClaims, owedhang: owedHang,
+  reserved: reservedNames,
 };
 if (serveMode) {
   const { createServer } = await import("node:http");

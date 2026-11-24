@@ -539,6 +539,35 @@ def validate_username(username: str) -> None:
             "Nickname: 3-32 Latin letters, digits, '-' or '_'")
 
 
+# The nickname Support speaks under (desktop/p2p/master_node.MASTER_USERNAME)
+# is kept for it: no NEW account takes it, nor a name that reads as it once
+# case, the separators and the ASCII look-alikes are folded — the shape rule
+# above admits no other script (B-132). Support is told by its pinned key, never
+# by this name; what the name alone carries is the Worker's mails ("<name>
+# invites you to Sautium"). An account that holds it keeps it: signing in,
+# restoring and a rotation that keeps the name are never checked. Mirrored by
+# RESERVED_SKELETONS in worker/verify.js.
+RESERVED_SKELETONS = frozenset({"sautium"})
+_LOOKALIKES = str.maketrans("01l5", "oiis")
+RESERVED_REFUSAL = 'The nickname "Sautium" is kept for Sautium\'s own Support — choose another.'
+
+
+def username_skeleton(username: str) -> str:
+    return username.lower().replace("-", "").replace("_", "").translate(_LOOKALIKES)
+
+
+def is_reserved_username(username: str) -> bool:
+    return username_skeleton(username) in RESERVED_SKELETONS
+
+
+def validate_new_username(username: str) -> None:
+    """validate_username, and the reservation: for a name a NEW account is
+    about to take (the launcher's account step)."""
+    validate_username(username)
+    if is_reserved_username(username):
+        raise ValueError(RESERVED_REFUSAL)
+
+
 def derive_seed(username: str, password: str) -> bytes:
     """Derive 32-byte Ed25519 seed from username+password using Argon2id."""
     if not HAS_ARGON2:
@@ -744,6 +773,9 @@ def rotate_identity(identity_dir: Path, username: str, password: str,
     validate_username(username)
 
     old_info = json.loads((identity_dir / "node_info.json").read_text(encoding="utf-8"))
+    if (is_reserved_username(username)
+            and username_skeleton(username) != username_skeleton(old_info["username"])):
+        raise ValueError(RESERVED_REFUSAL)
     old_private = serialization.load_pem_private_key(
         (identity_dir / "node_ed25519.key").read_bytes(), password=None)
     old_pub = old_info["public_key_hex"].lower()

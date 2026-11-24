@@ -336,6 +336,18 @@ const BRAKE_RETRY_AFTER_S = 60;
 // invite code and keeps kvKey() substitution unambiguous.
 const USERNAME_RE = /^[A-Za-z0-9_-]{3,32}$/;
 
+// The nickname Support speaks under is kept for it (B-132): a key other than
+// the master's may not come to speak under it, nor under a name that reads as
+// it once case, '-'/'_' and the ASCII look-alikes are folded; a key the names
+// table already holds under it keeps it. Mirrors RESERVED_SKELETONS and
+// username_skeleton in desktop/node_identity.py.
+const RESERVED_SKELETONS = new Set(["sautium"]);
+const LOOKALIKES = { "0": "o", "1": "i", "l": "i", "5": "s" };
+
+function usernameSkeleton(username) {
+  return username.toLowerCase().replace(/[-_]/g, "").replace(/[01l5]/g, (c) => LOOKALIKES[c]);
+}
+
 export default {
   async fetch(request, env) {
     const paused = writesPaused(env);
@@ -1624,6 +1636,9 @@ async function admit(env, counters, bind) {
   if (bind) {
     const held = await limiterCall(env, "names", "/name", { pubkey: bind.pubkey, now: Date.now() });
     if (held.name && held.name !== name) return misnamed();
+    if (!held.name && bind.pubkey !== MASTER_PUBKEY && RESERVED_SKELETONS.has(usernameSkeleton(bind.username))) {
+      return json({ error: "this name is reserved" }, 403);
+    }
   }
   const route = counters[0].key.slice(0, counters[0].key.indexOf(":"));
   const r = await limiterCall(env, route, "/take", { now: Date.now(), counters });
