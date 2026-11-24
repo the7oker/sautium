@@ -1194,15 +1194,15 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                     if minted:
                         _ensure_album(db, target, title, credit)
                     if target != v.album_id:
-                        # The slots its own files' tags wrote are the copy's,
-                        # not a tracklist the album holds apart from it: with
-                        # them counted, every album a signing pass had met
-                        # stayed behind its re-tagged copy as an album with
-                        # no file (PI-NODE-2D item 5).
-                        alone = not db.execute(text("""
+                        # The slots that are the copy's own (OWN_SLOT) are no
+                        # tracklist the album holds apart from it: with them
+                        # counted, every album a signing pass had met stayed
+                        # behind its re-tagged copy as an album with no file
+                        # (PI-NODE-2D item 5).
+                        alone = not db.execute(text(f"""
                             SELECT EXISTS (SELECT 1 FROM album_variants WHERE album_id = :a AND id <> :v)
-                                OR EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a
-                                                                        AND (source = 'mb' OR imported))"""),
+                                OR EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = :a
+                                                                           AND NOT ({OWN_SLOT.format(at='at')}))"""),
                             {"a": v.album_id, "v": vid}).scalar()
                         if alone:
                             # the old album's credits are its raw tags' (or the
@@ -2601,20 +2601,33 @@ def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
     return missing
 
 
+# A tracklist slot that is its copy's own — it goes when its files go, and an
+# album that holds no other is nothing apart from its copy — correlated
+# against an `album_tracks` row aliased {at}: this node's files' tags wrote it
+# ('tag', sign_audio._materialize_owned_tracklists; never a peer's), in an
+# album the seed did not pick. A pick's tracklist is the seed's to export,
+# sealed as it stands (seed_export's gate: every slot, timed, sealed), and
+# every deleter spares a pick — the mint, the album merges, the reconcile —
+# so its slots hold the album behind its copy, as every album's did before
+# 2026-11-24; `seed_picks` is emptied only by "Remove phantom layer".
+OWN_SLOT = """{at}.source = 'tag' AND NOT {at}.imported
+           AND NOT EXISTS (SELECT 1 FROM seed_picks o_sp WHERE o_sp.album_id = {at}.album_id)"""
+
+
 def drop_tag_slots(db: Session, album_ids: Sequence[Any], track_ids: Sequence[Any]) -> int:
-    """The tracklist slots this node's own files wrote
-    (album_tracks.source = 'tag', sign_audio._materialize_owned_tracklists)
-    for `track_ids` in `album_ids`, where no file is left — here or at an
+    """The tracklist slots that are their copy's own (OWN_SLOT) for
+    `track_ids` in `album_ids`, where no file is left — here or at an
     HQPlayer — of a copy of that album for that track. Called by a removal
     of files, after their delete and before the tracks', and by a move of
     files out of an album (move_albums): a slot whose one author was a file
     that went goes with it, so the track and the album go by the rules that
     stand instead of staying as a phantom built from the person's tags. A
-    slot MusicBrainz wrote ('mb') and a peer's (`imported`) are never its to
-    take. Returns how many went."""
-    return db.execute(text("""
+    slot MusicBrainz wrote ('mb'), a peer's (`imported`) and a slot of an
+    album the seed picked are never its to take: such an album stays, held
+    by them, and the removal is of a copy. Returns how many went."""
+    return db.execute(text(f"""
         DELETE FROM album_tracks at
-         WHERE at.source = 'tag' AND NOT at.imported
+         WHERE {OWN_SLOT.format(at='at')}
            AND at.album_id = ANY(CAST(:albums AS uuid[]))
            AND at.track_id = ANY(CAST(:tracks AS uuid[]))
            AND NOT EXISTS (SELECT 1 FROM owned_files f

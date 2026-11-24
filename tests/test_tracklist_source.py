@@ -395,6 +395,106 @@ def test_the_backfill_takes_a_slot_for_the_files_only_where_nothing_says_otherwi
     assert set(s[3] for s in _slots(cur)) == {"mb"}
 
 
+def _pick(cur, album_title, rank=1):
+    """The seed picked the album: its row in seed_picks, as the seed's import leaves it."""
+    cur.execute("INSERT INTO seed_picks (album_id, tier, rank) SELECT id, 1, %s FROM albums WHERE title = %s",
+                (rank, album_title))
+
+
+def _picks(cur):
+    cur.execute("SELECT al.title AS t FROM seed_picks sp JOIN albums al ON al.id = sp.album_id ORDER BY 1")
+    return [r["t"] for r in cur.fetchall()]
+
+
+def test_a_picks_copy_goes_and_the_album_keeps_its_tracklist_and_the_pick(cur, library):
+    """On the node that builds the seed the picks are its own albums, their
+    slots the materialiser's. The owner removes a pick's copy: every other
+    deleter spares a pick, and so does the removal — the album stays, held
+    by its sealed slots as before 2026-11-24, still the seed's to export;
+    the question says a copy. The album beside it goes as any does."""
+    _scan(library, "Solar Fields", "Movements", ["Sol", "Circles of Motion"])
+    _scan(library, "Carbon Based Lifeforms", "Hydroponic Garden", ["Central Plains", "Tensor"])
+    _materialise(cur)
+    cur.execute("UPDATE album_tracks SET author_pubkey = %s, signature = %s", SEAL)
+    _pick(cur, "Movements")
+
+    cur.execute("UPDATE album_variants SET absent_since = now()")
+    asked, removed = _remove_away()
+
+    assert _titles(cur, "albums") == ["Movements"] and _picks(cur) == ["Movements"]
+    assert _slots(cur) == [("Movements", "Sol", 1, "tag"), ("Movements", "Circles of Motion", 2, "tag")]
+    cur.execute("SELECT count(*) AS n FROM album_tracks WHERE signature IS NOT NULL")
+    assert cur.fetchone()["n"] == 2
+    assert _titles(cur, "tracks") == ["Circles of Motion", "Sol"]
+    cur.execute("SELECT count(*) AS n FROM album_variants")
+    assert cur.fetchone()["n"] == 0
+    # the pick's copy went and its album stays: a copy; the other album: music
+    assert asked == removed
+    assert (asked["files"], asked["copies"], asked["tracks"], asked["albums"], asked["artists"]) == (
+        2, 1, 2, 1, 1)
+
+
+def test_a_pick_the_seed_brought_keeps_its_rows_when_a_rip_of_it_comes_and_goes(cur, library):
+    """The receiving side: the pick's album and slots are the seed's
+    (`imported`, 'mb'), never the removal's; what a rip added to a pick's
+    tracklist stays with it too."""
+    import seed_import
+    from uuid_utils import album_uuid, track_uuid
+    album = str(album_uuid("Movements", "Solar Fields"))
+    tracks = [str(track_uuid(t, "Solar Fields")) for t in ("Sol", "Circles of Motion")]
+    seed_import.insert_structural(cur.connection, {
+        "albums": [{"id": album, "title": "Movements", "musicbrainz_id": str(uuid.uuid4()),
+                    "author_pubkey": SEAL[0], "signature": SEAL[1]}],
+        "tracks": [{"id": t, "title": title} for t, title in zip(tracks, ("Sol", "Circles of Motion"))],
+        "album_tracks": [{"album_id": album, "track_id": t, "disc": 1, "position": n, "length_ms": 200000,
+                          "author_pubkey": SEAL[0], "signature": SEAL[1]} for n, t in enumerate(tracks, 1)],
+        "seed_picks": [{"album_id": album, "tier": 1, "rank": 1}]})
+    cur.execute("SELECT DISTINCT imported, source::text AS source FROM album_tracks")
+    assert [(r["imported"], r["source"]) for r in cur.fetchall()] == [(True, "mb")]
+
+    _scan(library, "Solar Fields", "Movements", ["Sol", "Circles of Motion", "A Bonus"])
+    assert len(_materialise(cur)) == 1
+    _away(cur, "Movements")
+    asked, removed = _remove_away()
+
+    assert _titles(cur, "albums") == ["Movements"] and _picks(cur) == ["Movements"]
+    assert _slots(cur) == [("Movements", "Sol", 1, "mb"), ("Movements", "Circles of Motion", 2, "mb"),
+                           ("Movements", "A Bonus", 3, "tag")]
+    assert asked == removed and (asked["copies"], asked["tracks"], asked["albums"]) == (1, 0, 0)
+
+
+def test_a_forgotten_hqplayer_copy_leaves_a_pick_its_album(cur, library):
+    """The forget is a removal as the scanner's is: the pick's album stays
+    behind its last copy, the album beside it goes."""
+    import hqp_library
+    from database import get_db_context
+    _scan(library, "Solar Fields", "Movements", ["Sol", "Circles of Motion"])
+    _scan(library, "Carbon Based Lifeforms", "Hydroponic Garden", ["Central Plains", "Tensor"])
+    _materialise(cur)
+    _pick(cur, "Movements")
+    cur.execute("INSERT INTO hqp_endpoints (name) VALUES ('box') RETURNING id")
+    endpoint = cur.fetchone()["id"]
+    cur.execute("""INSERT INTO album_variants (album_id, directory_path, location, hqp_endpoint_id)
+                   SELECT id, '/smb/' || title, 'hqplayer', %s FROM albums""", (endpoint,))
+    cur.execute("""INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path, track_number)
+                   SELECT mf.track_id, hv.id, hv.directory_path || '/' || mf.track_number, mf.track_number
+                     FROM media_files mf JOIN album_variants lv ON lv.id = mf.album_variant_id
+                     JOIN album_variants hv ON hv.album_id = lv.album_id AND hv.location = 'hqplayer'
+                   RETURNING id""")
+    held = [r["id"] for r in cur.fetchall()]
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE location = 'local'")
+    _remove_away()
+    assert len(_slots(cur)) == 4
+
+    with get_db_context() as db:
+        stats = hqp_library._forget(db, held)
+        db.commit()
+
+    assert (stats["orphan_variants"], stats["orphan_albums"], stats["orphan_tracks"]) == (2, 1, 2)
+    assert _titles(cur, "albums") == ["Movements"] and _picks(cur) == ["Movements"]
+    assert _slots(cur) == [("Movements", "Sol", 1, "tag"), ("Movements", "Circles of Motion", 2, "tag")]
+
+
 def _objects(conn):
     """The catalogue's own text of what the delta makes."""
     with conn.cursor() as c:
