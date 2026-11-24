@@ -2546,11 +2546,12 @@ def drop_tag_slots(db: Session, album_ids: Sequence[Any], track_ids: Sequence[An
     (album_tracks.source = 'tag', sign_audio._materialize_owned_tracklists)
     for `track_ids` in `album_ids`, where no file is left — here or at an
     HQPlayer — of a copy of that album for that track. Called by a removal
-    of files, after their delete and before the tracks': a slot whose one
-    author was a removed file goes with it, so the track and the album go by
-    the rules that stand instead of staying as a phantom built from the
-    person's tags. A slot MusicBrainz wrote ('mb') and a peer's (`imported`)
-    are never its to take. Returns how many went."""
+    of files, after their delete and before the tracks', and by a move of
+    files out of an album (move_albums): a slot whose one author was a file
+    that went goes with it, so the track and the album go by the rules that
+    stand instead of staying as a phantom built from the person's tags. A
+    slot MusicBrainz wrote ('mb') and a peer's (`imported`) are never its to
+    take. Returns how many went."""
     return db.execute(text("""
         DELETE FROM album_tracks at
          WHERE at.source = 'tag' AND NOT at.imported

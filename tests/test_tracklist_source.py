@@ -297,10 +297,10 @@ def test_a_slot_musicbrainz_confirms_is_musicbrainzs_from_then_on(cur, library, 
         (1, SEAL[1]), (2, None), (3, None)]
 
 
-def test_a_superseded_whole_image_takes_the_slot_its_tags_wrote(cur, library):
-    """The CUE supersede's statement, on the rows it works on: a whole-image
-    row's slot held its track — and its position, against the slice that
-    takes it."""
+def test_a_slot_goes_only_once_no_file_of_its_album_holds_its_track(cur, library):
+    """The statement every removal shares (scanner.drop_tag_slots), on its
+    own: asked while the file is there it takes nothing. The CUE supersede's
+    use of it is scanned for real in test_library_reread_db.py."""
     from database import get_db_context
     _scan(library, "Solar Fields", "Movements", ["Movements (whole)"])
     _materialise(cur)
