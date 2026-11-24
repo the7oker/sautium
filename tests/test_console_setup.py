@@ -395,6 +395,128 @@ def test_a_folder_that_lies_on_a_mount_the_setup_has_no_line_for_is_taken_and_sa
         assert "mount point" not in said and "no line of /etc/fstab" not in said
 
 
+def test_a_disk_is_one_a_person_pulls_by_what_lsblk_says_of_it(sysfs):
+    """The setup's own line is for a disk that is plugged in and pulled —
+    what the automount's rule takes: USB storage and a card in the slot. By
+    the one reader of lsblk's columns (machine_tier.storage_medium), never a
+    second rule (review B3)."""
+    def pulled(device, system="/dev/mmcblk0p2"):
+        return setup.pulled_disk(device, LSBLK, system, str(sysfs))
+    assert pulled("/dev/sda1")                             # a stick
+    # A SATA disk or an SSD in a USB case says RM=0 and is pulled as a stick is: by its transport
+    assert pulled("/dev/sdb1")
+    for internal in ("/dev/nvme0n1p2", "/dev/sdc2", "/dev/mapper/vg-root", "/dev/sdd1", "/dev/vda1",
+                     "/dev/mmcblk1p1",                     # eMMC: soldered
+                     "nas:/music", "", "/dev/unknown9"):
+        assert not pulled(internal), internal
+    # A card is pulled — but never the one the system runs from, nor a second partition of it
+    assert not pulled("/dev/mmcblk0p1") and not pulled("/dev/mmcblk0p2")
+    assert pulled("/dev/mmcblk0p1", system="/dev/nvme0n1p2")
+    assert not pulled("/dev/sda1", system="/dev/sda1")     # a system that runs from the stick itself
+    assert set(setup.PULLED_MEDIA) <= set(setup.machine_tier.MEDIA)
+
+
+def test_a_mount_someone_set_up_is_theirs(monkeypatch):
+    """A line of /etc/fstab, a .mount or .automount unit somebody wrote, an
+    autofs point — against a mount systemd merely saw (a desktop's, a
+    hand's), for which it names no unit file."""
+    answers = {("findmnt", "--fstab", "-n"): (1, b"")}
+    monkeypatch.setattr(setup, "run", _findmnt(answers))
+    assert not setup.someone_mounts("/media/pi/Elements")
+    answers[("findmnt", "--fstab", "-n")] = (0, b"/srv/music /dev/sdb1 ext4\n")
+    assert setup.someone_mounts("/srv/music")
+    answers[("findmnt", "--fstab", "-n")] = (1, b"")
+    asked = []
+    for shown in (b"/etc/systemd/system/srv-music.mount\n\n\n", b"\n\n/etc/systemd/system/srv-music.automount\n",
+                  b"/run/systemd/generator/srv-music.mount\n"):
+        answers[("systemctl", "show")] = (0, shown)
+        monkeypatch.setattr(setup, "run", lambda args, **kw: asked.append(args) or _findmnt(answers)(args, **kw))
+        assert setup.someone_mounts("/srv/music"), shown
+    assert ["systemctl", "show", "-p", "FragmentPath", "--value", "srv-music.mount", "srv-music.automount"] in asked
+    answers[("systemctl", "show")] = (0, b"\n\n")           # systemd's own record of a mount it saw
+    assert not setup.someone_mounts("/srv/music")
+    answers[("findmnt", "-rn", "-o", "FSTYPE", "--mountpoint")] = (0, b"autofs\next4\n")
+    assert setup.someone_mounts("/srv/music")
+
+
+@pytest.mark.parametrize("what, source, fstype, unit, stacked, offered", [
+    ("an internal NVMe partition under a .mount unit", "/dev/nvme0n1p2", "ext4", b"/etc/systemd/system/m.mount\n", b"ext4\n", False),
+    ("the same, mounted by hand", "/dev/nvme0n1p2", "ext4", b"\n", b"ext4\n", False),
+    ("an internal SATA disk mounted by hand", "/dev/sdd1", "ext4", b"\n", b"ext4\n", False),
+    ("a network share", "nas:/music", "nfs4", b"\n", b"nfs4\n", False),
+    ("a stick behind an autofs point", "/dev/sda1", "exfat", b"\n", b"autofs\nexfat\n", False),
+    ("a stick under someone's .mount unit", "/dev/sda1", "exfat", b"/etc/systemd/system/m.mount\n", b"exfat\n", False),
+    ("a SATA disk in a USB case, mounted by hand", "/dev/sdb1", "ext4", b"\n", b"ext4\n", True),
+    ("a stick mounted by hand", "/dev/sda1", "exfat", b"\n", b"exfat\n", True)])
+def test_the_line_is_offered_only_for_a_pulled_disk_nobody_set_up_a_mount_for(
+        machine_ready, monkeypatch, tmp_path, capsys, what, source, fstype, unit, stacked, offered):
+    """Review B3. The setup offered "The music disk, mounted whenever it is
+    plugged in" for any disk no line of /etc/fstab mounted — an internal NVMe
+    partition under a .mount unit among them: a block that unmounted it under
+    whatever else read it and mounted it a second time at every start, printed
+    again at every run. The line is the setup's to offer only for a disk a
+    person pulls that nobody set up a mount for; every other mount is the
+    person's own, taken as named and said (PI-NODE-2D §2.5)."""
+    music = tmp_path / "music"
+    music.mkdir()
+    answers = {("findmnt", "-n", "-o", "TARGET", "-T"): (0, str(music).encode() + b"\n"),
+               ("findmnt", "--fstab", "-n", "-o", "TARGET"): (0, b"/\n"),
+               ("findmnt", "--fstab", "-n"): (1, b""),
+               ("systemctl", "show"): (0, unit),
+               ("findmnt", "-rn", "-o", "FSTYPE", "--mountpoint"): (0, stacked),
+               ("findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID,LABEL", "-T"): (
+                   0, _mount(source=source, target=str(music), fstype=fstype,
+                             uuid=None if fstype == "nfs4" else "4A21-0000").encode()),
+               ("findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"): (0, f"{music} {fstype} rw\n".encode()),
+               ("findmnt", "-rn", "-o", "TARGET", "-S", "UUID=4A21-0000"): (0, str(music).encode() + b"\n"),
+               **MACHINE}
+    monkeypatch.setattr(setup, "run", _findmnt(answers))
+    monkeypatch.setattr(setup.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(setup.os, "getgid", lambda: 1000)
+    for argv in (["--music", str(music), "--yes"], ["--yes"]):          # the run that names it, and a later one
+        assert setup.main(argv) == 0, what
+        said = capsys.readouterr().out
+        assert ("── The music disk, mounted whenever it is plugged in" in said) is offered, what
+        assert ("sudo umount" in said) is offered and ("roots --forget" in said) is offered, what
+        if not offered and argv[0] == "--music":
+            # the person's own mount: the folder is the root, as named, and what a mount point means is said
+            assert (f"{music} is a mount point: Sautium sees what is mounted there when Sautium starts.\n"
+                    "A disk unplugged or put back while Sautium runs is not seen") in said, what
+        assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [str(music), setup.AUTOMOUNT_BASE]
+    for name, value in (("docker_state", lambda: ("ok", "Docker")), ("tailnet_address", lambda: None),
+                        ("undervoltage_now", lambda: False)):
+        monkeypatch.setattr(setup, name, value)
+    monkeypatch.setattr(setup.agent, "head", lambda root: "c" * 40)
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:local")
+    monkeypatch.setattr(setup.agent, "compose_cmd", lambda root=None: ["docker", "compose"])
+    assert setup.main(["status"]) == 0
+    line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith(f"Music root {music}:"))
+    assert "a disk mounted at the root itself" in line and line.endswith("(./sautium shows the step)") is offered, what
+
+
+@pytest.mark.parametrize("options, own", [
+    ("ro,nofail,nosuid,nodev,noexec,uid=1000", True),
+    ("nofail,noexec,nodev,nosuid,ro", True),
+    ("rw,ro,nosuid,nodev,noexec", True),                   # the later word stands
+    ("defaults,ro,nosuid,nodev,noexec", True),
+    ("ro,nosuid,nodev,noexec,rw", False),
+    ("ro,nofail,nosuid,nodev,noexec,uid=1000,rw", False),
+    ("ro,nosuid,nodev,noexec,defaults", False),
+    ("ro,nosuid,nodev,noexec,exec", False),
+    ("ro,nosuid,nodev,noexec,suid", False),
+    ("ro,nosuid,nodev,noexec,dev", False),
+    ("ro,user,exec", False), ("ro,users,suid", False), ("ro,owner", False),      # owner: no noexec with it
+    ("ro,user", True), ("users,ro", True), ("ro,owner,noexec", True), ("ro,group,noexec", True),
+    ("nosuid,nodev,noexec", False), ("ro,nosuid,nodev", False), ("", False)])
+def test_a_line_is_the_setups_own_only_while_nothing_in_it_undoes_its_four_words(options, own):
+    """Review B4. mount(8) reads options left to right: `…,ro,…,rw` mounts
+    for writing. A line edited so was carried to /media/sautium/<UUID>, where
+    the mount reaches the node's container with its own flags (§2.6)."""
+    assert setup.mounted_safely(options) is own
+    assert setup.own_line({"source": "UUID=4A21-0000", "fstype": "exfat", "options": options}, "4A21-0000") is own
+    assert not setup.own_line({"source": "/dev/sda1", "fstype": "exfat", "options": options}, "4A21-0000")
+
+
 def test_an_install_made_by_hand_keeps_its_music_line(machine_ready, monkeypatch, tmp_path, capsys):
     """Its files keep their paths: the setup gives it no roots, no folder to
     pick and no automount, and --music is refused with the way to change over."""
@@ -424,6 +546,12 @@ LINE_4A21 = ("UUID=4A21-0000 /media/sautium/4A21-0000 exfat ro,nofail,nosuid,nod
 
 def _mount(**over):
     return json.dumps({"filesystems": [dict(ELEMENTS, **over)]})
+
+
+# What the setup asks of the machine about a disk: lsblk's own columns, and the device the system runs from
+MACHINE = {("lsblk", "-J", "-o", "NAME,RM,TRAN,ROTA"): (0, LSBLK.encode()),
+           ("findmnt", "-J", "-o", "SOURCE,FSTYPE,TARGET", "-T", "/"): (0, json.dumps({"filesystems": [
+               {"source": "/dev/mmcblk0p2", "fstype": "ext4", "target": "/"}]}).encode())}
 
 
 def test_the_line_mounts_a_music_disk_at_the_automounts_own_point():
@@ -545,6 +673,7 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_line_and_is_chosen_under
                ("findmnt", "--fstab", "-n", "-o", "TARGET"): (0, b"/\n"),
                ("findmnt", "--fstab", "-n"): (1, b""),
                ("findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID,LABEL", "-T"): (0, _mount().encode()),
+               **MACHINE,
                ("findmnt", "-rn", "-o", "TARGET", "-S", "UUID=4A21-0000"): (0, b"/media/pi/Elements\n")}
 
     def run(args, **kw):
@@ -636,6 +765,7 @@ def test_a_disk_someone_mounted_by_hand_is_offered_the_line_and_taken_as_named_m
                ("findmnt", "--fstab", "-n", "-o", "TARGET"): (0, b"/\n"),
                ("findmnt", "--fstab", "-n"): (1, b""),
                ("findmnt", "-J", "-o", "SOURCE,TARGET,FSTYPE,UUID,LABEL", "-T"): (0, mount.encode()),
+               **MACHINE,
                ("findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"): (0, f"{music} exfat rw\n".encode()),
                ("findmnt", "-rn", "-o", "TARGET", "-S", "UUID=4A21-0000"): (0, str(music).encode() + b"\n")}
     monkeypatch.setattr(setup, "run", _findmnt(answers))
@@ -731,6 +861,8 @@ class _Docker:
 
     def run(self, args, **kw):
         text = " ".join(args)
+        if args[-1] == "postgres":                      # PostgreSQL's own container: none in these cases
+            return subprocess.CompletedProcess(args, 0, b"", b"")
         self.asked.append("ps" if " ps " in text else "logs" if " logs " in text else "up" if " up " in text else text)
         out = b""
         if " ps " in text:
@@ -781,6 +913,90 @@ def test_the_log_the_setup_keeps_holds_nothing_of_a_setup_codes_form(checkout, m
     assert device_auth._SETUP_CODE_FORM.search(text) is None and setup.agent.SETUP_CODE.search(text) is None
     # the line itself stays, and says what stood there
     assert "The setup code to create it is [setup code removed] (also in setup_code.txt" in text
+
+
+class _Compose:
+    """`docker compose` as start() asks it, with compose's own rule for a
+    service's container: made again when the service's hash — here of the
+    lines of .env that reach PostgreSQL — is not the one the container was
+    made from, which is its label."""
+
+    def __init__(self, monkeypatch, env, postgres=True, backend=True):
+        self.env, self.asked = env, []
+        self.backend = "running" if backend else "exited"
+        self.label = self.hash() if postgres else None
+        monkeypatch.setattr(setup, "run", self.run)
+        monkeypatch.setattr(setup.agent, "_run", self.run)
+        monkeypatch.setattr(setup.agent, "compose_cmd", lambda root=None: ["docker", "compose"])
+
+    def hash(self):
+        import hashlib
+        held = setup.agent.read_env(self.env) if self.env.exists() else {}
+        return hashlib.sha256(repr(sorted((k, v) for k, v in held.items() if k.startswith(("PG_", "POSTGRES_")))
+                                   ).encode()).hexdigest()
+
+    def run(self, args, **kw):
+        out = b""
+        if args[:3] == ["docker", "compose", "ps"]:
+            running = "--status" in args
+            if args[-1] == "postgres":
+                out = b"pg1\n" if self.label is not None else b""
+            elif not running or self.backend == "running":
+                out = b"be1\n"
+        elif args[:4] == ["docker", "compose", "config", "--hash"]:
+            out = f"postgres {self.hash()}\n".encode()
+        elif args[:2] == ["docker", "inspect"]:
+            assert args[-1] == "pg1" and "com.docker.compose.config-hash" in args[3]
+            out = (self.label or "").encode() + b"\n"
+        elif args[:3] == ["docker", "compose", "stop"]:
+            self.asked.append("stop " + " ".join(args[3:]))
+            self.backend = "exited"
+        elif args[:3] == ["docker", "compose", "up"]:
+            # as compose does it: a service whose hash moved is stopped and made again — under
+            # whatever still holds connections to it
+            self.asked.append("up" + (": postgres made again under a running backend"
+                                      if self.label not in (None, self.hash()) and self.backend == "running" else ""))
+            self.label, self.backend = self.hash(), "running"
+        return subprocess.CompletedProcess(args, 0, out, b"")
+
+
+def test_a_run_that_makes_postgres_again_stops_the_backend_first(checkout, monkeypatch):
+    """Review B8. PostgreSQL is stopped by its smart shutdown, which waits
+    for its clients: made again under a running backend — a run of ./sautium
+    that moved a PG_* line of .env with the machine's memory — it waited its
+    whole 30 s out and was killed (the lab's own row). The setup stops the
+    backend first, as the host agent's update does; a run that leaves
+    PostgreSQL's service alone stops nothing."""
+    env = checkout / ".env"
+    env.write_text("POSTGRES_PASSWORD=kept\nCOMPOSE_FILE=docker-compose.pi.yml\n")
+    compose = _Compose(monkeypatch, env)
+
+    def started():
+        compose.asked.clear()
+        setup.start()
+        return compose.asked
+    assert started() == ["up"]                                     # nothing moved
+    # the board's memory read anew: PostgreSQL's lines move (machine_tier.pg_settings), its service with them
+    held = setup.agent.read_env(env)
+    changed = setup.write_env(_plan(held, ram_gib=3.7, volume_exists=True))
+    assert any(key.startswith("PG_") for key in changed)
+    assert setup.postgres_remade()
+    assert started() == ["stop backend", "up"]
+    assert not setup.postgres_remade() and started() == ["up"]      # and once only
+    # a line that does not reach PostgreSQL: its container stays, nothing is stopped
+    setup.agent.set_env(env, "SAUTIUM_IMAGE_MODELS", "0")
+    assert started() == ["up"]
+    # a board that grew loses the small board's lines: made again as well
+    setup.write_env(_plan(setup.agent.read_env(env), ram_gib=15.8, volume_exists=True))
+    assert started() == ["stop backend", "up"]
+    # … and the same for the other ways into start(): a root forgotten, a node that is stopped
+    setup.agent.set_env(env, "PG_SHARED_BUFFERS", "64MB")
+    compose.backend = "exited"
+    assert started() == ["up"]                                     # no backend to cut: nothing to stop
+    # a first start — no PostgreSQL yet — asks nothing of a container that is not there
+    first = _Compose(monkeypatch, env, postgres=False, backend=False)
+    setup.start()
+    assert first.asked == ["up"]
 
 
 def test_a_start_that_leaves_the_container_keeps_nothing_and_trims_nothing(checkout, monkeypatch):
@@ -1259,8 +1475,11 @@ def test_the_automounts_shell_parses_and_carries_the_owner(automount):
     assert 'SUBSYSTEMS=="usb"' in rule and 'KERNEL=="mmcblk[0-9]*"' in rule
     # Every event but a removal: a card put into a reader already plugged in is a change, never an add
     lines = [line for line in rule.splitlines() if line and not line.startswith("#")]
-    assert len(lines) == 4 and all(line.startswith('ACTION!="remove", SUBSYSTEM=="block", ') for line in lines)
-    assert all(line.endswith('TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"') for line in lines)
+    assert len(lines) == 5 and all(line.startswith('ACTION!="remove", SUBSYSTEM=="block", ') for line in lines)
+    assert all(line.endswith('TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"')
+               for line in lines[:4])
+    # … and the one that ends the unit with the medium, where the reader stays
+    assert lines[4].endswith('SUBSYSTEMS=="usb", ATTR{size}=="0", ENV{SYSTEMD_READY}="0"')
     # Root runs only the installed copy, never a file the person's own user can write
     assert str(automount.files["script"].parent) not in unit
     # Nothing root removes is named by a variable that could be empty
@@ -1416,6 +1635,8 @@ USB = {"ACTION": "add", "SUBSYSTEM": "block", "SUBSYSTEMS": ["block", "scsi", "u
     ("an encrypted volume", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": "crypto"}), 0),
     ("a RAID member", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": "raid"}), 0),
     ("a card reader's empty slot", dict(USB, KERNEL="sdb", **{"ATTR{size}": "0"}), 0),
+    ("the same slot, a card with a filesystem just pulled", dict(USB, KERNEL="sdb", ACTION="change",
+                                                                 **{"ATTR{size}": "0"}), 0),
     ("a USB optical drive, its tray empty or an audio CD in it", dict(USB, KERNEL="sr0"), 0),
     ("a data CD in it", dict(USB, KERNEL="sr0", **{"ENV{ID_FS_USAGE}": "filesystem"}), 1),
     ("a pull", dict(USB, KERNEL="sda1", ACTION="remove"), 0),
@@ -1426,7 +1647,74 @@ def test_the_rule_brings_a_volume_with_no_filesystem_named_to_the_script(what, p
     """Until PI-NODE-2D the rule matched ID_FS_USAGE=="filesystem" alone: a
     volume udev found no one filesystem on started no unit, and the person
     who plugged it in was told nothing (F18)."""
-    assert len(_rule_matches(properties)) == wants, what
+    assert len([line for line in _rule_matches(properties) if "SYSTEMD_WANTS" in line]) == wants, what
+
+
+class _Reader:
+    """One device's udev events taken through the rule and — as systemd acts
+    on the rule's words — through the script. A unit the device wants is
+    started when the device is there and the unit is not active (`mount`; a
+    oneshot that stays active, so an event for a device whose unit runs
+    starts nothing). A device the rule says is not ready is gone to systemd,
+    as one removed is, and the unit bound to it stops (`unmount`)."""
+
+    def __init__(self, automount):
+        self.automount, self.active = automount, False
+
+    def event(self, action="change", size="30310400", usage=None, **blkid):
+        properties = dict(USB, ACTION=action, KERNEL="loop0", **{"ATTR{size}": size})
+        if usage:
+            properties["ENV{ID_FS_USAGE}"] = usage
+        matched = _rule_matches(properties)
+        there = action != "remove" and not any('ENV{SYSTEMD_READY}="0"' in line for line in matched)
+        if not there and self.active:
+            assert self.automount.plug("unmount").returncode == 0
+            self.active = False
+        elif there and not self.active and any("SYSTEMD_WANTS" in line for line in matched):
+            assert self.automount.plug(**(blkid or dict(TYPE="", UUID="", LABEL=""))).returncode == 0
+            self.active = True
+
+
+def test_what_is_said_of_a_card_goes_with_the_card_where_its_reader_stays(automount):
+    """Review B9. A USB card reader keeps its block device, at size 0, when
+    the card is pulled: the unit stayed bound to a device that never went,
+    and an `unknown` card's notice outlived the card until the reader itself
+    was unplugged."""
+    reader = _Reader(automount)
+    reader.event(size="0")                                  # the reader plugged in, its slot empty
+    assert not reader.active and not automount.unread.exists()
+    reader.event()                                          # a card nothing can be told of
+    assert automount.unread.read_text().splitlines()[1] == "unknown"
+    reader.event()                                          # another event of the same card: nothing new
+    reader.event(size="0")                                  # the card pulled, the reader stays
+    assert not automount.unread.exists() and not reader.active
+    reader.event()                                          # and put back
+    assert automount.unread.exists()
+    reader.event(action="remove")                           # the reader itself unplugged
+    assert not automount.unread.exists()
+
+
+def test_a_card_after_another_in_the_same_reader_gets_its_own_start(automount):
+    """A partitioned card's whole device starts the unit, which finds
+    partitions and has nothing to do — and stays active. A card with its
+    filesystem on the whole device, put in after it, got no start: the unit
+    for that name was already running. So did a second such card after a
+    first, whose mount stayed over a medium that was gone."""
+    reader = _Reader(automount)
+    (automount.stub / "partitions").write_text("loop0p1\n")
+    reader.event()                                          # a partitioned card: the whole device holds no volume
+    assert reader.active and automount.calls() == [] and not automount.unread.exists()
+    reader.event(size="0")                                  # pulled
+    (automount.stub / "partitions").unlink()
+    reader.event(usage="filesystem", TYPE="vfat", UUID="4A21-0000", LABEL="Card")        # a whole-device card
+    (call,) = automount.calls()
+    assert call.endswith(f"/dev/loop0 {automount.base / '4A21-0000'}")
+    reader.event(size="0")                                  # pulled: its mount and its label go with it
+    assert automount.calls("umount") == [f"-l {automount.base / '4A21-0000'}"]
+    assert not (automount.base / ".names" / "4A21-0000").exists() and not (automount.state / "loop0").exists()
+    (automount.stub / "mounted-points").unlink()
+    reader.event(usage="filesystem", TYPE="exfat", UUID="0398-3084", LABEL="Other")      # another card
+    assert automount.calls()[-1].endswith(f"/dev/loop0 {automount.base / '0398-3084'}") and len(automount.calls()) == 2
 
 
 def _nothing_named(automount, **stub):
@@ -2069,7 +2357,11 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     # does not make a mount that arrives later read-only)
     for theirs in ("/dev/sda1 /mnt/sautium-4A21-0000 exfat ro,nosuid,nodev,noexec 0 0",
                    at_plug.replace("ro,nofail,", "rw,nofail,"), at_plug.replace(",noexec", ""),
-                   at_plug.replace(",nosuid,nodev", "")):
+                   at_plug.replace(",nosuid,nodev", ""),
+                   # … or that says the four words and undoes one further on (mount reads left to right)
+                   at_plug.replace(",x-systemd.before=", ",rw,x-systemd.before="),
+                   at_plug.replace(",x-systemd.before=", ",defaults,x-systemd.before="),
+                   at_plug.replace(",x-systemd.before=", ",exec,x-systemd.before=")):
         fstab.write_text(theirs + "\n")
         assert line_of(old_point) is None and _boot_mount_said(fstab, generated, roots=roots) == "", theirs
     assert "a disk mounted at the root itself" not in setup.root_lines(roots, "", {}, [])[1]     # not a step of ours
