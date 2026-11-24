@@ -56,7 +56,10 @@ class Page:
     """One connection of the stream, read event by event."""
 
     async def open(self) -> "Page":
+        """Connected: the ping read, and the name the node gave the connection."""
         self.events = (await settings_router.library_stream()).body_iterator
+        assert await self.next() == WAKE
+        self.id = (await self.named("stream"))["id"]
         return self
 
     async def next(self) -> str:
@@ -68,6 +71,16 @@ class Page:
         assert head == f"event: {event}", said
         assert data.startswith("data: ") and data.endswith("\n\n"), said
         return json.loads(data[len("data: "):])
+
+    async def nothing_more(self) -> None:
+        """Whatever the stream was owed has been said: a wake sent now is the
+        next thing it says."""
+        settings_router._tell_library_streams("wake")
+        assert await self.next() == WAKE
+
+    async def shows_load(self, on: bool, seq: int) -> dict:
+        return await asyncio.to_thread(settings_router.put_stream_load,
+                                       settings_router.StreamLoad(stream=self.id, on=on, seq=seq))
 
     async def close(self) -> None:
         await self.events.aclose()
@@ -118,27 +131,103 @@ def test_a_library_wake_has_the_trail_computed_again(trail):
 
 # -- the stream ------------------------------------------------------------------
 
-def test_a_load_band_change_is_a_named_event_and_no_wake(trail):
+# -- the load: to the connection whose page shows it ------------------------------
+
+@pytest.fixture
+def stored(monkeypatch):
+    """What the meter stored (user_settings['p2p.load']) and the gate's own
+    snapshot, as the node reads them while it has heard no band change."""
+    monkeypatch.setattr(settings_router, "_load_said", None)
+    monkeypatch.setattr(settings_router, "_read",
+                        lambda key: {"headroom": 1.0, "dormant": True} if key == "p2p.load" else None)
+    monkeypatch.setattr(settings_router, "_gate_snapshot", lambda: {"mode": "shadow"})
+
+
+def _band(headroom: float) -> dict:
+    return {"load": {"headroom": headroom, "dormant": True}, "gate": None}
+
+
+def test_a_connection_that_did_not_ask_is_sent_no_load(trail, stored):
+    """Every open page but the one on the Sync screen: band change after
+    band change, and nothing comes down its stream."""
     async def scenario():
         page = await Page().open()
-        assert await page.next() == WAKE                       # the connect's ping
         assert (await page.named("guidance"))["tasks"] == ["audio_output"]
         computed = trail.computed
-        # two band changes heard in one burst: the newest is what the screen shows
-        settings_router._on_sync_notify([Note("sautium_load", _load(0.9)), Note("sautium_load", _load(0.7))])
-        assert await page.named("load") == {"load": {"headroom": 0.7, "dormant": True}, "gate": None}
-        assert trail.computed == computed and not trail._moved.is_set()
-        # ... and a wake after it is the next thing the stream says: nothing rode along
-        settings_router.notify_library_subscribers()
-        assert await page.next() == WAKE
+        for headroom in (0.9, 0.7, 0.5):
+            settings_router._on_sync_notify([Note("sautium_load", _load(headroom))])
+        await page.nothing_more()
+        assert trail.computed == computed and not trail._moved.is_set()   # no wake of anything
         await page.close()
     asyncio.run(scenario())
+
+
+def test_a_connection_that_asks_is_sent_the_load_at_once_and_at_each_change(trail, stored):
+    async def scenario():
+        page, other = await Page().open(), await Page().open()
+        for one in (page, other):
+            await one.named("guidance")
+        assert page.id != other.id
+        # the screen opens between two band changes: what the node stored, at once
+        assert await page.shows_load(True, seq=1) == {"on": True}
+        assert await page.named("load") == {"load": {"headroom": 1.0, "dormant": True}, "gate": {"mode": "shadow"}}
+        # two band changes heard in one burst: the newest is what the screen shows
+        settings_router._on_sync_notify([Note("sautium_load", _load(0.9)), Note("sautium_load", _load(0.7))])
+        assert await page.named("load") == _band(0.7)
+        settings_router._on_sync_notify([Note("sautium_load", _load(0.6))])
+        assert await page.named("load") == _band(0.6)
+        await page.nothing_more()
+        await other.nothing_more()                          # the page beside it: not one of them
+        # a second page asks: the last band heard, at once
+        assert await other.shows_load(True, seq=1) == {"on": True}
+        assert await other.named("load") == _band(0.6)
+        await page.close()
+        await other.close()
+    asyncio.run(scenario())
+
+
+def test_a_connection_that_takes_its_interest_back_or_drops_is_sent_no_more(trail, stored):
+    async def scenario():
+        page = await Page().open()
+        await page.named("guidance")
+        await page.shows_load(True, seq=1)
+        await page.named("load")
+        # the screen leaves
+        assert await page.shows_load(False, seq=2) == {"on": False}
+        settings_router._on_sync_notify([Note("sautium_load", _load(0.4))])
+        await page.nothing_more()
+        # a word made before that one and arriving after it changes nothing
+        assert await page.shows_load(True, seq=1) == {"on": False}
+        settings_router._on_sync_notify([Note("sautium_load", _load(0.3))])
+        await page.nothing_more()
+        # back on the screen, then off it before the node's answer went out: the answer is not sent
+        await page.shows_load(True, seq=3)
+        await page.shows_load(False, seq=4)
+        await page.nothing_more()
+        # the connection drops with its interest
+        await page.shows_load(True, seq=5)
+        await page.named("load")
+        gone = page.id
+        await page.close()
+        assert settings_router._library_streams == []
+        settings_router._on_sync_notify([Note("sautium_load", _load(0.2))])      # reaches nobody, raises nothing
+        with pytest.raises(settings_router.HTTPException) as refused:
+            settings_router.put_stream_load(settings_router.StreamLoad(stream=gone, on=True, seq=6))
+        assert refused.value.status_code == 404
+    asyncio.run(scenario())
+
+
+def test_the_interest_names_a_connection_as_the_node_names_them():
+    for name in ("", "abc", "g" * 16, "A" * 16, "0" * 17, "../" + "0" * 13):
+        with pytest.raises(ValueError):
+            settings_router.StreamLoad(stream=name, on=True, seq=1)
+    with pytest.raises(ValueError):
+        settings_router.StreamLoad(stream="0" * 16, on=True, seq=0)
 
 
 def test_the_stream_says_the_trail_at_connect_and_when_its_set_changes(trail):
     async def scenario():
         page = await Page().open()
-        assert await page.next() == WAKE
         first = await page.named("guidance")
         assert first["tasks"] == ["audio_output"] and first["run"] == trail._id
 
@@ -148,8 +237,7 @@ def test_the_stream_says_the_trail_at_connect_and_when_its_set_changes(trail):
         computed = trail.computed
         await asyncio.to_thread(trail.compute)
         assert trail.computed == computed + 1
-        settings_router._on_sync_notify([Note("sautium_load", _load(0.5))])
-        await page.named("load")                               # the next thing said: no guidance before it
+        await page.nothing_more()
 
         # a task appears with a notice: no Library wake, and the trail said once
         trail.rules.append("notices")
@@ -168,11 +256,9 @@ def test_the_stream_says_the_trail_at_connect_and_when_its_set_changes(trail):
 
         # a page that connects now is told what stands
         other = await Page().open()
-        assert await other.next() == WAKE
         assert (await other.named("guidance"))["tasks"] == ["notices"]
         # ... and the first page hears nothing of that connect's computation
-        settings_router._on_sync_notify([Note("sautium_load", _load(0.4))])
-        await page.named("load")
+        await page.nothing_more()
         await page.close()
         await other.close()
         assert settings_router._library_streams == []
@@ -191,7 +277,6 @@ def test_a_stream_stands_when_its_connect_cannot_compute_the_trail(trail, monkey
             return {"tasks": ["music_folder"]}
         monkeypatch.setattr(settings_router, "_guidance_state", state)
         page = await Page().open()
-        assert await page.next() == WAKE
         settings_router.notify_library_subscribers()
         assert await page.next() == WAKE
         failing = False
@@ -213,7 +298,6 @@ def test_every_answer_is_numbered_in_the_order_it_was_computed(trail, monkeypatc
 
     async def scenario():
         page = await Page().open()
-        assert await page.next() == WAKE
         connect = await page.named("guidance")
         read = await asyncio.to_thread(settings_router.get_guidance)
         assert read["tasks"] == ["audio_output"] and read["seq"] > connect["seq"]
