@@ -288,13 +288,13 @@ def test_the_folder_coming_back_never_restarts_the_stream_hqplayer_plays(node, f
     assert [c for c, _ in _sent(fake, n)] == ["PlaylistAdd"] * 2 and fake.playlist == streamed + FILES[2:]
 
 
-def test_the_folder_coming_back_under_a_start_that_waits_leaves_it_its_stream(node, fake):
+def test_the_folder_coming_back_under_a_start_that_waits_starts_it_on_its_file(node, fake):
     """A start waits on slot 1's stream (Now Playing "loading" it), HQPlayer
-    at rest on an empty playlist; the folder comes back. The slot waited on
-    keeps its way in — its landing is what the start goes on — and HQPlayer
-    is sent nothing until then; the slots behind it are files again, handed
-    behind the stream as it lands."""
-    mgr, prov, t = node["mgr"], node["prov"], node["tracks"]
+    at rest on an empty playlist; the folder comes back. A slot nothing
+    sounds yet is held by nothing: its file is its way in again, and the
+    start that waited goes on the file — the stream is never waited for,
+    and what HQPlayer is handed is the owner's four files."""
+    mgr, t = node["mgr"], node["tracks"]
     node["gone"](True, told=False)
     items = items_for_media_ids(node["files"])
     b = node["attach"](items)
@@ -303,13 +303,11 @@ def test_the_folder_coming_back_under_a_start_that_waits_leaves_it_its_stream(no
     assert _wait(lambda: (mgr._latest_status.get("state"), mgr._latest_status.get("track_index")) == ("loading", 1))
     n = len(fake.received)
     node["gone"](False)
-    _settled(fake)
-    assert _sent(fake, n) == [] and b._parked is not None, _sent(fake, n)
-    assert _kinds(items) == ["pending", "file", "file", "file"] and mgr._reach_owed is items[0]
-    prov.land(t[0])
-    assert _wait(lambda: fake.state == PLAYING and fake.track == 1 and len(fake.playlist) == 4), fake.playlist
-    assert "/preview/" in fake.playlist[0] and fake.playlist[1:] == FILES[1:]
-    assert not {"Stop", "PlaylistClear"} & {c for c, _ in _sent(fake, n)}, _sent(fake, n)
+    assert _wait(lambda: fake.state == PLAYING and fake.track == 1 and fake.playlist == FILES), (
+        fake.playlist, _sent(fake, n))
+    assert _kinds(items) == ["file"] * 4
+    assert _wait(lambda: (mgr._latest_status.get("state"), mgr._latest_status.get("track_index")) == ("playing", 1))
+    assert not any("/preview/" in a.get("uri", "") for _, a in _sent(fake, n)), _sent(fake, n)
 
 
 def test_the_folder_going_under_a_start_that_waits_leaves_what_hqplayer_plays_meanwhile(node, fake):
