@@ -24,6 +24,11 @@ mount_watch.py; PI-NODE-2B §4.3).
   read-only word. A root that is a disk goes by the label the setup read; a
   root that is an empty folder and no disk is said at the start and listed
   as empty.
+- Since PI-NODE-2D (§2, §5, §9.3): a disk the setup's fstab line mounts lies
+  in the disks' folder and is listed as the automount's own; the automount's
+  two words for a volume no one filesystem is found on; an empty root is
+  lost only where the library holds copies from it, else new; a folder's
+  listing names the disk it lies on. Real mounts: test_roots_real_mounts.py.
 On a real PostgreSQL where a row is read or written; skipped without one.
 """
 
