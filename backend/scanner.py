@@ -221,6 +221,17 @@ def _record(unreachable: bool, ticket: int, wake: bool) -> None:
                              name="queue-reach").start()
 
 
+def of_music_folder(local_path: str) -> bool:
+    """Whether a file, by the path this process opens it at, lies in the
+    music folder as it is now. Only such a file speaks for the folder: a
+    row of a folder the library has left (another one picked, its rows
+    there until a Rescan) served or found missing says nothing of this
+    one."""
+    root = settings.translate_to_local_path(settings.library_db_root())
+    root = root.replace("\\", "/").rstrip("/")
+    return bool(root) and str(local_path).replace("\\", "/").startswith(root + "/")
+
+
 def folder_seen(unreachable: bool) -> None:
     """A producer's observation that needs no look (a library file served:
     the folder answers), recorded like a look that started now."""
