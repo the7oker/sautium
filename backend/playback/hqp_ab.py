@@ -861,6 +861,7 @@ class Sitting:
                         raise Refused(NEVER_HOLDS)
                     if name == self.yours and name in self.timings:
                         self._own_again = False     # its re-measure: the first timing stands
+                        self.warmed = (i, len(names))
                         continue
                     if name == self.yours:
                         raise Refused("HQPlayer's timing kept missing your filter here, so it cannot "
@@ -1604,8 +1605,8 @@ def _path(p: str):
 
 def _track(manager) -> Dict[str, Any]:
     """The queue's current entry as a sitting cuts it: an owned PCM file
-    here (Q4) — its path, the image's offset for a CUE slice, its length
-    and rate."""
+    here (Q4) — its path, the image's offset for a CUE slice, its length,
+    rate and channels (the speeds the screen reads are by them)."""
     from pathlib import Path
     from config import settings
     here = manager.spot()
@@ -1619,7 +1620,7 @@ def _track(manager) -> Dict[str, Any]:
         raise Refused(f"Comparing plays a cut of a file on this computer; this track plays "
                       f"from {where}.")                                             # W17
     row = db_query_one("""
-        SELECT file_path, file_format::text AS format, sample_rate,
+        SELECT file_path, file_format::text AS format, sample_rate, channels,
                duration_seconds, cue_start_seconds, cue_end_seconds
           FROM media_files WHERE id = %(id)s
     """, {"id": item.media_file_id})
@@ -1639,7 +1640,8 @@ def _track(manager) -> Dict[str, Any]:
     if length < LENGTH_MIN_S:
         raise Refused("This track is too short to compare a passage of it")
     return {"track_id": item.track_id, "title": item.title, "artist": item.artist, "path": path,
-            "offset": start, "length": length, "rate": int(row["sample_rate"])}
+            "offset": start, "length": length, "rate": int(row["sample_rate"]),
+            "channels": row["channels"] or 2}
 
 
 def _screen(s: Sitting, filters: List[dict], own: str, shaper: str, mode_name: str):

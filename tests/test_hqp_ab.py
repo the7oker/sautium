@@ -44,6 +44,9 @@ from test_hqp_backend import FakeHqp, _fresh_links, _item, _wait  # noqa: E402
 from test_hqp_load import PG, _make_db  # noqa: E402
 
 DBNAME = "sautium_pytest_hqp_ab"
+# The product's own read of the queue's entry, before the fixture stands a
+# stub in for it (its own test reads the database)
+_REAL_TRACK = hqp_ab._track
 
 BINS = 129
 FRAME_RATE = 5512.5
@@ -112,6 +115,7 @@ class TimedHqp(FakeHqp):
         self.refuse = set()            # filters SetFilter refuses in the 1x slot
         self.refused = []              # the names of each SetFilter it refused
         self.refuse_volume = False     # Volume refused (a fixed volume)
+        self.refuse_pause = False      # Pause refused
         self.adds = []                 # times of each cut's PlaylistAdd
         self.stream0 = None            # when the meter's stream of the entry began
         # The passage's own head: ('z', s) seconds of digital silence or
@@ -306,6 +310,8 @@ class TimedHqp(FakeHqp):
                 self._play(now)
                 return '<Play result="OK"/>'
             if cmd == "Pause":
+                if self.refuse_pause:
+                    return '<Pause result="Error">not now</Pause>'
                 self._pause(now)
                 return '<Pause result="OK"/>'
             if cmd == "Stop":
@@ -530,7 +536,7 @@ def ab(dsn, tmp_path, monkeypatch):
     # The track: an owned file here (its own test reads the database)
     monkeypatch.setattr(hqp_ab, "_track", lambda mgr: {
         "track_id": None, "title": "Song 1", "artist": "Artist", "path": str(tmp_path / "song.flac"),
-        "offset": 0.0, "length": 120.0, "rate": 44100})
+        "offset": 0.0, "length": 120.0, "rate": 44100, "channels": 2})
 
     def cut(path, start, length, *, lead, fade):
         out = tmp_path / f"cut-{start:.3f}-{length:.3f}-{lead:.3f}.flac"
@@ -992,6 +998,76 @@ def test_a_pause_that_does_not_hold_is_stopped_at_its_first_frame_not_heard_thro
     assert any(once[0] < t < source + S.LEAD_MIN_S for t in stops), (once, stops, source)
     heard = [(on, off) for on, off, _ in fake.output(t0) if once[0] < on < source + S.LEAD_MIN_S + 1.0]
     assert heard == [], heard
+
+
+def test_the_track_s_own_channels_are_what_the_screen_reads_speeds_by(ab, monkeypatch, tmp_path):
+    """Review round 3: the speeds measured here are by source channels — the
+    queue's entry read from the database carries a 5.1 file's six, and the
+    screen asks for the speeds of six."""
+    from playback.queue import QueueItem
+    from playback import hqp_load
+    song = tmp_path / "six.flac"
+    song.write_bytes(b"fLaC")
+    with ab.conn.cursor() as cur:
+        cur.execute("INSERT INTO tracks (id, title) VALUES (gen_random_uuid(), 'Six') RETURNING id")
+        track = cur.fetchone()[0]
+        cur.execute("INSERT INTO albums (id, title) VALUES (gen_random_uuid(), 'Six') RETURNING id")
+        album = cur.fetchone()[0]
+        cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
+                    (album, str(tmp_path)))
+        cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, file_format, sample_rate, "
+                    "bit_depth, channels, duration_seconds) VALUES (%s, %s, %s, 'FLAC', 44100, 24, 6, 120) "
+                    "RETURNING id", (track, cur.fetchone()[0], str(song)))
+        mf = cur.fetchone()[0]
+    ab.conn.commit()
+
+    class M:
+        latest_status = {"track_index": 1}
+        spot = staticmethod(lambda: None)
+
+        class queue:
+            @staticmethod
+            def item_at(i):
+                return QueueItem(track_id=str(track), media_file_id=mf,
+                                 source={"kind": "file", "path": str(song), "format": "FLAC"})
+    got = _REAL_TRACK(M)
+    assert got["channels"] == 6 and got["rate"] == 44100
+    asked = []
+    real = hqp_load.headroom
+    monkeypatch.setattr(hqp_load, "headroom", lambda ctx, **kw: (asked.append(kw), real(ctx, **kw))[1])
+    monkeypatch.setattr(hqp_ab, "_track", lambda mgr: {**got, "title": "Six", "artist": "A"})
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    assert asked and all(kw.get("src_channels") == 6 for kw in asked), asked
+
+
+def test_a_pause_hqplayer_refuses_ends_the_sitting_in_words(ab):
+    ab.fake.refuse_pause = True
+    hqp_ab.open_sitting("pair", "ext2")
+    v = ab.wait_phase("ended", timeout=60)
+    assert v["ended"] == "failed" and v["note"] == "HQPlayer did not pause the passage (not now)", v["note"]
+
+
+def test_the_chain_s_step_says_whether_their_filter_is_in_it(ab):
+    """Review round 2, L4: their filter is in the first step, in a check while
+    it is the champion, and in the next step after such a check (the fragment
+    it is compared with) — never in a next step after another's."""
+    hqp_ab.open_sitting("chain")
+    ab.wait_phase("ready")
+    ab.begin()
+    seen = []
+    for a in ("same", "worse", "better", "same"):                 # the check passed: theirs stays
+        if ab.phase() != "testing":
+            break
+        assert _wait(lambda: (hqp_ab.view().get("step") or {}).get("answerable"), 60)
+        st = hqp_ab.view()["step"]
+        seen.append((st["kind"], st["yours"]))
+        ab.answer(a)
+    hqp_ab.command("stop")
+    ab.wait_phase("result", "ended")
+    # first (theirs + a probe), next (a probe after a probe), check after
+    # "worse" (theirs again), next (a probe against theirs)
+    assert seen == [("first", True), ("next", False), ("check", True), ("next", True)], seen
 
 
 def test_a_slow_build_s_slip_is_recorded_as_late_and_a_resume_that_moved_as_the_check(ab):
