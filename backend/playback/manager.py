@@ -1688,9 +1688,11 @@ class PlaybackManager:
         listening_history against their foreign keys (every Play died on the
         archive of the old queue) and its path no longer opens. `retracked`:
         the canon's words that came with the wake — (old, new) track uuids
-        it rewrote; every slot of an old one takes the new, and the listen
-        in progress follows its item in the same step (tracker.follow), as
-        does a slot whose file belongs to another track now. The output
+        it rewrote; every slot bound to a file that carries an old one takes
+        the new, and the listen in progress follows its item in the same
+        step (tracker.follow), as does a slot whose file belongs to another
+        track now. A streamed slot keeps the uuid it was queued with: its
+        outputs know its stream by it. The output
         converges through queue_changed("rebind"); the status is re-published
         with the playing slot's new binding so Now Playing refetches."""
         from playback.queue import rebind_origins

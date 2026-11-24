@@ -263,8 +263,10 @@ class CanonicalQueue:
     def rebind(self, origins, plays, retracked=(), follow=None) -> list[QueueItem]:
         """The file layer changed under the queue (PlaybackManager.
         rebind_files). `retracked` — the canon's own words, in order: (old,
-        new) track uuids, "this track is now that one" — moves every slot of
-        an old uuid to the new one first; then `origins` maps the items, in
+        new) track uuids, "this track is now that one" — moves every slot
+        bound to a file that carries an old uuid to the new one first (a
+        streamed slot keeps the uuid it was queued with); then `origins`
+        maps the items, in
         order, to what each must change (rebind_origins): None where nothing
         does, else the fields to set — none when only its way in named a
         gone file. A slot's track uuid is set through `follow(item, uuid)`
@@ -281,7 +283,11 @@ class CanonicalQueue:
             moved = []
             for old, new in retracked:
                 for it in items:
-                    if it.track_id == old:
+                    # A streamed slot is left: its stream is known to the
+                    # outputs by the uuid it was queued with (the media
+                    # proxy's token, HQPlayer's hand-over ledger), and a slot
+                    # re-keyed under them is an entry no slot reads
+                    if it.track_id == old and it.source.get("kind") == "file":
                         follow(it, new)
                         if not any(it is m for m in moved):
                             moved.append(it)

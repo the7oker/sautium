@@ -410,6 +410,39 @@ def test_a_listen_is_one_listen_across_a_rewrite_of_its_tracks_uuid(
     assert cur.fetchall() == [(new, 1, 0)]
 
 
+def test_the_canons_word_for_a_streamed_slots_uuid_changes_nothing_on_that_slot(
+        node, lastfm, scratch_dsn):
+    """A streamed slot keeps the uuid it was queued with: its stream is
+    known to the outputs by it (the media proxy's token, HQPlayer's
+    hand-over ledger), so the canon's word for that uuid leaves the slot,
+    its way in and the listen in progress as they were — and the file slot
+    beside it, of another track, untouched too."""
+    from playback import manager as manager_mod
+    from playback import tracker
+    from playback.queue import items_for_media_ids
+    mgr, player = node["mgr"], node["player"]
+    old, new = node["phantoms"][0], str(uuid.uuid4())
+    queries = player._phantom_track_queries([old])
+    mgr.replace_queue(player.queue_mod.items_for_streamed([queries[old]])
+                      + items_for_media_ids(node["files"][:1]), play=False)
+    stream, file = mgr.queue.snapshot()
+    assert _wait(lambda: (stream.play or {}).get("token"))      # the lane named its stream
+    way_in = stream.play
+    _tick(node, "playing", 20.0)
+    heard = psycopg2.connect(scratch_dsn)
+    heard.autocommit = True
+    heard.cursor().execute("LISTEN sautium_files_removed")
+    _canon_rewrites(node, scratch_dsn, old, new)
+    assert _wait(lambda: (heard.poll(), bool(heard.notifies))[1])
+    node["out"].changed.clear()
+    manager_mod._files_changed(list(heard.notifies))
+    heard.close()
+    assert stream.track_id == old and stream.play is way_in and stream.source == {"kind": "track"}
+    assert tracker._play_session is not None and tracker._play_session.track_id == old
+    assert file.track_id == node["tracks"][0] and node["out"].changed == []
+    assert [m for m, _kw in lastfm] == ["update_now_playing"]
+
+
 def test_a_listen_goes_on_when_its_slot_becomes_the_track_itself(node, lastfm):
     """The other in-place change of a playing item's identity: its file
     leaves the library with no other copy, and the slot becomes the track
