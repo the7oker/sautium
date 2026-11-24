@@ -26,13 +26,16 @@ After update: run pending DB migrations, restart backend+tracker. Dependency
 installs are not done here — see perform_update.
 """
 
+import hashlib
 import logging
 import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, Tuple, List
@@ -645,9 +648,8 @@ def current_commit() -> Optional[str]:
     return head_commit(get_project_root())
 
 
-def head_commit(root: Path) -> Optional[str]:
-    """The first 12 hex digits of HEAD under `root`, from the files git keeps
-    them in: a detached HEAD, a loose ref, a packed ref; a linked worktree's
+def _git_dirs(root: Path) -> Optional[Tuple[Path, Path]]:
+    """(`root`'s git dir, the repository's common dir): a linked worktree's
     `.git` file and `commondir` are followed."""
     git_dir = root / ".git"
     try:
@@ -658,31 +660,149 @@ def head_commit(root: Path) -> Optional[str]:
             git_dir = Path(text[len("gitdir:"):].strip())
             if not git_dir.is_absolute():
                 git_dir = (root / git_dir).resolve()
-        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
     except OSError:
         return None
-    if not head.startswith("ref:"):
-        return head[:12] if _HEX40.fullmatch(head) else None
-    ref = head[len("ref:"):].strip()
     common = git_dir
     try:
         common = (git_dir / (git_dir / "commondir").read_text(encoding="utf-8").strip()).resolve()
     except OSError:
         pass
+    return git_dir, common
+
+
+def _ref_oid(git_dir: Path, common: Path, ref: str) -> Tuple[Optional[str], Optional[str]]:
+    """(the object `ref` names, the commit a packed ref's annotated tag peels
+    to) from a loose ref or packed-refs — (None, None) where there is none."""
     for candidate in (git_dir / ref, common / ref):
         try:
             value = candidate.read_text(encoding="utf-8").strip()
         except OSError:
             continue
         if _HEX40.fullmatch(value):
-            return value[:12]
+            return value, None
     try:
-        for line in (common / "packed-refs").read_text(encoding="utf-8").splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[1] == ref and _HEX40.fullmatch(parts[0]):
-                return parts[0][:12]
+        lines = (common / "packed-refs").read_text(encoding="utf-8").splitlines()
     except OSError:
-        pass
+        return None, None
+    for at, line in enumerate(lines):
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == ref and _HEX40.fullmatch(parts[0]):
+            peeled = lines[at + 1][1:].strip() if at + 1 < len(lines) and lines[at + 1].startswith("^") else ""
+            return parts[0], peeled if _HEX40.fullmatch(peeled) else None
+    return None, None
+
+
+def _head_oid(root: Path) -> Optional[str]:
+    dirs = _git_dirs(root)
+    if dirs is None:
+        return None
+    git_dir, common = dirs
+    try:
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not head.startswith("ref:"):
+        return head if _HEX40.fullmatch(head) else None
+    return _ref_oid(git_dir, common, head[len("ref:"):].strip())[0]
+
+
+def head_commit(root: Path) -> Optional[str]:
+    """The first 12 hex digits of HEAD under `root`, from the files git keeps
+    them in: a detached HEAD, a loose ref, a packed ref; a linked worktree's
+    `.git` file and `commondir` are followed."""
+    head = _head_oid(root)
+    return head[:12] if head else None
+
+
+def _pack_offset(index: Path, oid: bytes) -> Optional[int]:
+    """Where a pack holds the object `oid`, from its version-2 index."""
+    with open(index, "rb") as f:
+        if f.read(8) != b"\377tOc\0\0\0\2":
+            return None
+        fanout = struct.unpack(">256I", f.read(1024))
+        first, end, total = (fanout[oid[0] - 1] if oid[0] else 0), fanout[oid[0]], fanout[255]
+        f.seek(8 + 1024 + 20 * first)
+        names = f.read(20 * (end - first))
+        at = next((n for n in range(end - first) if names[20 * n:20 * n + 20] == oid), None)
+        if at is None:
+            return None
+        f.seek(8 + 1024 + 24 * total + 4 * (first + at))
+        (offset,) = struct.unpack(">I", f.read(4))
+        if offset & 0x80000000:
+            f.seek(8 + 1024 + 28 * total + 8 * (offset & 0x7FFFFFFF))
+            (offset,) = struct.unpack(">Q", f.read(8))
+        return offset
+
+
+def _tag_object(common: Path, oid: str) -> Optional[bytes]:
+    """The tag object `oid`, read from the object store by hand — loose, or
+    whole in a pack — and only as what hashes to its name. None for any
+    other object, one stored as a delta, or one past _TAG_OBJECT_LIMIT."""
+    body = None
+    try:
+        loose = (common / "objects" / oid[:2] / oid[2:]).read_bytes()
+        header, _, body = zlib.decompressobj().decompress(loose, _TAG_OBJECT_LIMIT + 32).partition(b"\0")
+        if not header.startswith(b"tag "):
+            return None
+    except FileNotFoundError:
+        for index in sorted((common / "objects" / "pack").glob("*.idx")):
+            offset = _pack_offset(index, bytes.fromhex(oid))
+            if offset is None:
+                continue
+            with open(index.with_suffix(".pack"), "rb") as f:
+                f.seek(offset)
+                entry = f.read(_TAG_OBJECT_LIMIT + 32)
+            kind, size, shift, at = (entry[0] >> 4) & 7, entry[0] & 15, 4, 1
+            while entry[at - 1] & 0x80:
+                size |= (entry[at] & 0x7F) << shift
+                shift += 7
+                at += 1
+            if kind != 4 or size > _TAG_OBJECT_LIMIT:       # 4: a tag, whole
+                return None
+            body = zlib.decompressobj().decompress(entry[at:], size)
+            break
+    if body is None or hashlib.sha1(b"tag %d\0" % len(body) + body).hexdigest() != oid:
+        return None
+    return body
+
+
+def head_release(root: Path) -> Optional[str]:
+    """The release the checkout under `root` is ON — `v0.2.13` — or None:
+    the tag of the version this tree states (a release's tree states its
+    own, scripts/release.py refuses any other), where a ref of that name —
+    one this updater fetched (RELEASE_REFS) or the tree's own (refs/tags) —
+    names HEAD's commit through an annotated tag.
+
+    What a node says it runs (its start line, /config), never a judgement
+    of a release: no signature is checked here — `survey` judges, with git
+    and the signers' list, before a checkout is ever moved. Read from `.git`
+    by hand like head_commit, so it answers None where the tag cannot be
+    read that way (an object stored as a delta, a repository that is not
+    SHA-1): a commit past the release, and a tree with no tag of it, say
+    their commit alone."""
+    version = installer_version()
+    dirs = _git_dirs(root)
+    head = _head_oid(root)
+    if version == (0, 0, 0) or dirs is None or head is None:
+        return None
+    git_dir, common = dirs
+    name = "v%d.%d.%d" % version
+    for ref in (RELEASE_REFS + name, "refs/tags/" + name):
+        oid, peeled = _ref_oid(git_dir, common, ref)
+        if oid is None:
+            continue
+        if peeled is not None:          # packed-refs says what the tag names
+            if peeled == head:
+                return name
+            continue
+        try:
+            raw = _tag_object(common, oid)
+            headers = release_verify.tag_headers(raw) if raw else None
+        except (OSError, IndexError, struct.error, zlib.error, release_verify.VerifyError) as exc:
+            logger.debug(f"{ref} not read by hand: {exc!r}")
+            continue
+        if headers and (headers["object"], headers["type"], headers["tag"]) == (head, "commit", name):
+            return name
     return None
 
 

@@ -793,11 +793,14 @@ def _segments(cur, track) -> int:
 
 @pytest.mark.parametrize("what", ["a long segment", "a short segment", "the portrait", "not a number"])
 def test_the_sonic_pass_saves_no_embedding_of_a_track_whose_vectors_are_not_unit(
-        cur, prints, models, monkeypatch, caplog, what):
+        cur, prints, models, monkeypatch, caplog, what, one_batch):
     """The band the import gate holds a peer's bundle to, held to this node's
     own. The refused kind is the embedding alone: the track's features are
     not CLAP's and are saved, as when the forward fails; the rest of the
-    batch saves; the pass counts the track and says so."""
+    batch saves; the pass counts the track and says so. The three tracks are
+    one batch whatever memory this machine has free (`one_batch`): the
+    batch's size is read off free memory, and where that was short the one
+    wake below was three."""
     tracks = _three(cur, prints, fixed=True)
     _clap_answers(monkeypatch, models, {2: _off_unit(what)})
     with caplog.at_level(logging.ERROR, logger="embeddings"):

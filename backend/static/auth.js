@@ -969,9 +969,11 @@
   const SSE_IDLE_MS = 45000;
 
   // Reads the SSE wire format from a ReadableStream reader and yields
-  // raw `data:` payloads (joined with newlines if multi-line). Comment
-  // lines (": ...") and `event:` / `id:` / `retry:` fields are
-  // ignored — the backend never sets those for us right now.
+  // one { data, type } per event: the raw `data:` payload (joined with
+  // newlines if multi-line) and the name its `event:` field gives it —
+  // "message" without one, as EventSource has it. Comment lines (": ...")
+  // and `id:` / `retry:` fields are ignored — the backend never sets
+  // those for us right now.
   async function* parseSSE(reader, path) {
     const decoder = new TextDecoder();
     let buf = "";
@@ -1001,12 +1003,15 @@
         const block = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
         const dataLines = [];
+        let type = "message";
         for (const line of block.split("\n")) {
           if (line.startsWith("data:")) {
             dataLines.push(line.slice(5).replace(/^ /, ""));
+          } else if (line.startsWith("event:")) {
+            type = line.slice(6).trim() || "message";
           }
         }
-        if (dataLines.length) yield dataLines.join("\n");
+        if (dataLines.length) yield { data: dataLines.join("\n"), type };
       }
     }
   }
@@ -1039,7 +1044,10 @@
   // Drop-in replacement for `new EventSource(path)` when you need
   // request signing. Returns an AbortController — call .abort() to
   // close the stream. Callbacks mirror EventSource semantics so we
-  // can swap call sites with minimal change. Reconnects with a doubling
+  // can swap call sites with minimal change — but for a named event
+  // (`event: x`), which onMessage gets too, as { data, type: "x" }: the
+  // one stream that carries any tells them apart by `type` (app-shell.js
+  // libraryWake). Reconnects with a doubling
   // backoff (1 s … 30 s) that restarts from 1 s whenever a wake or
   // `online` cut a wait short: the network that just came back needs a
   // few quick tries, not one attempt and then the long tail.
@@ -1082,9 +1090,9 @@
           }
           backoff = 1000;
           const reader = resp.body.getReader();
-          for await (const data of parseSSE(reader, path)) {
+          for await (const event of parseSSE(reader, path)) {
             try {
-              onMessage({ data });
+              onMessage(event);
             } catch (e) {
               if (onError) onError(e);
             }

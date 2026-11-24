@@ -262,6 +262,15 @@ async def get_account() -> Dict[str, Any]:
     }
 
 
+def _record_email_verified(verified: bool) -> None:
+    """`user_profile.email_verified`, and its word to the pages: the identity
+    line offers the verification while it is missing and the guidance trail
+    leads to it (routers.settings.identity_event, _guidance_state). Said by
+    the writer — until 2026-11-24 a page saw it at whatever woke it next."""
+    _db_execute("UPDATE user_profile SET email_verified = %s WHERE id = 1", (verified,))
+    _db_execute("NOTIFY sautium_identity")
+
+
 @router.put("/account/email")
 async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
     """Set or change the account email, on the account's password; the
@@ -296,7 +305,7 @@ async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
     data["email_verified"] = False
     info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")   # resolve_identity re-reads on mtime change
 
-    _db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+    _record_email_verified(False)
 
     # The step the wizard takes before it sends a code: a mailbox this
     # identity verified before — a reinstall with the same pair, an address
@@ -314,7 +323,7 @@ async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
     if verified:
         data["email_verified"] = True
         info_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+        _record_email_verified(True)
 
     return reply({"email": email, "email_verified": verified,
                   "grant": None if verified else device_auth.grant("email", EMAIL_FLOW_SECONDS)})
@@ -1456,7 +1465,7 @@ async def _verified_email_certificate() -> bool:
     if await asyncio.to_thread(_holds_identity):
         return True
     if result is not None:
-        _db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+        _record_email_verified(False)
         logger.info("identity: the address was recorded as verified, and the Worker holds no "
                     "certificate of it for this key — the verification is asked for again")
     return False
@@ -1559,9 +1568,7 @@ async def email_status() -> Dict[str, Any]:
     result = await _check_email_upgrade(identity)
     verified = _verified_for_this_key(result)
     if verified:
-        _db_execute(
-            "UPDATE user_profile SET email_verified = TRUE WHERE id = 1"
-        )
+        _record_email_verified(True)
     return {"email": email, "verified": verified}
 
 
@@ -1649,7 +1656,7 @@ async def email_verify_code(opened=boxed(VerifyCodeRequest)) -> Dict[str, Any]:
     # Persist so future /email/status checks return verified without a
     # Worker round-trip. Email-change and password-change flows (when
     # they land) must clear this flag.
-    _db_execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
+    _record_email_verified(True)
     device_auth.drop_grant("email")
     if changed:
         _certificate_changed()

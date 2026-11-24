@@ -146,21 +146,11 @@ class P2PManager:
         # published to user_settings for the Web UI (desktop/p2p/identity_proof.py).
         # Load meter: this process tree's CPU against the profile ceiling —
         # headroom/dormancy for the miner (hold), the DHT announce sweep
-        # (pace) and later the gate; published to user_settings['p2p.load'].
+        # (pace) and later the gate; published to user_settings['p2p.load']
+        # and, with the snapshot, on the load's own channel.
         from desktop.p2p import load_meter
         self._load_meter = load_meter.install(load_meter.LoadMeter())
-
-        def _publish_load(snap: dict) -> None:
-            try:
-                from desktop.p2p import pricing
-                values = {"p2p.load": snap}
-                if pricing.current() is not None:
-                    values["p2p.gate"] = pricing.current().snapshot()
-                self._write_settings_blocking(values)
-                self._notify_blocking("sautium_identity")
-            except Exception as e:
-                logger.debug("load publish failed: %s", e)
-        self._load_meter.subscribe(_publish_load)
+        self._load_meter.subscribe(self._publish_load)
         self._load_meter.start()
 
         self._proof_stopping = False
@@ -876,13 +866,28 @@ class P2PManager:
             row = cur.fetchone()
             return row[0] if row else None
 
-    def _notify_blocking(self, channel: str) -> None:
+    def _publish_load(self, snap: dict) -> None:
+        """A band change of the load meter (its thread): the snapshot and
+        the gate's kept for the Web UI's reads, and said on the load's own
+        channel — the backend passes it to the screen that shows it."""
+        try:
+            from desktop.p2p import load_meter, pricing
+            values = {"p2p.load": snap}
+            gate = None
+            if pricing.current() is not None:
+                gate = values["p2p.gate"] = pricing.current().snapshot()
+            self._write_settings_blocking(values)
+            self._notify_blocking(load_meter.CHANNEL, load_meter.message(snap, gate))
+        except Exception as e:
+            logger.debug("load publish failed: %s", e)
+
+    def _notify_blocking(self, channel: str, payload: str = "") -> None:
         """Fire one NOTIFY on a short-lived connection (executor-safe)."""
         conn = psycopg2.connect(self.db_dsn)
         try:
             conn.autocommit = True
             with conn.cursor() as cur:
-                cur.execute(f"NOTIFY {channel}")
+                cur.execute("SELECT pg_notify(%s, %s)", (channel, payload))
         finally:
             conn.close()
 

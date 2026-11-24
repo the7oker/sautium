@@ -65,3 +65,51 @@ def test_close_streams_ends_a_blocked_read_at_once(server):
     assert not reader.is_alive()
     assert time.monotonic() - started < 2
     assert client._streams == []
+
+
+class _LibraryStream(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        self.wfile.write(b"data: {}\n\n"
+                         b'event: guidance\ndata: {"tasks": [], "seq": 1, "run": "r"}\n\n'
+                         b": keepalive\n\n"
+                         b'event: load\ndata: {"load": {}, "gate": null}\n\n'
+                         b"data: {}\n\n")
+        self.wfile.flush()
+        self.server.gone.wait(KEEPALIVE_S)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_a_named_event_is_no_wake_to_the_launcher(monkeypatch):
+    """The Library stream carries the trail and the load for the page as
+    named events; the launcher's reader moves its scan line on wakes alone —
+    a load event every two seconds would have asked for the scan's state
+    each time."""
+    monkeypatch.setattr(api_client, "_cached_secret", b"test-secret")
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _LibraryStream)
+    srv.gone = threading.Event()
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    client = BackendAPIClient(base_url=f"http://127.0.0.1:{srv.server_port}")
+    wakes, second = [], threading.Event()
+
+    def read():
+        for _ in client.stream("/api/settings/library/stream"):
+            wakes.append(time.monotonic())
+            if len(wakes) == 2:
+                second.set()
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        assert second.wait(5)
+        client.close_streams()
+        reader.join(5)
+        assert len(wakes) == 2
+    finally:
+        srv.gone.set()
+        srv.shutdown()
+        srv.server_close()

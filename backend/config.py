@@ -16,7 +16,6 @@ class Settings(BaseSettings):
 
     # Application Info
     app_name: str = "Sautium"
-    app_version: str = "0.1.1"
     debug: bool = False
 
     # Database Configuration
@@ -373,16 +372,41 @@ def ui_build() -> int:
 
 
 def build_identity() -> dict:
-    """What this node runs: the checkout's HEAD (first 12 hex digits) or the
-    packaged build id, None where either does not apply. The one reader for
-    /config, a backup manifest and a share export; HEAD is read from `.git`
-    by hand (desktop/updater.head_commit), never by spawning git."""
-    from desktop.updater import current_commit, head_commit, installed_build
+    """What this node runs: the release its checkout is on (`v0.2.13`; None
+    on any other commit and for a packaged tree), the checkout's HEAD (first
+    12 hex digits) or the packaged build id, None where either does not
+    apply. The one reader for the start line, /config, a backup manifest and
+    a share export; HEAD and the release's tag are read from `.git` by hand
+    (desktop/updater.head_commit, head_release), never by spawning git.
+    Until 2026-11-24 a constant in this file said the version, and said
+    0.1.1 on every release after it."""
+    from desktop.updater import get_project_root, head_commit, head_release, installed_build
     # A Docker node's checkout .git is mounted beside its read-only code, not
     # in it (the compose files' SAUTIUM_CHECKOUT)
     checkout = os.environ.get("SAUTIUM_CHECKOUT")
-    return {"commit": head_commit(Path(checkout)) if checkout else current_commit(),
+    root = Path(checkout) if checkout else get_project_root()
+    return {"release": head_release(root), "commit": head_commit(root),
             "build": installed_build()}
+
+
+def running_version(identity: Optional[dict] = None) -> str:
+    """This node's version in one word or two — "0.2.13" on a release,
+    "commit f2d70b01a2c4" off one, "build …" for a packaged tree."""
+    identity = identity or build_identity()
+    if identity["release"]:
+        return identity["release"][1:]
+    if identity["commit"]:
+        return f"commit {identity['commit']}"
+    return f"build {identity['build']}" if identity["build"] else "unknown build"
+
+
+def running_line() -> str:
+    """What the start line says this node runs: "Sautium 0.2.13
+    (f2d70b01a2c4)" on a release, "Sautium (commit f2d70b01a2c4)" off one."""
+    identity = build_identity()
+    if identity["release"]:
+        return f"{settings.app_name} {identity['release'][1:]} ({identity['commit']})"
+    return f"{settings.app_name} ({running_version(identity)})"
 
 
 def get_settings() -> Settings:

@@ -847,7 +847,7 @@ class SyncWalk:
 
         if "://" in peer_addr:
             api = BackendAPIClient(peer_addr, peer=peer_identity,
-                                   expected_pubkey=expected_pubkey)
+                                   expected_pubkey=expected_pubkey, remote=True)
             attempts = 2 if is_lan else 1
             for attempt in range(attempts):
                 if await _healthy(api):
@@ -858,7 +858,7 @@ class SyncWalk:
             return None
 
         api = BackendAPIClient(f"https://{peer_addr}", peer=peer_identity,
-                               expected_pubkey=expected_pubkey)
+                               expected_pubkey=expected_pubkey, remote=True)
         if await _healthy(api):
             self.dead.answered(peer_addr)
             return api

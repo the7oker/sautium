@@ -4,24 +4,28 @@ Minimal HTTP/HTTPS client for communicating with the Sautium backend.
 Uses only urllib (no extra dependencies) to fetch stats and health info.
 The local backend is plain HTTP; a peer is HTTPS pinned to its node key.
 
-Two signing modes, chosen at construction:
+Who the other end is is said at construction, and decides everything else:
 
 - LOCAL backend (default): HMAC-SHA256 over
   ``METHOD\\nPATH_AND_QUERY\\nTS\\nNONCE\\nsha256_hex(body)`` with the secret
   shared with the backend (the identity folder's ``.api_secret``); headers
   ``X-Sautium-Ts``, ``X-Sautium-Nonce``, ``X-Sautium-Body-Sha256``,
   ``X-Sautium-Sig``; see backend/auth_hmac.py.
-- PEER (``peer=PeerIdentity(...)``): Ed25519 by this node's key over the
-  wire-format-v1 message (desktop/p2p/peer_auth.py) — headers
-  ``X-Sautium-Peer-Pubkey/-Ts/-Sig`` — bound to the peer's pubkey, which is
-  the TLS channel's verified node-key binding (peer_auth.pinned_ssl_context;
-  the ``/health`` body must agree with it, it is never trusted on its own).
-  The {certificate, proof} bundle rides along as ``X-Sautium-Peer-Cert`` on
-  the first request and whenever the peer answers
-  ``X-Sautium-Peer-Identity: unknown``. Until the channel identity is known
-  the request goes out unsigned (the anonymous lane), and gate quotes are
-  never paid — work is only ever burned for an authenticated recipient.
-  The local secret is never sent to a peer.
+- PEER (``peer=PeerIdentity(...)``, or ``remote=True`` where this node may
+  have no identity yet): the channel is pinned to the peer's node key
+  (peer_auth.pinned_ssl_context; the ``/health`` body must agree with it, it
+  is never trusted on its own) and every reply is bounded in bytes and time.
+  With an identity the request is signed — Ed25519 by this node's key over
+  the wire-format-v1 message (desktop/p2p/peer_auth.py), headers
+  ``X-Sautium-Peer-Pubkey/-Ts/-Sig``, bound to the peer's pubkey, which is
+  the channel's. The {certificate, proof} bundle rides along as
+  ``X-Sautium-Peer-Cert`` on the first request and whenever the peer answers
+  ``X-Sautium-Peer-Identity: unknown``. Until the channel identity is known,
+  and on a node with no identity of its own, the request goes out unsigned
+  (the anonymous lane), and gate quotes are never paid — work is only ever
+  burned for an authenticated recipient. A peer request is signed with a
+  peer identity or not at all: the local secret is the host's own client's,
+  and a peer client never looks for it.
 """
 
 import gzip
@@ -202,7 +206,8 @@ def forget_secret() -> None:
 
 def _load_secret() -> Optional[bytes]:
     """Read the HMAC secret, retrying briefly if the backend hasn't
-    written it yet (startup race window)."""
+    written it yet (startup race window). The host's own client's alone
+    (the launcher and its backend): a peer client never comes here."""
     global _cached_secret
     if _cached_secret is not None:
         return _cached_secret
@@ -310,21 +315,32 @@ def _says_when(e: urllib.error.HTTPError) -> bool:
 
 class BackendAPIClient:
     """Client for the local backend API (plain HTTP on loopback, HMAC-signed)
-    or a peer node (HTTPS pinned to the node key)."""
+    or a peer node (HTTPS pinned to the node key).
+
+    `peer`: this node's identity as a peer client, which makes the other end
+    a peer. `remote=True` says so where the caller may hold none (a node
+    with no account dials the peers its walk and slice cycles find): that
+    client is a peer's all the same — pinned, bounded, unsigned. Until
+    2026-11-24 a client built with `peer=None` was the host's own whatever
+    it dialled: it waited five seconds for the launcher's secret file at
+    every request, warned, and would have signed a peer's request with the
+    host's secret had the file been there."""
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000",
                  peer: Optional[peer_auth.PeerIdentity] = None,
                  expected_pubkey: Optional[str] = None,
-                 secret: Optional[bytes] = None):
+                 secret: Optional[bytes] = None,
+                 remote: bool = False):
         self.base_url = base_url.rstrip("/")
         self._secret = secret               # the local backend's, when the caller holds it
+        self._remote = remote or peer is not None
         # A peer channel must authenticate as a node: the pinning context
         # refuses certs without a valid node-key binding, and locks onto the
         # first verified key when the caller has no expectation
         # (DHT-discovered strangers).
         self._ssl_ctx = (
             peer_auth.pinned_ssl_context(expected_pubkey)
-            if peer is not None and self.base_url.startswith("https://") else None
+            if self._remote and self.base_url.startswith("https://") else None
         )
         self._streams: list = []
         self._stream_generation = 0     # close_streams() ends every reader of the current one
@@ -344,8 +360,10 @@ class BackendAPIClient:
         self.session_deadline: Optional[float] = None
 
     def _auth_headers(self, method: str, path: str, data: bytes) -> dict:
-        if self.peer is None:
+        if not self._remote:
             return _sign_headers(method, path, data, self._secret)
+        if self.peer is None:
+            return {}                    # no identity to sign with: the anonymous lane
         if not self._server_pubkey and path != "/health":
             self.get_health()            # learn the recipient before signing
         if not self._server_pubkey:
@@ -394,7 +412,7 @@ class BackendAPIClient:
         return self._gate_header is not None
 
     def _note_peer_response(self, headers) -> None:
-        if self.peer is None:
+        if not self._remote:
             return
         gate = headers.get(admission.HDR_GATE_RESULT)
         if gate:
@@ -417,7 +435,7 @@ class BackendAPIClient:
         is bounded in bytes and in time (_PEER_BOUNDS, and what is left of
         `session_deadline`) and its connection is watched; the local
         backend is not a peer — (None, None)."""
-        if self.peer is None:
+        if not self._remote:
             return None, None
         limit, seconds = _PEER_BOUNDS.get(endpoint_family(path), _PEER_DEFAULT_BOUND)
         if self.session_deadline is not None:
@@ -432,7 +450,7 @@ class BackendAPIClient:
         return _peer_opener(self._ssl_ctx, exchange).open(req, timeout=timeout)
 
     def _error_body(self, e: urllib.error.HTTPError) -> dict:
-        body = _read_json_body(e, _ERROR_BODY_CAP if self.peer is not None else None)
+        body = _read_json_body(e, _ERROR_BODY_CAP if self._remote else None)
         if not isinstance(body, dict):
             raise ValueError("refusal body is not an object")
         return body
@@ -533,7 +551,7 @@ class BackendAPIClient:
         (`birth_cert`) goes to the identity's witness sink with the
         channel's key — the sink checks it is that key's before it records."""
         health = self._get_json("/health")
-        if self.peer is not None and health:
+        if self._remote and health:
             channel = (peer_auth.pinned_pubkey(self._ssl_ctx)
                        if self._ssl_ctx is not None else None)
             node_id = str(health.get("node_id") or "").lower()
@@ -549,7 +567,7 @@ class BackendAPIClient:
                 self._server_pubkey = channel
                 self._introduced = False
             cert = health.get("birth_cert")
-            if self.peer.witness is not None and isinstance(cert, dict):
+            if self.peer is not None and self.peer.witness is not None and isinstance(cert, dict):
                 self.peer.witness(cert, channel)
         self.last_health = health
         return health
@@ -664,14 +682,16 @@ class BackendAPIClient:
 
     def stream(self, path: str,
                stop: Optional[threading.Event] = None) -> Iterator[None]:
-        """Yield once per server-sent event on `path`, forever — or until
-        `stop` is set: checked on every frame, keepalives included, so a
-        subscriber scoped to a dialog is gone within one keepalive period
-        of the dialog closing.
+        """Yield once per wake on `path`, forever — or until `stop` is set:
+        checked on every frame, keepalives included, so a subscriber scoped
+        to a dialog is gone within one keepalive period of the dialog
+        closing.
 
         Deliberately not a payload reader: every channel we consume is a wake
         event whose whole meaning is "re-read state over the signed API", so
-        parsing frames would only invite the two to disagree. Blocks; run it
+        parsing frames would only invite the two to disagree. A named event
+        (`event: x` — the Library stream's `guidance` and `load` carry
+        payloads for the page) is no wake and is passed over. Blocks; run it
         on a thread and end it with close_streams().
 
         Reconnects on drop with a backoff, because the launcher restarts the
@@ -695,11 +715,17 @@ class BackendAPIClient:
                 self._streams.append(breaker)
                 delay = 1.0
                 try:
+                    named = False
                     for raw in resp:
                         if stopped():
                             return
-                        if raw.startswith(b"data:"):
-                            yield None
+                        if raw.startswith(b"event:"):
+                            named = True
+                        elif raw.startswith(b"data:"):
+                            if not named:
+                                yield None
+                        elif not raw.strip():
+                            named = False           # the event's end
                 finally:
                     self._streams.remove(breaker)
                     breaker.close()

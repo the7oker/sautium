@@ -708,7 +708,11 @@ See:
   names it). `config.build_identity()` is the one reader — `/config`,
   the backup manifest and the share export report the running commit through
   it; HEAD is read from `.git` by hand (`desktop/updater.head_commit`), never
-  by spawning git.
+  by spawning git. Since 2026-11-24 it also names the release the checkout
+  is ON (`head_release`: the tag of the version the tree states, naming
+  HEAD's commit, read by hand the same way) — what the start line,
+  `/config`'s `app_version` and the API's version say; off a release a node
+  says its commit alone, and no constant says a version.
 - **Never bake models into the image.** Cache lives on the host, survives container deletes.
 - **Restart backend after model/prompt changes**: `docker restart sautium-backend` then check logs for "Application startup complete".
 

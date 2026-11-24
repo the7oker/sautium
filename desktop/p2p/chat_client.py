@@ -443,7 +443,7 @@ class ChatClient:
         """One user_settings value (JSONB)."""
         return await self._db(self._read_setting_blocking, key)
 
-    def _write_settings_blocking(self, values: dict) -> None:
+    def _write_settings_blocking(self, values: dict, notify: Optional[str] = None) -> None:
         conn = psycopg2.connect(self.store.db_dsn)
         try:
             conn.autocommit = True
@@ -455,11 +455,16 @@ class ChatClient:
                         ON CONFLICT (key) DO UPDATE
                             SET value = EXCLUDED.value, updated_at = NOW()
                     """, (key, json.dumps(value)))
+                if notify:
+                    cur.execute(f"NOTIFY {notify}")
         finally:
             conn.close()
 
-    async def _write_settings(self, values: dict) -> None:
-        await asyncio.get_running_loop().run_in_executor(None, self._write_settings_blocking, values)
+    async def _write_settings(self, values: dict, notify: Optional[str] = None) -> None:
+        """Upsert user_settings keys; `notify`: the channel their readers
+        listen on, said once the values are written."""
+        await asyncio.get_running_loop().run_in_executor(
+            None, self._write_settings_blocking, values, notify)
 
     async def master_contact(self) -> Optional[dict]:
         """The resolved master contact, or None."""
@@ -1618,14 +1623,18 @@ class ChatClient:
         self.reachability = status
         if self._on_reachability:
             await self._on_reachability(status, detail)
+        # A verdict is news once: the same one again (a node that waits for
+        # its identity re-checks every minute) is per-pass noise — in the log,
+        # and to the pages: the Sync screen's Reachable row is told of a
+        # verdict that changed (the node's network state rides
+        # sautium_identity), where until 2026-11-24 it saw one at whatever
+        # woke the page next
+        said = (status, detail)
         await self._write_settings({
             "p2p.reachability": status,
             "p2p.reachability_detail": detail,
             "p2p.reachability_checked_at": datetime.now(timezone.utc).isoformat(),
-        })
-        # A verdict is news once: the same one again (a node that waits for
-        # its identity re-checks every minute) is per-pass noise
-        said = (status, detail)
+        }, notify=None if said == self._reachability_said else "sautium_identity")
         logger.log(logging.DEBUG if said == self._reachability_said else logging.INFO,
                    f"Reachability: {status} ({detail})")
         self._reachability_said = said
