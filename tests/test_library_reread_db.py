@@ -588,3 +588,34 @@ def test_a_folder_retagged_into_two_albums_leaves_only_a_pick_behind(cur, librar
     assert _album_rows(cur) == ([("LP", 0, ["tag"] * 4)] if picked else []) + halves
     assert _picked(cur) == (["LP"] if picked else [])
 
+
+@pytest.mark.parametrize("held_by", ["mb", "pick"])
+def test_a_superseded_copy_leaves_an_album_its_tracklist_holds(cur, library, template, held_by):
+    """The CUE supersede's album delete asked only for copies: an album
+    MusicBrainz wrote a tracklist for went with its slots when a sheet's
+    removal emptied its copy, and so would a pick's. It asks for slots as
+    every other album delete does."""
+    _clean(cur)
+    d = library / "A" / "Live"
+    _flac(template, d / "image.flac", "The Whole Set", "Aurora", "Live (image)", track=1)
+    sheet = d / "image.cue"
+    sheet.write_text('PERFORMER "Aurora"\nTITLE "Live"\nFILE "image.flac" WAVE\n'
+                     '  TRACK 01 AUDIO\n    TITLE "Open"\n    INDEX 01 00:00:00\n'
+                     '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 01 00:01:00\n')
+    _scan()
+    if held_by == "mb":
+        cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position)
+                       SELECT av.album_id, mf.track_id, 1, mf.track_number
+                         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id""")
+    else:
+        _materialise(cur)
+        _pick(cur, "Live")
+    slots = ["mb", "mb"] if held_by == "mb" else ["tag", "tag"]
+    assert _album_rows(cur) == [("Live", 1, slots)]
+
+    sheet.unlink()
+    assert _scan()["superseded"] == 2
+    assert _album_rows(cur) == [("Live", 0, slots), ("Live (image)", 1, [])]
+    cur.execute("SELECT title FROM tracks ORDER BY 1")
+    assert cur.fetchall() == [("Open",), ("The Whole Set",), ("Two",)]
+    assert _picked(cur) == (["Live"] if held_by == "pick" else [])

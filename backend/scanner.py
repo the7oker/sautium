@@ -1028,10 +1028,15 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
             for sql in ("DELETE FROM track_mbids WHERE track_id = ANY(CAST(:t AS uuid[]))",
                         # the owned tracklist's slots the merged track took from
                         # these files (sign_audio._materialize_owned_tracklists):
-                        # each movement's track takes its own once its file moves
+                        # each movement's track takes its own once its file
+                        # moves. The files' slots only: one MusicBrainz or a
+                        # peer wrote for the merged track is not theirs. (A
+                        # pick's among them, unlike at a removal: its copy
+                        # stays, and they are made again from its files.)
                         "DELETE FROM album_tracks at USING album_variants av, media_files mf "
                         "WHERE mf.album_variant_id = av.id AND at.album_id = av.album_id "
-                        "AND at.track_id = mf.track_id AND mf.track_id = ANY(CAST(:t AS uuid[]))",
+                        "AND at.track_id = mf.track_id AND mf.track_id = ANY(CAST(:t AS uuid[])) "
+                        "AND at.source = 'tag' AND NOT at.imported",
                         # and off the files, or a pass that binds from the files
                         # (bind_owned_recordings) would bind it back
                         "UPDATE media_files SET recording_mbid = NULL WHERE track_id = ANY(CAST(:t AS uuid[]))",
@@ -2192,6 +2197,8 @@ class LibraryScanner:
                         DELETE FROM albums WHERE id = ANY(CAST(:aids AS uuid[]))
                           AND NOT EXISTS (SELECT 1 FROM album_variants av
                                           WHERE av.album_id = albums.id)
+                          AND NOT EXISTS (SELECT 1 FROM album_tracks at
+                                          WHERE at.album_id = albums.id)
                     """), {"aids": [str(a) for a in affected_albums]})
 
                 db.commit()

@@ -4617,6 +4617,12 @@ ever fill on a node with the streaming library off.
   "alone": a pick's album stays behind its copy, held by its sealed slots,
   as every album did before this — still exportable — and the question says
   a copy. In the album deletes it would have left a pick with no tracklist.
+  The CUE supersede's album delete asked only for copies and now asks for
+  slots as the others do: an album MusicBrainz wrote a tracklist for, or a
+  pick, no longer goes with its slots when a sheet's removal empties its
+  copy. The re-read's split of a merged work re-derives the slots the
+  merged track's files made, and no longer deletes MusicBrainz's and a
+  peer's with them.
 - **The backfill is conservative** (in the column's delta): `tag` where the
   slot is the node's own, a file of the album names it whole — track, disc,
   position, length — and it is no older than the album's first copy. In
