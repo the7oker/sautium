@@ -28,6 +28,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from db_pool import Listener, db_query, db_query_one, db_query_with_ef_search
+from playback.queue import gone_prefixes
+from sql_queries import album_away
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +95,15 @@ FAVOURITE_WINDOW_DAYS = 730
 
 
 # Subqueries shared by the album shelves to fetch the album-tile-row
-# contract: {artist, cover_url, cover_id, media_file_id}. A phantom album
-# has no files, so the artist falls back to the album credit and its art
-# is the CAA cover_url (the frontend's coverUrl() prefers it).
-_ALBUM_TILE_SUBQUERIES = """
+# contract: {artist, cover_url, cover_id, media_file_id, not_here}. A phantom
+# album has no files, so the artist falls back to the album credit and its
+# art is the CAA cover_url (the frontend's coverUrl() prefers it).
+# `not_here`: why none of the owner's files of the album opens here now —
+# 'disk' | 'away', the album payload's own definition (sql_queries.
+# album_away; param `gone`) — NULL while one does, and for an album not
+# owned: such an album stays on its shelf, marked.
+_ALBUM_TILE_SUBQUERIES = f"""
+    {album_away('al.id')} AS not_here,
     COALESCE(
         (SELECT a.name
          FROM artists a
@@ -274,7 +281,11 @@ def get_new_in_library(
                    COALESCE(av.arrived_at, av.entered_at) AS arrived,
                    -- where the album's files are: a copy that only the
                    -- HQPlayer's library holds wears a badge on its tile
-                   av.location::text AS location
+                   av.location::text AS location,
+                   -- why none of its files opens here now (NULL: one does).
+                   -- Of the album, never of this key copy: the newest copy
+                   -- may be out while an older one plays
+                   {album_away('av.album_id')} AS not_here
             FROM album_variants av
             WHERE {NEWEST_COPY}
               AND (%(before)s::timestamptz IS NULL
@@ -289,6 +300,7 @@ def get_new_in_library(
                ak.entered,
                ak.arrived,
                ak.location,
+               ak.not_here,
                ak.album_id AS _album_uuid,
                COALESCE(
                 (SELECT a.name
@@ -331,6 +343,7 @@ def get_new_in_library(
         "before": cursor_ts[0],
         "before_arrived": cursor_ts[1],
         "before_id": before_id,
+        "gone": gone_prefixes(),
     })
 
     next_cursor: dict[str, str] | None = None
@@ -378,7 +391,7 @@ def get_recommendations(
         JOIN albums al ON al.id = r.album_id
         ORDER BY r.pos
         LIMIT %(limit)s
-    """, {"ranking": ranking, "limit": limit})
+    """, {"ranking": ranking, "limit": limit, "gone": gone_prefixes()})
 
     if len(albums) < limit:
         existing = {a["id"] for a in albums}
@@ -901,7 +914,7 @@ def _seed_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
         ORDER BY (r.rn > r.cap), r.tier, r.shuffle
         LIMIT %(needed)s
         """,
-        {"exclude": list(exclude), "needed": needed},
+        {"exclude": list(exclude), "needed": needed, "gone": gone_prefixes()},
     )
 
 
@@ -925,7 +938,7 @@ def _random_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
         ORDER BY RANDOM()
         LIMIT %(needed)s
         """,
-        {"exclude": list(exclude), "needed": needed},
+        {"exclude": list(exclude), "needed": needed, "gone": gone_prefixes()},
     )
 
 
@@ -954,5 +967,5 @@ def _cold_start_albums(limit: int, exclude: set[str] = frozenset()) -> list[dict
         JOIN albums al ON al.id = ak.album_id
         ORDER BY ak.entered DESC, ak.arrived DESC, ak.album_id DESC
         """,
-        {"limit": limit, "exclude": list(exclude)},
+        {"limit": limit, "exclude": list(exclude), "gone": gone_prefixes()},
     )

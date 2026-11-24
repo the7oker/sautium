@@ -3499,9 +3499,15 @@
     // The album's files live only in the HQPlayer's library (no bytes here).
     const held = item.location === 'hqplayer'
       ? '<span class="album-tile-feat album-tile-held">HQPlayer</span>' : '';
+    // His album, none of whose files opens here now (`not_here`: its disk
+    // out, or its copy away): it keeps its place, dimmed, with the one word;
+    // the tap opens its page, which says the rest
+    const out = item.not_here
+      ? `<span class="album-tile-feat album-tile-out">${escapeHtml(notHereWords(item.not_here).mark)}</span>` : '';
+    if (out) tile.classList.add('is-not-here');
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
-        ${cover}${held}
+        ${cover}${held}${out}
       </div>
       <div class="album-title">${escapeHtml(title || '')}</div>
       <div class="album-artist">${escapeHtml(artist || '')}</div>
@@ -3776,25 +3782,42 @@
       .then(data => fillHomeRow(favSec.row, data.artists, 'artist'))
       .catch(sectionFailure(favSec, 'favourite-artists')),
 
-    fetch('/api/home/new-in-library?limit=20')
-      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(data => {
-        if (!data.albums.length) {
-          newSec.section.remove();
-          return;
-        }
-        newSec.section.hidden = false;
-        fillHomeRow(newSec.row, data.albums, 'album');
-        attachInfiniteScroll(newSec.row, '/api/home/new-in-library',
-          data.next_cursor, 'album');
-      })
-      .catch(sectionFailure(newSec, 'new-in-library')),
+    homeShelf(newSec, '/api/home/new-in-library?limit=20', data => {
+      if (!data.albums.length) {
+        newSec.section.remove();
+        return null;
+      }
+      newSec.section.hidden = false;
+      fillHomeRow(newSec.row, data.albums, 'album');
+      return attachInfiniteScroll(newSec.row, '/api/home/new-in-library',
+        data.next_cursor, 'album');
+    }).catch(sectionFailure(newSec, 'new-in-library')),
 
-    fetch('/api/home/recommendations?limit=20')
-      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(data => fillHomeRow(recSec.row, data.albums, 'album'))
-      .catch(sectionFailure(recSec, 'recommendations')),
+    homeShelf(recSec, '/api/home/recommendations?limit=20', data => {
+      fillHomeRow(recSec.row, data.albums, 'album');
+      return null;
+    }).catch(sectionFailure(recSec, 'recommendations')),
     ]);
+  }
+
+  // A Home shelf of albums: its first page drawn, and drawn again from a
+  // payload that says otherwise when what opens here changes (followReach:
+  // a tile's mark comes and goes with its album's disk) — the same payload
+  // touches no tile. `fill(data)` draws the row and returns its paging, if
+  // it pages.
+  async function homeShelf(sec, url, fill) {
+    let paging = null;
+    const draw = text => {
+      followReach(sec.row, url, text, again => {
+        if (paging) paging.disconnect();
+        sec.row.replaceChildren();
+        draw(again);
+      });
+      paging = fill(JSON.parse(text));
+    };
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    draw(await r.text());
   }
 
   /* ---------- Discovery screen (Step 1.5b) ----------
@@ -5409,9 +5432,10 @@
      say "unreachable" before a slow look has). A screen that shows the
      owner's files names its payload here (followReach); when the key is
      another, the payload is asked again and the screen repainted only if it says
-     otherwise — the same answer touches no DOM. Any screen may follow (a
-     shelf of tiles as well): it names the URL its payload came from, that
-     payload's text and how it is drawn again. */
+     otherwise — the same answer touches no DOM. Any element may follow (an
+     album's screen, a shelf's row of tiles): it names the URL its payload
+     came from, that payload's text and how it is drawn again — handed the
+     new text, for one that draws from it. */
   const _reachScreens = new Set();
   function followReach(screen, url, text, rerender) {
     screen._reach = { url, text, rerender };
@@ -5427,7 +5451,7 @@
       text = await resp.text();
     } catch (_) { return false; }      // the node is away: the page's own reconnect repaints
     if (!screen.isConnected || screen._reach !== reach || text === reach.text) return false;
-    reach.rerender();
+    reach.rerender(text);
     return true;
   }
   // The key the node last said (the `reach` message of the page's stream:

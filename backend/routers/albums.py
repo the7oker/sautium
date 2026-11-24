@@ -27,7 +27,7 @@ from desktop.p2p.mb_slice_queries import BANDCAMP_PAGE
 from genre_queries import album_genre_chips
 from playback import substitute
 from playback.manager import active_hqp_endpoint
-from sql_queries import ALBUM_FILES, best_rip_order, owned_rank, rip_quality
+from sql_queries import ALBUM_FILES, album_away, best_rip_order, owned_rank, rip_quality
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
@@ -500,11 +500,14 @@ def get_album(
     # copy away — is still the owner's: `away` says why and whether this
     # node streams it meanwhile (what the play routes ask); `away_part` the
     # same where only some of its tracks are out.
+    # Whether the album is away is one definition (sql_queries.album_away),
+    # the tiles' too; which of its tracks are out is each row's own `here`.
+    whole = db_query_one(f"SELECT {album_away('%(id)s::uuid', '%(vid)s::int')} AS why", params)["why"]
     out = [t for t in album["tracks"] if not t["here"]]
-    reach = ({"why": "disk" if any(t["why"] == "disk" for t in out) else "away",
+    reach = ({"why": whole or ("disk" if any(t["why"] == "disk" for t in out) else "away"),
               "streams": substitute.streams()} if out else None)
-    album["away"] = reach if out and len(out) == len(album["tracks"]) else None
-    album["away_part"] = reach if out and len(out) < len(album["tracks"]) else None
+    album["away"] = reach if whole else None
+    album["away_part"] = reach if out and not whole else None
     _composer_lines(album)
 
     # Full variant list, always returned (UI hides the selector when

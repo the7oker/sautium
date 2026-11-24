@@ -70,6 +70,29 @@ def here(mf: str = "mf", av: str = "av") -> str:
 HERE = here()
 
 
+def album_away(album: str, variant: str = "NULL") -> str:
+    """SQL expression: why no file of the album `album` (an albums.id
+    expression) opens here now — 'disk' where a copy of it lies under a
+    folder that does not answer, 'away' where every copy is one a Rescan set
+    aside — and NULL while a file of it opens (a file in an HQPlayer's
+    library is one), or it has no file at all (not owned). `variant`: that
+    copy's files alone (the album page's pinned variant). Param `gone`, as
+    HERE. THE definition of an album being away: the album payload's `away`
+    and every tile's mark are this one expression — none of an album's
+    files opens exactly when no track's best copy does (albums._PICKED_FILES
+    picks a copy that is here wherever one is)."""
+    copy = f"({variant} IS NULL OR xv.id = {variant})"
+    return f"""(SELECT CASE WHEN count(*) = 0 OR bool_or(x.here) THEN NULL
+                        WHEN bool_or(NOT x.absent) THEN 'disk' ELSE 'away' END
+                 FROM (SELECT {here('xm', 'xv')} AS here, xv.absent_since IS NOT NULL AS absent
+                         FROM media_files xm JOIN album_variants xv ON xv.id = xm.album_variant_id
+                        WHERE xv.album_id = {album} AND {copy}
+                       UNION ALL
+                       SELECT true, false
+                         FROM hqp_library_files xh JOIN album_variants xv ON xv.id = xh.album_variant_id
+                        WHERE xv.album_id = {album} AND {copy}) x)"""
+
+
 def owned_rank(alias: str, style: str = "psycopg") -> str:
     """ORDER BY term ahead of best_rip_order: the copy the active output
     plays natively first. A variant at the HQPlayer that IS the output

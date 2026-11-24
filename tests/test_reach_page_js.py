@@ -232,3 +232,73 @@ def test_a_new_word_of_what_is_reachable_asks_the_open_screens_payload_again_and
     assert "reachNoticeChanged" not in SOURCE
     player = (REPO_ROOT / "backend" / "static" / "player.js").read_text(encoding="utf-8")
     assert "window.dispatchEvent(new CustomEvent('sautium:reach', { detail: msg.d }));" in player
+
+
+TILE_DRIVER = WORDS + "\n" + _block("function renderAlbumTile(item) {") + r"""
+const escapeHtml = s => String(s == null ? '' : s);
+const coverPlaceholderColors = () => ({ bg1: '#000', bg2: '#111' });
+const coverUrl = () => '';
+const opened = [];
+const navigateToEntity = (kind, id) => opened.push([kind, id]);
+const document = { createElement: () => {
+  const classes = [], on = {};
+  return { classList: { add: c => classes.push(c) }, classes, on, innerHTML: '',
+           addEventListener: (name, fn) => { on[name] = fn; } }; } };
+const draw = item => { const t = renderAlbumTile(item); t.on.click();
+  return { marked: t.classes.includes('is-not-here'),
+           word: (t.innerHTML.match(/album-tile-out">([^<]*)</) || [])[1] || null,
+           held: t.innerHTML.includes('album-tile-held') }; };
+console.log(JSON.stringify({
+  here: draw({ id: 'a', title: 'Here', artist: 'A', not_here: null }),
+  disk: draw({ id: 'b', title: 'Out', artist: 'A', not_here: 'disk' }),
+  away: draw({ id: 'c', title: 'Away', artist: 'A', not_here: 'away' }),
+  held: draw({ id: 'd', title: 'Held', artist: 'A', location: 'hqplayer' }),
+  opened,
+}));
+"""
+
+
+def test_a_tile_of_an_album_that_is_out_keeps_its_place_dimmed_with_the_one_word():
+    """PI-NODE-2D §3.4, §4.5, Q5: on "New in my collection" and the
+    Recommendations rows an album whose disk is out, or whose copy is away,
+    stays, marked; the tap opens its page as any tile's does."""
+    out = _node(TILE_DRIVER)
+    assert out["here"] == {"marked": False, "word": None, "held": False}
+    assert out["disk"] == {"marked": True, "word": "not connected", "held": False}
+    assert out["away"] == {"marked": True, "word": "away", "held": False}
+    assert out["held"] == {"marked": False, "word": None, "held": True}
+    assert out["opened"] == [["album", "a"], ["album", "b"], ["album", "c"], ["album", "d"]]
+
+
+SHELF_DRIVER = "\n".join([
+    "const _reachScreens = new Set();",
+    _block("function followReach(screen, url, text, rerender) {"),
+    _block("async function refreshReach(screen) {"),
+    _block("async function homeShelf(sec, url, fill) {"),
+]) + r"""
+let served = JSON.stringify({ albums: [{ id: 'a', not_here: null }] });
+const fetched = [];
+const fetch = url => { fetched.push(url);
+  return Promise.resolve({ ok: true, text: () => Promise.resolve(served) }); };
+const log = [];
+const row = { isConnected: true, replaceChildren: () => log.push('emptied') };
+const fill = data => { log.push('drawn ' + data.albums.map(a => a.id + ':' + a.not_here).join(','));
+  return { disconnect: () => log.push('paging ended') }; };
+(async () => {
+  await homeShelf({ row }, '/api/home/new-in-library?limit=20', fill);
+  const again = [await refreshReach(row)];                       // the same payload: no tile touched
+  served = JSON.stringify({ albums: [{ id: 'a', not_here: 'disk' }] });
+  again.push(await refreshReach(row));                           // its disk went: drawn again, once
+  again.push(await refreshReach(row));
+  console.log(JSON.stringify({ log, again, fetched: fetched.length }));
+})();
+"""
+
+
+def test_a_home_shelf_is_drawn_again_only_from_a_payload_that_says_otherwise():
+    out = _node(SHELF_DRIVER)
+    assert out["again"] == [False, True, False] and out["fetched"] == 4
+    assert out["log"] == ["drawn a:null", "paging ended", "emptied", "drawn a:disk"]
+    home = _block("async function renderHome(root) {")
+    assert "homeShelf(newSec, '/api/home/new-in-library?limit=20'," in home
+    assert "homeShelf(recSec, '/api/home/recommendations?limit=20'," in home

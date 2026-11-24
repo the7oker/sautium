@@ -894,6 +894,60 @@ def test_the_pages_ask_whether_this_node_streams(node):
     assert player.reach() == {"streams": False}
 
 
+# -- the shelves' tiles (§3.4, §4.5, Q5) -------------------------------------------
+
+
+def _tiles(node) -> dict:
+    """The owned album's mark on each Home shelf that shows owned albums:
+    New in my collection, the Recommendations ranking, the cold start and
+    the random fill."""
+    from routers import home
+    node["monkeypatch"].setattr(home._ranking, "album_ids", lambda: [node["owned"]])
+    shelves = {
+        "new": home.get_new_in_library(limit=20, before=None, before_arrived=None, before_id=None)["albums"],
+        "ranked": home.get_recommendations(limit=20)["albums"],
+        "cold": home._cold_start_albums(20),
+        "random": home._random_fill(20, set()),
+    }
+    return {name: next(t for t in tiles if t["id"] == node["owned"])["not_here"]
+            for name, tiles in shelves.items()}
+
+
+def _page_says(node):
+    from routers import albums
+    away = albums.get_album(node["owned"], variant_id=None)["away"]
+    return away and away["why"]
+
+
+def test_a_tile_says_of_an_album_that_is_out_what_its_page_says(node):
+    """An album whose disk is out stays on its shelves, marked, and an away
+    copy too (Q5) — by the album payload's own definition of away
+    (sql_queries.album_away), whatever copy the shelf orders the album by."""
+    from db_pool import db_query_one
+    from sql_queries import album_away
+    cur = node["cur"]
+    everywhere = dict.fromkeys(("new", "ranked", "cold", "random"))
+    assert _tiles(node) == everywhere and _page_says(node) is None
+
+    node["gone"](True)
+    assert _tiles(node) == {k: "disk" for k in everywhere} and _page_says(node) == "disk"
+
+    # the shelf's key copy is the newest one — here the copy on the disk that
+    # is out — while an older copy elsewhere opens: the album is not away
+    older = node["copy"](0, "NW/01.flac")
+    cur.execute("UPDATE album_variants SET entered_at = now() - interval '1 day' WHERE id = "
+                "(SELECT album_variant_id FROM media_files WHERE id = %s)", (older,))
+    assert _tiles(node) == everywhere and _page_says(node) is None
+
+    node["gone"](False)
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE album_id = %s", (node["owned"],))
+    assert _tiles(node) == {k: "away" for k in everywhere} and _page_says(node) == "away"
+
+    # an album he does not own is not "away"
+    assert db_query_one(f"SELECT {album_away('%(id)s::uuid')} AS why",
+                        {"id": node["streamed"], "gone": []})["why"] is None
+
+
 # -- the threat (§3.5): his own album through the demo channel --------------------
 
 
