@@ -110,7 +110,12 @@ See:
   startup job, boot-streak counter or tier
   heuristic may drop them. The phantom layer's growth is the owner's switch
   (`discovery.phantom_layer`, default on). The lite phantom prune of
-  2026-07-10 broke this rule and was removed 2026-08-27.
+  2026-07-10 broke this rule and was removed 2026-08-27. One start-up step
+  removes such rows, once a database, at the owner's own yes of 2026-11-24
+  for that named step: `db_migrate`'s `tracklist_leftovers_v1` completes
+  removals he had confirmed — the albums they left with no copy, no release
+  group and no imported row or slot, their slots, and those slots' tracks
+  nothing else refers to.
 - **No mocking the database or external enrichment APIs in tests** that are
   supposed to verify DB behavior. Integration tests that run against a real
   pgvector DB catch migration-and-query mismatches that mocks hide.
