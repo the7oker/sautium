@@ -6447,6 +6447,39 @@ def test_a_file_gone_from_a_folder_that_answers_sends_a_shared_hqplayer_nothing(
         other.close()
 
 
+def test_the_canons_word_for_a_streamed_slots_uuid_leaves_hqplayers_entry_the_slots(fake, lane, listens,
+                                                                                    monkeypatch):
+    """HQPlayer plays a streamed slot and the canon rewrites that track's
+    uuid (a rip of it landed and was merged, a slice renamed it): HQPlayer
+    knows the entry by the uuid the slot was queued with — its hand-over
+    ledger, the media proxy's token — so the slot keeps that uuid, the entry
+    is still the slot's, Now Playing still names it and the listen goes on.
+    Re-keyed, no slot read the entry: it showed as another app's playback
+    and the listen was cut at its second."""
+    prov, _proxy = lane
+    mgr = _lane_manager(lane, monkeypatch, [_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        added, _gen = mgr.replace_queue([_streamed(1), _streamed(2)], play=True)
+        assert added == 2
+        prov.land("stream-1")
+        assert _wait(lambda: fake.state == PLAYING and (mgr._latest_status.get("state"),
+                     mgr._latest_status.get("track_id")) == ("playing", "stream-1"), 15), mgr._latest_status
+        assert _wait(lambda: tracker._play_session is not None)
+        item = mgr.queue.item_at(1)
+        mgr.rebind_files((("stream-1", "0b9c2f6e-0000-4000-8000-00000000000a"),))   # the canon's word
+        _settled(fake, ticks=4)
+        status = mgr._latest_status
+        assert item.track_id == "stream-1"
+        assert (status.get("state"), status.get("track_id"), status.get("source")) == (
+            "playing", "stream-1", None), status
+        assert tracker._play_session is not None and tracker._play_session.track_id == "stream-1"
+        assert listens[0] == []                         # nothing saved: the listen is open
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+
+
 def _queued_under_another(fake, lane, monkeypatch):
     """Another controller plays; the node's queue, put together without
     playing it, is two streams still to come (the queue's alone)."""

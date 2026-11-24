@@ -263,8 +263,10 @@ class CanonicalQueue:
     def rebind(self, origins, plays, retracked=(), follow=None) -> list[QueueItem]:
         """The file layer changed under the queue (PlaybackManager.
         rebind_files). `retracked` — the canon's own words, in order: (old,
-        new) track uuids, "this track is now that one" — moves every slot of
-        an old uuid to the new one first; then `origins` maps the items, in
+        new) track uuids, "this track is now that one" — moves every slot
+        bound to a file that carries an old uuid to the new one first (a
+        streamed slot keeps the uuid it was queued with); then `origins`
+        maps the items, in
         order, to what each must change (rebind_origins): None where nothing
         does, else the fields to set — none when only its way in named a
         gone file. A slot's track uuid is set through `follow(item, uuid)`
@@ -276,15 +278,23 @@ class CanonicalQueue:
         tracker hold. Returns the items that changed; the version is bumped
         when any did."""
         follow = follow or (lambda it, track_id: setattr(it, "track_id", track_id))
+        # Where each rewritten uuid ended, the words read once from the last
+        # to the first (A→B then B→C: A is C)
+        now: dict = {}
+        for old, new in reversed(retracked):
+            now[old] = now.get(new, new)
         with self._lock:
             items = list(self._items)
-            moved = []
-            for old, new in retracked:
-                for it in items:
-                    if it.track_id == old:
-                        follow(it, new)
-                        if not any(it is m for m in moved):
-                            moved.append(it)
+            moved, seen = [], set()
+            for it in items:
+                # A streamed slot is left: its stream is known to the
+                # outputs by the uuid it was queued with (the media
+                # proxy's token, HQPlayer's hand-over ledger), and a slot
+                # re-keyed under them is an entry no slot reads
+                if it.track_id in now and it.source.get("kind") == "file":
+                    follow(it, now[it.track_id])
+                    seen.add(id(it))
+                    moved.append(it)
             for it, change in zip(items, origins(items)):
                 if change is None:
                     continue
@@ -293,7 +303,7 @@ class CanonicalQueue:
                         follow(it, value)
                     else:
                         setattr(it, name, value)
-                if not any(it is m for m in moved):
+                if id(it) not in seen:
                     moved.append(it)
             if moved:
                 new_plays = plays(moved) if plays is not None else [None] * len(moved)
@@ -328,19 +338,6 @@ class CanonicalQueue:
                 _file_lengths(changed)
                 self._version += 1
             return changed, owed
-
-    def set_play(self, item: "QueueItem", play: Optional[dict]) -> bool:
-        """This very item's way in is `play` now, whatever it was — the slot
-        a start is about to open, read after the look at its file
-        (PlaybackManager.before_start), under the lock every re-read of the
-        ways in takes. Whether it changed; the version moves when it did."""
-        with self._lock:
-            if item.play == play or not any(it is item for it in self._items):
-                return False
-            _set_play(item, play)
-            _file_lengths([item])
-            self._version += 1
-            return True
 
     def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
                   bump: bool = True, before=None) -> bool:

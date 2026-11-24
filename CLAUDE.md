@@ -427,8 +427,11 @@ See:
   copy (radio, Play similar: `QueueItem.own_fill`) never streams for want of
   that copy unless `radio.streamed` is on — it is a gap of its slot until
   the file is back. A listen in progress is one listen across the canon's
-  rewrite of its track's uuid: the rewrite says so with its wake, and the
-  slot and the open listen follow in one step (`tracker.follow`). A slot that is a file is read by its `media_file_id`, never by
+  rewrite of its track's uuid: the rewrite says so with its wake, and a
+  slot bound to a file and its open listen follow in one step
+  (`tracker.follow`); a streamed slot keeps the uuid it was queued with
+  (its outputs know its stream by it), so a streamed listen of a track the
+  canon rewrote meanwhile is not written — open since before 2026-11-24. A slot that is a file is read by its `media_file_id`, never by
   the track uuid its enqueue saw (the canon rewrites it). How an owned file reaches HQPlayer is read off its
   address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
   on this machine by path, anywhere else as a stream from the media proxy

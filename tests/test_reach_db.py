@@ -410,6 +410,59 @@ def test_a_listen_is_one_listen_across_a_rewrite_of_its_tracks_uuid(
     assert cur.fetchall() == [(new, 1, 0)]
 
 
+def test_the_canons_word_for_a_streamed_slots_uuid_changes_nothing_on_that_slot(
+        node, lastfm, scratch_dsn):
+    """A streamed slot keeps the uuid it was queued with: its stream is
+    known to the outputs by it (the media proxy's token, HQPlayer's
+    hand-over ledger), so the canon's word for that uuid leaves the slot,
+    its way in and the listen in progress as they were — and the file slot
+    beside it, of another track, untouched too."""
+    from playback import manager as manager_mod
+    from playback import tracker
+    from playback.queue import items_for_media_ids
+    mgr, player = node["mgr"], node["player"]
+    old, new = node["phantoms"][0], str(uuid.uuid4())
+    queries = player._phantom_track_queries([old])
+    mgr.replace_queue(player.queue_mod.items_for_streamed([queries[old]])
+                      + items_for_media_ids(node["files"][:1]), play=False)
+    stream, file = mgr.queue.snapshot()
+    assert _wait(lambda: (stream.play or {}).get("token"))      # the lane named its stream
+    way_in = stream.play
+    _tick(node, "playing", 20.0)
+    heard = psycopg2.connect(scratch_dsn)
+    heard.autocommit = True
+    heard.cursor().execute("LISTEN sautium_files_removed")
+    _canon_rewrites(node, scratch_dsn, old, new)
+    assert _wait(lambda: (heard.poll(), bool(heard.notifies))[1])
+    node["out"].changed.clear()
+    manager_mod._files_changed(list(heard.notifies))
+    heard.close()
+    assert stream.track_id == old and stream.play is way_in and stream.source == {"kind": "track"}
+    assert tracker._play_session is not None and tracker._play_session.track_id == old
+    assert file.track_id == node["tracks"][0] and node["out"].changed == []
+    assert [m for m, _kw in lastfm] == ["update_now_playing"]
+
+
+def test_the_canons_words_are_read_once_each_and_a_slot_ends_where_they_end():
+    """A chain of rewrites in one wake — A is B, then B is C — leaves a file
+    slot of A at C, one of B at C, and a rename there and back where it
+    was; each slot is asked once, whatever the number of words."""
+    from playback.queue import CanonicalQueue, QueueItem
+    queue = CanonicalQueue()
+    slots = [QueueItem(track_id=t, media_file_id=n, source={"kind": "file", "path": f"/m/{n}.flac"})
+             for n, t in enumerate(["a", "b", "x", "d", "e"])]
+    queue.replace(slots)
+    followed = []
+
+    def follow(it, track_id):
+        followed.append(it.media_file_id)
+        it.track_id = track_id
+    words = (("a", "b"), ("b", "c"), ("d", "e"), ("e", "d"), ("y", "x"))
+    moved = queue.rebind(lambda items: [None] * len(items), None, words, follow)
+    assert [it.track_id for it in slots] == ["c", "c", "x", "d", "d"]
+    assert followed == [0, 1, 3, 4] and moved == [slots[0], slots[1], slots[3], slots[4]]
+
+
 def test_a_listen_goes_on_when_its_slot_becomes_the_track_itself(node, lastfm):
     """The other in-place change of a playing item's identity: its file
     leaves the library with no other copy, and the slot becomes the track
@@ -812,6 +865,53 @@ def test_the_look_before_a_start_never_waits_behind_a_queue_edit_in_flight(node)
         release.set()
     assert _wait(lambda: out.changed == ["rebind"])     # the output told once the edit was done
     assert _streams(items[0]) and items[1].play is None
+
+
+def test_a_landing_while_the_start_slot_is_read_ahead_is_kept(node, monkeypatch):
+    """The slot a start opens, read ahead of a queue edit in flight, is
+    computed and written under the queue's own lock, as every re-read is:
+    a stream that lands on it meanwhile lands after, on what was read —
+    never to be written over with the pending mark read before it."""
+    from playback import substitute
+    mgr, out = node["mgr"], node["out"]
+    (node["root"] / "NW" / "01.flac").unlink()
+    items = _queue(node, play=True)
+    assert _wait(lambda: (items[0].play or {}).get("token"))
+    landed = {"kind": "proxy", "token": items[0].play["token"], "lane": True}
+    substitute.observe({"/a/look/of/before"})       # the next look's observation is another one
+    armed, done = [], []
+    look, plays = mgr._first_opens, substitute.native_plays
+
+    def looked(*a, **kw):
+        moved = look(*a, **kw)
+        armed.append(True)
+        return moved
+
+    def read(its, output_id, endpoint_id):
+        ways = plays(its, output_id, endpoint_id)
+        if armed and not done:                      # the read ahead: a landing arrives now
+            done.append(True)
+            landing = threading.Thread(
+                target=lambda: mgr.queue.swap_play(items[0], items[0].play, landed))
+            landing.start()
+            landing.join(0.5)
+        return ways
+    monkeypatch.setattr(mgr, "_first_opens", looked)
+    monkeypatch.setattr(substitute, "native_plays", read)
+    held, release = threading.Event(), threading.Event()
+
+    def edit():                                     # a queue edit still committing
+        with mgr._mutate_lock:
+            held.set()
+            release.wait(10)
+    threading.Thread(target=edit, daemon=True).start()
+    assert held.wait(5)
+    try:
+        mgr.before_start(out)
+    finally:
+        release.set()
+    assert done and _wait(lambda: not [t for t in threading.enumerate() if t.name == "queue-reach"])
+    assert items[0].play == landed
 
 
 def test_a_re_read_during_a_look_never_hands_the_missing_file_back(node, monkeypatch):
