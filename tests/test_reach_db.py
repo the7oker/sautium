@@ -443,6 +443,26 @@ def test_the_canons_word_for_a_streamed_slots_uuid_changes_nothing_on_that_slot(
     assert [m for m, _kw in lastfm] == ["update_now_playing"]
 
 
+def test_the_canons_words_are_read_once_each_and_a_slot_ends_where_they_end():
+    """A chain of rewrites in one wake — A is B, then B is C — leaves a file
+    slot of A at C, one of B at C, and a rename there and back where it
+    was; each slot is asked once, whatever the number of words."""
+    from playback.queue import CanonicalQueue, QueueItem
+    queue = CanonicalQueue()
+    slots = [QueueItem(track_id=t, media_file_id=n, source={"kind": "file", "path": f"/m/{n}.flac"})
+             for n, t in enumerate(["a", "b", "x", "d", "e"])]
+    queue.replace(slots)
+    followed = []
+
+    def follow(it, track_id):
+        followed.append(it.media_file_id)
+        it.track_id = track_id
+    words = (("a", "b"), ("b", "c"), ("d", "e"), ("e", "d"), ("y", "x"))
+    moved = queue.rebind(lambda items: [None] * len(items), None, words, follow)
+    assert [it.track_id for it in slots] == ["c", "c", "x", "d", "d"]
+    assert followed == [0, 1, 3, 4] and moved == [slots[0], slots[1], slots[3], slots[4]]
+
+
 def test_a_listen_goes_on_when_its_slot_becomes_the_track_itself(node, lastfm):
     """The other in-place change of a playing item's identity: its file
     leaves the library with no other copy, and the slot becomes the track

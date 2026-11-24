@@ -278,19 +278,23 @@ class CanonicalQueue:
         tracker hold. Returns the items that changed; the version is bumped
         when any did."""
         follow = follow or (lambda it, track_id: setattr(it, "track_id", track_id))
+        # Where each rewritten uuid ended, the words read once from the last
+        # to the first (A→B then B→C: A is C)
+        now: dict = {}
+        for old, new in reversed(retracked):
+            now[old] = now.get(new, new)
         with self._lock:
             items = list(self._items)
-            moved = []
-            for old, new in retracked:
-                for it in items:
-                    # A streamed slot is left: its stream is known to the
-                    # outputs by the uuid it was queued with (the media
-                    # proxy's token, HQPlayer's hand-over ledger), and a slot
-                    # re-keyed under them is an entry no slot reads
-                    if it.track_id == old and it.source.get("kind") == "file":
-                        follow(it, new)
-                        if not any(it is m for m in moved):
-                            moved.append(it)
+            moved, seen = [], set()
+            for it in items:
+                # A streamed slot is left: its stream is known to the
+                # outputs by the uuid it was queued with (the media
+                # proxy's token, HQPlayer's hand-over ledger), and a slot
+                # re-keyed under them is an entry no slot reads
+                if it.track_id in now and it.source.get("kind") == "file":
+                    follow(it, now[it.track_id])
+                    seen.add(id(it))
+                    moved.append(it)
             for it, change in zip(items, origins(items)):
                 if change is None:
                     continue
@@ -299,7 +303,7 @@ class CanonicalQueue:
                         follow(it, value)
                     else:
                         setattr(it, name, value)
-                if not any(it is m for m in moved):
+                if id(it) not in seen:
                     moved.append(it)
             if moved:
                 new_plays = plays(moved) if plays is not None else [None] * len(moved)
