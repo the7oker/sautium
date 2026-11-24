@@ -869,6 +869,27 @@ comes after the control port answers again — so neither can end the wait.
     HQPlayer's own advance) goes to HQPlayer as on a mirror, the entry it
     reads naming the slot — a "play next" run piece by piece behind the
     piece before it; what touches the part before it is the queue's alone.
+    The entry it reads is its slot's by what it names, whatever way in that
+    slot has by now (since 2026-11-24; until then the entry had to be what
+    the slot opens, and a slot re-bound under it read as drift). So it is
+    after a re-bind, or a change of what opens here (the music folder went,
+    or came back: `PlaybackManager.reach_changed`), while HQPlayer plays or
+    pauses an entry of the queue's (`_converge_mirror`, since 2026-11-24):
+    only what lies behind that entry follows — replaced by remove-after /
+    re-append, ending before the first slot whose stream is still to come —
+    the entry itself never stopped, restarted or handed again, and what
+    lies before it left as the past. Until then a changed entry at or
+    before the one it read had a playing HQPlayer rebuilt around its
+    position and a paused one taken afresh, stopped: the folder going or
+    coming back cut the track that sounded, and with every slot a stream to
+    come the node stopped the music and started nothing. The slot HQPlayer
+    sounds keeps its way in until HQPlayer leaves it — through a new order's
+    rebuild around it too — and is read then (a status that says a start
+    under way, HQPlayer between two entries, is no leaving yet). Stopped,
+    HQPlayer takes the queue afresh as before — unless a start waits for
+    its stream (the playlist is marked no mirror, and that start hands the
+    queue over as a play press) or is under way (the playlist follows once
+    it is over); on an HQPlayer another controller holds nothing is sent.
     An edit behind it while HQPlayer reads no slot of the queue's, or a file
     queued at more than one slot it holds, lands on no entry by a guess: it
     is the queue's, the mirror lost. A play next whose anchor HQPlayer

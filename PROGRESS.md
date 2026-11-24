@@ -3621,9 +3621,15 @@ entry. A slot whose way in (`play`) named a gone file is re-read. The
 restore of a persisted queue runs the same pass, and so does every
 (re)connect of the listener. The output converges through
 `queue_changed("rebind")`: the engine, the browser and DLNA re-read their
-tail; HQPlayer re-appends the entries past the playing slot, and rebuilds
-around the position only when a changed entry lies at or before it (the
-protocol has no insert). The two writers of the queue's file id —
+tail; HQPlayer re-appends the entries past the playing slot, and — until
+2026-11-24 — rebuilt around the position when a changed entry lay at or
+before it (the protocol has no insert). Since 2026-11-24 it rebuilds
+nothing while it plays or pauses an entry of the queue's: that entry keeps
+its own end of the file, what lies before it is the past, and its playlist
+is the queue's from behind that entry on (a tail mirror) — the rebuild cut
+the track that sounded whenever the music folder went or came back, and
+with every slot a stream to come it stopped the music and started nothing
+(`HqpBackend._converge_mirror`, `_follow_behind`). The two writers of the queue's file id —
 the session snapshot and the listen — write each reference as its foreign
 key keeps it, which covers the moment between the delete's commit and the
 re-bind. The missing length was the view's: a stopped HQPlayer Desktop

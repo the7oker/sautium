@@ -233,14 +233,17 @@ class CanonicalQueue:
                 self._version += 1
             return changed
 
-    def reresolve(self, resolve) -> int:
+    def reresolve(self, resolve, hold: Optional[QueueItem] = None) -> int:
         """Recompute how the ACTIVE output opens every slot (`QueueItem.play`)
         — an output switch keeps the queue, and each output opens its own
         copy of a track (playback.substitute.native_plays). `resolve` maps
         the items, in order, to their `play` (None = as `source` says).
-        Returns the number of slots left `pending` a stream."""
+        `hold` — a slot the output plays on through this re-read (HQPlayer
+        rebuilt around its position) — keeps its way in whatever was read,
+        as in reread. Returns the number of slots left `pending` a stream."""
         with self._lock:
-            plays = list(resolve(list(self._items)))
+            plays = [it.play if it is hold else play
+                     for it, play in zip(self._items, resolve(list(self._items)))]
             for it, play in zip(self._items, plays):
                 _set_play(it, play)
             self._version += 1

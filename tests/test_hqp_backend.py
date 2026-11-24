@@ -1706,7 +1706,11 @@ def test_a_rebind_past_the_playing_slot_reappends_the_tail(fake):
     assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 1)
 
 
-def test_a_rebind_before_the_playing_slot_rebuilds_around_it(fake):
+def test_a_rebind_before_the_playing_slot_is_the_past_and_nothing_is_rebuilt(fake):
+    """Until 2026-11-24 a playing HQPlayer was rebuilt around its position
+    for an entry before the one it reads (Stop, the queue afresh, a start at
+    its second): what it has played is the past — nothing is sent, and its
+    playlist is the queue's from the entry it reads on (a tail mirror)."""
     mgr = _album(3)
     b = _mirrored(mgr)
     fake.state, fake.track = int(PlaybackState.PLAYING), 2
@@ -1714,21 +1718,34 @@ def test_a_rebind_before_the_playing_slot_rebuilds_around_it(fake):
     _move(mgr, 1, "E:/Music/B/01.flac", 10)
     b.queue_changed("rebind")
     b.queue_start()                     # the manager's, once it let the queue lock go
-    assert fake.playlist == ["file:///E:/Music/B/01.flac", "file:///E:/Music/A/02.flac",
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
                              "file:///E:/Music/A/03.flac"]
-    assert [(c, a) for c, a in fake.commands if c in ("Stop", "SelectTrack", "Play")] == [
-        ("Stop", {}), ("SelectTrack", {"index": "2"}), ("Play", {})]
-    assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 2)
+    assert [c for c, _ in fake.commands if c not in _QUESTIONS] == []
+    assert (fake.state, fake.track) == (int(PlaybackState.PLAYING), 2) and b._mirror == "tail"
 
 
-def test_a_rebind_at_the_paused_slot_resumes_it_on_the_play_press(fake):
-    mgr = _album(2)
+@pytest.mark.parametrize("state", [PlaybackState.PLAYING, PlaybackState.PAUSED])
+def test_a_rebind_of_the_slot_hqplayer_reads_leaves_its_entry_and_follows_behind_it(fake, state):
+    """The slot HQPlayer plays, or holds paused, is re-bound to another copy
+    with the one behind it: the entry it reads keeps its own end of the file
+    — never stopped, never handed again (until 2026-11-24 a playing one was
+    rebuilt around its position and a paused one taken afresh, stopped) —
+    and the entry behind it is replaced. A tail mirror: the entry read is
+    its slot's by what it names, and the canary holds it so."""
+    mgr = _album(3)
     b = _mirrored(mgr)
-    fake.state, fake.track = int(PlaybackState.PAUSED), 2
+    fake.state, fake.track = int(state), 2
+    fake.commands.clear()
     _move(mgr, 2, "E:/Music/B/02.flac", 20)
+    _move(mgr, 3, "E:/Music/B/03.flac", 30)
     b.queue_changed("rebind")
-    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/B/02.flac"]
-    assert fake.state == int(PlaybackState.STOPPED) and b._spot_at()[0] == 2
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
+                             "file:///E:/Music/B/03.flac"]
+    assert [c for c, _ in fake.commands if c not in _QUESTIONS] == ["PlaylistRemove", "PlaylistAdd"]
+    assert (fake.state, fake.track) == (int(state), 2) and b._mirror == "tail"
+    with _link().asking() as hqp:
+        status, playlist = hqp.get_status(), hqp.get_playlist()
+    assert b._judge_mirror(playlist, status, expect=b._mirror_moves) and b._mirror == "tail"
 
 
 def test_a_rebind_leaves_a_drifted_playlist_to_the_canary(fake):
@@ -13436,34 +13453,27 @@ def test_a_tap_while_a_new_order_waits_its_turn_plays_the_tapped_track(fake, out
     assert ("SelectTrack", {"index": "1"}) in _start_sent(fake, n)
 
 
-def test_a_play_during_a_rebinds_rebuild_resumes_the_track_where_it_was(fake, output):
-    """Track 2 plays; the file of slot 1 left the library and its re-bound
-    slot needs a rebuild around the playing one. A Play while HQPlayer takes
-    it joins the start the rebuild owes: track 2 plays on at its second."""
+def test_a_rebind_before_the_playing_track_leaves_it_playing_and_a_play_then_starts_nothing(fake, output):
+    """Track 2 plays; the file of slot 1 left the library. Its re-bound slot
+    is the past: HQPlayer is rebuilt around nothing (until 2026-11-24 it was,
+    its start at the track's second owed), track 2 plays on, and a Play made
+    then starts nothing anew."""
     mgr, b = output
     with fake._lock:
         fake.track, fake.position = 2, 80.0
     assert _wait(lambda: mgr._latest_status.get("track_index") == 2
                  and mgr._latest_status.get("position", 0) >= 81)
-    n = _slow_adds(fake)
-
-    def rebind():
-        with mgr._mutate_lock, b.mutation():          # as rebind_files does
-            _move(mgr, 1, "E:/Music/B/01.flac", 10)
-            b.queue_changed("rebind")
-        b.queue_start()
-    rebinding = threading.Thread(target=rebind, daemon=True)
-    rebinding.start()
-    _handing_over(fake, n)
+    n = len(fake.commands)
+    with mgr._mutate_lock, b.mutation():              # as rebind_files does
+        _move(mgr, 1, "E:/Music/B/01.flac", 10)
+        b.queue_changed("rebind")
+    b.queue_start()
     assert _quick(b.play)
-    rebinding.join(10)
     _settled()
-    assert fake.playlist == ["file:///E:/Music/B/01.flac", "file:///E:/Music/A/02.flac",
+    assert fake.playlist == ["file:///E:/Music/A/01.flac", "file:///E:/Music/A/02.flac",
                              "file:///E:/Music/A/03.flac"]
-    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 2
-    sent = _start_sent(fake, n)
-    assert sent[0] == ("SelectTrack", {"index": "2"})
-    assert sent[1][0] == "Seek" and int(sent[1][1]["position"]) >= 80
+    assert fake.state == int(PlaybackState.PLAYING) and fake.track == 2 and fake.position >= 80
+    assert not [c for c, _ in fake.commands[n:] if c in ("Stop", "PlaylistClear", "SelectTrack", "Seek")]
 
 
 def test_a_tap_during_a_seamless_reorder_plays_the_tapped_track_at_its_new_slot(
