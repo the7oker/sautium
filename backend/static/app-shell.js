@@ -6287,7 +6287,7 @@
               applyPhantomExcerpts(screen, body.excerpt);
             }
           })
-          .catch(() => {});
+          .catch(err => console.warn('what streams of the album could not be read', err));
       }
 
       if (isPhantom) {
