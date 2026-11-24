@@ -57,6 +57,32 @@ def test_manager_hears_the_active_backend_only():
     assert mgr.latest_status["output"]["label"] == "stub"
 
 
+def test_only_a_slot_of_the_queue_sounding_ends_what_a_play_said_of_its_failures(monkeypatch):
+    """A Play none of whose slots streams is said (`stream_event`) until
+    something of the queue sounds. What plays at no slot of it is no such
+    sound: another controller's entry on the output, a track of the queue
+    before that a renderer plays on — each took the word back before."""
+    from playback import tracker
+    monkeypatch.setattr(tracker, "track_play_event", lambda *a, **k: None)
+    mgr = PlaybackManager()
+    mgr.lane.maintain = lambda: None
+    out = _Stub(mgr._on_backend_status)
+    mgr._active = out
+    slot = QueueItem(track_id="t-1", media_file_id=None, source={"kind": "track"}, title="One",
+                     play={"kind": "unplayable", "reason": "x", "code": "unknown", "lane": True})
+    mgr.queue.replace([slot])
+    mgr._play_started([slot])
+    mgr._slot_failed(slot, 1, "unknown")
+    said = mgr.latest_status["stream_event"]
+    assert (said["kind"], said["all"]) == ("not_streamable", True)
+    for extra in ({"source": "external"}, {"unslotted": True}):
+        out._emit(PlaybackStatus(state="playing", position=12.0, length=200.0, queue_index=0,
+                                 extra=extra))
+        assert mgr.latest_status.get("stream_event") == said, extra
+    out._emit(PlaybackStatus(state="playing", position=1.0, length=200.0, queue_index=1))
+    assert "stream_event" not in mgr.latest_status
+
+
 def test_renderer_online_is_decided_by_the_first_address_that_answers():
     with socket.socket() as srv:
         srv.bind(("127.0.0.1", 0))

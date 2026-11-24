@@ -6151,10 +6151,6 @@ def test_a_played_queue_whose_streams_all_fail_sends_a_shared_hqplayer_nothing(f
         other.close()
 
 
-@pytest.mark.skip(reason="waits for PlaybackManager._on_backend_status (playback/manager.py, not this slice's part) to "
-                         "count a Play's run as played only when what sounds is the queue's own — a status whose "
-                         "`source` is not \"external\": today another controller's entry playing on marks the run "
-                         "played (_played) and takes back what _slot_failed said")
 def test_the_failure_of_a_played_queue_is_said_while_the_other_controller_plays_on(fake, lane, listens, monkeypatch):
     """The same, the other controller's entry playing on: the Play's failure
     is said (PlaybackManager._slot_failed: `stream_event`, every slot failed)

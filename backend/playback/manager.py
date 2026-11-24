@@ -978,7 +978,7 @@ class PlaybackManager:
                         freed / 1048576, lo, hi)
 
     def _played(self) -> None:
-        """Something of the queue sounds: a Play's run of failures is over,
+        """A slot of the queue sounds: a Play's run of failures is over,
         and so is what it said."""
         with self._slots_lock:
             run = self._play_run
@@ -1152,7 +1152,11 @@ class PlaybackManager:
             self._anchor_item, self._anchor_slot = item, idx
         self._maintain_preview_window(idx, s.extra.get("start_slot"))
         self.lane.maintain()
-        if new_data["state"] == "playing" and s.position > 0:
+        if new_data["state"] == "playing" and s.position > 0 and item is not None and idx:
+            # A slot of the queue sounds. What plays at no slot of it — another
+            # controller's entry (`source` external), a track of the queue
+            # before (a renderer's load the queue names no more) — is no sound
+            # of this Play's: its failures stay said
             self._played()
 
         # Natural end-of-queue: the player stopped on the last track. Archive
