@@ -309,4 +309,4 @@ def test_the_sheets_foot_promises_only_what_the_sheet_shows():
 def test_the_chosen_folders_row_says_it_can_be_pulled_while_it_is_on_a_plugged_disk():
     path = _disks()["path"]
     assert path == [[SAFE, False], ["", True],
-                    ["Empty or not mounted — your own tracks cannot play or be scanned until it is back.", False]]
+                    ["Not connected — your own tracks cannot play or be scanned until it is back.", False]]

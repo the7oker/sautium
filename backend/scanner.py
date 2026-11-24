@@ -101,11 +101,31 @@ def scope_admitted(library_path, rel: str) -> bool:
     return not library_root.picks() or library_root.within(os.path.join(str(library_path), rel)) is not None
 
 
-# A Docker bind is fixed when its container starts: a drive reconnected under
-# a running node stays invisible to it until the restart.
-UNREACHABLE = ("The music folder is empty or not mounted, so nothing was scanned. "
-               "Reconnect it and scan again — a Docker node sees it again only "
-               "after a restart.")
+# What a refused scan says, by the way the node is given its music folder —
+# what brings the folder back differs with it. Under roots (library_root:
+# the owner picks the folder under folders bound `rslave`) a disk put back
+# is seen as it arrives, and the wake scans it. A Docker node whose folder
+# is its .env line's bind sees what was there when its container started:
+# a drive reconnected under it stays invisible until the restart. A
+# launcher reads the folder itself. Drafts for the words sitting
+# (PI-NODE-2D-DESIGN §9.2).
+UNREACHABLE = {
+    "pick": ("The music folder is not connected, so nothing was scanned. "
+             "Connect its disk — Sautium scans it by itself."),
+    "setup": ("The music folder is empty or not mounted, so nothing was scanned. "
+              "Reconnect it and restart Sautium: this node sees a disk only as it "
+              "was at its start."),
+    "launcher": ("The music folder is empty or not connected, so nothing was scanned. "
+                 "Reconnect it and scan again."),
+}
+
+
+def unreachable_words() -> str:
+    """The refusal's sentence on this node (UNREACHABLE)."""
+    import library_root
+    from claude_code import is_launcher_mode
+    return UNREACHABLE["pick" if library_root.picks()
+                       else "launcher" if is_launcher_mode() else "setup"]
 
 
 def library_unreachable(wake: bool = True) -> bool:
@@ -138,15 +158,16 @@ def _look(ticket: int, wake: bool) -> bool:
 
 
 # The folder's state, two ways: the last answer recorded (looks and
-# observations, ordered by when they started) and what the notices were last
-# given. The notices derive on every wake of every stream, so they share one
+# observations, ordered by when they started) — what gone_prefixes reads, and
+# a change of it is the queue's event (playback.manager.reach_changed) — and
+# what the notices were last given. The notices derive on every wake of every stream, so they share one
 # look, run by a worker thread, and wait for it a few seconds at most — a look
 # that takes longer reads as a dead mount. Their look never wakes the channel:
 # on a share that flaps it would wake itself without end, so a change only a
 # request's derivation saw reaches the tabs already open with the next wake.
 # Producers do wake it, when their answer differs from what the notices show:
 # a scan's refusal, the prune, Library opened, a library file served or found
-# missing. And a look the readers gave up on wakes them if the folder answered
+# missing, the folder watcher's loss, the first file of a new queue missing. And a look the readers gave up on wakes them if the folder answered
 # after all: a disk spinning up is not a dead mount.
 LOOK_PATIENCE_S = 3.0
 _folder = threading.Condition()
@@ -179,6 +200,7 @@ def _record(unreachable: bool, ticket: int, wake: bool) -> None:
             return
         _recorded = ticket
         back = _folder_unreachable and not unreachable
+        moved = _folder_unreachable != unreachable
         _folder_unreachable = unreachable
         wake = wake and unreachable != _shown
         if wake:
@@ -190,6 +212,13 @@ def _record(unreachable: bool, ticket: int, wake: bool) -> None:
         import library_watch
         threading.Thread(target=library_watch.folder_back, daemon=True,
                          name="library-watch-rearm").start()
+    if moved:
+        # What opens here changed (gone_prefixes): the queue reads its
+        # slots' ways in again — in a process that holds one, off this thread
+        playback = sys.modules.get("playback.manager")
+        if playback is not None:
+            threading.Thread(target=playback.reach_changed, daemon=True,
+                             name="queue-reach").start()
 
 
 def folder_seen(unreachable: bool) -> None:
@@ -198,15 +227,40 @@ def folder_seen(unreachable: bool) -> None:
     _record(unreachable, _next_ticket(), wake=True)
 
 
-def check_folder() -> None:
-    """A producer's look that nobody waits for (Library opened, a library
-    file found missing): the worker looks and wakes the notices if the
-    answer differs from what they show."""
+def gone_prefixes() -> List[str]:
+    """The stored-path prefixes (as media_files.file_path spells them) of
+    the folders this node knows unreachable now: none, or the music
+    folder's one — a list, so several folders are several entries. A file
+    under one opens nowhere here (sql_queries.HERE): it is no way in for a
+    queue slot, and its album says so.
+
+    The list is this process's recorded observation (_record), never a look
+    at the disk — a reader on the play path does not wait on a dead mount —
+    and never stored: it is made again at each start, by a look taken
+    before the first queue is read (PlaybackManager.init_from_settings),
+    and kept by the events that record the folder's state after it."""
+    with _folder:
+        gone = _folder_unreachable
+    return [settings.library_db_root() + "/"] if gone else []
+
+
+def check_folder(wait: bool = False) -> None:
+    """A producer's look (Library opened, a library file found missing, the
+    folder watcher's loss): the worker looks and wakes the notices if the
+    answer differs from what they show. Nobody waits for it but the play
+    path (`wait`): the file a new queue starts with is missing, and what
+    opens instead is read once the folder has answered — waited for no
+    longer than LOOK_PATIENCE_S; a slower answer is recorded when it
+    comes, and that record is the queue's event."""
     global _look_wanted, _look_wakes_wanted
     _ensure_worker()
     with _folder:
         _look_wanted = _look_wakes_wanted = True
         _folder.notify_all()
+        if wait:
+            # a look under way began before this miss: the one after it
+            after = _looks_done + (1 if _looking else 0)
+            _folder.wait_for(lambda: _looks_done > after, timeout=LOOK_PATIENCE_S)
 
 
 def folder_unreachable_now() -> bool:
@@ -282,7 +336,7 @@ def refuse_if_unreachable() -> None:
     launcher, cli.py, a walk that came back empty). Its look at the folder
     wakes the notices when the answer changed, so every open tab learns."""
     if library_unreachable():
-        raise LibraryUnreachable(UNREACHABLE)
+        raise LibraryUnreachable(unreachable_words())
 
 
 @dataclass(frozen=True)
@@ -1440,7 +1494,7 @@ class LibraryScanner:
                 # away all the same.
                 import library_root
                 if library_root.picks():
-                    raise LibraryUnreachable(UNREACHABLE)
+                    raise LibraryUnreachable(unreachable_words())
             raise ValueError(f"Library path does not exist: {self.library_path}")
 
         logger.info(f"Initialized scanner for: {self.library_path}")

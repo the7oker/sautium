@@ -18,7 +18,7 @@ silently dropped (logged at debug level by the caller if needed).
 
 from db_pool import db_query
 from playback.manager import active_hqp_endpoint
-from sql_queries import ARTIST_COMPOSER_ONLY, ARTIST_OWNED, TRACK_FILES, best_rip_order, owned_rank
+from sql_queries import ARTIST_COMPOSER_ONLY, ARTIST_OWNED, HERE, best_rip_order, owned_rank
 
 
 def hydrate_artists(artist_ids: list[str]) -> list[dict]:
@@ -142,6 +142,7 @@ def hydrate_tracks(refs: list) -> list[dict]:
     if not wanted:
         return []
 
+    from scanner import gone_prefixes
     hqp_id = active_hqp_endpoint()
     rows = db_query(f"""
         SELECT t.id::text AS track_id,
@@ -165,13 +166,13 @@ def hydrate_tracks(refs: list) -> list[dict]:
             SELECT f.id, f.location::text AS location, f.cover_id, f.duration_seconds,
                    al.id AS album_id, al.title AS album, al.release_year
             FROM (
-                SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                SELECT mf.id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                        mf.album_variant_id, mf.cover_id, mf.duration_seconds,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = t.id
                 UNION ALL
-                SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                SELECT hf.id, av.location, av.hqp_endpoint_id, true,
                        hf.album_variant_id, NULL::uuid, hf.duration_seconds,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
@@ -192,6 +193,6 @@ def hydrate_tracks(refs: list) -> list[dict]:
             LIMIT 1
         ) ph ON true
         WHERE t.id::text = ANY(%(ids)s)
-    """, {"ids": wanted, "hqp_id": hqp_id})
+    """, {"ids": wanted, "hqp_id": hqp_id, "gone": gone_prefixes()})
     by_id = {r["track_id"]: r for r in rows}
     return [by_id[tid] for tid in wanted if tid in by_id]

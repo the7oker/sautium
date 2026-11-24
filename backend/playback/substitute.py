@@ -43,8 +43,8 @@ import threading
 from typing import Callable, Optional
 
 from db_pool import db_query
-from playback.queue import file_source
-from sql_queries import best_rip_order, owned_rank
+from playback.queue import file_source, gone_prefixes
+from sql_queries import HERE, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
 
@@ -74,16 +74,17 @@ REASONS = {
 
 _COPIES_SQL = f"""
     SELECT f.track_id::text AS track_id, f.id, f.location::text AS location, f.hqp_endpoint_id,
+           f.here,
            mf.file_path, mf.file_format::text AS file_format,
            mf.cue_start_seconds, mf.cue_end_seconds,
            hf.hqp_path, hf.file_format::text AS hqp_format
     FROM (
-        SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id, av.absent_since,
+        SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                mf.is_lossless, mf.sample_rate, mf.bit_depth
         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
         WHERE mf.track_id = ANY(%(ids)s::uuid[])
         UNION ALL
-        SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id, av.absent_since,
+        SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id, true,
                hf.is_lossless, hf.sample_rate, hf.bit_depth
         FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
         WHERE hf.track_id = ANY(%(ids)s::uuid[])
@@ -92,6 +93,20 @@ _COPIES_SQL = f"""
     LEFT JOIN hqp_library_files hf ON f.location = 'hqplayer' AND hf.id = f.id
     ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
 """
+
+
+def by_copies(item) -> bool:
+    """A slot whose way in is read against its track's copies
+    (native_plays)."""
+    return bool(item.track_id) and item.source.get("kind") in _BY_TRACK
+
+
+def streams() -> bool:
+    """Whether a slot with no file here can stream on this node now:
+    streaming is up and a provider stands in its order — what a play route
+    asks before it queues a stream."""
+    from streaming import service as streaming_service
+    return streaming_service.is_enabled() and bool(streaming_service.providers_preferred())
 
 
 def _file_play(r: dict) -> dict:
@@ -162,23 +177,31 @@ def native_plays(items: list, output_id: Optional[str],
     lane brought it once it has) — or None to open `source` as is. Streams
     and foreign uris are as they are on every output; owned items are
     looked up once for the whole queue, every copy of every track in one
-    query."""
-    owned = [it for it in items
-             if it.track_id and it.source.get("kind") in _BY_TRACK]
+    query.
+
+    A copy that is not here now (sql_queries.HERE: away, or under a folder
+    that does not answer) is never a way in: a slot whose own file is one
+    takes the best copy that is here, else streams — its origin (`source`)
+    untouched, so the same read gives None again once the file opens."""
+    owned = [it for it in items if by_copies(it)]
     by_track: dict = {}
     if owned:
         for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}),
-                                        "hqp_id": endpoint_id}):
-            by_track.setdefault(r["track_id"], []).append(r)
+                                        "hqp_id": endpoint_id, "gone": gone_prefixes()}):
+            if r["here"]:
+                by_track.setdefault(r["track_id"], []).append(r)
     out = []
     for it in items:
         src = it.source
         kind = src.get("kind")
-        if kind not in _BY_TRACK or not it.track_id:
+        if not by_copies(it):
             out.append(None)
             continue
         rows = by_track.get(it.track_id, [])
         local = next((r for r in rows if r["location"] == "local"), None)
+        # the slot's own file, where that opens now
+        own_file = kind == "file" and any(
+            r["location"] == "local" and r["id"] == it.media_file_id for r in rows)
         if output_id == "hqplayer":
             own = next((r for r in rows if r["location"] == "hqplayer"
                         and r["hqp_endpoint_id"] == endpoint_id), None)
@@ -188,17 +211,17 @@ def native_plays(items: list, output_id: Optional[str],
                 # this HQPlayer's copy outranks a rip here, as on the album page
                 out.append({"kind": "hqp", "path": own["hqp_path"], "format": own["hqp_format"],
                             "endpoint": endpoint_id})
-            elif kind == "file":
+            elif own_file:
                 out.append(_prepared(it, None))
             elif local is not None:
                 out.append(_prepared(it, _file_play(local)))
             else:
-                # held at another HQPlayer, its file gone, or never one here:
-                # streamed on this HQPlayer too, its playlist ending before it
-                # until it lands (hqp_backend's horizon)
+                # held at another HQPlayer, no file of it here now, or never
+                # one here: streamed on this HQPlayer too, its playlist
+                # ending before it until it lands (hqp_backend's horizon)
                 out.append(_stream_play(it))
         else:
-            if kind == "file":
+            if own_file:
                 out.append(None)
             elif local is not None:
                 out.append(_file_play(local))
@@ -208,10 +231,9 @@ def native_plays(items: list, output_id: Optional[str],
 
 
 def streamed(item) -> bool:
-    """A slot whose row shows a stream's state: a not-owned track the lane
-    brings it (an owned file's preparation shows none)."""
-    if item.media_file_id is not None or item.source.get("kind") == "file":
-        return False
+    """A slot whose row shows a stream's state: its way in is a stream the
+    lane brings it — a not-owned track, or an owned one with no file here
+    now (an owned file's preparation for HQPlayer shows none)."""
     play = item.opener()
     if play.get("prepare") or play.get("transcode") or play.get("cut") or play.get("kind") == "file":
         return False                # a copy here, prepared for HQPlayer: no stream

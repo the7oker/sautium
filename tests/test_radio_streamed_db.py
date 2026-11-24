@@ -516,6 +516,76 @@ def test_the_real_scorer_filters_the_served_rows_before_its_limit(node):
     assert [r["track_id"] for r in _SCORER(seed, limit=3, served=True, pool=3)] == owned[:3]
 
 
+def _music_folder(monkeypatch, gone: bool) -> None:
+    """The node's music folder as the fixture's paths have it, and what the
+    node has recorded of it."""
+    import scanner
+    from config import settings
+    monkeypatch.setattr(settings, "music_library_path", "E:/Music")
+    monkeypatch.setattr(settings, "music_host_path", None)
+    monkeypatch.setattr(scanner, "_folder_unreachable", gone)
+
+
+def test_the_real_scorer_serves_no_track_whose_only_copy_is_not_here_now(node, monkeypatch):
+    """PI-NODE-2D Q6: a track whose only copy lies under a folder that does
+    not answer is, for radio's rule, not the owner's to play — `served=True`
+    leaves it out, `served=False` has it among the ones that stream."""
+    seed = node["streamed"][7]["track_id"]
+    _embed(node, seed, 0.0)
+    owned = [r["track_id"] for r in node["owned"][:3]]
+    for i, t in enumerate(owned):
+        _embed(node, t, 0.1 * (i + 1))
+    _music_folder(monkeypatch, gone=False)
+    assert [r["track_id"] for r in _SCORER(seed, limit=5, served=True)] == owned
+    _music_folder(monkeypatch, gone=True)
+    assert _SCORER(seed, limit=5, served=True) == []
+    out = _SCORER(seed, limit=5, served=False)
+    assert [r["track_id"] for r in out] == owned
+    assert all(r["is_owned"] and not r["playable"] for r in out)
+    # a copy in a folder that answers serves it again
+    cur = node["cur"]
+    cur.execute("INSERT INTO album_variants (album_id, directory_path) "
+                "SELECT album_id, '/elsewhere/M' FROM album_variants LIMIT 1 RETURNING id")
+    cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, sample_rate, bit_depth, "
+                "duration_seconds, track_number) VALUES (%s, %s, '/elsewhere/M/01.flac', 44100, 16, 200, 1) "
+                "RETURNING id", (owned[0], cur.fetchone()[0]))
+    copy = cur.fetchone()[0]
+    assert [(r["track_id"], r["file_id"]) for r in _SCORER(seed, limit=5, served=True)] == [(owned[0], copy)]
+
+
+def test_radio_and_play_similar_never_stream_his_album_from_a_disk_that_is_out_on_their_own(node, monkeypatch):
+    """Automatic fills do not spend his listens: with radio.streamed off a
+    track with no copy here now is left out, and no provider is asked; with
+    it on it is a slot played whole, like any streamed track."""
+    from fastapi import HTTPException
+    mgr, player, cur = node["mgr"], node["player"], node["cur"]
+    monkeypatch.setattr(player.track_similarity, "similar_tracks", _SCORER)
+    seed = node["streamed"][7]["track_id"]
+    _embed(node, seed, 0.0)
+    owned = [r["track_id"] for r in node["owned"][:3]]
+    for i, t in enumerate(owned):
+        _embed(node, t, 0.1 * (i + 1))
+        cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                    "SELECT av.album_id, %s, %s, 200000 FROM album_variants av LIMIT 1", (t, i + 1))
+    node["full"].has.update(owned)
+    _music_folder(monkeypatch, gone=False)
+    batch, _passed = player._radio_build_batch(seed, {seed}, None)
+    assert [item.source["kind"] for item, _r in batch] == ["file"] * 3
+
+    _music_folder(monkeypatch, gone=True)
+    batch, _passed = player._radio_build_batch(seed, {seed}, None)
+    assert batch == [] and node["full"].resolved == []
+    with pytest.raises(HTTPException) as e:
+        player.play_similar(player.PlaySimilarRequest(track_id=seed, limit=6))
+    assert e.value.status_code == 404 and len(mgr.queue) == 0
+    assert node["full"].resolved == node["demo"].resolved == node["clip"].resolved == []
+
+    _switch(node, True)
+    batch, _passed = player._radio_build_batch(seed, {seed}, None)
+    assert sorted(item.track_id for item, _r in batch) == sorted(owned)
+    assert all(item.source == {"kind": "track"} and item.whole for item, _r in batch)
+
+
 def test_play_similar_on_a_seed_not_analysed_says_so_whatever_the_switch(node):
     from fastapi import HTTPException
     player = node["player"]

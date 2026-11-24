@@ -128,7 +128,7 @@ def test_a_folder_that_is_gone_is_refused_as_unreachable_not_reported_as_a_faile
         main_module._scan_thread.join()
 
     assert main_module._scan_state["running"] is False
-    assert main_module._scan_state["progress"] == f"Scan failed: {scanner.UNREACHABLE}"
+    assert main_module._scan_state["progress"] == f"Scan failed: {scanner.unreachable_words()}"
     said = [r for r in caplog.records if r.name == "main"]
     assert [r.levelname for r in said] == ["WARNING"] and said[0].exc_info is None
     assert _last_scan(cur) is None
@@ -328,7 +328,7 @@ def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
         asyncio.run(main_module.scan_start())
 
     assert refused.value.status_code == 409
-    assert refused.value.detail == scanner.UNREACHABLE
+    assert refused.value.detail == scanner.unreachable_words()
     assert main_module._scan_state["running"] is False
     assert heard() == ["sautium_notices"]         # every open tab learns the onset
 
@@ -370,7 +370,7 @@ def test_the_cli_is_refused_as_the_queue_is(cur, library, backend_here, heard):
     from click.testing import CliRunner
     _owned_file(cur)
     refused = CliRunner().invoke(backend_here.cli, ["scan"])
-    assert refused.exit_code == 1 and scanner.UNREACHABLE in refused.output, refused.output
+    assert refused.exit_code == 1 and scanner.unreachable_words() in refused.output, refused.output
     assert heard() == ["sautium_notices"]         # the look's news
 
 
@@ -385,8 +385,8 @@ def _empty_the_folder_during_the_walk(monkeypatch, library):
 
 
 @pytest.mark.parametrize("case, progress, wakes", [
-    ("gone before the walk", f"Scan failed: {scanner.UNREACHABLE}", ["sautium_notices"]),
-    ("gone during the walk", f"Scan failed: {scanner.UNREACHABLE}", ["sautium_notices"]),
+    ("gone before the walk", f"Scan failed: {scanner.unreachable_words()}", ["sautium_notices"]),
+    ("gone during the walk", f"Scan failed: {scanner.unreachable_words()}", ["sautium_notices"]),
     ("a fresh node's empty folder", "No audio files found", []),
 ], ids=["gone-before", "gone-during", "fresh-node"])
 def test_an_empty_walk_records_no_scan(cur, library, main_module, heard, monkeypatch,
@@ -1053,7 +1053,7 @@ def test_a_copy_away_while_another_is_found_keeps_one_analysis(
     # a play of the album takes the copy found, not the one away
     from routers import player
     cur.execute("SELECT id FROM albums WHERE title = 'Pulse Archive'")
-    picked = [r["id"] for r in player._album_media_rows(str(cur.fetchone()[0]))]
+    picked = [r["id"] for r in player._album_rows(str(cur.fetchone()[0]))]
     cur.execute("SELECT file_path FROM media_files WHERE id = ANY(%s)", (picked,))
     assert len(picked) == 2 and all("Disk/" in p for (p,) in cur.fetchall())
 
@@ -1089,10 +1089,11 @@ def test_an_equal_copy_back_leaves_the_analysis_where_it_is(
         assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
 
 
-def test_a_track_away_plays_as_a_missing_file_and_a_present_copy_first(
+def test_a_track_away_streams_and_a_present_copy_plays_first(
         cur, library, main_module, monkeypatch, tmp_path, scanned_library):
     """The queue's way in: a present copy outranks one that is away, and a
-    track only away still opens its file — a 404, as an unreachable root."""
+    track only away streams — a copy that does not open here now is never a
+    way in (before 2026-11-24 it opened its missing file, a 404)."""
     from playback import substitute
     from playback.queue import QueueItem
     carrier, _ = scanned_library["Carrier"]
@@ -1101,8 +1102,7 @@ def test_a_track_away_plays_as_a_missing_file_and_a_present_copy_first(
     item = QueueItem(track_id=carrier, media_file_id=None, source={"kind": "track"},
                      title="Carrier")
 
-    [only_away] = substitute.native_plays([item], None, None)
-    assert only_away["path"].endswith("Ostrava Unit/Pulse Archive/01.flac")
+    assert substitute.native_plays([item], None, None) == [{"kind": "pending"}]
 
     target = library / "Disk" / "Pulse Archive" / "01.flac"
     target.parent.mkdir(parents=True)
@@ -1495,7 +1495,7 @@ def test_a_copy_found_elsewhere_and_kept_is_away(
 
     assert _away(cur) == ["Pulse Archive"]
     cur.execute("SELECT id FROM albums WHERE title = 'Pulse Archive'")
-    picked = [r["id"] for r in player._album_media_rows(str(cur.fetchone()[0]))]
+    picked = [r["id"] for r in player._album_rows(str(cur.fetchone()[0]))]
     cur.execute("SELECT file_path FROM media_files WHERE id = ANY(%s)", (picked,))
     assert all("(2019)/" in p for (p,) in cur.fetchall())
 

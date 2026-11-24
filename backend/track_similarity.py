@@ -57,7 +57,7 @@ autocorrelated windows.
 from typing import Optional
 
 from db_pool import db_query_with_ef_search
-from sql_queries import best_rip_order, owned_rank
+from sql_queries import HERE, best_rip_order, owned_rank
 
 POOL = 600              # mean-KNN recall horizon. Probe: widening 300→600 pulled
                         # 5 more tracks into the hybrid top-30 (one at mean-rank
@@ -104,9 +104,10 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     `artist_cap` keeps each artist to its best N rows (raw KNN clusters hard);
     `jitter` reshuffles near-ties for radio so the same seed never yields the
     same station twice — 0 gives a deterministic shelf. `served` keeps only
-    the rows the active output opens itself (True — the owner's own, a local
-    file or one held at the HQPlayer that is the output) or only the others
-    (False — they stream), BEFORE the artist cap and the LIMIT: radio's
+    the rows the active output opens itself (True — the owner's own: a local
+    file that opens now, or one held at the HQPlayer that is the output) or
+    only the others (False — they stream: not owned, or owned with no file
+    here now), BEFORE the artist cap and the LIMIT: radio's
     owned-only station and its streamed candidates are each a full top-N of
     their own, never what a mixed top-N left of them. For True the recall
     arms walk the owner's tracks alone too (_SERVED_RECALL): on a node whose
@@ -120,6 +121,7 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
     silently die mid-session.
     """
     from playback.manager import active_hqp_endpoint
+    from scanner import gone_prefixes
     hqp_id = active_hqp_endpoint()
     return db_query_with_ef_search(f"""
         WITH target AS (SELECT vector FROM embeddings WHERE track_id = %(seed)s::uuid),
@@ -176,11 +178,12 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
                    mf_rep.id AS file_id,
                    mf_rep.location::text AS location, mf_rep.file_path, mf_rep.file_format,
                    (mf_rep.id IS NOT NULL) AS is_owned,
-                   -- the active output opens this copy itself: a local file, or
-                   -- one held at the HQPlayer that IS the output (params
-                   -- hqp_id); a copy held elsewhere streams
-                   COALESCE(mf_rep.location = 'local'
-                            OR mf_rep.hqp_endpoint_id = %(hqp_id)s, false) AS playable,
+                   -- the active output opens this copy itself: a local file
+                   -- that opens now (sql_queries.HERE), or one held at the
+                   -- HQPlayer that IS the output (params hqp_id); a copy held
+                   -- elsewhere, or with no file here now, streams
+                   COALESCE(mf_rep.here AND (mf_rep.location = 'local'
+                            OR mf_rep.hqp_endpoint_id = %(hqp_id)s), false) AS playable,
                    t.title, a.name AS artist, ta.artist_id,
                    COALESCE(mf_rep.album_title, ph_rep.album) AS album,
                    COALESCE(mf_rep.release_year, ph_rep.release_year) AS year,
@@ -194,17 +197,17 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id
             LEFT JOIN LATERAL (
-                SELECT f.id, f.location, f.hqp_endpoint_id,
+                SELECT f.id, f.location, f.hqp_endpoint_id, f.here,
                        f.file_path, f.file_format,
                        al.title AS album_title, al.release_year, al.cover_url AS album_cover_url
                 FROM (
-                    SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                    SELECT mf.id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                            mf.album_variant_id, mf.file_path, mf.file_format,
                            mf.is_lossless, mf.sample_rate, mf.bit_depth
                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                     WHERE mf.track_id = t.id
                     UNION ALL
-                    SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                    SELECT hf.id, av.location, av.hqp_endpoint_id, true,
                            hf.album_variant_id, hf.hqp_path, hf.file_format,
                            hf.is_lossless, hf.sample_rate, hf.bit_depth
                     FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
@@ -223,8 +226,8 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
             WHERE (mf_rep.id IS NOT NULL OR ph_rep.album IS NOT NULL)
               AND EXISTS (SELECT 1 FROM target)
               AND (%(served)s::boolean IS NULL
-                   OR COALESCE(mf_rep.location = 'local'
-                               OR mf_rep.hqp_endpoint_id = %(hqp_id)s, false) = %(served)s::boolean)
+                   OR COALESCE(mf_rep.here AND (mf_rep.location = 'local'
+                               OR mf_rep.hqp_endpoint_id = %(hqp_id)s), false) = %(served)s::boolean)
         ),
         rescored AS (
             SELECT pool.*,
@@ -264,7 +267,8 @@ def similar_tracks(seed_uuid: str, exclude=(), limit: int = 20,
         WHERE artist_rank <= %(artist_cap)s
         ORDER BY score * (1 + %(jitter)s * random())
         LIMIT %(limit)s
-    """, {"hqp_id": hqp_id, "seed": seed_uuid, "exclude": list(exclude), "limit": limit,
+    """, {"hqp_id": hqp_id, "gone": gone_prefixes(),
+          "seed": seed_uuid, "exclude": list(exclude), "limit": limit,
           "pool": pool, "artist_cap": artist_cap, "jitter": jitter, "served": served,
           "kin_cap": KIN_ARM_CAP, "w_tag": W_TAG},
         ef_search=max(pool, 500))

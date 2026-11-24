@@ -1,0 +1,877 @@
+"""An album whose files are not reachable now plays as a phantom does
+(PI-NODE-2D §3): which stored paths do not answer is one recorded fact
+(scanner.gone_prefixes), read by the function that picks a slot's way in
+(playback.substitute.native_plays) and by every query that ranks copies
+(sql_queries.HERE, owned_rank) — a copy that is not here now, its folder
+gone or the copy away, is never a way in: the slot takes a copy that opens,
+else streams, its origin untouched. Against a real PostgreSQL — a throwaway
+database built from the migrations — with a provider on no network."""
+
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+
+import pytest
+
+BACKEND = Path(__file__).resolve().parent.parent / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
+psycopg2 = pytest.importorskip("psycopg2")
+pytest.importorskip("sqlalchemy")
+
+import psycopg2.pool  # noqa: E402
+
+from playback.base import Capabilities, PlayerBackend  # noqa: E402
+from streaming.base import (FetchedAudio, ProviderManifest, ResolvedSource,  # noqa: E402
+                            StreamProvider)
+from streaming.proxy import MediaProxy  # noqa: E402
+
+
+class _Output(PlayerBackend):
+    """An output that takes every mutation as it is (the base contract) and
+    keeps what it was told."""
+    id = "browser"
+    label = "stub"
+
+    def __init__(self, emit):
+        super().__init__(emit)
+        self.changed: list = []
+        self.replaced: list = []
+
+    def start(self): pass
+    def shutdown(self): pass
+    def capabilities(self): return Capabilities()
+    def play(self): return True
+    def pause(self): return True
+    def stop(self): return True
+    def next(self): return True
+    def previous(self): return True
+    def select(self, index, track_id=None): return True
+
+    def queue_replace(self, items, *, play):
+        self.replaced.append([it.opener().get("kind") for it in items])
+        return super().queue_replace(items, play=play)
+
+    def queue_changed(self, kind, *, play=False):
+        self.changed.append(kind)
+
+
+class _Catalog(StreamProvider):
+    """Resolves every track at its catalog length; a download waits until
+    the test lets that track go."""
+    manifest = ProviderManifest(id="catalog", name="Catalog", kind="direct_url", lossless=True)
+    resolve_workers = 2
+
+    def __init__(self):
+        self.gates: dict = {}
+        self.asked: list = []
+
+    def fetch(self, query):
+        return self._download(self._resolve(query).source_id)
+
+    def _resolve(self, query):
+        self.asked.append(query.track_id)
+        return ResolvedSource(source_id=query.track_id, duration=query.duration)
+
+    def _download(self, sid):
+        from streaming.base import FetchCancelled, fetching
+        gate = self.gates.setdefault(sid, threading.Event())
+        unhook = fetching().on_cancel(gate.set)
+        gate.wait(20)
+        unhook()
+        if fetching().cancelled.is_set():
+            raise FetchCancelled(sid)
+        return FetchedAudio(data=b"fLaC" + b"\x00" * 64, mime="audio/flac", lossless=True)
+
+    def land(self, *sids):
+        for s in sids:
+            self.gates.setdefault(s, threading.Event()).set()
+
+
+def _wait(pred, timeout=10.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if pred():
+            return True
+        time.sleep(0.02)
+    return pred()
+
+
+@pytest.fixture
+def node(scratch_dsn, monkeypatch, tmp_path):
+    """The owner's album "Night Walks" — two files under the music folder,
+    its tracklist in album_tracks as the materialiser leaves it — and a
+    not-owned album of three tracks, one artist; a manager on an output that
+    takes everything, its lane on a media proxy (no port) fed by a provider
+    on no network. `gone(flag)` sets what the node has recorded of its music
+    folder, without the event; `copy(n, path)` adds a second copy of track n
+    in another folder."""
+    import db_pool
+    import routers.player as player
+    import scanner
+    from config import settings
+    from playback import manager as manager_mod
+    from playback.manager import PlaybackManager
+    from streaming import service as streaming_service
+    root = tmp_path / "music"
+    (root / "NW").mkdir(parents=True)
+    monkeypatch.setattr(settings, "music_library_path", str(root))
+    monkeypatch.setattr(settings, "music_host_path", None)
+    # The folder's state is process state: each test starts with it answering,
+    # once the look worker is idle (a look still running would land here)
+    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
+    for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0)):
+        monkeypatch.setattr(scanner, name, value)
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 6, dsn=scratch_dsn, options="-c timezone=UTC")
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    conn = psycopg2.connect(scratch_dsn)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("TRUNCATE tracks, albums, artists, listening_sessions, demo_plays, hqp_endpoints, "
+                "user_settings CASCADE")
+    artist = str(uuid.uuid4())
+    cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Hidden Orchestra')", (artist,))
+    owned, streamed = str(uuid.uuid4()), str(uuid.uuid4())
+    cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'Night Walks'), (%s, 'Dawn Chorus')",
+                (owned, streamed))
+    db_root = settings.library_db_root()
+    cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
+                (owned, f"{db_root}/NW"))
+    variant = cur.fetchone()[0]
+    files, tracks = [], []
+    for i in (1, 2):
+        t = str(uuid.uuid4())
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, %s)", (t, f"Owned {i}"))
+        cur.execute("INSERT INTO track_artists (track_id, artist_id) VALUES (%s, %s)", (t, artist))
+        (root / "NW" / f"0{i}.flac").write_bytes(b"fLaC")
+        cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, file_format, "
+                    "sample_rate, bit_depth, duration_seconds, track_number) "
+                    "VALUES (%s, %s, %s, 'FLAC', 44100, 16, 200, %s) RETURNING id",
+                    (t, variant, f"{db_root}/NW/0{i}.flac", i))
+        files.append(cur.fetchone()[0])
+        cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                    "VALUES (%s, %s, %s, 200000)", (owned, t, i))
+        tracks.append(t)
+    phantoms = []
+    for i in (1, 2, 3):
+        t = str(uuid.uuid4())
+        cur.execute("INSERT INTO tracks (id, title) VALUES (%s, %s)", (t, f"Stream {i}"))
+        cur.execute("INSERT INTO track_artists (track_id, artist_id) VALUES (%s, %s)", (t, artist))
+        cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                    "VALUES (%s, %s, %s, 200000)", (streamed, t, i))
+        phantoms.append(t)
+
+    def gone(flag: bool) -> None:
+        monkeypatch.setattr(scanner, "_folder_unreachable", flag)
+
+    elsewhere = (tmp_path / "elsewhere").as_posix()
+
+    def copy(n: int, name: str, *, sample_rate=44100) -> int:
+        """A second copy of track n at `elsewhere`/`name` — a folder that
+        is not the music folder, the file there."""
+        path = f"{elsewhere}/{name}"
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"fLaC")
+        cur.execute("INSERT INTO album_variants (album_id, directory_path, sample_rate) "
+                    "VALUES (%s, %s, %s) RETURNING id", (owned, path.rsplit("/", 1)[0], sample_rate))
+        v = cur.fetchone()[0]
+        cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, file_format, "
+                    "sample_rate, bit_depth, duration_seconds, track_number) "
+                    "VALUES (%s, %s, %s, 'FLAC', %s, 16, 200, %s) RETURNING id",
+                    (tracks[n], v, path, sample_rate, n + 1))
+        return cur.fetchone()[0]
+
+    prov = _Catalog()
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k")
+    monkeypatch.setattr(streaming_service, "_proxy", proxy)
+    monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
+    monkeypatch.setattr(streaming_service, "providers_preferred", lambda: [prov])
+    monkeypatch.setattr(streaming_service, "note_provider_health", lambda silent, answered: False)
+    monkeypatch.setattr(player, "_chain_cache", {})
+    monkeypatch.setattr(player, "_refusals", {})
+    mgr = PlaybackManager()
+    monkeypatch.setattr(mgr, "_schedule_persist", lambda: None)
+    monkeypatch.setattr(player, "manager", mgr)
+    monkeypatch.setattr(manager_mod, "manager", mgr)
+    mgr.lane.attach(proxy)
+    out = _Output(mgr._on_backend_status)
+    mgr._active = out
+    monkeypatch.setattr(mgr, "ensure_active", lambda: out)
+    yield {"mgr": mgr, "prov": prov, "proxy": proxy, "out": out, "player": player, "cur": cur,
+           "owned": owned, "streamed": streamed, "files": files, "tracks": tracks,
+           "phantoms": phantoms, "variant": variant, "root": root, "db_root": db_root,
+           "gone": gone, "copy": copy, "elsewhere": elsewhere, "streaming": streaming_service,
+           "monkeypatch": monkeypatch}
+    prov.land(*phantoms, *tracks)
+    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
+    _wait(lambda: not [t for t in threading.enumerate() if t.name == "queue-reach"])
+    conn.close()
+    pool.closeall()
+
+
+# -- the fact and the way in (§3.2) --------------------------------------------
+
+
+def test_the_gone_prefixes_are_the_recorded_answer_never_a_look_at_the_disk(node, monkeypatch):
+    import os
+    import scanner
+    assert scanner.gone_prefixes() == []
+    monkeypatch.setattr(os, "scandir", lambda path: pytest.fail("a reader looked at the disk"))
+    node["gone"](True)
+    assert scanner.gone_prefixes() == [node["db_root"] + "/"]
+    node["gone"](False)
+    assert scanner.gone_prefixes() == []
+
+
+def test_a_file_under_a_folder_that_does_not_answer_is_no_way_in_and_its_origin_stays(node):
+    from playback.queue import items_for_media_ids
+    from playback.substitute import native_plays
+    it = items_for_media_ids(node["files"][:1])[0]
+    origin = dict(it.source)
+    assert native_plays([it], "browser", None) == [None]
+    node["gone"](True)
+    assert native_plays([it], "browser", None) == [{"kind": "pending"}]     # a stream to come
+    assert native_plays([it], "hqplayer", None) == [{"kind": "pending"}]
+    assert (it.source, it.media_file_id) == (origin, node["files"][0])
+    node["gone"](False)
+    assert native_plays([it], "browser", None) == [None]                    # the local copy again
+    assert native_plays([it], "hqplayer", None) == [None]
+
+
+def test_a_second_copy_that_is_here_is_the_way_in(node):
+    from playback.queue import items_for_media_ids
+    from playback.substitute import native_plays
+    other = node["copy"](0, "NW/01.flac")
+    it = items_for_media_ids(node["files"][:1])[0]
+    assert native_plays([it], "browser", None) == [None]
+    node["gone"](True)
+    play = native_plays([it], "browser", None)[0]
+    assert (play["kind"], play["media_file_id"], play["path"]) == (
+        "file", other, f"{node['elsewhere']}/NW/01.flac")
+    assert it.source["path"] == f"{node['db_root']}/NW/01.flac"
+
+
+def test_an_away_copy_with_no_other_streams_and_a_copy_here_stands_in_for_it(node):
+    """Q4: a copy a Rescan set away follows the same rule — before it the
+    slot opened the missing file."""
+    from playback.queue import items_for_media_ids
+    from playback.substitute import native_plays
+    it = items_for_media_ids(node["files"][:1])[0]
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
+                        (node["variant"],))
+    assert native_plays([it], "browser", None) == [{"kind": "pending"}]
+    other = node["copy"](0, "NW/01.flac")
+    assert native_plays([it], "browser", None)[0]["media_file_id"] == other
+    # the track itself (a slot queued while the copy was away) reads the same
+    from playback.queue import QueueItem
+    track = QueueItem(track_id=node["tracks"][1], media_file_id=None, source={"kind": "track"})
+    assert native_plays([track], "browser", None) == [{"kind": "pending"}]
+
+
+def _ranked(node, track: int, hqp_id, gone: list) -> list:
+    from db_pool import db_query
+    from sql_queries import TRACK_FILES, best_rip_order, owned_rank
+    return [(r["location"], r["id"]) for r in db_query(
+        f"SELECT f.id, f.location::text AS location FROM ({TRACK_FILES}) f "
+        f"ORDER BY {owned_rank('f')}, {best_rip_order('f')}",
+        {"tid": node["tracks"][track], "hqp_id": hqp_id, "gone": gone})]
+
+
+def _held(node, name: str, track: int) -> tuple:
+    """A copy of track `track` in the library of an HQPlayer called `name`."""
+    cur = node["cur"]
+    cur.execute("INSERT INTO hqp_endpoints (name) VALUES (%s) RETURNING id", (name,))
+    ep = cur.fetchone()[0]
+    cur.execute("INSERT INTO album_variants (album_id, directory_path, location, hqp_endpoint_id) "
+                "VALUES (%s, %s, 'hqplayer', %s) RETURNING id", (node["owned"], f"/media/{name}/NW", ep))
+    cur.execute("INSERT INTO hqp_library_files (track_id, album_variant_id, hqp_path, file_format, "
+                "sample_rate, bit_depth) VALUES (%s, %s, %s, 'FLAC', 44100, 16) RETURNING id",
+                (node["tracks"][track], cur.fetchone()[0], f"/media/{name}/NW/01.flac"))
+    return ep, cur.fetchone()[0]
+
+
+def test_with_every_folder_answering_the_copies_rank_as_before(node):
+    """owned_rank with an empty array is the order it had: the copy at the
+    HQPlayer that is the output, the local rips best first, a copy at
+    another HQPlayer, a copy that is away last."""
+    cd = node["files"][0]
+    hires = node["copy"](0, "hi/01.flac", sample_rate=96000)
+    away = node["copy"](0, "gone/01.flac", sample_rate=192000)
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = "
+                        "(SELECT album_variant_id FROM media_files WHERE id = %s)", (away,))
+    ep, held = _held(node, "box", 0)
+    other, held_elsewhere = _held(node, "second", 0)
+    assert _ranked(node, 0, ep, []) == [("hqplayer", held), ("local", hires), ("local", cd),
+                                        ("hqplayer", held_elsewhere), ("local", away)]
+    assert _ranked(node, 0, None, [])[:2] == [("local", hires), ("local", cd)]
+    # the music folder gone: its file ranks with the away copy, the copy
+    # elsewhere and the HQPlayers' stand
+    order = _ranked(node, 0, ep, [node["db_root"] + "/"])
+    assert order[:3] == [("hqplayer", held), ("local", hires), ("hqplayer", held_elsewhere)]
+    assert set(order[3:]) == {("local", away), ("local", cd)}
+
+
+def test_with_no_folder_gone_a_copy_query_plans_as_it_did(node):
+    """`here` is a column of the row source: with an empty array a copy
+    query's plan has the nodes of the one that read absent_since alone —
+    the same scans on the same indexes, the same joins, in the same shape —
+    and one sub-plan of its own, over the empty array."""
+    from playback import substitute
+    from sql_queries import HERE
+    cur = node["cur"]
+
+    def nodes(sql: str) -> list:
+        cur.execute("EXPLAIN (COSTS OFF) " + sql,
+                    {"ids": [node["tracks"][0]], "hqp_id": None, "gone": []})
+        kept, under = [], None
+        for line in (r[0] for r in cur.fetchall()):
+            indent = len(line) - len(line.lstrip())
+            if under is not None and indent > under:
+                continue                    # the sub-plan's own nodes
+            under = indent if "SubPlan" in line else None
+            if line.lstrip().startswith("->") or not kept:
+                kept.append(line.rstrip())
+        return kept
+
+    assert HERE in substitute._COPIES_SQL
+    with_here = nodes(substitute._COPIES_SQL)
+    as_it_was = nodes(substitute._COPIES_SQL.replace(HERE, "(av.absent_since IS NULL)"))
+    assert with_here == as_it_was
+
+
+def test_a_slot_that_streams_for_want_of_a_file_shows_a_streams_state(node):
+    """The queue row of a slot whose way in became a stream shows the
+    stream row's own lines: the lane counts it among the streamed slots."""
+    from playback.queue import items_for_media_ids
+    from playback.substitute import streamed
+    it = items_for_media_ids(node["files"][:1])[0]
+    assert not streamed(it)
+    it.play = {"kind": "pending"}
+    assert streamed(it)
+    it.play = {"kind": "pending", "prepare": "transcode", "file": dict(it.source)}
+    assert not streamed(it)             # a copy here, prepared for HQPlayer
+
+
+# -- the event, and who hears it (§3.3) -----------------------------------------
+
+
+def _queue(node, *, play=False):
+    from playback.queue import items_for_media_ids
+    items = items_for_media_ids(node["files"])
+    node["mgr"].replace_queue(items, play=play)
+    return items
+
+
+def _streams(it) -> bool:
+    return it.opener().get("kind") in ("pending", "proxy")
+
+
+def test_a_recorded_change_rereads_the_queue_once_and_the_folders_return_is_the_local_copy_again(node):
+    """The mount table, the watcher's loss, a file found missing: each
+    records the folder's answer, and a change of it is the queue's event —
+    one re-read, one new version, the output told once, the status carrying
+    it; the origins untouched, so the folder's return gives every slot its
+    own file back with no question."""
+    import scanner
+    mgr, out = node["mgr"], node["out"]
+    items = _queue(node)
+    origins = [dict(it.source) for it in items]
+    mgr._latest_status = {"state": "stopped", "track_index": 0}
+    out.changed.clear()
+    v = mgr.queue.version
+
+    scanner.folder_seen(True)                       # a producer's observation: the folder is gone
+    assert _wait(lambda: out.changed == ["rebind"])
+    assert all(_streams(it) for it in items) and mgr.queue.version == v + 1
+    assert _wait(lambda: mgr.latest_status.get("playlist_version") == v + 1)
+    assert [it.source for it in items] == origins
+    # each row says what its stream does, and the lane looked at its window
+    assert _wait(lambda: [s["index"] for s in mgr.slots_message()["slots"]] == [1, 2])
+    assert _wait(lambda: set(node["tracks"]) <= set(node["prov"].asked))
+    scanner.folder_seen(True)                       # said again: nothing changed, nothing is read
+    assert not _wait(lambda: len(out.changed) > 1, timeout=0.5)
+
+    scanner.folder_seen(False)                      # a library file served: it answers again
+    assert _wait(lambda: out.changed == ["rebind", "rebind"])
+    assert all(it.play is None for it in items) and mgr.queue.version == v + 2
+    assert [it.source for it in items] == origins
+    assert _wait(lambda: mgr.slots_message()["slots"] == [])
+
+
+def test_the_slot_the_output_sounds_keeps_its_way_in_until_the_output_leaves_it(node):
+    """The output's own end of the file it plays is the output's: a way in
+    swapped under the sounding slot would be that slot started over. It is
+    read when the output moves on — the next Play of it streams."""
+    import scanner
+    from playback.base import PlaybackStatus
+    mgr, out = node["mgr"], node["out"]
+    first, second = _queue(node)
+    mgr._on_backend_status(out, PlaybackStatus(state="playing", position=3.0, length=200.0,
+                                               queue_index=1))
+    scanner.folder_seen(True)
+    assert _wait(lambda: _streams(second))
+    assert first.play is None and mgr._reach_owed is first
+    mgr._on_backend_status(out, PlaybackStatus(state="playing", position=4.0, length=200.0,
+                                               queue_index=1))
+    assert not _wait(lambda: first.play is not None, timeout=0.5)       # still sounding
+    mgr._on_backend_status(out, PlaybackStatus(state="playing", position=0.0, length=200.0,
+                                               queue_index=2))
+    assert _wait(lambda: _streams(first))
+    assert mgr._reach_owed is None
+
+
+def test_a_manager_reads_its_own_owed_slot(node, monkeypatch):
+    """The slot owed its reading is this manager's: read by it, whichever
+    manager the process holds as its own."""
+    from playback import manager as manager_mod
+    from playback.base import PlaybackStatus
+    from playback.manager import PlaybackManager
+    mgr, out = node["mgr"], node["out"]
+    first, second = _queue(node)
+    mgr._on_backend_status(out, PlaybackStatus(state="paused", position=3.0, length=200.0,
+                                               queue_index=1))
+    monkeypatch.setattr(manager_mod, "manager", PlaybackManager())
+    node["gone"](True)
+    mgr.reach_changed()
+    assert first.play is None and _streams(second) and mgr._reach_owed is first
+    mgr._on_backend_status(out, PlaybackStatus(state="stopped", queue_index=1))
+    assert _wait(lambda: _streams(first))
+
+
+def test_his_queue_whose_folder_went_where_nothing_streams_says_so_on_its_rows_alone(node):
+    """A Nano node: the slots wait, each row saying why. The toast of a
+    Play of streamed tracks that do not stream ("Nothing on … streams
+    here") is for slots tapped as streams — none here."""
+    import scanner
+    mgr = node["mgr"]
+    items = _queue(node, play=True)                 # a Play that has not sounded yet
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    scanner.folder_seen(True)
+    assert _wait(lambda: all(it.opener().get("kind") == "unplayable" for it in items))
+    assert _wait(lambda: [(s["state"], s["reason"]) for s in mgr.slots_message()["slots"]]
+                 == [("failed", "off")] * 2)
+    assert mgr.latest_status.get("stream_event") is None
+    assert [it.source["kind"] for it in items] == ["file", "file"]
+
+
+def test_a_new_queue_while_the_folder_is_gone_reads_its_file_slots(node):
+    """A file slot committed while the folder does not answer is read as
+    any slot's: no window in which the output is handed a path that does
+    not open."""
+    from playback.queue import items_for_media_ids
+    mgr = node["mgr"]
+    node["gone"](True)
+    items = _queue(node)
+    assert all(_streams(it) for it in items)
+    more = items_for_media_ids(node["files"][:1])
+    mgr.append(more)
+    assert _streams(more[0]) and more[0].source["kind"] == "file"
+
+
+def _pull_the_disk(node) -> None:
+    """The folder as a pulled disk leaves it: there, and empty — with no
+    event, as a share that died or a root that is itself a mount point."""
+    for f in (node["root"] / "NW").iterdir():
+        f.unlink()
+    (node["root"] / "NW").rmdir()
+
+
+def test_a_play_whose_first_file_is_missing_looks_at_the_folder_and_streams(node):
+    """The play path's own look, one stat of the file about to be opened: a
+    miss is a producer's observation, and the output is handed the queue as
+    it reads after it — never the path that does not open."""
+    import scanner
+    mgr, out = node["mgr"], node["out"]
+    _pull_the_disk(node)
+    assert scanner.gone_prefixes() == []            # nothing told the node
+    items = _queue(node, play=True)
+    assert scanner.gone_prefixes() == [node["db_root"] + "/"]
+    assert out.replaced == [["pending", "pending"]]
+    assert [it.source["kind"] for it in items] == ["file", "file"]
+    assert mgr.queue.snapshot() == items
+
+
+def test_a_first_slot_that_is_the_track_itself_is_asked_by_the_file_it_would_open(node):
+    """A slot queued as the track opens its copy here as a file: the look
+    asks about that file, as about a slot that is a file."""
+    import scanner
+    from playback.queue import QueueItem
+    mgr, out = node["mgr"], node["out"]
+    _pull_the_disk(node)
+    track = QueueItem(track_id=node["tracks"][0], media_file_id=None, source={"kind": "track"},
+                      title="Owned 1", album_id=node["owned"])
+    mgr.replace_queue([track], play=True)
+    assert scanner.gone_prefixes() == [node["db_root"] + "/"]
+    assert out.replaced == [["pending"]]
+
+
+def test_a_play_of_which_nothing_opens_where_nothing_streams_is_refused_before_the_output(node):
+    from playback.manager import NotHere
+    from playback.queue import items_for_media_ids
+    mgr, out = node["mgr"], node["out"]
+    old = _queue(node)
+    out.replaced.clear()
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    _pull_the_disk(node)
+    with pytest.raises(NotHere) as refused:
+        mgr.replace_queue(items_for_media_ids(node["files"]), play=True)
+    assert refused.value.why == "disk"
+    assert out.replaced == [] and mgr.queue.snapshot() == old       # the old queue intact
+
+
+def test_a_first_file_that_is_there_asks_the_folder_nothing(node, monkeypatch):
+    import scanner
+    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: pytest.fail("the folder was looked at"))
+    items = _queue(node, play=True)
+    assert node["out"].replaced == [["file", "file"]] and all(it.play is None for it in items)
+
+
+def test_a_copy_set_away_streams_its_queued_slot_and_is_its_file_again_when_back(node):
+    """Q4, in the queue: a slot on an away file with no other copy keeps
+    its file as its origin and streams; the copy back, it is that file."""
+    mgr, out, cur = node["mgr"], node["out"], node["cur"]
+    first, second = _queue(node)
+    out.changed.clear()
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    mgr.rebind_files()                              # as the Rescan's notify does
+    assert _streams(first) and _streams(second)
+    assert (first.media_file_id, first.source["kind"], out.changed) == (node["files"][0], "file", ["rebind"])
+    cur.execute("UPDATE album_variants SET absent_since = NULL WHERE id = %s", (node["variant"],))
+    mgr.rebind_files()
+    assert first.play is None and second.play is None
+    assert out.changed == ["rebind", "rebind"]
+    mgr.rebind_files()                              # nothing moved: nothing told
+    assert out.changed == ["rebind", "rebind"]
+
+
+def test_a_slot_back_on_its_file_shows_the_files_length_not_the_excerpts(node):
+    """A stream's landing writes its own length on the slot (an excerpt's
+    30 s): the file back, the slot shows the file's."""
+    mgr = node["mgr"]
+    first, _second = _queue(node)
+    node["gone"](True)
+    mgr.reach_changed()
+    assert _streams(first)
+    first.duration_seconds, first.excerpt = 30.0, True
+    node["gone"](False)
+    mgr.reach_changed()
+    assert (first.play, first.duration_seconds, first.excerpt) == (None, 200.0, False)
+
+
+def test_the_start_looks_at_the_folder_before_the_first_queue_is_read(node, monkeypatch):
+    """Q3: the list is this process's observation, made again at each start
+    before the persisted queue is restored and its ways in read."""
+    import scanner
+    from dataclasses import asdict
+    from playback.manager import PlaybackManager
+    from playback.queue import items_for_media_ids
+    from routers import settings as settings_router
+    stored = {"items": [asdict(it) for it in items_for_media_ids(node["files"])]}
+    monkeypatch.setattr(settings_router, "_read",
+                        lambda key: {"player.queue": stored, "output.type": "browser"}.get(key))
+    monkeypatch.setattr(PlaybackManager, "_schedule_persist", lambda self: None)
+    _pull_the_disk(node)
+    fresh = PlaybackManager()
+    known = []
+    restore = fresh._restore_persisted_queue
+
+    def restoring():
+        known.append(scanner.gone_prefixes())
+        restore()
+    monkeypatch.setattr(fresh, "_restore_persisted_queue", restoring)
+    fresh.init_from_settings()
+    try:
+        assert known == [[node["db_root"] + "/"]]
+        assert [it.source["kind"] for it in fresh.queue.snapshot()] == ["file", "file"]
+        assert all(_streams(it) for it in fresh.queue.snapshot())
+    finally:
+        fresh.activate(None)
+
+
+def test_the_folder_watchers_loss_is_a_look_at_the_folder(node, monkeypatch):
+    import library_watch
+    import scanner
+    looked = []
+    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: looked.append(wait))
+    monkeypatch.setattr(library_watch, "_source", None)
+    monkeypatch.setattr(library_watch, "_state", dict(library_watch._state))
+    library_watch._lost("unmounted")
+    assert looked == [False]
+    library_watch._lost("the watch limit", library_watch.NO_EVENTS)      # no word about the folder
+    assert looked == [False]
+
+
+# -- the routes (§3.4) ------------------------------------------------------------
+
+
+def _kinds(mgr) -> list:
+    return [(it.source["kind"], it.title) for it in mgr.queue.snapshot()]
+
+
+def _album_ref(node):
+    player = node["player"]
+    return player.QueueEntitiesRequest(items=[player.EntityRef(kind="album", id=node["owned"])])
+
+
+def test_an_album_half_out_is_read_per_track(node):
+    """All-or-nothing before: an album with one track's copy elsewhere and
+    its folder gone queued the missing file beside it."""
+    player, mgr = node["player"], node["mgr"]
+    other = node["copy"](0, "NW/01.flac")
+    node["gone"](True)
+    segments, missing, left = player._entity_segments(_album_ref(node).items)
+    assert [(kind, len(rows)) for kind, rows in segments] == [("owned", 1), ("phantom", 1)]
+    assert [(r["id"], r["location"]) for r in segments[0][1]] == [(other, "local")]
+    assert (segments[1][1][0].track_id, segments[1][1][0].album_id) == (node["tracks"][1], node["owned"])
+    assert (missing, left) == ([], [])
+    answer = player.play_entities(_album_ref(node))
+    assert (answer["queued"], answer["streaming"], answer["not_streamable"]) == (1, 1, [])
+    assert _kinds(mgr) == [("file", "Owned 1"), ("track", "Owned 2")]
+    assert mgr.queue.item_at(2).album_id == node["owned"]
+
+
+def test_no_route_queues_a_file_that_is_not_here(node):
+    """play-tracks, queue-tracks and play-track take file ids — the pages'
+    own: a file not here is queued as its track, through the one split; a
+    row of rank 3 never reaches the queue as a file."""
+    player, mgr = node["player"], node["mgr"]
+    node["gone"](True)
+    rows = player._album_rows(node["owned"])
+    assert [(r["id"], r["why"]) for r in rows] == [(None, "disk"), (None, "disk")]
+    segments, _left = player._reach_segments(rows)
+    assert [kind for kind, _rows in segments] == ["phantom"]
+
+    answer = player.play_tracks(player.PlayTracksRequest(track_ids=node["files"], origin="album",
+                                                         origin_album_id=node["owned"]))
+    assert (answer["count"], answer["not_streamable"]) == (2, [])
+    assert _kinds(mgr) == [("track", "Owned 1"), ("track", "Owned 2")]
+    assert {it.album_id for it in mgr.queue.snapshot()} == {node["owned"]}
+    player.queue_tracks(player.QueueTracksRequest(track_ids=node["files"][:1], position="end"))
+    assert _kinds(mgr)[2] == ("track", "Owned 1")
+    player.play_track(player.PlayTrackRequest(track_id=node["files"][1]))
+    assert _kinds(mgr) == [("track", "Owned 2")]
+    player.play_album(player.PlayAlbumRequest(album_id=node["owned"]))
+    assert _kinds(mgr) == [("track", "Owned 1"), ("track", "Owned 2")]
+
+    # the folder back: the same routes queue the files, and a slot queued as
+    # the track while it was out opens the local copy
+    node["gone"](False)
+    assert [r["id"] for r in player._album_rows(node["owned"])] == node["files"]
+    mgr.reach_changed()
+    assert [it.opener().get("media_file_id") for it in mgr.queue.snapshot()] == node["files"]
+    player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
+    assert _kinds(mgr) == [("file", "Owned 1"), ("file", "Owned 2")]
+
+
+def test_an_away_copy_is_read_by_the_routes_as_a_copy_on_a_disk_that_is_out(node):
+    player, mgr = node["player"], node["mgr"]
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
+                        (node["variant"],))
+    assert [(r["id"], r["why"]) for r in player._album_rows(node["owned"])] == [(None, "away")] * 2
+    player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
+    assert _kinds(mgr) == [("track", "Owned 1"), ("track", "Owned 2")]
+    other = node["copy"](0, "NW/01.flac")     # a present copy stands in
+    player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
+    assert [(it.source["kind"], it.media_file_id) for it in mgr.queue.snapshot()] == [
+        ("file", other), ("track", None)]
+
+
+def _refusals(node, calls) -> list:
+    from fastapi import HTTPException
+    out = []
+    for call in calls:
+        with pytest.raises(HTTPException) as refused:
+            call()
+        out.append((refused.value.status_code, refused.value.detail))
+    return out
+
+
+def _every_route(node) -> list:
+    player = node["player"]
+    return [
+        lambda: player.play_track(player.PlayTrackRequest(track_id=node["files"][0])),
+        lambda: player.play_tracks(player.PlayTracksRequest(track_ids=node["files"])),
+        lambda: player.queue_tracks(player.QueueTracksRequest(track_ids=node["files"], position="end")),
+        lambda: player.play_entities(_album_ref(node)),
+        lambda: player.queue_entities(_album_ref(node)),
+        lambda: player.play_album(player.PlayAlbumRequest(album_id=node["owned"])),
+    ]
+
+
+def test_where_nothing_streams_the_routes_refuse_before_the_queue_or_the_output(node):
+    """A Nano node, the streaming library off, no provider: 409 not_here
+    with why and the sentence, nothing queued, the output never asked."""
+    mgr, out = node["mgr"], node["out"]
+    old = _queue(node)
+    out.replaced.clear()
+    out.changed.clear()
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    node["gone"](True)
+    disk = {"reason": "not_here", "why": "disk",
+            "message": "Night Walks cannot play until its disk is connected."}
+    assert _refusals(node, _every_route(node)) == [(409, disk)] * 6
+    assert mgr.queue.snapshot() == old and out.replaced == [] and out.changed == []
+
+    node["gone"](False)
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
+                        (node["variant"],))
+    away = {"reason": "not_here", "why": "away",
+            "message": "Night Walks cannot play until its files are back."}
+    assert _refusals(node, _every_route(node)) == [(409, away)] * 6
+    assert mgr.queue.snapshot() == old and out.replaced == []
+    # a provider gone is the same as the library off
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: True)
+    node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    assert _refusals(node, _every_route(node)[:1]) == [(409, away)]
+
+
+def test_a_mix_keeps_its_files_and_leaves_the_rest_out_with_the_reason(node):
+    player, mgr = node["player"], node["mgr"]
+    other = node["copy"](0, "NW/01.flac")
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    node["gone"](True)
+    left = [{"track_id": node["tracks"][1], "title": "Owned 2", "reason": "not_here", "why": "disk"}]
+    answer = player.play_entities(_album_ref(node))
+    assert (answer["queued"], answer["streaming"], answer["not_streamable"]) == (1, 0, left)
+    assert [(it.source["kind"], it.media_file_id) for it in mgr.queue.snapshot()] == [("file", other)]
+    answer = player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
+    assert (answer["count"], answer["not_streamable"]) == (1, left)
+    answer = player.queue_tracks(player.QueueTracksRequest(track_ids=node["files"], position="end"))
+    assert (answer["count"], answer["not_streamable"]) == (1, left)
+    assert len(mgr.queue) == 2
+
+
+def test_a_never_owned_album_with_streaming_off_is_the_streaming_refusal_as_before(node):
+    """not_here is the owner's own music alone: a phantom with streaming
+    off is still told as streaming being off."""
+    player = node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    node["gone"](True)
+    ref = player.QueueEntitiesRequest(items=[player.EntityRef(kind="album", id=node["streamed"])])
+    (status, detail), = _refusals(node, [lambda: player.play_entities(ref)])
+    assert status == 503 and detail["reason"] == "streaming"
+
+
+def test_a_history_card_of_an_album_that_is_out_streams_or_is_refused(node):
+    player, mgr, cur = node["player"], node["mgr"], node["cur"]
+    cur.execute("INSERT INTO listening_sessions (origin, origin_album_id, track_count, ended_at) "
+                "VALUES ('album', %s, 2, now()) RETURNING id::text", (node["owned"],))
+    session = cur.fetchone()[0]
+    for n, (track, file) in enumerate(zip(node["tracks"], node["files"])):
+        cur.execute("INSERT INTO session_tracks (session_id, position, track_id, media_file_id, album_id) "
+                    "VALUES (%s, %s, %s, %s, %s)", (session, n, track, file, node["owned"]))
+    player.play_session(player.PlaySessionRequest(session_id=session))
+    assert _kinds(mgr) == [("file", "Owned 1"), ("file", "Owned 2")]
+    node["gone"](True)
+    answer = player.play_session(player.PlaySessionRequest(session_id=session))
+    assert (answer["queued"], answer["streaming"], answer["missing"]) == (0, 2, 0)
+    assert _kinds(mgr) == [("track", "Owned 1"), ("track", "Owned 2")]
+    old = mgr.queue.snapshot()
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    disk = {"reason": "not_here", "why": "disk",
+            "message": "Night Walks cannot play until its disk is connected."}
+    assert _refusals(node, [
+        lambda: player.play_session(player.PlaySessionRequest(session_id=session)),
+        lambda: player.queue_session(player.QueueSessionRequest(session_id=session, position="end")),
+    ]) == [(409, disk)] * 2
+    assert mgr.queue.snapshot() == old
+
+
+def test_the_album_payload_says_what_is_here_and_whether_this_node_streams_it(node):
+    """Per track `here`, and the album's `away`: null, or why and whether
+    this node streams — `away_part` where only some tracks are out."""
+    from routers import albums
+    here = albums.get_album(node["owned"], variant_id=None)
+    assert [t["here"] for t in here["tracks"]] == [True, True]
+    assert (here["away"], here["away_part"], here["is_owned"]) == (None, None, True)
+
+    node["gone"](True)
+    out = albums.get_album(node["owned"], variant_id=None)
+    assert [(t["here"], t["why"]) for t in out["tracks"]] == [(False, "disk"), (False, "disk")]
+    assert (out["away"], out["away_part"]) == ({"why": "disk", "streams": True}, None)
+    assert (out["is_owned"], out["quality"]) == (True, here["quality"])      # still his, his copy's badge
+    assert [t["media_file_id"] for t in out["tracks"]] == node["files"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    assert albums.get_album(node["owned"], variant_id=None)["away"] == {"why": "disk", "streams": False}
+
+    other = node["copy"](0, "NW/01.flac")
+    part = albums.get_album(node["owned"], variant_id=None)
+    assert [(t["media_file_id"], t["here"]) for t in part["tracks"]] == [(other, True), (node["files"][1], False)]
+    assert (part["away"], part["away_part"]) == (None, {"why": "disk", "streams": False})
+
+    node["gone"](False)
+    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
+                        (node["variant"],))
+    away = albums.get_album(node["owned"], variant_id=None)
+    assert [(t["here"], t["why"]) for t in away["tracks"]] == [(True, None), (False, "away")]
+    assert away["away_part"] == {"why": "away", "streams": False}
+
+
+def test_the_pages_ask_whether_this_node_streams(node):
+    player = node["player"]
+    assert player.reach() == {"streams": True}
+    node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    assert player.reach() == {"streams": False}
+
+
+# -- the threat (§3.5): his own album through the demo channel --------------------
+
+
+def test_an_owned_track_streamed_for_want_of_its_file_spends_the_demo_listen_like_any_other(node):
+    """No exemption for a track "owned" on a disk that is out: the node has
+    rows, not bytes. Its one full listen on the demo channel is spent past
+    90 %, and the next resolve leaves that channel out; the provider was
+    asked by title, artist and length — nothing says the album is owned."""
+    from playback.base import PlaybackStatus
+    from streaming import demo
+    player, mgr, out, prov = node["player"], node["mgr"], node["out"], node["prov"]
+    prov.manifest = ProviderManifest(id="catalog", name="Catalog", kind="direct_url",
+                                     lossless=False, demo_limited=True)
+    node["monkeypatch"].setattr(node["streaming"], "get_provider", lambda pid: prov)
+    seen = []
+    resolve = prov._resolve
+    prov._resolve = lambda query: (seen.append(query), resolve(query))[1]
+    node["gone"](True)
+    player.play_tracks(player.PlayTracksRequest(track_ids=node["files"][:1]))
+    prov.land(node["tracks"][0])
+    first = mgr.queue.item_at(1)
+    assert _wait(lambda: first.stream_token)
+    assert demo._demo_provider_id(first) == "catalog"
+    for position in (10.0, 185.0):
+        demo.status_observer({"state": "playing", "position": position, "length": 200.0}, first)
+    assert demo.consumed([node["tracks"][0]]) == {node["tracks"][0]}
+    assert not demo.admits(prov, node["tracks"][0], demo.consumed([node["tracks"][0]]))
+    demo.status_observer({"state": "stopped", "position": 0.0, "length": 200.0}, first)
+    query = seen[0]
+    assert (query.title, query.artist, query.duration) == ("Owned 1", "Hidden Orchestra", 200.0)
+    assert query.media_file_id is None              # no word of a file of his
+
+
+# -- F11: what a refused scan says (§2.7, §9.2) ----------------------------------
+
+
+def test_a_refused_scan_says_what_brings_the_folder_back_on_this_node(monkeypatch):
+    """One sentence said "a Docker node sees it again only after a restart"
+    on every node: true only where the folder is the .env line's bind."""
+    import claude_code
+    import library_root
+    import scanner
+    monkeypatch.setattr(library_root, "picks", lambda: True)
+    monkeypatch.setattr(claude_code, "is_launcher_mode", lambda: True)
+    assert scanner.unreachable_words() == (
+        "The music folder is not connected, so nothing was scanned. "
+        "Connect its disk — Sautium scans it by itself.")
+    monkeypatch.setattr(library_root, "picks", lambda: False)
+    assert scanner.unreachable_words() == (
+        "The music folder is empty or not connected, so nothing was scanned. "
+        "Reconnect it and scan again.")
+    monkeypatch.setattr(claude_code, "is_launcher_mode", lambda: False)
+    assert scanner.unreachable_words() == (
+        "The music folder is empty or not mounted, so nothing was scanned. "
+        "Reconnect it and restart Sautium: this node sees a disk only as it was at its start.")
+    with pytest.raises(scanner.LibraryUnreachable, match="restart Sautium"):
+        monkeypatch.setattr(scanner, "library_unreachable", lambda wake=True: True)
+        scanner.refuse_if_unreachable()

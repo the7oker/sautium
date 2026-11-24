@@ -534,7 +534,8 @@ def _run(source) -> None:
 
 def _lost(why: str, as_state: str = UNREACHABLE, source=None) -> None:
     """The watch went (the drive unplugged, the folder removed): disarmed,
-    nothing removed — a scan is no part of it. It is armed again when the
+    nothing removed — a scan is no part of it — and the folder looked at
+    (the notice, what the queue opens). It is armed again when the
     folder answers (folder_back). Past the watch limit it is no_events. A
     late word from a source already replaced changes nothing."""
     global _source
@@ -546,6 +547,11 @@ def _lost(why: str, as_state: str = UNREACHABLE, source=None) -> None:
     if source is not None:
         source.stop()
     logger.warning(f"Library watch: disarmed — {why}")
+    if as_state == UNREACHABLE:
+        # The folder's own word that it went: looked at, so the notice and
+        # the queue's ways in follow now (scanner.check_folder)
+        from scanner import check_folder
+        check_folder()
 
 
 def folder_back() -> None:

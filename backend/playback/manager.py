@@ -20,6 +20,7 @@ mirror leaves (a replace that plays) goes once it is let go
 """
 
 import logging
+import os
 import threading
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict
@@ -31,12 +32,17 @@ from hqplayer_client import STATUS_READINGS, format_time
 
 from playback import sessions, tracker
 from playback.base import PlaybackStatus, PlayerBackend, ReorderPlan, Spot, new_id
-from playback.queue import CanonicalQueue, QueueItem, resolved_artwork
+from playback.queue import CanonicalQueue, QueueItem, gone_prefixes, resolved_artwork
+from playback import substitute
 from playback.substitute import LEAD, Lane
 
 logger = logging.getLogger(__name__)
 
 _PREVIEW_BEHIND = 1   # instant "previous"
+
+# The states in which the output holds a slot open: its way in is its own
+# until it leaves the slot (PlaybackManager._reread_ways_in)
+_SOUNDING = ("playing", "paused", "loading", "unknown")
 
 
 class OutputHeld(ConnectionError):
@@ -66,6 +72,17 @@ def said_with(e: BaseException) -> Optional[str]:
     the routes to answer — never a note: a traceback prints notes, and this
     names a track."""
     return getattr(e, "_said", None)
+
+
+class NotHere(RuntimeError):
+    """A new queue no slot of which opens here now, on a node that streams
+    nothing: nothing commits, the queue as it was, the output never asked.
+    `why` — 'disk': its folder does not answer — is the play route's answer
+    (409 `not_here`)."""
+
+    def __init__(self, why: str = "disk"):
+        super().__init__("nothing of the new queue opens here now, and this node streams nothing")
+        self.why = why
 
 
 class QueueChanged(RuntimeError):
@@ -129,6 +146,9 @@ class PlaybackManager:
         # (`stream_event` on the status, toasted once per page)
         self._play_run: Optional[dict] = None
         self._stream_event: Optional[dict] = None
+        # The slot whose way in was not read again while the output sounded
+        # it (_reread_ways_in): read when the output leaves it
+        self._reach_owed: Optional[QueueItem] = None
 
     # -- backend lifecycle ---------------------------------------------------
 
@@ -626,10 +646,10 @@ class PlaybackManager:
         """Recompute `QueueItem.play` for every slot against this output
         (playback.substitute.native_plays); the HQPlayer output names the
         endpoint whose library it holds so its own copies rank first."""
-        from playback.substitute import native_plays
         endpoint_id = getattr(backend, "endpoint_id", None)
+        self._reach_owed = None         # every slot is read here, for this output
         pending = self.queue.reresolve(
-            lambda items: native_plays(items, backend.id, endpoint_id))
+            lambda items: substitute.native_plays(items, backend.id, endpoint_id))
         if pending:
             logger.info("%d queued slot(s) need a stream on %s", pending, backend.id)
 
@@ -700,6 +720,10 @@ class PlaybackManager:
             from playback.substitute import streamed
             items = [it for it in self.queue.snapshot()
                      if it.source.get("kind") == "track" and streamed(it)]
+            if not items:
+                # no slot of the Play was tapped as a stream: the failure is
+                # an owned track's with no file here now, said on its row
+                return
             failed = [it for it in items if id(it) in run["failed"]]
             firsts = items[:2]
             event = None
@@ -757,7 +781,16 @@ class PlaybackManager:
         An install older than the Output picker, where an endpoint being
         configured WAS the choice, had that choice saved once
         (db_migrate's hqp_choice_v1): nothing here reads "configured" as
-        "chosen" any more."""
+        "chosen" any more.
+
+        What opens here is this process's own observation, so the music
+        folder is looked at first — before the persisted queue is restored
+        and its slots' ways in read (scanner.gone_prefixes). The look is the
+        notices' shared one, waited for no longer than its patience: what a
+        slower folder answers is recorded when it does, and that record is
+        the queue's event (reach_changed)."""
+        from scanner import folder_unreachable_now
+        folder_unreachable_now()
         from routers.settings import _read
         from routers.player import _hqp_configured
         otype = _read("output.type") or "browser"
@@ -976,6 +1009,7 @@ class PlaybackManager:
             return
         if s.state == "disconnected":
             self._push_status({"state": "disconnected"})
+            self._reach_follows(None, s.state)
             return
 
         if s.item is not None:
@@ -1148,6 +1182,7 @@ class PlaybackManager:
         if isinstance(idx, int) and idx >= 1:
             self._last_slot = idx
         self._push_status(new_data)
+        self._reach_follows(item, new_data["state"])
 
     # -- queue mutations -----------------------------------------------------------
     #
@@ -1202,15 +1237,61 @@ class PlaybackManager:
         """The way in of every new slot that is the track itself, for an output
         that reads none as it mirrors (every one but HQPlayer, whose own
         mirror reads each slot's): a copy here opens as a file — a streamed
-        album may list a track owned on another album — else its stream."""
+        album may list a track owned on another album — else its stream.
+        While a folder of the library does not answer (gone_prefixes), a
+        slot that is a file is read too: one under that folder is no way
+        in. With every folder answering a file slot is what the route that
+        made it found here, and no copy is asked about."""
         if backend is None or backend.id == "hqplayer":
             return
-        tracks = [it for it in items if it.source.get("kind") == "track"]
-        if not tracks:
+        kinds = ("track", "file") if gone_prefixes() else ("track",)
+        read = [it for it in items if it.source.get("kind") in kinds]
+        if not read:
             return
-        from playback.substitute import native_plays
-        for it, play in zip(tracks, native_plays(tracks, backend.id, None)):
+        for it, play in zip(read, substitute.native_plays(read, backend.id, None)):
             it.play = play
+
+    @staticmethod
+    def _first_opens(backend: PlayerBackend, items: list) -> None:
+        """The play path's own look, beside the events (reach_changed): a
+        folder can stop answering with no event — a network share, a root
+        that is itself a mount point. Before a new queue is handed to an
+        output for a start, the first slot's file is asked for once, where
+        that slot's way in is a file of this node the node takes for
+        reachable (a slot that is the track itself is read for it: its copy
+        here opens as a file); a miss is a producer's observation — the
+        folder is looked at (scanner.check_folder, waited for no longer
+        than the look's patience) — and the new slots' ways in are read
+        after it. Outside the queue lock: this is where the file system is
+        asked."""
+        if not items:
+            return
+        src = items[0].source
+        if src.get("kind") != "file" and substitute.by_copies(items[0]):
+            src = substitute.native_plays(items[:1], backend.id,
+                                          getattr(backend, "endpoint_id", None))[0] or src
+        if src.get("kind") != "file" or any(src["path"].startswith(g) for g in gone_prefixes()):
+            return
+        if not src["path"].startswith(settings.library_db_root() + "/"):
+            return                      # no file of the music folder: the look would say nothing of it
+        try:
+            os.stat(settings.translate_to_local_path(src["path"]))
+        except OSError:
+            from scanner import check_folder
+            check_folder(wait=True)
+
+    @staticmethod
+    def _refuse_if_none_opens(backend: PlayerBackend, items: list) -> None:
+        """A new queue none of whose slots opens here now, on a node that
+        streams nothing, is refused before the output is asked (NotHere) —
+        only while a folder of the library does not answer: with every
+        folder answering the routes' own split is the whole of it."""
+        if not items or not gone_prefixes() or substitute.streams():
+            return
+        plays = ([it.play for it in items] if backend.id != "hqplayer" else
+                 substitute.native_plays(items, backend.id, getattr(backend, "endpoint_id", None)))
+        if all(p is not None and p.get("kind") == "pending" and not p.get("prepare") for p in plays):
+            raise NotHere("disk")
 
     def replace_queue(self, items: list[QueueItem], *, play: bool,
                       archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
@@ -1220,7 +1301,10 @@ class PlaybackManager:
         commit: an output that refused it (busy, gone) leaves history as it
         was; a rotation that fails commits nothing, and the output abandons
         what it was given (PlayerBackend.queue_abandon). An output that took
-        none of `items` raises QueueRefused. Returns (added, generation);
+        none of `items` raises QueueRefused; a queue to play whose first
+        file is not there is read after a look at its folder (_first_opens),
+        and one of which nothing opens here, on a node that streams nothing,
+        raises NotHere before the output is asked. Returns (added, generation);
         generation is what background fillers must guard their appends
         with."""
         pick = self.backend
@@ -1231,8 +1315,10 @@ class PlaybackManager:
             # more, with no scan
             gated = self.ensure_active()
             pick = lambda: gated if self._active is gated and gated.healthy() else self._gate_once()  # noqa: E731
+            self._first_opens(gated, items)
         with self._output_mutation(pick) as backend:
             self._read_ways_in(backend, items)
+            self._refuse_if_none_opens(backend, items)
             accepted = backend.queue_replace(items, play=play)
             added = len(accepted)
             if items and not added:
@@ -1424,35 +1510,107 @@ class PlaybackManager:
         listener below — a rescan's prune, a superseded CUE image, a cascade,
         whichever process ran it — as do a Rescan that sets a copy aside as
         away and an import while copies are away (a slot on an away file
-        moves to a copy here); the restore of a persisted queue calls it
-        once. A gone id left in a slot is written into session_tracks and
+        moves to a copy here; with none it keeps its file and streams, and
+        is that file again when the copy is back — every slot's way in is
+        read again, _reread_ways_in); the restore of a persisted queue calls
+        it once. A gone id left in a slot is written into session_tracks and
         listening_history against their foreign keys (every Play died on the
         archive of the old queue) and its path no longer opens. The output
         converges through queue_changed("rebind"); the status is re-published
         with the playing slot's new binding so Now Playing refetches."""
         from playback.queue import rebind_origins
-        from playback.substitute import native_plays
         with self._output_mutation(lambda: self._active) as backend:
             plays = None
             if backend is not None:
                 endpoint_id = getattr(backend, "endpoint_id", None)
-                plays = lambda items: native_plays(items, backend.id, endpoint_id)
+                plays = lambda items: substitute.native_plays(items, backend.id, endpoint_id)
             moved = self.queue.rebind(rebind_origins, plays)
-            if not moved:
+            reread = self._reread_ways_in(backend) if backend is not None else []
+            if not moved and not reread:
                 return
-            logger.info("%d queued slot(s) re-bound: their file left the library",
-                        len(moved))
-            if backend is not None:
-                backend.queue_changed("rebind")
-            self._schedule_persist()
-            status = self._latest_status
-            if status.get("state") not in (None, "disconnected"):
-                update = {"playlist_version": self.queue.version}
-                item = self.queue.item_at(status.get("track_index"))
-                if item is not None:
-                    update.update(media_file_id=item.media_file_id,
-                                  track_id=item.track_id)
-                self._push_status({**status, **update})
+            if moved:
+                logger.info("%d queued slot(s) re-bound: their file left the library",
+                            len(moved))
+                self._schedule_persist()
+            self._rebound(backend)
+
+    def reach_changed(self) -> None:
+        """What opens here changed: the music folder stopped or started
+        answering (scanner's recorded answer — the mount table, the folder
+        watcher's loss, a library file served or found missing, a scan's
+        refusal, Library opened: events, never a timer), or the output left
+        the slot it sounded while that happened (_reach_follows). Every
+        slot's way in is read again for the active output, its origin
+        untouched: a file that does not open here now is a stream to come,
+        and the same slot is its file again — no question — when the folder
+        is back. The output follows by queue_changed("rebind"), the status
+        carries the new playlist version, the lane looks at its window. With
+        no output attached nothing is read: the attach reads every slot's."""
+        with self._output_mutation(lambda: self._active) as backend:
+            if backend is None:
+                return
+            changed = self._reread_ways_in(backend)
+            if not changed:
+                return
+            logger.info("%d queued slot(s) open another way: what is reachable here changed",
+                        len(changed))
+            self._rebound(backend)
+
+    def _sounding(self) -> Optional[QueueItem]:
+        """The slot the output plays, is paused on or is loading."""
+        status = self._latest_status
+        if status.get("state") not in _SOUNDING:
+            return None
+        return self.queue.item_at(status.get("track_index"))
+
+    def _reread_ways_in(self, backend: PlayerBackend) -> list:
+        """Read again, for `backend`, the way in of every slot that is read
+        against its track's copies (one query for the queue) — but the slot
+        the output sounds: its end of the file, or of the stream, is the
+        output's own, and a way in swapped under it would be a slot started
+        over. It is owed its reading until the output leaves it
+        (_reach_follows). Returns the slots whose way in changed. Caller
+        holds the queue lock."""
+        endpoint_id = getattr(backend, "endpoint_id", None)
+        sounding = self._sounding()
+        changed, owed = self.queue.reread(
+            substitute.by_copies, lambda items: substitute.native_plays(items, backend.id, endpoint_id), hold=sounding)
+        self._reach_owed = sounding if owed else None
+        return changed
+
+    def _reach_follows(self, item: Optional[QueueItem], state: str) -> None:
+        """On the status thread, after the status that says so is published:
+        the output left the slot whose way in was not read again while it
+        sounded — read now, off this thread."""
+        owed = self._reach_owed
+        if owed is None or (item is owed and state in _SOUNDING):
+            return
+        self._reach_owed = None
+        threading.Thread(target=self.reach_followed, daemon=True, name="queue-reach").start()
+
+    def reach_followed(self) -> None:
+        """reach_changed on a thread of its own — the scanner's record of a
+        change, the output leaving the slot it sounded: what goes wrong
+        there is said in the log, where no caller waits to hear it."""
+        try:
+            self.reach_changed()
+        except Exception:
+            logger.exception("the queue's ways in were not read again after what is reachable here changed")
+
+    def _rebound(self, backend: Optional[PlayerBackend]) -> None:
+        """Slots were re-bound, or their ways in read again, under the queue:
+        the output converges, and the status is re-published with the new
+        playlist version and the playing slot's binding."""
+        if backend is not None:
+            backend.queue_changed("rebind")
+        status = self._latest_status
+        if status.get("state") not in (None, "disconnected"):
+            update = {"playlist_version": self.queue.version}
+            item = self.queue.item_at(status.get("track_index"))
+            if item is not None:
+                update.update(media_file_id=item.media_file_id,
+                              track_id=item.track_id)
+            self._push_status({**status, **update})
 
     def playlist(self) -> dict:
         """The queue as /api/player/playlist serves it: each slot the active
@@ -1561,6 +1719,14 @@ manager = PlaybackManager()
 _files_listener = Listener("queue-files-listener", ("sautium_files_removed",),
                            on_notify=lambda notifies: manager.rebind_files(),
                            on_connect=lambda: manager.rebind_files())
+
+
+def reach_changed() -> None:
+    """scanner._record's follower, on a thread of its own: the recorded
+    answer of the music folder changed, and the queue reads its slots' ways
+    in again (PlaybackManager.reach_changed). The manager is looked up at
+    the call."""
+    manager.reach_followed()
 
 
 def start_files_listener() -> None:

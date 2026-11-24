@@ -51,6 +51,25 @@ def best_rip_order(alias: str) -> str:
             f"{alias}.bit_depth DESC NULLS LAST, {alias}.id")
 
 
+# A local file opens now when its copy is not away (album_variants.
+# absent_since: a Rescan found none of its files) and its path lies under no
+# folder the node knows unreachable (param `gone`: scanner.gone_prefixes(),
+# the process's recorded observation — an empty array where every folder
+# answers, and the query then plans as it did without it). A file in an
+# HQPlayer's own library is `here` as it stands (its presence is that
+# HQPlayer's). Every row source that feeds a choice of copy computes it as
+# the column `here`, which owned_rank reads.
+
+def here(mf: str = "mf", av: str = "av") -> str:
+    """The expression, for a media_files row aliased `mf` joined to its
+    album_variants row `av`."""
+    return (f"({av}.absent_since IS NULL AND NOT EXISTS (SELECT 1 FROM unnest(%(gone)s::text[]) g "
+            f"WHERE starts_with({mf}.file_path, g)))")
+
+
+HERE = here()
+
+
 def owned_rank(alias: str, style: str = "psycopg") -> str:
     """ORDER BY term ahead of best_rip_order: the copy the active output
     plays natively first. A variant at the HQPlayer that IS the output
@@ -58,14 +77,14 @@ def owned_rank(alias: str, style: str = "psycopg") -> str:
     active or that HQPlayer's library was never imported,
     playback.manager.active_hqp_endpoint) outranks the local files, which
     outrank copies at other HQPlayers (those play only as streams); a copy
-    that is away (album_variants.absent_since: a Rescan found none of its
-    files) comes last — chosen only when nothing else holds the track, it
-    opens to a missing file, as an unreachable root's do. The row needs
-    album_variants' location, hqp_endpoint_id and absent_since
-    (ALBUM_FILES). `style` names the placeholder syntax: psycopg's
-    %(name)s or SQLAlchemy's :name."""
+    that is not here now (`here` false: away, or under a folder that does
+    not answer — HERE) comes last, and is never a way in: a caller that
+    picks a copy to open takes rank 3 for "none here". The row needs
+    album_variants' location and hqp_endpoint_id, and `here` (ALBUM_FILES).
+    `style` names the placeholder syntax: psycopg's %(name)s or
+    SQLAlchemy's :name."""
     e = "%(hqp_id)s" if style == "psycopg" else ":hqp_id"
-    return (f"CASE WHEN {alias}.absent_since IS NOT NULL THEN 3 "
+    return (f"CASE WHEN NOT {alias}.here THEN 3 "
             f"WHEN {alias}.location = 'hqplayer' "
             f"AND {alias}.hqp_endpoint_id = {e} THEN 0 "
             f"WHEN {alias}.location = 'local' THEN 1 ELSE 2 END")
@@ -137,14 +156,14 @@ QUALITY_GATE = (
 
 # One track's files (%(tid)s) from both places files live — the per-track
 # form of ALBUM_FILES below, for a play/queue by track uuid.
-TRACK_FILES = """
-    SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+TRACK_FILES = f"""
+    SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since, {HERE} AS here,
            mf.is_lossless, mf.sample_rate, mf.bit_depth
     FROM media_files mf
     JOIN album_variants av ON av.id = mf.album_variant_id
     WHERE mf.track_id = %(tid)s::uuid
     UNION ALL
-    SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+    SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since, true,
            hf.is_lossless, hf.sample_rate, hf.bit_depth
     FROM hqp_library_files hf
     JOIN album_variants av ON av.id = hf.album_variant_id
@@ -153,10 +172,11 @@ TRACK_FILES = """
 
 # Every file of one album (%(id)s) from both places files live — a row per
 # media_files / hqp_library_files entry with the variant's location and
-# endpoint, so a picker can rank copies with owned_rank + best_rip_order.
-# `id` is the row's id IN ITS TABLE; read it with `location`.
-ALBUM_FILES = """
-    SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+# endpoint and whether the file opens now (`here`, HERE: param `gone`), so a
+# picker can rank copies with owned_rank + best_rip_order. `id` is the row's
+# id IN ITS TABLE; read it with `location`.
+ALBUM_FILES = f"""
+    SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since, {HERE} AS here,
            mf.track_id, mf.album_variant_id, mf.is_lossless, mf.sample_rate,
            mf.bit_depth, mf.duration_seconds, mf.disc_number, mf.track_number,
            mf.file_format, mf.file_path AS path
@@ -164,7 +184,7 @@ ALBUM_FILES = """
     JOIN album_variants av ON av.id = mf.album_variant_id
     WHERE av.album_id = %(id)s::uuid
     UNION ALL
-    SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+    SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since, true,
            hf.track_id, hf.album_variant_id, hf.is_lossless, hf.sample_rate,
            hf.bit_depth, hf.duration_seconds, hf.disc_number, hf.track_number,
            hf.file_format, hf.hqp_path

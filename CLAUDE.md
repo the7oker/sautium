@@ -410,7 +410,17 @@ See:
   leaves the library (the `media_files` delete trigger wakes
   `PlaybackManager.rebind_files`: a live copy of the track, else the track
   itself, streamed) and, since 2026-11-09, when its file's copy is away
-  while a copy of the track is here (it moves to that copy). How an owned file reaches HQPlayer is read off its
+  while a copy of the track is here (it moves to that copy). Since
+  2026-11-24 a slot's way in is also read again when the folder its file
+  lies in stops or starts answering (`scanner.gone_prefixes`, the process's
+  recorded observation; its change is the queue's event,
+  `PlaybackManager.reach_changed` — the slot the output sounds is read when
+  the output leaves it), and a file that does not open here now — its
+  folder not answering, its copy away — is never a way in: the slot keeps
+  its origin and streams like a phantom, the demo channel's one listen
+  included, or is refused where nothing streams (`sql_queries.HERE`; the
+  play routes' one split, 409 `not_here`), and is its file again, with no
+  question, when the file is back. How an owned file reaches HQPlayer is read off its
   address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
   on this machine by path, anywhere else as a stream from the media proxy
   — a share the HQPlayer would mount is an extra setup for the same bytes,
