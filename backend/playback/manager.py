@@ -1185,7 +1185,7 @@ class PlaybackManager:
         if isinstance(idx, int) and idx >= 1:
             self._last_slot = idx
         self._push_status(new_data)
-        self._reach_follows(item, new_data["state"])
+        self._reach_follows(item, new_data["state"], starting=bool(s.extra.get("starting")))
 
     # -- queue mutations -----------------------------------------------------------
     #
@@ -1631,12 +1631,17 @@ class PlaybackManager:
         self._reach_owed = sounding if owed else None
         return changed
 
-    def _reach_follows(self, item: Optional[QueueItem], state: str) -> None:
+    def _reach_follows(self, item: Optional[QueueItem], state: str, *, starting: bool = False) -> None:
         """On the status thread, after the status that says so is published:
         the output left the slot whose way in was not read again while it
-        sounded — read now, off this thread."""
+        sounded — read now, off this thread. A status that says a start
+        under way (`starting`: HQPlayer between two entries as it moves on
+        by itself, or rebuilt around the slot it plays) says nothing of that
+        yet — a read then swapped the way in under a slot about to play on,
+        and had HQPlayer take the queue afresh in the middle of its own
+        advance: the status after the start says where the output is."""
         owed = self._reach_owed
-        if owed is None or (item is owed and state in _SOUNDING):
+        if owed is None or starting or (item is owed and state in _SOUNDING):
             return
         self._reach_owed = None
         threading.Thread(target=self.reach_followed, daemon=True, name="queue-reach").start()
