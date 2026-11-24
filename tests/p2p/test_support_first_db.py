@@ -45,7 +45,7 @@ def conn(scratch_dsn):
     c = psycopg2.connect(scratch_dsn)
     c.autocommit = True
     with c.cursor() as cur:
-        cur.execute("TRUNCATE friends CASCADE")
+        cur.execute("TRUNCATE friends, mail_vouchers CASCADE")
         cur.execute("DELETE FROM user_settings WHERE key LIKE 'p2p.%'")
     yield c
     c.close()
@@ -238,3 +238,84 @@ def test_a_drop_carries_the_masters_voucher_for_this_nodes_key(conn, scratch_dsn
         await client._mailbox_deposit(fid, await client._pending_for(fid))
     asyncio.run(scene())
     assert [d["voucher"] for d in drops.made] == [None, voucher]
+
+
+def test_the_masters_stream_outlives_a_database_that_is_away(conn, scratch_dsn, master, caplog):
+    """Review round 1: the redial's read of the kept mail fails with the
+    database away; the stream retries at the ordinary cap, it does not end."""
+    client = _client(scratch_dsn)
+    calls = []
+
+    async def no_relay():
+        calls.append("dial")
+        if len(calls) >= 3:
+            client.running = False
+        return None
+
+    async def away(is_master):
+        raise psycopg2.OperationalError("the database is restarting")
+
+    async def no_wait(seconds):
+        pass
+    client._reconnect_cap = away
+    client._rest_master = no_wait
+    caplog.set_level(logging.WARNING, logger=cc.__name__)
+    asyncio.run(client._relay_subscription_loop(MASTER.pub, no_relay, is_master=True))
+    assert calls == ["dial"] * 3
+    assert "the kept mail unread" in caplog.text
+
+
+def test_a_master_row_resolved_without_a_handshake_still_starts_its_stream(conn, scratch_dsn, master):
+    """Review round 1: a life-data merge binds the Support stub in the
+    database; the resolver's next pass is the event the stream waits for."""
+    client = _client(scratch_dsn)
+    asyncio.run(client._ensure_master_contact())
+    dialled = []
+
+    async def subscription(relay_pubkey, resolve, is_master):
+        dialled.append(relay_pubkey)
+
+    client._relay_subscription_loop = subscription
+
+    async def scene():
+        loop = asyncio.ensure_future(client._master_wake_loop())
+        await asyncio.sleep(0.1)
+        waiting = not loop.done()
+        with conn.cursor() as cur:                  # what the merge writes
+            cur.execute("UPDATE friends SET public_key_hex = %s WHERE source = 'master'", (MASTER.pub,))
+        await client._do_resolve_pending()
+        await asyncio.wait_for(loop, 5)
+        return waiting
+    assert asyncio.run(scene()) is True
+    assert dialled == [MASTER.pub]
+
+
+def test_the_handshake_wakes_the_stream_even_when_what_follows_it_fails(conn, scratch_dsn, master):
+    client = _client(scratch_dsn)
+    asyncio.run(client._ensure_master_contact())
+
+    async def broken(friend, peers):
+        raise psycopg2.OperationalError("gone")
+    client._sync_chat_history = broken
+
+    async def scene():
+        with pytest.raises(psycopg2.OperationalError):
+            await client._handshake_accepted(MASTER.pub, master, {"username": "Sautium"},
+                                             client._identity(), "198.51.100.9", 8801)
+        return client._master_accepted.is_set()
+    assert asyncio.run(scene()) is True
+
+
+def test_a_voucher_of_a_master_key_no_longer_pinned_rides_no_drop(conn, scratch_dsn, master, drops):
+    """Review round 1: a release that changed the pin leaves the voucher the
+    old key signed; the drop goes without one (the small share), not refused."""
+    from desktop.p2p import chat_wire
+    fid = _resolved_master(conn, ME.pub)
+    _write(conn, fid)
+    client = _client(scratch_dsn)
+    client.store.keep_mail_voucher(chat_wire.make_mail_voucher(OLD_ME.key.sign, ME.pub))
+
+    async def scene():
+        await client._mailbox_deposit(fid, await client._pending_for(fid))
+    asyncio.run(scene())
+    assert [d["voucher"] for d in drops.made] == [None]

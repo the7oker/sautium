@@ -1330,7 +1330,9 @@ also takes the unvouched share — 10 an address and 250 a day
 invalid voucher is a 403. A flood of fresh certificates spends that share at
 most. The expiry is how a ban acts: the master stops renewing. And the
 client deposits only while the master's row is bound to the key it signs
-with now (`chat_wire.accepts_current_key`, in `_mailbox_deposit` alone): a
+with now, or names none (a row from before the binding was kept, or one a
+404 notice left; `chat_wire.accepts_current_key`, in `_mailbox_deposit`
+alone): a
 Support contact still `pending:` is never pushed to, and a node that rotated
 while the master was away waits for its notice. A drop from a key the
 master does not know is said at warning, acked, and never marks the

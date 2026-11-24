@@ -795,6 +795,11 @@ def test_the_unvouched_share_full_keeps_out_the_unvouched_alone():
     assert r["vouchedFromThatAddress"] == [200, "stored"]
 
 
+def test_the_days_unvouched_drops_are_read_from_the_public_stats():
+    r = _run("vouchers")
+    assert r["stats"] == {"unvouched_today": 1, "unvouched_per_day": 250}   # since the scenario set it to 0
+
+
 def test_a_planned_rotations_worker_takes_the_previous_keys_vouchers():
     r = _run("vouchers", "--previous-master-seed", os.urandom(32).hex())
     assert r["previousMaster"] == [200, "stored"]

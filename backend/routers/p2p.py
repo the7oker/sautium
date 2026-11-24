@@ -395,9 +395,9 @@ def _friend_row_out(row: dict, own_key: Optional[str]) -> dict:
     key = row["public_key_hex"]
     support = row.get("source") == "master"
     if not key.startswith("pending:"):
-        row["chat_key"] = key[:16]
+        row["chat_key"] = key[:16].lower()
     elif support and fingerprint and chat_wire.binds(fingerprint, master_node.MASTER_PUBKEY_HEX):
-        row["chat_key"] = master_node.MASTER_PUBKEY_HEX[:16]
+        row["chat_key"] = master_node.MASTER_PUBKEY_HEX[:16].lower()
     else:
         row["chat_key"] = ""
     if support:

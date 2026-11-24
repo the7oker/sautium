@@ -675,6 +675,13 @@ async function handleIssuanceStats(request, env) {
       // Live reachable-volunteer count (fresh directory entries) — the
       // relay/volunteer share the T-points want, visible for free.
       directory: (await directoryCall(env, `/stats?now=${now}`)).body,
+      // The master's mailbox drops without its voucher in the current day,
+      // against their share: the owner's reading of when that share may go
+      // to 0 (SUPPORT-FIRST §2.7). No more of the mailbox than that.
+      mailbox: {
+        unvouched_today: (await mailboxCall(env, "/stats")).body.unvouched_today,
+        unvouched_per_day: MAIL_UNVOUCHED_PER_DAY,
+      },
     } };
   }
   return json(statsMemo.body);
@@ -2203,8 +2210,11 @@ export class MasterMailbox {
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
     if (request.method === "GET" && url.pathname === "/stats") {
+      const unvouched = this.sql.exec("SELECT n FROM counters WHERE key = 'mailbox:unvouched:all:' AND until > ?",
+                                      Date.now()).toArray()[0];
       return Response.json({ pending: this._held(),
-                             sockets: this.state.getWebSockets ? this.state.getWebSockets().length : 0 });
+                             sockets: this.state.getWebSockets ? this.state.getWebSockets().length : 0,
+                             unvouched_today: unvouched ? Number(unvouched.n) : 0 });
     }
     return new Response("not found", { status: 404 });
   }

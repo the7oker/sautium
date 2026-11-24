@@ -1911,6 +1911,7 @@ async function mailVouchers() {
   if (addrKey) presetIn(mailDb, addrKey, 10);                 // none on a Worker without the share
   out.addressShareFull = await drop(d, undefined, "198.51.100.152");
   out.vouchedFromThatAddress = await drop(d, await mailVoucher(master, d.pubHex, now, now + 60 * day), "198.51.100.152");
+  out.stats = (await call("GET", "/issuance-stats")).body.mailbox ?? null;
   return out;
 }
 

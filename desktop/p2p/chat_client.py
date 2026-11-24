@@ -221,6 +221,11 @@ def accepted_pubkey(result: dict, expected_invite: str, expect_master: bool = Fa
     return pubkey
 
 
+def _verify(pubkey_hex: str, message: bytes, signature: bytes) -> bool:
+    from desktop.node_identity import verify_signature
+    return verify_signature(message, signature, pubkey_hex)
+
+
 def nudge_invite(friend: dict, pinned: Optional[str]) -> Optional[str]:
     """The invite a refused handshake's nudge names: a contact made by
     accepting a mailed invite nudges its inviter, armed by the acceptance
@@ -773,6 +778,11 @@ class ChatClient:
         await self._deliver_rotation_notices()
         pass_at = time.monotonic()
         friends = await self._db(self.store.get_friends)
+        if not self._master_accepted.is_set() and any(
+                f["public_key_hex"] == master_node.MASTER_PUBKEY_HEX for f in friends):
+            # Resolved by no handshake of this client's (a life-data merge of
+            # the owner's backup): its stream starts all the same
+            self._master_accepted.set()
 
         # Collect invite codes that are already resolved (have real public key)
         resolved_invites = {
@@ -952,6 +962,8 @@ class ChatClient:
         await self._db(self._bind_resolved, peer_pubkey, invite, result.get("username", ""),
                        result, ident.public_key_hex)
         logger.info(f"Pending friend resolved via handshake: {invite} ({ip}:{port})")
+        if peer_pubkey.lower() == master_node.MASTER_PUBKEY_HEX.lower():
+            self._master_accepted.set()           # the row is resolved: its stream may start
         resolved_friend = await self._db(self.store.get_friend_by_public_key, peer_pubkey)
         await self._note_peer_alive((resolved_friend or {}).get("id"), peer_pubkey, ip, port)
         if peer_pubkey.lower() == master_node.MASTER_PUBKEY_HEX.lower():
@@ -962,16 +974,13 @@ class ChatClient:
                 # What was written to Support before it answered goes now,
                 # where it just answered — the handshake is its event (B-116)
                 await self._push_master_outbox(resolved_friend, ip, port)
-                self._master_accepted.set()
 
     async def _keep_mail_voucher(self, voucher, own_pubkey: str) -> None:
         """The master's voucher for its mailbox, from its handshake's answer
         or its stream's header, kept when it is the master's for our key now
         (SUPPORT-FIRST §2.4); anything else is no voucher."""
-        from desktop.node_identity import verify_signature
-        if voucher and chat_wire.mail_voucher_holds(
-                voucher, own_pubkey, master_node.MASTER_PUBKEY_HEX,
-                lambda pubkey, message, sig: verify_signature(message, sig, pubkey)):
+        if voucher and chat_wire.mail_voucher_holds(voucher, own_pubkey,
+                                                    master_node.MASTER_PUBKEY_HEX, _verify):
             await self._db(self.store.keep_mail_voucher, voucher)
 
     def _bind_resolved(self, peer_pubkey: str, invite: str, username: str,
@@ -1504,7 +1513,13 @@ class ChatClient:
                     self._master_failed[addr] = time.time() + 600
             if not self.running:
                 break
-            cap = await self._reconnect_cap(is_master)
+            try:
+                cap = await self._reconnect_cap(is_master)
+            except psycopg2.Error as e:
+                # The database is away (a restart): the stream retries at
+                # the ordinary cap rather than end with it
+                logger.warning("Relay wake stream (%s…): the kept mail unread: %s", relay_pubkey[:8], e)
+                cap = RECONNECT_CAP_S
             backoff = min(backoff, cap)
             if is_master:
                 await self._rest_master(backoff + random.uniform(0, backoff / 4))
@@ -1930,6 +1945,13 @@ class ChatClient:
                                                               ident.public_key_hex):
             return "waiting for Support to accept this node's current key"
         outcome = "kept in the master's mailbox"
+        # The voucher kept for our key, while the master it names is the one
+        # pinned now (a release that changed the pin leaves an older one:
+        # without it, a drop takes the small share rather than a refusal)
+        voucher = await self._db(self.store.mail_voucher, ident.public_key_hex)
+        if voucher and not chat_wire.mail_voucher_holds(voucher, ident.public_key_hex,
+                                                        master_pubkey, _verify):
+            voucher = None
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
                                          headers={"Accept-Encoding": "gzip"}) as session:
             for msg in messages:
@@ -1946,10 +1968,14 @@ class ChatClient:
                     session, master_pubkey=master_pubkey,
                     sender_pubkey=self.store.public_key_hex, sign=ident.sign,
                     encrypted=encrypted, timestamp_iso=sent_at,
-                    message_uuid=msg["message_uuid"],
-                    voucher=await self._db(self.store.mail_voucher, ident.public_key_hex),
+                    message_uuid=msg["message_uuid"], voucher=voucher,
                     worker_url=mailbox_client.WORKER_URL)
                 if not result.kept:                # the outbox keeps the rest
+                    if result.refusal == "invalid voucher":
+                        # No voucher the master signed for this key is invalid:
+                        # one this node kept is wrong, said loudly
+                        logger.warning("The master's mailbox refused this node's voucher (%s…)",
+                                       ident.public_key_hex[:16])
                     return (f"the master's mailbox refused it: {result.refusal}" if result.refusal
                             else "the master's mailbox is unreachable")
                 await self._db(self.store.mark_parked, msg["id"])

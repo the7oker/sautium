@@ -498,9 +498,10 @@ master's first handshake, but it is already bound to the pin's fingerprint,
 so its thread opens by that key (the friends list's `chat_key`) and what is
 written there waits on the node, said as waiting for Support. Nothing goes
 to the master's Worker mailbox before that handshake — the outbox never
-pushes to a `pending:` row — and none while the master has not accepted the
-key the node signs with now (a rotation while it was away;
-`_mailbox_deposit`, the one place that decides a drop). The handshake is the
+pushes to a `pending:` row — and none while the master's row names another
+key of the node's than the one it signs with now (a rotation while it was
+away; a row that names none is read as before; `_mailbox_deposit`, the one
+place that decides a drop). The handshake is the
 event that sends what waits, at the address that answered, and the master's
 wake stream follows it at once. The delivery path's state per friend is
 logged at info once per change; while a message waits kept for Support the

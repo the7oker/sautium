@@ -174,7 +174,7 @@ class PeerChatService:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("""
                 SELECT id, username, public_key_hex, invite_code, display_name,
-                       is_blocked, source::text AS source
+                       is_blocked, source::text AS source, bound_identity
                   FROM friends
                  WHERE public_key_hex = %s
             """, (public_key_hex,))

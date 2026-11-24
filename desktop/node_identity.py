@@ -534,7 +534,7 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 
 def validate_username(username: str) -> None:
     """Raise ValueError unless the username fits the network-wide format."""
-    if not USERNAME_RE.match(username):
+    if not USERNAME_RE.fullmatch(username):        # `$` alone takes a trailing newline
         raise ValueError(
             "Nickname: 3-32 Latin letters, digits, '-' or '_'")
 
