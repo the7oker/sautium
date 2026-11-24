@@ -488,3 +488,35 @@ def test_a_copy_retagged_out_of_an_album_musicbrainz_wrote_takes_its_own_slots_o
         _tag(f, album="LP (fixed)")
     _scan()
     assert _album_rows(cur) == [("LP", 0, ["mb", "mb"]), ("LP (fixed)", 1, [])]
+
+
+def test_a_reread_and_a_retag_leave_a_copy_where_it_entered(cur, library, template):
+    """A copy enters the library once, at the scan round that made its row
+    (album_variants.entered_at): a file read again in place and an album
+    re-tagged whole do not make it new on "New in my collection"."""
+    from routers import home
+    _clean(cur)
+    first = [_flac(template, library / "A" / "First" / f"{i:02d}.flac", f"F{i}", "Aurora", "First", track=i)
+             for i in (1, 2)]
+    _scan()
+    _flac(template, library / "A" / "Second" / "01.flac", "S1", "Aurora", "Second", track=1)
+    _scan()
+
+    def shelf():
+        return [a["title"] for a in home.get_new_in_library(
+            limit=20, before=None, before_arrived=None, before_id=None)["albums"]]
+
+    def entered():
+        cur.execute("SELECT id, entered_at FROM album_variants ORDER BY id")
+        return cur.fetchall()
+    assert shelf() == ["Second", "First"]
+    at = entered()
+    assert at[0][1] < at[1][1]                      # two scans, two rounds
+
+    _tag(first[0], title="F1 (fixed)")
+    assert _scan()["reread"] == 1
+    assert (shelf(), entered()) == (["Second", "First"], at)
+    for f in first:
+        _tag(f, album="First (fixed)")
+    _scan()
+    assert (shelf(), entered()) == (["Second", "First (fixed)"], at)

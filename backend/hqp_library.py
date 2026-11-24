@@ -580,6 +580,8 @@ def sync(host: str, port: int, *, force: bool = False,
     stats: Dict[str, Any] = {"unchanged": False, "refused": None, "library_files": 0,
                              "unsupported": 0, "known": 0, "added": 0, "errors": 0,
                              "unique_tracks": 0, "cancelled": False}
+    # a sync is a round of its own: the instant its new copies enter at
+    started = datetime.now(timezone.utc)
     resolved = resolve_endpoint(host, port)
     if not has_own_library(host):
         logger.warning("HQPlayer at %s:%s runs on this machine and reads this node's own library; not synced",
@@ -643,11 +645,11 @@ def sync(host: str, port: int, *, force: bool = False,
             db.commit()
     if new:
         import_metadata(new, sink=FileSink("hqplayer", ep["id"]), stats=stats,
-                        progress_cb=progress_cb, cancel_check=cancel_check)
-        # A copy that just arrived is new in the collection: the Home feed
-        # sorts variants by arrived_at, which media_files' triggers keep for
-        # local rips and nothing keeps for a copy — the moment the node first
-        # saw it is its arrival.
+                        progress_cb=progress_cb, cancel_check=cancel_check, entered_at=started)
+        # A copy's arrival is its files' (the Home feed's order inside one
+        # round), which media_files' triggers keep for local rips and
+        # nothing keeps for a copy here — the moment the node first saw it
+        # is its arrival.
         db_execute("""
             UPDATE album_variants av
                SET arrived_at = (SELECT MIN(f.first_seen_at) FROM hqp_library_files f

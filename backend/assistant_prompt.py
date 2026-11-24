@@ -108,8 +108,9 @@ Also check `a.gender = 'mixed'` for bands with female vocalists (ABBA, Blondie, 
 with singing/vocals (~766 artists detected from biographies). Use \
 `a.is_vocalist = 'instrumental'` for purely instrumental acts (~42 artists detected). \
 Combine with `a.gender` for queries like "female vocal jazz".
-- For "recently added" queries: use `owned_files.arrived_at` — when a file came onto this disk or a copy appeared \
-in the HQPlayer's library (`ORDER BY f.arrived_at DESC`).
+- For "recently added" queries: order by `album_variants.entered_at` — when the copy entered this library (the scan \
+or the HQPlayer sync that found it) — and inside one scan by `owned_files.arrived_at`, when the file came onto the \
+disk (`ORDER BY av.entered_at DESC, f.arrived_at DESC`).
 - NOT-OWNED music is FIRST-CLASS, both to recommend and to PLAY. Besides the files on disk the \
 catalog holds ~22k artists and hundreds of thousands of albums the user does not own (discovered \
 from MusicBrainz/Last.fm/similar-artists — see the schema's Phantom section). Every playback tool \
@@ -155,7 +156,7 @@ who WROTE the music, apart from who performs it (track_artists); from the files'
 ## Physical entities (SERIAL primary keys)
 
 **album_variants** (id SERIAL, album_id UUID, directory_path, sample_rate, bit_depth, is_lossless BOOLEAN, \
-location ENUM 'local'|'hqplayer', hqp_endpoint_id → hqp_endpoints)
+location ENUM 'local'|'hqplayer', hqp_endpoint_id → hqp_endpoints, entered_at)
   - A physical edition of an album (CD, Vinyl, Hi-Res, etc.). `location` says where its files live: \
 this node's disk, or an HQPlayer's own library (a copy the HQPlayer holds — one more edition, like a \
 CD rip next to a vinyl rip). **hqp_endpoints** (id, name, host, port) names that HQPlayer — a friend's \
@@ -353,7 +354,7 @@ ORDER BY at2.weight DESC
 
 Find tracks by artist gender (female/male/mixed vocals), newest owned first:
 ```sql
-SELECT t.id AS track_id, t.title, a.name as artist, al.title as album, MAX(f.arrived_at) AS added_at
+SELECT t.id AS track_id, t.title, a.name as artist, al.title as album, MAX(av.entered_at) AS added_at
 FROM owned_files f
 JOIN tracks t ON f.track_id = t.id
 JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
@@ -362,7 +363,7 @@ JOIN album_variants av ON f.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
 WHERE a.gender = 'female'
 GROUP BY t.id, t.title, a.name, al.title
-ORDER BY added_at DESC
+ORDER BY added_at DESC, MAX(f.arrived_at) DESC
 ```
 
 Find instrumental-only tracks (no singing): the same query with `a.is_vocalist = 'instrumental'`.
@@ -370,7 +371,7 @@ Find female vocal tracks: `a.gender IN ('female', 'mixed') AND a.is_vocalist = '
 
 Recently added albums:
 ```sql
-SELECT al.title, a.name as artist, MIN(f.arrived_at) as added_at,
+SELECT al.title, a.name as artist, MAX(av.entered_at) as added_at,
        COUNT(DISTINCT f.track_id) as track_count
 FROM owned_files f
 JOIN tracks t ON f.track_id = t.id
@@ -379,7 +380,7 @@ JOIN artists a ON ta.artist_id = a.id
 JOIN album_variants av ON f.album_variant_id = av.id
 JOIN albums al ON av.album_id = al.id
 GROUP BY al.title, a.name
-ORDER BY added_at DESC
+ORDER BY added_at DESC, MAX(f.arrived_at) DESC
 LIMIT 20
 ```
 

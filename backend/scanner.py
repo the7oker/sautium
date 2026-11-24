@@ -481,7 +481,8 @@ def _ensure_album(db: Session, album_id: str, title: str, credit: str,
 
 def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink,
                     stats: Dict[str, int], progress_cb: Optional[callable] = None,
-                    cancel_check: Optional[callable] = None) -> None:
+                    cancel_check: Optional[callable] = None,
+                    entered_at: Optional[datetime] = None) -> None:
     """Phase 2 of a scan: canonical entities and file rows from extracted
     metadata. ``entries`` = ``(dir_path, metadata)`` — the directory in DB
     form (the variant key) and the metadata as extract_metadata returns it
@@ -489,9 +490,16 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     Single-threaded with entity caches, one savepoint per file, a commit
     every 100 files; counts into ``stats`` (added, errors, unique_tracks).
     cancel_check stops after the current file, keeping what was committed.
+
+    ``entered_at`` is the start of the round this import belongs to (a scan
+    round, an HQPlayer library's sync): every copy the round makes carries
+    that one instant (album_variants.entered_at), written at the copy's
+    insert and never after. An import called on its own is a round of its
+    own.
     """
     for key in ("added", "errors", "unique_tracks"):
         stats.setdefault(key, 0)
+    entered_at = entered_at or datetime.now(timezone.utc)
 
     def _report(msg: str):
         if progress_cb:
@@ -647,6 +655,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                                 is_lossless=metadata.get("is_lossless", True),
                                 location=sink.location,
                                 hqp_endpoint_id=sink.hqp_endpoint_id,
+                                entered_at=entered_at,
                             )
                             db.add(variant)
                             db.flush()
@@ -1173,9 +1182,9 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                             dest = db.execute(text("""
                                 INSERT INTO album_variants (album_id, directory_path, raw_title, raw_artist,
                                                             location, hqp_endpoint_id, sample_rate,
-                                                            bit_depth, is_lossless)
+                                                            bit_depth, is_lossless, entered_at)
                                 SELECT :a, :d, :t, :c, location, hqp_endpoint_id, sample_rate,
-                                       bit_depth, is_lossless
+                                       bit_depth, is_lossless, entered_at
                                   FROM album_variants WHERE id = :v RETURNING id"""),
                                 {"a": target, "d": v.directory_path, "t": t, "c": c, "v": vid}).scalar()
                             albums.forget(v.directory_path)
@@ -1797,6 +1806,9 @@ class LibraryScanner:
             Dictionary with statistics (processed, added, skipped, reread,
             errors).
         """
+        # One call is one round of the scan queue (main._scan_round): its
+        # start is the instant every copy it makes enters the library at.
+        round_started = datetime.now(timezone.utc)
         stats = {
             "processed": 0,
             "added": 0,
@@ -2040,7 +2052,8 @@ class LibraryScanner:
         if rereads:
             reread_metadata(rereads, assignments, stats, moves, touched_albums)
         import_metadata(new_entries, sink=LOCAL_FILES, stats=stats, progress_cb=progress_cb,
-                        cancel_check=None if cancelled_in_phase1 else cancel_check)
+                        cancel_check=None if cancelled_in_phase1 else cancel_check,
+                        entered_at=round_started)
         # The rows of the same folders whose folder now makes another album
         # of them: the shape changed as files arrived or were re-tagged.
         if existing:

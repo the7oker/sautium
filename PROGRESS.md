@@ -4498,9 +4498,11 @@ catalogue: the scan compared paths only, Rescan included
   good. Few tracks is no incomplete album: only the album's own words make
   it wait.
 - **Arrival is the file's birth here.** A copy keeps its source's mtime, so
-  "New in my collection" orders by the birth time on this disk (statx,
-  CreationTime, st_birthtime), else the first read — never the mtime.
-  Through WSL's drvfs and Docker Desktop's 9p there is no birth time.
+  a file's arrival is its birth time on this disk (statx, CreationTime,
+  st_birthtime), else the first read — never the mtime. Through WSL's drvfs
+  and Docker Desktop's 9p there is no birth time. Since 2026-11-24 it
+  orders "New in my collection" inside one scan only; between scans the
+  entry into the library decides (below, "New is what entered last").
 
 ### The identity worker belongs to the process, not to a file (2026-11-18)
 
@@ -4624,6 +4626,39 @@ ever fill on a node with the streaming library off.
   shape only a copy that went leaves; the mint always has a release group,
   the seed and a share write `imported`. A leftover that has a release
   group cannot be told from a phantom and stays one.
+
+### New is what entered last (2026-11-24)
+
+"New in my collection" ordered albums by their files' birth time alone
+(LIBRARY-WATCH, 2026-11-17). On a box with two sticks it put the later one
+below: an exFAT stick keeps the day its files were copied onto it, ntfs-3g
+keeps none (the arrival is then the first read) — the stick scanned sixteen
+minutes after the other sorted two days before it (PI-NODE-2D, F15). The
+owner's rule: by entry into the database.
+
+- **`album_variants.entered_at`: the start of the scan round that made the
+  copy's row** — one instant for every copy one round makes (one run of the
+  scan queue's worker over one merged request is one call of
+  `scan_and_import`, which takes it at its entry; an HQPlayer library's sync
+  is a round of its own). Written at the copy's insert and never after: a
+  re-read in place, a canon move of the album, files joining the copy later
+  do not make it new; a copy split off by a re-tag takes its source's. Not
+  `created_at`, which inside a long scan runs in walk order — the alphabet.
+- **Inside one round the files' birth time decides.** A first scan of a
+  whole library is one round, and the only evidence of what came to the disk
+  last is the files' own. So the shelf's key is `(entered_at,
+  COALESCE(arrived_at, entered_at), album_id)`, of the album's newest copy
+  here, else of its newest at an HQPlayer; the cursor is that whole key, and
+  the index is that key (`idx_album_variants_entered_desc`), so a page reads
+  a page of it. The query before grouped every copy on every request and no
+  index could order it.
+- **No shelf reshuffled at the update**: the backfill gives a copy made
+  before this its arrival (else its row's creation); the rule governs what
+  enters from then on. A scan cut short and resumed is two rounds — what the
+  second made sorts above the first's.
+- The cold-start Recommendations and the assistant's "recently added"
+  recipes follow the same order; the album page's date of a copy stays its
+  files' arrival.
 
 ## Known Gotchas
 

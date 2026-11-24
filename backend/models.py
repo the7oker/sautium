@@ -489,6 +489,9 @@ class AlbumVariant(Base):
     is_lossless = Column(Boolean, default=True)
     absent_since = Column(DateTime(timezone=True))   # a local copy away (001_initial.sql)
     arrived_at = Column(DateTime(timezone=True))     # its files' earliest arrival (triggers)
+    # the start of the scan round (or HQPlayer sync) that made the row: written
+    # at its insert, never after — what "New in my collection" orders by
+    entered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     raw_artist = Column(Text)  # the album credit the scan minted it under, beside raw_title (the folder rule)
     positional_asked = Column(Text)  # the positional pass's last abstention, as its candidates (canon.positional)
     positional_bound = Column(Boolean, nullable=False, server_default="false")  # the positional pass bound this copy
