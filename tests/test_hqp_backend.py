@@ -756,6 +756,14 @@ def fake(monkeypatch):
     from playback import substitute
     monkeypatch.setattr(substitute, "native_plays",
                         lambda items, output_id, endpoint_id: [None] * len(items))
+    # A start of a file that is not there has the music folder looked at
+    # first (PlaybackManager._first_opens -> scanner.check_folder: the folder
+    # and the catalogue read). No file exists here and there is no catalogue:
+    # the look says nothing — the real one would fail on the table-less
+    # session database and log it. tests/test_reach_db.py drives the real
+    # look; a test of a folder that went gives its own (test_roon_coexistence).
+    import scanner
+    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: None)
     # The playback trace is process-wide — the hand-over ledger, the attempts,
     # the failing run, a refusal's notice, the client's failures: each test
     # starts and leaves them empty, whatever order the tests run in.
@@ -791,6 +799,19 @@ def test_a_queue_handed_to_an_hqplayer_that_does_not_answer_gives_up_at_once(fak
     assert not any(taken) and unsent == 0 and time.monotonic() - t < 3
     assert "HQPlayer has not answered an add — 6 of 6 tracks wait for its answer" in caplog.text
     assert "refused 6 of 6" not in caplog.text
+
+
+def test_a_start_of_a_file_that_is_not_there_logs_no_failed_look_here(fake, output, caplog):
+    """The fixture's stand-in for the music folder's look (`fake`): a new
+    queue played on a file that does not exist asks for the look, and here —
+    no folder, no catalogue — it says nothing and fails nowhere. Before the
+    stand-in every such start logged "Music folder look failed" at ERROR."""
+    import logging
+    mgr, b = output
+    with caplog.at_level(logging.ERROR):
+        added, _gen = mgr.replace_queue([_item("E:/Music/R/01.flac", 401)], play=True)
+        assert added == 1 and _wait(lambda: fake.playlist == ["file:///E:/Music/R/01.flac"])
+    assert "Music folder look failed" not in caplog.text
 
 
 def _item(path, mfid, fmt="FLAC", **span):
