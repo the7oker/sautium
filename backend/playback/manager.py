@@ -52,23 +52,39 @@ _SOUNDING = ("playing", "paused", "loading", "unknown")
 _STAT_PATIENCE_S = 3.0
 
 
+# The stats in flight, by path: [done, answer]. One look of one path at a
+# time — a stat already in flight for a path is the one every asker waits on.
+_stats: dict = {}
+_stats_lock = threading.Lock()
+
+
 def _opens(path: str) -> bool:
     """Whether a file of this node opens now: one stat, on a thread of its
     own, waited for no longer than _STAT_PATIENCE_S. One that has not
-    answered by then does not open now."""
-    answer: list = []
+    answered by then does not open now. A stat still in flight for the same
+    path — an earlier asker's, on a mount that hangs — is the one this
+    asker waits on, within the same patience: never a second thread for it.
+    A stat that never returns leaves its one thread for good, as the
+    folder's own look does (scanner._look_worker) — the kernel's call
+    cannot be taken back; once the folder is recorded as not answering no
+    path under it is asked for again."""
+    with _stats_lock:
+        flight = _stats.get(path)
+        if flight is None:
+            flight = _stats[path] = [threading.Event(), False]
 
-    def ask() -> None:
-        try:
-            os.stat(path)
-        except OSError:
-            answer.append(False)
-        else:
-            answer.append(True)
-    look = threading.Thread(target=ask, daemon=True, name="queue-look")
-    look.start()
-    look.join(_STAT_PATIENCE_S)
-    return bool(answer) and answer[0]
+            def ask() -> None:
+                try:
+                    os.stat(path)
+                    flight[1] = True
+                except OSError:
+                    pass
+                finally:
+                    with _stats_lock:
+                        _stats.pop(path, None)
+                    flight[0].set()
+            threading.Thread(target=ask, daemon=True, name="queue-look").start()
+    return flight[0].wait(_STAT_PATIENCE_S) and flight[1]
 
 
 class OutputHeld(ConnectionError):
@@ -1307,34 +1323,37 @@ class PlaybackManager:
         if not items:
             return False
         it = items[0]
-        before = substitute.unopened()
         missed: set = set()
-        substitute.observe(missed)
         endpoint = getattr(backend, "endpoint_id", None)
         root = settings.library_db_root() + "/"
         # read against the copies only where that says more than the slot does:
         # a file slot nothing was observed of is its own file
-        fresh = bool(before) or (not held and it.source.get("kind") != "file")
+        fresh = bool(substitute.unopened()) or (not held and it.source.get("kind") != "file")
         src = it.opener() if held else it.source
-        while True:
-            if fresh and substitute.by_copies(it):
-                src = substitute.native_plays([it], backend.id, endpoint)[0] or it.source
-            src = src.get("file", src)      # a file HQPlayer is handed prepared is that file
-            path = src.get("path") if src.get("kind") == "file" else None
-            if (path is None or path in missed or not path.startswith(root)
-                    or any(path.startswith(g) for g in gone_prefixes())):
-                break       # no file of the music folder the node takes for reachable
-            if _opens(settings.translate_to_local_path(path)):
-                break
-            if not missed:
-                from scanner import check_folder
-                check_folder(wait=True)
-                if any(path.startswith(g) for g in gone_prefixes()):
-                    break   # its folder does not answer: the recorded fact says the rest
-            missed.add(path)
-            substitute.observe(missed)
-            fresh = True
-        return substitute.unopened() != before
+        # The look reads the slot under its OWN observation so far (this
+        # thread's alone); every other reader keeps the one the last look
+        # left until this one ends, and is then given this one's in one
+        # step — never an empty one in between, under which a re-read on
+        # another thread would hand a missing file back
+        with substitute.looking(missed):
+            while True:
+                if fresh and substitute.by_copies(it):
+                    src = substitute.native_plays([it], backend.id, endpoint)[0] or it.source
+                src = src.get("file", src)      # a file HQPlayer is handed prepared is that file
+                path = src.get("path") if src.get("kind") == "file" else None
+                if (path is None or path in missed or not path.startswith(root)
+                        or any(path.startswith(g) for g in gone_prefixes())):
+                    break       # no file of the music folder the node takes for reachable
+                if _opens(settings.translate_to_local_path(path)):
+                    break
+                if not missed:
+                    from scanner import check_folder
+                    check_folder(wait=True)
+                    if any(path.startswith(g) for g in gone_prefixes()):
+                        break   # its folder does not answer: the recorded fact says the rest
+                missed.add(path)
+                fresh = True
+        return substitute.observe(missed)
 
     @staticmethod
     def _refuse_if_none_opens(backend: PlayerBackend, items: list) -> None:
@@ -1407,17 +1426,25 @@ class PlaybackManager:
             # the look's own record follows on a thread: the start needs it
             # now — as it does a file the look alone did not find, which is
             # no way in of its slot from here on (another copy, its stream).
-            # Never behind a queue edit in flight — a play intent waits for
-            # none: the edit's own mirror reads what it hands the output
-            # under the same record and observation, and the queue's slots
-            # are read once it is done, on the thread the record's change uses
+            # Behind a queue edit in flight a play intent never waits: the
+            # queue's slots are read once the edit is done, on the thread
+            # the record's change uses. The slot this start opens is not
+            # left to that race — on an output that opens what the slot's
+            # way in says as it starts (HQPlayer reads every slot's again at
+            # each mirroring) it is read here, at once, under the queue's
+            # own lock, which orders it with every re-read: the output is
+            # asked for a start of what the look left, and hears of it with
+            # the rest (`ahead`)
             if self._mutate_lock.acquire(blocking=False):
                 try:
                     self.reach_changed()
                 finally:
                     self._mutate_lock.release()
             else:
-                threading.Thread(target=self.reach_followed, daemon=True,
+                start = items[0]
+                ahead = backend.id != "hqplayer" and substitute.by_copies(start) and (
+                    self.queue.set_play(start, substitute.native_plays([start], backend.id, None)[0]))
+                threading.Thread(target=self.reach_followed, args=(ahead,), daemon=True,
                                  name="queue-reach").start()
         if not tapped:
             self._refuse_if_none_opens(backend, items)
@@ -1646,7 +1673,7 @@ class PlaybackManager:
             self._schedule_persist()
         return result
 
-    def rebind_files(self) -> None:
+    def rebind_files(self, retracked: tuple = ()) -> None:
         """Re-bind every slot whose file left the library: it takes a live
         copy of its track, or the track itself, and a slot whose way in named
         a gone file is re-read for the active output (playback.queue.
@@ -1659,7 +1686,11 @@ class PlaybackManager:
         read again, _reread_ways_in); the restore of a persisted queue calls
         it once. A gone id left in a slot is written into session_tracks and
         listening_history against their foreign keys (every Play died on the
-        archive of the old queue) and its path no longer opens. The output
+        archive of the old queue) and its path no longer opens. `retracked`:
+        the canon's words that came with the wake — (old, new) track uuids
+        it rewrote; every slot of an old one takes the new, and the listen
+        in progress follows its item in the same step (tracker.follow), as
+        does a slot whose file belongs to another track now. The output
         converges through queue_changed("rebind"); the status is re-published
         with the playing slot's new binding so Now Playing refetches."""
         from playback.queue import rebind_origins
@@ -1668,7 +1699,7 @@ class PlaybackManager:
             if backend is not None:
                 endpoint_id = getattr(backend, "endpoint_id", None)
                 plays = lambda items: substitute.native_plays(items, backend.id, endpoint_id)
-            moved = self.queue.rebind(rebind_origins, plays)
+            moved = self.queue.rebind(rebind_origins, plays, retracked, tracker.follow)
             reread = self._reread_ways_in(backend) if backend is not None else []
             if not moved and not reread:
                 return
@@ -1678,7 +1709,7 @@ class PlaybackManager:
                 self._schedule_persist()
             self._rebound(backend)
 
-    def reach_changed(self) -> None:
+    def reach_changed(self, ahead: bool = False) -> None:
         """What opens here changed: the music folder stopped or started
         answering (scanner's recorded answer — the mount table, the folder
         watcher's loss, a library file served or found missing, a scan's
@@ -1702,10 +1733,10 @@ class PlaybackManager:
             if waited is not None and waited.opener().get("kind") != "pending":
                 waited = None
             changed = self._reread_ways_in(backend)
-            if not changed:
+            if not changed and not ahead:
                 return
             logger.info("%d queued slot(s) open another way: what is reachable here changed",
-                        len(changed))
+                        len(changed) + ahead)
             self._rebound(backend)
             if waited is not None and waited.opener().get("kind") != "pending":
                 settled = waited
@@ -1756,12 +1787,14 @@ class PlaybackManager:
         self._reach_owed = None
         threading.Thread(target=self.reach_followed, daemon=True, name="queue-reach").start()
 
-    def reach_followed(self) -> None:
+    def reach_followed(self, ahead: bool = False) -> None:
         """reach_changed on a thread of its own — the scanner's record of a
-        change, the output leaving the slot it sounded: what goes wrong
+        change, the output leaving the slot it sounded, a look that came
+        back with a queue edit in flight (`ahead`: the slot its start opens
+        was read already, and the output has yet to hear): what goes wrong
         there is said in the log, where no caller waits to hear it."""
         try:
-            self.reach_changed()
+            self.reach_changed(ahead)
         except Exception:
             logger.exception("the queue's ways in were not read again after what is reachable here changed")
 
@@ -1884,8 +1917,16 @@ manager = PlaybackManager()
 # trigger, a Rescan that sets a copy aside as away, an import while copies
 # are away, the canon's rewrite of a track's uuid) and on every (re)connect. A burst — a CUE reconcile commits per
 # image — folds into few passes. The manager is looked up at each call.
+def _files_changed(notifies: list) -> None:
+    """The files listener's wake: the queue re-binds, with the canon's words
+    among the notifications — "track <old> <new>", a track's uuid rewritten
+    (canon.identity._update_track_uuid) — in the order they were said."""
+    words = [n.payload.split() for n in notifies if n.payload.startswith("track ")]
+    manager.rebind_files(tuple((old, new) for _word, old, new in words))
+
+
 _files_listener = Listener("queue-files-listener", ("sautium_files_removed",),
-                           on_notify=lambda notifies: manager.rebind_files(),
+                           on_notify=_files_changed,
                            on_connect=lambda: manager.rebind_files())
 
 

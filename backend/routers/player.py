@@ -3785,11 +3785,12 @@ _radio_dry_seed: Optional[str] = None      # the seed whose fill gave nothing
 
 def _fills(items: list) -> list:
     """`items`, the owner's own copies an automatic fill queues (a radio
-    batch, Play similar), marked as nobody's tap (QueueItem.whole): with
+    batch, Play similar), marked as nobody's tap and as his own copy
+    (QueueItem.whole, own_fill): with
     its copy not here such a slot never streams behind his back — only
     while his switch lets radio stream, and then whole."""
     for it in items:
-        it.whole = True
+        it.whole = it.own_fill = True
     return items
 
 

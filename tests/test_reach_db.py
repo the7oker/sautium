@@ -340,6 +340,94 @@ def test_a_slot_takes_its_files_track_when_the_canon_rewrote_it(node, scratch_ds
     assert node["out"].changed == ["rebind"]
 
 
+@pytest.fixture
+def lastfm(node, monkeypatch):
+    """The play tracker on this node's database, no listen open; Last.fm's
+    calls counted, none sent."""
+    from playback import tracker
+    said: list = []
+    monkeypatch.setattr(tracker, "_play_session", None)
+    monkeypatch.setattr(tracker, "_carried", False)
+    monkeypatch.setattr(tracker, "_scrobble_async",
+                        lambda method, **kw: (said.append((method, kw)), True)[1])
+    return said
+
+
+def _tick(node, state: str, position: float) -> None:
+    from playback.base import PlaybackStatus
+    node["mgr"]._on_backend_status(node["out"], PlaybackStatus(
+        state=state, position=position, length=200.0, queue_index=1))
+
+
+def _listens(node) -> list:
+    node["cur"].execute("SELECT track_id::text, started_at, duration_listened::float, completed, "
+                        "skipped, media_file_id FROM listening_history ORDER BY started_at")
+    return node["cur"].fetchall()
+
+
+@pytest.mark.parametrize("how", ["rename", "merge"])
+@pytest.mark.parametrize("scrobbled_before", [False, True])
+@pytest.mark.parametrize("word", ["the canon's word", "the file layer read", "no word before its end"])
+def test_a_listen_is_one_listen_across_a_rewrite_of_its_tracks_uuid(
+        node, lastfm, scratch_dsn, how, scrobbled_before, word):
+    """The canon rewrites the uuid of the track that is playing — a rename,
+    a merge into a track that exists. The listen in progress follows its
+    item to the new uuid in the same step (the canon's own word with the
+    wake; a wake that lost it reads the slot's file) — nothing saved,
+    nothing reopened: one history row at the end, against the uuid that
+    exists, from the real start, of the real length; one now-playing, one
+    scrobble, whether it had gone before the rewrite or not; the stats
+    derived from that one row. With no word at all before the listen ends
+    its row is still written against the track its file belongs to."""
+    from playback import manager as manager_mod
+    from playback import tracker
+    mgr, cur = node["mgr"], node["cur"]
+    it = _queue(node)[0]
+    old = it.track_id
+    new = str(uuid.uuid4()) if how == "rename" else node["phantoms"][0]
+    _tick(node, "playing", 2.0)
+    started = tracker._play_session.started_at
+    _tick(node, "playing", 120.0 if scrobbled_before else 40.0)
+    assert [m for m, _kw in lastfm] == ["update_now_playing"] + ["scrobble"] * scrobbled_before
+    heard = psycopg2.connect(scratch_dsn)
+    heard.autocommit = True
+    heard.cursor().execute("LISTEN sautium_files_removed")
+    _canon_rewrites(node, scratch_dsn, old, new)
+    if word == "the canon's word":
+        assert _wait(lambda: (heard.poll(), bool(heard.notifies))[1])
+        manager_mod._files_changed(list(heard.notifies))        # as the files listener hears it
+    elif word == "the file layer read":
+        mgr.rebind_files()
+    heard.close()
+    assert it.track_id == (old if word == "no word before its end" else new)
+    _tick(node, "playing", 150.0)
+    _tick(node, "stopped", 150.0)
+    assert tracker._play_session is None
+    assert _listens(node) == [(new, started, 150.0, True, False, node["files"][0])]
+    assert [m for m, _kw in lastfm] == ["update_now_playing", "scrobble"]
+    assert lastfm[-1][1]["timestamp"] == int(started.timestamp())
+    cur.execute("SELECT track_id::text, play_count, skip_count FROM local_play_stats")
+    assert cur.fetchall() == [(new, 1, 0)]
+
+
+def test_a_listen_goes_on_when_its_slot_becomes_the_track_itself(node, lastfm):
+    """The other in-place change of a playing item's identity: its file
+    leaves the library with no other copy, and the slot becomes the track
+    itself — the same uuid, so the same listen: one row, with no file."""
+    from playback import tracker
+    mgr, cur = node["mgr"], node["cur"]
+    it = _queue(node)[0]
+    _tick(node, "playing", 2.0)
+    started = tracker._play_session.started_at
+    cur.execute("DELETE FROM media_files WHERE id = %s", (node["files"][0],))
+    mgr.rebind_files()
+    assert it.source == {"kind": "track"} and it.track_id == node["tracks"][0]
+    _tick(node, "playing", 150.0)
+    _tick(node, "stopped", 150.0)
+    assert _listens(node) == [(node["tracks"][0], started, 150.0, True, False, None)]
+    assert [m for m, _kw in lastfm] == ["update_now_playing", "scrobble"]
+
+
 def _ranked(node, track: int, hqp_id, gone: list) -> list:
     from db_pool import db_query
     from sql_queries import TRACK_FILES, best_rip_order, owned_rank
@@ -714,12 +802,66 @@ def test_the_look_before_a_start_never_waits_behind_a_queue_edit_in_flight(node)
     threading.Thread(target=edit, daemon=True).start()
     assert held.wait(5)
     try:
+        out.changed.clear()
         threading.Thread(target=lambda: (mgr.before_start(out), looked.set()), daemon=True).start()
         assert looked.wait(5)                       # the Play's look came back with the edit in flight
-        assert items[0].play is None
+        # the slot that start opens is read already — never left to a race
+        # with the re-read that waits for the edit
+        assert _streams(items[0]) and out.changed == []
     finally:
         release.set()
-    assert _wait(lambda: _streams(items[0]))        # read once the edit was done
+    assert _wait(lambda: out.changed == ["rebind"])     # the output told once the edit was done
+    assert _streams(items[0]) and items[1].play is None
+
+
+def test_a_re_read_during_a_look_never_hands_the_missing_file_back(node, monkeypatch):
+    """A look's observation replaces the last one in one step, when the look
+    ends: a re-read of the ways in on another thread while a look is under
+    way (a file event, the folder's record) still reads under the last
+    observation, and the slot keeps its stream — never its missing file."""
+    from playback import manager as manager_mod
+    mgr, out = node["mgr"], node["out"]
+    (node["root"] / "NW" / "01.flac").unlink()
+    items = _queue(node, play=True)
+    assert _streams(items[0])
+    seen, real = [], manager_mod._opens
+
+    def opens(path):                                # mid-look: a re-read on another thread
+        other = threading.Thread(target=mgr.reach_changed)
+        other.start()
+        other.join(5)
+        seen.append(items[0].play)
+        return real(path)
+    monkeypatch.setattr(manager_mod, "_opens", opens)
+    mgr.before_start(out)
+    assert seen and all(play is not None for play in seen)
+    assert _streams(items[0])
+
+
+def test_a_stat_in_flight_for_a_path_is_the_one_every_asker_waits_on(node, monkeypatch):
+    """On a mount that hangs, every Play, Next or tap of the same file waits
+    on the one stat already in flight — within the same patience — and
+    starts no thread of its own; the stat back, the next asker asks anew."""
+    import os
+    from playback import manager as manager_mod
+    hang, real, asked = threading.Event(), os.stat, []
+    path = str(node["root"] / "NW" / "01.flac")
+
+    def stat(p, *a, **kw):
+        if str(p) == path:
+            asked.append(p)
+            hang.wait(10)
+        return real(p, *a, **kw)
+    monkeypatch.setattr(manager_mod, "_STAT_PATIENCE_S", 0.2)
+    monkeypatch.setattr(os, "stat", stat)
+    try:
+        assert [manager_mod._opens(path) for _ in range(3)] == [False, False, False]
+        assert len(asked) == 1
+        assert len([t for t in threading.enumerate() if t.name == "queue-look"]) == 1
+    finally:
+        hang.set()
+    assert _wait(lambda: path not in manager_mod._stats)
+    assert manager_mod._opens(path) is True and len(asked) == 2
 
 
 def test_a_refusal_names_no_disk_for_slots_that_were_never_files(node):

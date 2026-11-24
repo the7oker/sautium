@@ -40,6 +40,7 @@ same way, and the lane prepares it in the same order.
 
 import logging
 import threading
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from db_pool import db_query
@@ -116,10 +117,27 @@ _COPIES_SQL = f"""
 # second definition of "here" in SQL: an album's page and its tiles say what
 # the database knows.
 _unopened: frozenset = frozenset()
+# A look in progress, on its own thread: what it has observed so far, read by
+# that thread alone until the look ends and its observation replaces the
+# last one in one step (PlaybackManager._first_opens)
+_look = threading.local()
 
 
 def unopened() -> frozenset:
-    return _unopened
+    """The files no way in may name: on a thread whose look is in progress,
+    that look's own so far; on every other, the latest finished look's."""
+    return getattr(_look, "paths", _unopened)
+
+
+@contextmanager
+def looking(paths: set):
+    """A look in progress on this thread: its reads of the slot it looks at
+    see `paths` — what it has found missing so far — and nobody else's do."""
+    _look.paths = paths
+    try:
+        yield
+    finally:
+        del _look.paths
 
 
 def observe(paths) -> bool:
@@ -171,13 +189,13 @@ def _stream_play(item, fill_streams: Callable[[], bool] = _fill_streams) -> dict
 
     THE one place a slot becomes a stream by a read of its way in, so the
     one place that asks who queued it: a slot an automatic fill queued as
-    the owner's own copy (`whole`, its origin a file or an HQPlayer's) is
+    the owner's own copy (`own_fill`, whatever its origin is by now) is
     no stream for want of that copy unless radio may stream
     (`fill_streams`: his switch) — and then whole or not at all, the lane's
     rule for every `whole` slot. Otherwise it is a gap of its slot — not
     here, said on its row, walked past — until a read finds its copy."""
     play = item.play or {}
-    if item.whole and item.source.get("kind") != "track" and not fill_streams():
+    if item.own_fill and not fill_streams():
         return {"kind": "unplayable", "reason": REASONS["not_here"], "code": "not_here",
                 "lane": True}
     if play.get("code") in ("off", "not_here"):
@@ -253,7 +271,7 @@ def native_plays(items: list, output_id: Optional[str],
     owned = [it for it in items if by_copies(it)]
     by_track: dict = {}
     track_of: dict = {}             # a slot's own file -> the track it belongs to now
-    unseen = _unopened              # files the latest look did not find (observe)
+    unseen = unopened()             # files the latest look did not find (observe)
     if owned:
         mids = sorted({it.media_file_id for it in owned
                        if it.source.get("kind") == "file" and it.media_file_id is not None})

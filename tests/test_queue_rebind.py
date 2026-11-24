@@ -327,8 +327,8 @@ def test_the_listener_rebinds_on_the_delete(conn, dsn, mgr, monkeypatch):
     passes = []
     rebind = mgr.rebind_files
 
-    def counted():
-        rebind()
+    def counted(*words):
+        rebind(*words)
         passes.append(mgr.queue.item_at(1).media_file_id)
     mgr.rebind_files = counted
     with conn.cursor() as cur:

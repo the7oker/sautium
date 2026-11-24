@@ -409,6 +409,8 @@ def test_radio_appends_its_batch_whole_and_takes_the_switch_at_each_batch(node):
     assert len(mgr.queue) == 10
     assert sum(1 for it in mgr.queue.snapshot() if it.source["kind"] == "track") == 2
     assert all(it.whole for it in mgr.queue.snapshot())     # every slot of a fill says so
+    # ...and which it is: his own copy, or a stream his switch allowed
+    assert all(it.own_fill == (it.source["kind"] == "file") for it in mgr.queue.snapshot())
     _switch(node, False)
     player._radio_played.clear()
     player._radio_fill("seed", gen)
@@ -657,6 +659,31 @@ def test_with_radios_switch_on_a_stations_file_that_is_not_here_streams_whole_or
     mgr.reach_changed()
     assert _wait(lambda: items[3].opener().get("code") == "excerpt_only")
     assert _wait(lambda: all(it.opener()["kind"] == "proxy" for it in items[:3]))
+    assert node["clip"].downloads == []
+    mgr.set_radio_mode(False)
+
+
+def test_a_fills_own_slot_whose_file_left_the_library_is_still_no_stream_behind_his_back(
+        node, monkeypatch):
+    """A station's own file leaves the library with no other copy, the track
+    kept: the re-bind makes the slot the track itself — and it is still the
+    slot a fill queued as his own copy (QueueItem.own_fill, whatever its
+    origin became, kept by a persisted queue too): no stream with his
+    switch off, no provider asked; with it on, whole."""
+    from dataclasses import asdict
+    from playback.queue import QueueItem
+    mgr, cur = node["mgr"], node["cur"]
+    items = _station(node, monkeypatch)
+    node["full"].has.update(it.track_id for it in items)
+    cur.execute("DELETE FROM media_files WHERE id = %s", (items[0].media_file_id,))
+    mgr.rebind_files()
+    assert items[0].source == {"kind": "track"} and items[0].own_fill
+    assert items[0].play["code"] == "not_here"
+    assert _wait(_no_resolve_runs) and node["full"].resolved == node["demo"].resolved == []
+    assert QueueItem(**asdict(items[0])).own_fill           # as a persisted queue restores it
+    _switch(node, True)
+    mgr.reach_changed()
+    assert _wait(lambda: items[0].opener()["kind"] == "proxy")
     assert node["clip"].downloads == []
     mgr.set_radio_mode(False)
 
