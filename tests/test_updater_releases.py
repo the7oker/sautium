@@ -879,14 +879,17 @@ def test_the_release_a_clones_own_list_no_longer_verifies_is_up_to_date(world):
 
 
 def test_a_first_install_runs_as_the_bootstraps_run_it(world):
+    # The installer's payload is the project's own tree, and it takes no release under the version that tree states
+    # (install_release's min_version): the release is tagged at that version, whatever it is now.
+    name = "v" + ".".join(map(str, updater.installer_version()))
     tip = world.commit("v2\n")
-    world.tag("v0.2.0", tip)
+    world.tag(name, tip)
     app, signers = _fresh(world, "app")
     command = [sys.executable, "-B", "-m", "desktop.updater", "install-release", str(app), str(signers)]
     result = subprocess.run(command, cwd=str(get_project_root()), capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert git(app, "rev-parse", "HEAD") == tip
-    git(world.seed, "push", "-q", "origin", ":refs/tags/v0.2.0")
+    git(world.seed, "push", "-q", "origin", f":refs/tags/{name}")
     again = subprocess.run(command, cwd=str(get_project_root()), capture_output=True, text=True)
     assert again.returncode == 3, again.stdout + again.stderr
 
