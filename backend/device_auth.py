@@ -366,6 +366,58 @@ def _another_identity(pubkey: str) -> bool:
         return not cur.fetchone()[0]
 
 
+def _holds_identity(pubkey: Optional[str] = None) -> bool:
+    """Whether this node's database names an identity as its own — `pubkey`,
+    when given (lower-case hex) — by the record _another_identity reads: the
+    signing key of record, else the last P2P run's key, else the seals."""
+    from db_pool import db_query_one
+    from desktop.node_identity import OWN_SEALS_SQL
+    if not db_query_one(OWN_SEALS_SQL)["found"]:
+        return False
+    return pubkey is None or not _another_identity(pubkey)
+
+
+def _may_take_name(username: str, pubkey: Optional[str] = None) -> bool:
+    """Whether an account may be made here under `username` (B-132): any name
+    the reservation does not hold; a reserved one only by Support's own key,
+    or by the identity this node's database already names (a holder bringing
+    its key back). Asked before the derivation (`pubkey` None) where the key
+    alone could decide — a node meant to be the master
+    (MASTER-FAILCLOSED's flag) or one whose records name an identity — so any
+    other refusal costs no Argon2id; asked again with the key it derived."""
+    import master_node
+    from config import settings
+    from desktop.node_identity import is_reserved_username
+    if not is_reserved_username(username):
+        return True
+    if pubkey is None:
+        return settings.sautium_master or _holds_identity()
+    return pubkey == master_node.MASTER_PUBKEY_HEX.lower() or _holds_identity(pubkey)
+
+
+def reserved_name_refusal() -> Optional[str]:
+    """At start, after the migrations and before the key is recorded: the
+    words a node refuses to start with when it is about to make its account
+    from P2P_USERNAME under the reserved nickname with a key that is not
+    Support's — None otherwise. Only a start that MAKES the account, its
+    database naming no identity yet (B-132, the design session's narrowing):
+    a node made by its .env before the reservation keeps starting, with its
+    key or after a new P2P_PASSWORD (a holder's rotation keeps the name)."""
+    import master_node
+    from config import settings
+    from desktop.node_identity import is_reserved_username
+    if not settings.p2p_username or not is_reserved_username(settings.p2p_username):
+        return None
+    d = _identity_dir()
+    if d is not None and (d / "node_ed25519.key").exists():
+        return None                       # the folder's key is the account, not the env's
+    pubkey = _expected_pubkey()
+    if pubkey is None or pubkey == master_node.MASTER_PUBKEY_HEX.lower() or _holds_identity():
+        return None
+    return (f"P2P_USERNAME names the reserved nickname {settings.p2p_username}, and this node's "
+            "key is not Support's — the node does not start; choose another nickname in .env")
+
+
 def _code(groups: int) -> str:
     return "-".join("".join(secrets.choice(_PIN_ALPHABET) for _ in range(PIN_GROUP_LEN))
                     for _ in range(groups))
@@ -597,11 +649,15 @@ def _write_identity(d, username: str, password: str, new_identity: bool = False)
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    from desktop.node_identity import place_key, pubkey_on_disk
+    from desktop.node_identity import RESERVED_REFUSAL, place_key, pubkey_on_disk
     from p2p_identity import derive_identity, derive_private_key
 
+    if not _may_take_name(username):
+        raise ValueError(RESERVED_REFUSAL)
     info = derive_identity(username, password)          # validates the name
     pubkey = info["public_key_hex"]
+    if not _may_take_name(username, pubkey):
+        raise ValueError(RESERVED_REFUSAL)
     if not new_identity and _another_identity(pubkey):
         raise AnotherIdentity()
     # Said, not left to account_anonymous's reading of the name's shape: the

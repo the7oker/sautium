@@ -4,9 +4,9 @@
 // the Worker code actually does (test_birth_cert.py, test_worker_limits.py).
 //
 // usage: node worker_harness.mjs <authority_seed_hex> <email_pepper> [--scenario NAME] [--armed]
-//                                [--owed-timeout MS]
+//                                [--owed-timeout MS] [--worker PATH] [--previous-master-seed HEX]
 //        node worker_harness.mjs <authority_seed_hex> <email_pepper> --serve [--stamp-brake N]
-//                                [--master-seed HEX]
+//                                [--master-seed HEX] [--mail-per-sender N]
 // Without --serve: runs one scenario (default: contract) and prints one JSON
 // object on stdout; --armed runs it with the stamp budget armed, as a refusal
 // (shipped shadow). With --serve: answers HTTP on 127.0.0.1 (a free port) with
@@ -18,6 +18,8 @@
 // requests reached the Worker, and GET /__harness/mails the mails it sent.
 // --master-seed makes the test's master key the Worker's MASTER_PUBKEY (a
 // test that drains the master's mailbox signs as it); otherwise a fresh one.
+// --mail-per-sender sets the mailbox's per-sender day (3 otherwise, so a
+// scenario can reach it).
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
@@ -36,8 +38,12 @@ const stampBrake = brakeAt >= 0 ? Number(harnessArgs[brakeAt + 1]) : Infinity;
 const armed = harnessArgs.includes("--armed");
 const owedTimeoutAt = harnessArgs.indexOf("--owed-timeout");
 const masterSeedAt = harnessArgs.indexOf("--master-seed");
+const previousMasterAt = harnessArgs.indexOf("--previous-master-seed");
+const perSenderAt = harnessArgs.indexOf("--mail-per-sender");
 const here = dirname(fileURLToPath(import.meta.url));
-const workerPath = resolve(here, "../../worker/verify.js");
+// --worker names another verify.js to drive: an older release's, for a rollout's middle state.
+const workerAt = harnessArgs.indexOf("--worker");
+const workerPath = workerAt >= 0 ? resolve(harnessArgs[workerAt + 1]) : resolve(here, "../../worker/verify.js");
 
 const hex = (u8) => Array.from(u8).map((b) => b.toString(16).padStart(2, "0")).join("");
 const unhex = (h) => new Uint8Array(h.match(/../g).map((x) => parseInt(x, 16)));
@@ -77,8 +83,17 @@ let swapped = src.replace(
 if (swapped === src) throw new Error("TRUSTED_AUTHORITIES pattern not found");
 const swapped2 = swapped.replace(/const MASTER_PUBKEY = "[0-9a-f]{64}";/, `const MASTER_PUBKEY = "${master.pubHex}";`);
 if (swapped2 === swapped) throw new Error("MASTER_PUBKEY pattern not found");
-swapped = swapped2.replace("const MAIL_PER_SENDER_DAY = 30;", "const MAIL_PER_SENDER_DAY = 3;");
-if (swapped === swapped2) throw new Error("MAIL_PER_SENDER_DAY pattern not found");
+if (!swapped2.includes("const MAIL_PER_SENDER_DAY = 30;")) throw new Error("MAIL_PER_SENDER_DAY pattern not found");
+swapped = swapped2.replace("const MAIL_PER_SENDER_DAY = 30;",
+                           `const MAIL_PER_SENDER_DAY = ${perSenderAt >= 0 ? Number(harnessArgs[perSenderAt + 1]) : 3};`);
+// A planned rotation's Worker: the previous master key's vouchers count too.
+const previousMaster = previousMasterAt >= 0 ? await keyFromSeed(harnessArgs[previousMasterAt + 1]) : await newKey();
+if (previousMasterAt >= 0) {
+  const before = swapped;
+  swapped = before.replace("const MASTER_VOUCHER_KEYS = [MASTER_PUBKEY];",
+                           `const MASTER_VOUCHER_KEYS = [MASTER_PUBKEY, "${previousMaster.pubHex}"];`);
+  if (swapped === before) throw new Error("MASTER_VOUCHER_KEYS pattern not found");
+}
 if (owedTimeoutAt >= 0) {
   // How long the birth instance waits on a handover the owners instance does
   // not answer, cut for the scenario that waits it out.
@@ -1811,6 +1826,96 @@ async function mailboxDrops() {
 }
 
 // -------------------------------------------------------------------------
+// names: the nickname Sautium is kept for Support (B-132)
+// -------------------------------------------------------------------------
+
+async function reservedNames() {
+  const out = {};
+  const speak = async (key, name, ip) => {
+    await issue(key, { ip });
+    const r = await sendCode(key, name, `${key.pubHex.slice(0, 8)}@example.org`, { ip });
+    return [r.status, r.body.error ?? null];
+  };
+  out.newKey = await speak(await newKey(), "Sautium", "198.51.100.140");
+  out.lookAlike = await speak(await newKey(), "SAUTlUM", "198.51.100.141");
+  out.lowerCase = await speak(await newKey(), "sautium", "198.51.100.142");
+  out.beside = await speak(await newKey(), "SautiumFan", "198.51.100.143");
+  out.master = await speak(master, "Sautium", "198.51.100.144");
+  // a key that spoke under the name before the reservation keeps it
+  const holder = await newKey();
+  const hmacKey = await subtle.importKey("raw", new TextEncoder().encode(emailPepper),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const token = hex(new Uint8Array(await subtle.sign("HMAC", hmacKey, new TextEncoder().encode("name:sautium"))));
+  limiterShard("names").db.prepare("INSERT INTO names (pubkey, name, seen) VALUES (?, ?, ?)")
+    .run(holder.pubHex, token, Date.now());
+  out.holder = await speak(holder, "sautium", "198.51.100.145");
+  return out;
+}
+
+// -------------------------------------------------------------------------
+// vouchers: the master's word on a drop (B-118)
+// -------------------------------------------------------------------------
+
+async function mailVoucher(key, pubHex, issuedAt, expiresAt) {
+  return { v: 1, pubkey: pubHex, issued_at: issuedAt, expires_at: expiresAt,
+           sig: await sign(key, `sautium-mail-voucher-v1:${pubHex}:${issuedAt}:${expiresAt}`) };
+}
+
+async function mailVouchers() {
+  const out = {};
+  let n = 0;
+  const drop = async (sender, voucher, ip = "198.51.100.150") => {
+    n += 1;
+    const encrypted = Buffer.from(`box:v${n}`).toString("base64");
+    const uuid = `00000000-0000-4000-8000-${String(1000 + n).padStart(12, "0")}`;
+    const timestamp = "2026-11-24T12:00:00Z";
+    const body = {
+      to: master.pubHex, from_public_key: sender.pubHex, encrypted, timestamp, message_uuid: uuid,
+      signature: await sign(sender, `mailbox:v1:${master.pubHex}:${uuid}:${timestamp}:${await sha256Hex(encrypted)}`),
+    };
+    if (voucher !== undefined) body.voucher = voucher;
+    const r = await call("POST", "/mailbox", body, { ip });
+    return [r.status, r.body.error ?? r.body.voucher ?? (r.body.stored ? "stored" : null)];
+  };
+  const unvouched = () => countIn(mailDb, "mailbox:unvouched:all:");
+  const now = Math.floor(Date.now() / 1000);
+  const day = 86400;
+  const a = await newKey(), b = await newKey(), other = await newKey();
+  for (const k of [a, b]) await issue(k, { ip: "198.51.100.150" });
+  const valid = await mailVoucher(master, a.pubHex, now, now + 60 * day);
+  out.valid = await drop(a, valid);
+  out.unvouchedAfterValid = unvouched();
+  out.expired = await drop(a, await mailVoucher(master, a.pubHex, now - 61 * day, now - day));
+  out.unvouchedAfterExpired = unvouched();
+  out.none = await drop(b);
+  out.unvouchedAfterNone = unvouched();
+  out.forged = await drop(a, await mailVoucher(other, a.pubHex, now, now + 60 * day));
+  out.anotherKeys = await drop(b, valid);
+  out.tooLong = await drop(a, await mailVoucher(master, a.pubHex, now, now + 91 * day));
+  out.future = await drop(a, await mailVoucher(master, a.pubHex, now + 600, now + 60 * day));
+  out.malformed = await drop(a, { v: 2 });
+  out.previousMaster = await drop(a, await mailVoucher(previousMaster, a.pubHex, now, now + 60 * day));
+  // the unvouched share's day in all: the vouched still get in
+  const rows = () => mailDb.prepare("SELECT count(*) AS c FROM mail").get().c;
+  presetIn(mailDb, "mailbox:unvouched:all:", 250);
+  const before = rows();
+  out.shareFull = await drop(b, undefined, "198.51.100.151");
+  out.shareFullWrote = rows() !== before;
+  out.vouchedBesideIt = await drop(b, await mailVoucher(master, b.pubHex, now, now + 60 * day), "198.51.100.151");
+  presetIn(mailDb, "mailbox:unvouched:all:", 0);
+  // an address's unvouched drops: one left there, then it is full for them alone
+  const c = await newKey(), d = await newKey();
+  for (const k of [c, d]) await issue(k, { ip: "198.51.100.152" });
+  await drop(c, undefined, "198.51.100.152");
+  const [addrKey] = keysIn(mailDb, "mailbox:unvouched:addr:").filter((k) => countIn(mailDb, k) === 1);
+  if (addrKey) presetIn(mailDb, addrKey, 10);                 // none on a Worker without the share
+  out.addressShareFull = await drop(d, undefined, "198.51.100.152");
+  out.vouchedFromThatAddress = await drop(d, await mailVoucher(master, d.pubHex, now, now + 60 * day), "198.51.100.152");
+  out.stats = (await call("GET", "/issuance-stats")).body.mailbox ?? null;
+  return out;
+}
+
+// -------------------------------------------------------------------------
 // armed: the stamp budget as a refusal (--armed)
 // -------------------------------------------------------------------------
 
@@ -2130,6 +2235,7 @@ const scenarios = {
   names: nameRetention, mailbox: mailboxFull, shards: shardFailure, history: issuanceHistory,
   drops: mailboxDrops, armed: armedStamps, vectors: inviteVectors, owners: inviteOwners,
   reserve: reserveShare, smallorder: smallOrder, told: toldOnce, owed: owedClaims, owedhang: owedHang,
+  reserved: reservedNames, vouchers: mailVouchers,
 };
 if (serveMode) {
   const { createServer } = await import("node:http");

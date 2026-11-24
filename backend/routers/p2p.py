@@ -342,7 +342,9 @@ _FRIENDS_SELECT = f"""
            COALESCE(r.rights, '{{}}') AS rights_granted,
            COALESCE(g.rights, '{{}}') AS grant_rights,
            EXISTS (SELECT 1 FROM friend_grants fg
-                   WHERE fg.friend_id = f.id) AS has_grant
+                   WHERE fg.friend_id = f.id) AS has_grant,
+           upper(encode(f.key_fingerprint, 'hex')) AS key_fingerprint,
+           f.bound_identity
     FROM friends f
     LEFT JOIN (
         SELECT friend_id, COUNT(*) AS unread
@@ -363,28 +365,52 @@ _FRIENDS_SELECT = f"""
 """
 
 
-def _friend_row_out(row: dict) -> dict:
-    """A friend row as the client renders it. `reach`, on the Support
-    contact's row alone: this node can deliver to Support or deposit for it
-    (its Worker mailbox, B-92) — the row and the chat header say what becomes
-    of a message, never a presence: a person reads "offline" as "nobody will
-    get this" (PI-NODE-2B Q21). It takes P2P on and a certificate the Worker
-    issued (it takes mail from no other key); a `pending:` Support contact
-    is not resolved yet, and what is written to it waits on this node.
+def _friend_row_out(row: dict, own_key: Optional[str]) -> dict:
+    """A friend row as the client renders it.
+
+    `chat_key`: what the thread is reached by — a resolved friend's key's
+    first 16 hex; the Support contact's while it is still `pending:` too,
+    the pinned key its fingerprint binds (B-116: what is written there waits
+    on this node until the master's first handshake); no other stub has one.
+
+    On the Support contact's row alone, `support_wait` — what a message waits
+    for: `handshake` (the master never answered this node yet), `key` (it has
+    not accepted the key this node signs with now: a rotation while it was
+    away), None — and `reach`: this node can deliver to Support or deposit
+    for it (its Worker mailbox, B-92). The row and the chat header say what
+    becomes of a message, never a presence: a person reads "offline" as
+    "nobody will get this" (PI-NODE-2B Q21). `reach` takes no wait, P2P on
+    and a certificate the Worker issued (it takes mail from no other key).
     Accepted gaps: on a launcher-mode backend the P2P switch read is the
     backend's, not whether the launcher's P2P runs; and a deposit the
     mailbox refused (full, a cap) leaves this line while that bubble says
     "Not sent yet"."""
     import master_node
+    from desktop.p2p import chat_wire
     from p2p_identity import served_certificate
     for k in ("added_at", "last_seen", "last_activity_at"):
         if row.get(k):
             row[k] = row[k].isoformat()
-    if "public_key_hex" in row:
-        if row.get("source") == "master":
-            row["reach"] = bool(row["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
-                                and settings.p2p_enabled
-                                and served_certificate(settings) is not None)
+    fingerprint, bound = row.pop("key_fingerprint"), row.pop("bound_identity")
+    key = row["public_key_hex"]
+    support = row.get("source") == "master"
+    if not key.startswith("pending:"):
+        row["chat_key"] = key[:16].lower()
+    elif support and fingerprint and chat_wire.binds(fingerprint, master_node.MASTER_PUBKEY_HEX):
+        row["chat_key"] = master_node.MASTER_PUBKEY_HEX[:16].lower()
+    else:
+        row["chat_key"] = ""
+    if support:
+        if key.startswith("pending:"):
+            row["support_wait"] = "handshake"
+        elif own_key and not chat_wire.accepts_current_key(bound, own_key):
+            row["support_wait"] = "key"
+        else:
+            row["support_wait"] = None
+        row["reach"] = bool(row["support_wait"] is None
+                            and key == master_node.MASTER_PUBKEY_HEX
+                            and settings.p2p_enabled
+                            and served_certificate(settings) is not None)
     return row
 
 
@@ -454,9 +480,11 @@ async def list_friends(cursor: str = "", limit: int = 50,
         "SELECT count(*) AS c FROM friends f WHERE TRUE" + q_clause,
         q_params)["c"]
 
+    identity = _get_identity()
+    own_key = identity["public_key_hex"] if identity else None
     return {
-        "pinned": [_friend_row_out(r) for r in pinned],
-        "items": [_friend_row_out(r) for r in items],
+        "pinned": [_friend_row_out(r, own_key) for r in pinned],
+        "items": [_friend_row_out(r, own_key) for r in items],
         "next_cursor": next_cursor,
         "total": total,
     }

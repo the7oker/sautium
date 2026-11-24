@@ -31,7 +31,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +50,22 @@ def deposit_signature(sign: Signer, master_pubkey: str, message_uuid: str,
     return sign(message.encode("utf-8")).hex()
 
 
+class Deposit(NamedTuple):
+    """What the mailbox made of one drop: `kept` with the Worker's answer
+    ({stored, id} | {duplicate}); else its `refusal` (the error it named),
+    or neither when it did not answer — the message then stays in the
+    outbox, and the client says which (its delivery path's state)."""
+    kept: bool
+    answer: Optional[dict]
+    refusal: Optional[str]
+
+
 async def deposit(session, *, master_pubkey: str, sender_pubkey: str, sign: Signer,
                   encrypted: str, timestamp_iso: str, message_uuid: str,
-                  worker_url: str = WORKER_URL) -> Optional[dict]:
-    """Park one chat payload for the master. Returns the Worker's answer
-    ({stored, id} | {duplicate}) or None when the mailbox did not take it —
-    the message then stays in the outbox for the direct path, as before."""
+                  voucher: Optional[dict] = None, worker_url: str = WORKER_URL) -> Deposit:
+    """Park one chat payload for the master, with the master's voucher for
+    the sender when it holds one (SUPPORT-FIRST §2: the mailbox's main
+    share; without, a small one). An older Worker ignores the field."""
     payload = {
         "to": master_pubkey.lower(),
         "from_public_key": sender_pubkey.lower(),
@@ -64,16 +74,19 @@ async def deposit(session, *, master_pubkey: str, sender_pubkey: str, sign: Sign
         "message_uuid": message_uuid,
         "signature": deposit_signature(sign, master_pubkey, message_uuid, timestamp_iso, encrypted),
     }
+    if voucher:
+        payload["voucher"] = voucher
     try:
         async with session.post(f"{worker_url}/mailbox", json=payload) as resp:
             body = await resp.json(content_type=None)
             if resp.status == 200:
-                return body
-            logger.warning("mailbox refused %s: %s %s", message_uuid[:8], resp.status,
-                           body.get("error") if isinstance(body, dict) else body)
+                return Deposit(True, body, None)
+            error = body.get("error") if isinstance(body, dict) else None
+            logger.debug("mailbox refused %s: %s %s", message_uuid[:8], resp.status, body)
+            return Deposit(False, None, error if isinstance(error, str) else f"HTTP {resp.status}")
     except Exception as e:                       # network — the outbox keeps the message
         logger.debug("mailbox unreachable: %s", e)
-    return None
+    return Deposit(False, None, None)
 
 
 class MasterMailbox:

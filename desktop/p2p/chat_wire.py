@@ -13,6 +13,7 @@ and a time, so it cannot be replayed at another node or later than
 TS_WINDOW.
 """
 
+import base64
 import hashlib
 import json
 import logging
@@ -208,6 +209,79 @@ VOUCHER_TTL = 24 * 3600
 # verify.js MAIL_TTL_MS): a message kept there longer than this is gone, so
 # it is no longer "kept" and is deposited again (B-92).
 MAILBOX_TTL_S = 30 * 24 * 3600
+
+
+# The master's voucher for its Worker mailbox (SUPPORT-FIRST §2, B-118): it
+# says the master took mail from this key — a friend it accepts mail from,
+# whose identity its gate verified — and a drop that carries it gets the
+# mailbox's main share; one without, a small one (worker/verify.js, which
+# checks it against the master's key it pins). Issued at every accepted
+# handshake and every wake-stream connect; the expiry is how a ban acts:
+# the master stops renewing. The Worker refuses a life over the maximum.
+MAIL_VOUCHER_CONTEXT = "sautium-mail-voucher-v1"
+MAIL_VOUCHER_LIFE_S = 60 * 86400
+MAIL_VOUCHER_MAX_LIFE_S = 90 * 86400
+MAIL_VOUCHER_SKEW_S = 300
+# The wake stream's answer carries it as a header, never a frame: an older
+# client reads an unknown frame as a reason to pull history.
+MAIL_VOUCHER_HEADER = "X-Sautium-Mail-Voucher"
+
+
+def mail_voucher_payload(pubkey: str, issued_at: int, expires_at: int) -> str:
+    """What the master signs. Mirrored by worker/verify.js mailVoucherPayload."""
+    return f"{MAIL_VOUCHER_CONTEXT}:{pubkey.lower()}:{int(issued_at)}:{int(expires_at)}"
+
+
+def make_mail_voucher(sign, pubkey: str, now: Optional[float] = None) -> dict:
+    """The master's voucher for `pubkey`; `sign(bytes) -> bytes` is its key's."""
+    issued = int(time.time() if now is None else now)
+    expires = issued + MAIL_VOUCHER_LIFE_S
+    return {"v": 1, "pubkey": pubkey.lower(), "issued_at": issued, "expires_at": expires,
+            "sig": sign(mail_voucher_payload(pubkey, issued, expires).encode("utf-8")).hex()}
+
+
+def mail_voucher_holds(voucher, pubkey: str, master_pubkey: str, verify,
+                       now: Optional[float] = None) -> bool:
+    """Whether `voucher` is the master's for `pubkey`, alive now, and of a
+    life the Worker takes — the node's check before it keeps one.
+    `verify(pubkey_hex, message_bytes, signature_bytes) -> bool`."""
+    if not isinstance(voucher, dict) or voucher.get("v") != 1:
+        return False
+    issued, expires, sig = voucher.get("issued_at"), voucher.get("expires_at"), voucher.get("sig")
+    if (not isinstance(issued, int) or not isinstance(expires, int) or not isinstance(sig, str)
+            or str(voucher.get("pubkey", "")).lower() != pubkey.lower()):
+        return False
+    t = int(time.time() if now is None else now)
+    if issued > t + MAIL_VOUCHER_SKEW_S or expires <= t or expires - issued > MAIL_VOUCHER_MAX_LIFE_S:
+        return False
+    try:
+        signature = bytes.fromhex(sig)
+    except ValueError:
+        return False
+    return verify(master_pubkey, mail_voucher_payload(pubkey, issued, expires).encode("utf-8"),
+                  signature)
+
+
+def encode_mail_voucher(voucher: dict) -> str:
+    return base64.urlsafe_b64encode(json.dumps(voucher, separators=(",", ":")).encode()).decode()
+
+
+def decode_mail_voucher(text: str) -> Optional[dict]:
+    try:
+        voucher = json.loads(base64.urlsafe_b64decode(text.encode("ascii")))
+    except (ValueError, UnicodeError):
+        return None
+    return voucher if isinstance(voucher, dict) else None
+
+
+def accepts_current_key(bound_identity: Optional[str], own_pubkey: str) -> bool:
+    """Whether a friend's row says it accepted the key this node signs with
+    now (friends.bound_identity: set at the handshake and at a rotation
+    notice the friend took). NULL is a row resolved before the column
+    (delta 014), read as before. The master's mailbox takes a drop only
+    from a key the master accepted, and the Support row says what it waits
+    for by the same reading (SUPPORT-FIRST §1.3)."""
+    return bound_identity is None or bound_identity.lower() == own_pubkey.lower()
 
 
 def delivery_payload(message_uuid: str, ciphertext_sha256: str) -> str:

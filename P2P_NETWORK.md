@@ -323,6 +323,22 @@ takes, one parse on every node (`chat_wire.parse_share`, whitespace dropped):
 a code, short or long, `#<uuid>` (an invite link) or `#i-<token>` (a mailed
 invite).
 
+**The nickname Sautium is kept for Support** (since 2026-11-24, B-132): no new
+account takes it, nor a name that reads as it once case, `-`/`_` and the ASCII
+look-alikes (`0 1 l 5`) are folded (`node_identity.username_skeleton`; the
+shape rule admits no other script). The boundaries: the Web UI's setup (refused
+before any derivation, unless the key may decide — a node meant to be the
+master, or one whose records already name an identity), a rotation into the
+name, a start that makes its account from `P2P_USERNAME`, the launcher's
+account step, and the Worker's first binding of a key to a name (`admit`, 403
+`this name is reserved`). An account that holds it keeps it: signing in,
+restoring, a rotation that keeps the name, a node made by its `.env` before the
+reservation (with its key, or a new `P2P_PASSWORD`), a key the Worker already
+holds under it — the Worker binds a name to a key and knows no rotation, so a
+holder's new key is refused there (an accepted gap). Support is told by its
+pinned key, never by this name; what the name alone carries is the Worker's
+mails ("`<name>` invites you to Sautium").
+
 **Key rotation** (name or password change — SHIPPED 2026-09-10). Both are
 KDF inputs, so either change is a new key; the old one is kept:
 1. `node_identity.rotate_identity(dir, name, password, anonymous)` derives
@@ -478,6 +494,21 @@ node's) seeds it as a pending friend when it starts; its resolver (LAN → cache
 token handshake, stores the grant and pulls the welcome message through the
 ordinary history sync. Deleting the contact sets `p2p.master_removed` — the
 auto-add never resurrects it (re-adding the code by hand clears the flag).
+**Support is written to from a node's first minute** (since 2026-11-24,
+SUPPORT-FIRST: B-116): the seeded contact stays `pending:` until the
+master's first handshake, but it is already bound to the pin's fingerprint,
+so its thread opens by that key (the friends list's `chat_key`) and what is
+written there waits on the node, said as waiting for Support. Nothing goes
+to the master's Worker mailbox before that handshake — the outbox never
+pushes to a `pending:` row — and none while the master's row names another
+key of the node's than the one it signs with now (a rotation while it was
+away; a row that names none is read as before; `_mailbox_deposit`, the one
+place that decides a drop). The handshake is the
+event that sends what waits, at the address that answered, and the master's
+wake stream follows it at once. The delivery path's state per friend is
+logged at info once per change; while a message waits kept for Support the
+master's stream is dialled again at most a minute after a failure (else
+five), since the master's drain pings a stream that is not back yet.
 
 **A master fails closed** (since 2026-11-22, B-113 — on 2026-11-19 the
 master started with a password changed by accident in its `.env`, derived

@@ -16,6 +16,7 @@ that refuses (a sender without a certificate) leaves the row waiting; a
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -53,7 +54,8 @@ def worker():
     if shutil.which("node") is None:
         pytest.skip("node not installed")
     proc = subprocess.Popen(["node", str(HARNESS), os.urandom(32).hex(), "test-email-pepper", "--serve",
-                             "--master-seed", MASTER.key.private_bytes_raw().hex()],
+                             "--master-seed", MASTER.key.private_bytes_raw().hex(),
+                             "--mail-per-sender", "30"],                   # one sender, every test
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     info = json.loads(proc.stdout.readline())
     yield info["url"]
@@ -298,3 +300,37 @@ def test_a_pending_support_contact_gets_nothing_deposited(world):
         cur.execute("SELECT delivered, parked_at FROM p2p_messages")
         assert cur.fetchall() == [(False, None)]
     assert asyncio.run(w.drain()) == 0
+
+
+def test_a_drop_from_a_key_the_master_never_met_is_said_and_acked_and_its_sender_keeps_it(
+        world, caplog):
+    """SUPPORT-FIRST §1.4: a master that does not know the sender (it forgot
+    the node, or never met it) drops the drop — said at warning, acked, so the
+    Worker holds it no more — and nothing marks it delivered; the sender's
+    copy goes directly once the master knows its key."""
+    w = world
+    with w.master_db.cursor() as cur:
+        cur.execute("DELETE FROM friends WHERE public_key_hex = %s", (ME.pub,))
+    caplog.set_level(logging.INFO)
+
+    async def scene():
+        msg = await w.client._db(w.store.prepare_outgoing, w.support, "is anyone there?")
+        await w.client._push_to(w.support)
+        kept = _state(w.sender_db, msg["message_uuid"])
+        drained = await w.drain(), await w.drain()
+        after_drain = _state(w.sender_db, msg["message_uuid"])
+        with w.master_db.cursor() as cur:          # the master meets this node again
+            cur.execute("INSERT INTO friends (username, public_key_hex, invite_code, source) "
+                        "VALUES ('me', %s, %s, 'manual')", (ME.pub, ME.info["invite_code"]))
+        host, port = await asyncio.to_thread(w.master_up)
+        await w.client._push_master_outbox(await w.client.master_contact(), host, port)
+        return msg["message_uuid"], kept, drained, after_drain
+
+    msg_uuid, kept, drained, after_drain = asyncio.run(scene())
+    assert kept == (False, True)
+    assert drained == (1, 0)                                   # handed over once, acked
+    assert after_drain == (False, True)                        # the drain proved nothing to the sender
+    said = [r for r in caplog.records if "a key this master does not know" in r.getMessage()]
+    assert len(said) == 1 and said[0].levelno == logging.WARNING
+    assert _state(w.sender_db, msg_uuid) == (True, True)       # delivered directly, once known
+    assert _held(w.master_db, msg_uuid) == 1
