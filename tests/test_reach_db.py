@@ -847,6 +847,53 @@ def test_the_look_before_a_start_never_waits_behind_a_queue_edit_in_flight(node)
     assert _streams(items[0]) and items[1].play is None
 
 
+def test_a_landing_while_the_start_slot_is_read_ahead_is_kept(node, monkeypatch):
+    """The slot a start opens, read ahead of a queue edit in flight, is
+    computed and written under the queue's own lock, as every re-read is:
+    a stream that lands on it meanwhile lands after, on what was read —
+    never to be written over with the pending mark read before it."""
+    from playback import substitute
+    mgr, out = node["mgr"], node["out"]
+    (node["root"] / "NW" / "01.flac").unlink()
+    items = _queue(node, play=True)
+    assert _wait(lambda: (items[0].play or {}).get("token"))
+    landed = {"kind": "proxy", "token": items[0].play["token"], "lane": True}
+    substitute.observe({"/a/look/of/before"})       # the next look's observation is another one
+    armed, done = [], []
+    look, plays = mgr._first_opens, substitute.native_plays
+
+    def looked(*a, **kw):
+        moved = look(*a, **kw)
+        armed.append(True)
+        return moved
+
+    def read(its, output_id, endpoint_id):
+        ways = plays(its, output_id, endpoint_id)
+        if armed and not done:                      # the read ahead: a landing arrives now
+            done.append(True)
+            landing = threading.Thread(
+                target=lambda: mgr.queue.swap_play(items[0], items[0].play, landed))
+            landing.start()
+            landing.join(0.5)
+        return ways
+    monkeypatch.setattr(mgr, "_first_opens", looked)
+    monkeypatch.setattr(substitute, "native_plays", read)
+    held, release = threading.Event(), threading.Event()
+
+    def edit():                                     # a queue edit still committing
+        with mgr._mutate_lock:
+            held.set()
+            release.wait(10)
+    threading.Thread(target=edit, daemon=True).start()
+    assert held.wait(5)
+    try:
+        mgr.before_start(out)
+    finally:
+        release.set()
+    assert done and _wait(lambda: not [t for t in threading.enumerate() if t.name == "queue-reach"])
+    assert items[0].play == landed
+
+
 def test_a_re_read_during_a_look_never_hands_the_missing_file_back(node, monkeypatch):
     """A look's observation replaces the last one in one step, when the look
     ends: a re-read of the ways in on another thread while a look is under

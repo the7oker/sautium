@@ -1431,10 +1431,11 @@ class PlaybackManager:
             # the record's change uses. The slot this start opens is not
             # left to that race — on an output that opens what the slot's
             # way in says as it starts (HQPlayer reads every slot's again at
-            # each mirroring) it is read here, at once, under the queue's
-            # own lock, which orders it with every re-read: the output is
-            # asked for a start of what the look left, and hears of it with
-            # the rest (`ahead`)
+            # each mirroring) it is read here, at once, as every re-read of
+            # the ways in is — computed and written under the queue's own
+            # lock (CanonicalQueue.reread), so a landing is never written
+            # over: the output is asked for a start of what the look left,
+            # and hears of it with the rest (`ahead`)
             if self._mutate_lock.acquire(blocking=False):
                 try:
                     self.reach_changed()
@@ -1442,8 +1443,9 @@ class PlaybackManager:
                     self._mutate_lock.release()
             else:
                 start = items[0]
-                ahead = backend.id != "hqplayer" and substitute.by_copies(start) and (
-                    self.queue.set_play(start, substitute.native_plays([start], backend.id, None)[0]))
+                ahead = backend.id != "hqplayer" and bool(self.queue.reread(
+                    lambda it: it is start and substitute.by_copies(it),
+                    lambda its: substitute.native_plays(its, backend.id, None))[0])
                 threading.Thread(target=self.reach_followed, args=(ahead,), daemon=True,
                                  name="queue-reach").start()
         if not tapped:

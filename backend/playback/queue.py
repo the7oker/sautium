@@ -335,19 +335,6 @@ class CanonicalQueue:
                 self._version += 1
             return changed, owed
 
-    def set_play(self, item: "QueueItem", play: Optional[dict]) -> bool:
-        """This very item's way in is `play` now, whatever it was — the slot
-        a start is about to open, read after the look at its file
-        (PlaybackManager.before_start), under the lock every re-read of the
-        ways in takes. Whether it changed; the version moves when it did."""
-        with self._lock:
-            if item.play == play or not any(it is item for it in self._items):
-                return False
-            _set_play(item, play)
-            _file_lengths([item])
-            self._version += 1
-            return True
-
     def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
                   bump: bool = True, before=None) -> bool:
         """This very item's way in becomes `play` — if it still is `expected`
