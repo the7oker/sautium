@@ -101,6 +101,12 @@ class QueueItem:
     # file again when that opens (playback.substitute._stream_play). A fill
     # never spends a demo listen of his own album behind his back.
     whole: bool = False
+    # That fill queued it AS a copy of the owner's own (never as a stream
+    # his switch allowed): said here, apart from its origin — which a
+    # re-bind turns into the track itself when the file leaves the library —
+    # so the rule above holds through a re-bind, a persisted queue's restore
+    # and an output switch.
+    own_fill: bool = False
     # How the ACTIVE output opens this slot when that differs from `source`
     # (playback.substitute, recomputed on every output switch): a `file` /
     # `hqp` copy the new output opens itself, a `proxy` stream that stands
@@ -254,25 +260,41 @@ class CanonicalQueue:
             self._version += 1
             return sum(1 for p in plays if p and p.get("kind") == "pending")
 
-    def rebind(self, origins, plays) -> list[QueueItem]:
+    def rebind(self, origins, plays, retracked=(), follow=None) -> list[QueueItem]:
         """The file layer changed under the queue (PlaybackManager.
-        rebind_files). `origins` maps the items, in order, to what each must
-        change (rebind_origins): None where nothing does, else the fields to
-        set — none when only its way in named a gone file. Every item that
-        changed has its `play` re-read through `plays` (the active output's
-        native_plays), or cleared with no output attached: the attach
-        re-reads every slot. Items change in place, so the playing one stays
-        the object the backends and the tracker hold. Returns the items that
-        changed; the version is bumped when any did."""
+        rebind_files). `retracked` — the canon's own words, in order: (old,
+        new) track uuids, "this track is now that one" — moves every slot of
+        an old uuid to the new one first; then `origins` maps the items, in
+        order, to what each must change (rebind_origins): None where nothing
+        does, else the fields to set — none when only its way in named a
+        gone file. A slot's track uuid is set through `follow(item, uuid)`
+        (playback.tracker.follow: in one step with the listen in progress of
+        that item). Every item that changed has its `play` re-read through
+        `plays` (the active output's native_plays), or cleared with no
+        output attached: the attach re-reads every slot. Items change in
+        place, so the playing one stays the object the backends and the
+        tracker hold. Returns the items that changed; the version is bumped
+        when any did."""
+        follow = follow or (lambda it, track_id: setattr(it, "track_id", track_id))
         with self._lock:
             items = list(self._items)
             moved = []
+            for old, new in retracked:
+                for it in items:
+                    if it.track_id == old:
+                        follow(it, new)
+                        if not any(it is m for m in moved):
+                            moved.append(it)
             for it, change in zip(items, origins(items)):
                 if change is None:
                     continue
                 for name, value in change.items():
-                    setattr(it, name, value)
-                moved.append(it)
+                    if name == "track_id" and value is not None:
+                        follow(it, value)
+                    else:
+                        setattr(it, name, value)
+                if not any(it is m for m in moved):
+                    moved.append(it)
             if moved:
                 new_plays = plays(moved) if plays is not None else [None] * len(moved)
                 for it, play in zip(moved, new_plays):
@@ -306,6 +328,19 @@ class CanonicalQueue:
                 _file_lengths(changed)
                 self._version += 1
             return changed, owed
+
+    def set_play(self, item: "QueueItem", play: Optional[dict]) -> bool:
+        """This very item's way in is `play` now, whatever it was — the slot
+        a start is about to open, read after the look at its file
+        (PlaybackManager.before_start), under the lock every re-read of the
+        ways in takes. Whether it changed; the version moves when it did."""
+        with self._lock:
+            if item.play == play or not any(it is item for it in self._items):
+                return False
+            _set_play(item, play)
+            _file_lengths([item])
+            self._version += 1
+            return True
 
     def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
                   bump: bool = True, before=None) -> bool:
