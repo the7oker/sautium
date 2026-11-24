@@ -23,7 +23,7 @@ from typing import Optional
 
 from db_pool import db_query as _db_query
 from hqplayer_client import file_path_to_uri
-from sql_queries import best_rip_order
+from sql_queries import HERE, best_rip_order
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +91,9 @@ class QueueItem:
     # says. `source` is the enqueue-time origin, which no output switch
     # touches, so the way back to the output that opened it natively is
     # free; it changes only when the file it names leaves the library
-    # (CanonicalQueue.rebind).
+    # (CanonicalQueue.rebind). A file that does not open here now — its
+    # copy away, its folder not answering — is never a way in: the slot's
+    # `play` is a stream until it does (CanonicalQueue.reread).
     play: Optional[dict] = None
 
     def opener(self) -> dict:
@@ -257,6 +259,27 @@ class CanonicalQueue:
                 self._version += 1
             return moved
 
+    def reread(self, pick, plays) -> list[QueueItem]:
+        """What opens here changed under the queue (PlaybackManager.
+        reach_changed): the way in of every slot `pick` names is read again
+        through `plays` (the active output's native_plays), the origin
+        untouched. A slot whose way in is a file again keeps nothing the
+        stream told of its length (an excerpt's 30 s). Returns the items
+        whose way in changed; the version is bumped when any did."""
+        with self._lock:
+            chosen = [it for it in self._items if pick(it)]
+            if not chosen:
+                return []
+            changed = []
+            for it, play in zip(chosen, plays(chosen)):
+                if play != it.play:
+                    _set_play(it, play)
+                    changed.append(it)
+            if changed:
+                _file_lengths(changed)
+                self._version += 1
+            return changed
+
     def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
                   bump: bool = True, before=None) -> bool:
         """This very item's way in becomes `play` — if it still is `expected`
@@ -409,6 +432,25 @@ def _set_play(item: QueueItem, play: Optional[dict]) -> None:
         item.provider, item.excerpt = None, False
 
 
+def _file_lengths(items: list[QueueItem]) -> None:
+    """Each of `items` whose way in is a file of this node shows that file's
+    length — a stream's landing wrote its own (CanonicalQueue.
+    refresh_proxy_items). Caller holds the queue's lock."""
+    by_file = {}
+    for it in items:
+        src = it.opener()
+        if src.get("kind") == "file":
+            by_file.setdefault(src.get("media_file_id") or it.media_file_id, []).append(it)
+    by_file.pop(None, None)
+    if not by_file:
+        return
+    for r in _db_query("SELECT id, duration_seconds FROM media_files "
+                       "WHERE id = ANY(%(ids)s) AND duration_seconds IS NOT NULL",
+                       {"ids": list(by_file)}):
+        for it in by_file[r["id"]]:
+            it.duration_seconds = float(r["duration_seconds"])
+
+
 # -- item constructors -----------------------------------------------------
 
 _MEDIA_ITEM_SQL = """
@@ -466,8 +508,10 @@ def _item_from_media_row(r: dict) -> QueueItem:
 # (one on the album the slot was queued from first) and whether the track
 # itself is still in the catalogue. A file of a copy that is away
 # (album_variants.absent_since) counts as gone while a present copy of the
-# track is here: the slot moves to it; with none, it keeps its file, which
-# opens to a missing file as an unreachable root's do.
+# track is here: the slot moves to it — a copy that opens now first
+# (sql_queries.HERE); with none, it keeps its file as its origin, and its
+# way in is read as any slot's whose file does not open here now
+# (playback.substitute.native_plays: a stream).
 _AWAY_FILE = """EXISTS (SELECT 1 FROM media_files af
                      JOIN album_variants av ON av.id = af.album_variant_id
                      WHERE af.id = {m} AND av.absent_since IS NOT NULL)
@@ -498,7 +542,7 @@ _REBIND_SQL = f"""
         FROM media_files mf
         JOIN album_variants av ON av.id = mf.album_variant_id
         WHERE q.origin_gone AND mf.track_id = q.track_id
-        ORDER BY (av.absent_since IS NOT NULL), (av.album_id = q.album_id) DESC NULLS LAST,
+        ORDER BY (NOT {HERE}), (av.album_id = q.album_id) DESC NULLS LAST,
                  {best_rip_order('mf')}
         LIMIT 1
     ) c ON true
@@ -522,7 +566,9 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
              or (it.play or {}).get("media_file_id") is not None]
     if not bound:
         return out
+    from scanner import gone_prefixes
     rows = _db_query(_REBIND_SQL, {
+        "gone": gone_prefixes(),
         "mids": [it.media_file_id if it.source.get("kind") == "file" else None
                  for _, it in bound],
         "pmids": [(it.play or {}).get("media_file_id") for _, it in bound],

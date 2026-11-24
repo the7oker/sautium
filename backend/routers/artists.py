@@ -22,7 +22,7 @@ from discography import (ALBUM_SORT_EXPR, fetch_new_albums, phantom_sort,
 from genre_queries import artist_genres
 from release_groups import collapse_to_groups
 from playback.manager import active_hqp_endpoint
-from sql_queries import ARTIST_COMPOSER_ONLY, best_rip_order, owned_rank
+from sql_queries import ARTIST_COMPOSER_ONLY, HERE, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
 
@@ -623,6 +623,7 @@ def get_artist(
     # counts still names the hits, and they stream like any phantom row
     # (media_file_id NULL, the album as play context). Tier ordering and
     # the 5-row cap happen entirely in SQL.
+    from scanner import gone_prefixes
     hqp_id = active_hqp_endpoint()
     artist["popular_tracks"] = db_query(f"""
         WITH track_pop AS (
@@ -650,13 +651,13 @@ def get_artist(
             JOIN LATERAL (
                 SELECT f.id, f.location, f.album_variant_id, f.duration_seconds
                 FROM (
-                    SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                    SELECT mf.id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                            mf.album_variant_id, mf.duration_seconds,
                            mf.is_lossless, mf.sample_rate, mf.bit_depth
                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                     WHERE mf.track_id = t.id
                     UNION ALL
-                    SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                    SELECT hf.id, av.location, av.hqp_endpoint_id, true,
                            hf.album_variant_id, hf.duration_seconds,
                            hf.is_lossless, hf.sample_rate, hf.bit_depth
                     FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
@@ -708,7 +709,7 @@ def get_artist(
             local_plays DESC,
             title
         LIMIT 5
-    """, {"id": artist_id, "album_ids": album_ids, "hqp_id": hqp_id})
+    """, {"id": artist_id, "album_ids": album_ids, "hqp_id": hqp_id, "gone": gone_prefixes()})
     # The credit line names ListenBrainz only where its numbers actually
     # ranked something on this page (the Popularity sort counts too).
     artist["listenbrainz_used"] = (

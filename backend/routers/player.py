@@ -39,7 +39,7 @@ from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
 from serving import EventStream
-from sql_queries import ALBUM_FILES, TRACK_FILES, best_rip_order, owned_rank, rip_quality
+from sql_queries import ALBUM_FILES, HERE, TRACK_FILES, best_rip_order, owned_rank, rip_quality
 
 logger = logging.getLogger(__name__)
 
@@ -3015,6 +3015,13 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 # appended as its fetch lands, which let a later tap land in between.
 
 
+def _gone() -> list:
+    """The stored-path prefixes of the folders that do not answer now — the
+    `gone` every copy-picking query takes (sql_queries.HERE)."""
+    from scanner import gone_prefixes
+    return gone_prefixes()
+
+
 def _album_media_rows(album_id: str) -> list[dict]:
     """The album's files in play order for the ACTIVE output: one row per
     track, its best copy — the copy at the HQPlayer that is the output first
@@ -3040,7 +3047,7 @@ def _album_media_rows(album_id: str) -> list[dict]:
             ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
         ) picked
         ORDER BY disc_number NULLS FIRST, track_number
-    """, {"id": album_id, "hqp_id": hqp_id})
+    """, {"id": album_id, "hqp_id": hqp_id, "gone": _gone()})
 
 
 def _push_segment(segments: list, kind: str, items: list) -> None:
@@ -3074,7 +3081,7 @@ def _entity_segments(refs: list) -> tuple[list, list]:
                    OR f.hqp_endpoint_id = %(hqp_id)s
                 ORDER BY {owned_rank('f')}, {best_rip_order('f')}
                 LIMIT 1
-            """, {"tid": ref.id, "hqp_id": hqp_id})
+            """, {"tid": ref.id, "hqp_id": hqp_id, "gone": _gone()})
             if row:
                 kind, items = "owned", [row]
             else:
@@ -3245,13 +3252,13 @@ def _session_segments(session_id: str) -> tuple[list, int]:
         LEFT JOIN LATERAL (
             SELECT f.id, f.location
             FROM (
-                SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                SELECT mf.id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth,
                        (mf.id = st.media_file_id) AS own
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = st.track_id
                 UNION ALL
-                SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                SELECT hf.id, av.location, av.hqp_endpoint_id, true,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth, false
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
                 WHERE hf.track_id = st.track_id
@@ -3262,7 +3269,7 @@ def _session_segments(session_id: str) -> tuple[list, int]:
             LIMIT 1) f ON true
         WHERE st.session_id = %(id)s::uuid
         ORDER BY st.position
-    """, {"id": session_id, "hqp_id": hqp_id})
+    """, {"id": session_id, "hqp_id": hqp_id, "gone": _gone()})
 
     by_album: dict[Optional[str], list[str]] = {}
     for r in rows:

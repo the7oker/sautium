@@ -198,6 +198,23 @@ def folder_seen(unreachable: bool) -> None:
     _record(unreachable, _next_ticket(), wake=True)
 
 
+def gone_prefixes() -> List[str]:
+    """The stored-path prefixes (as media_files.file_path spells them) of
+    the folders this node knows unreachable now: none, or the music
+    folder's one — a list, so several folders are several entries. A file
+    under one opens nowhere here (sql_queries.HERE): it is no way in for a
+    queue slot, and its album says so.
+
+    The list is this process's recorded observation (_record), never a look
+    at the disk — a reader on the play path does not wait on a dead mount —
+    and never stored: it is made again at each start, by a look taken
+    before the first queue is read (PlaybackManager.init_from_settings),
+    and kept by the events that record the folder's state after it."""
+    with _folder:
+        gone = _folder_unreachable
+    return [settings.library_db_root() + "/"] if gone else []
+
+
 def check_folder() -> None:
     """A producer's look that nobody waits for (Library opened, a library
     file found missing): the worker looks and wakes the notices if the

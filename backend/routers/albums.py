@@ -393,7 +393,8 @@ def get_album(
             )
 
     hqp_id = active_hqp_endpoint()
-    params = {"id": album_id, "vid": variant_id, "hqp_id": hqp_id}
+    from scanner import gone_prefixes
+    params = {"id": album_id, "vid": variant_id, "hqp_id": hqp_id, "gone": gone_prefixes()}
 
     album = db_query_one("""
         SELECT al.id::text AS id,
