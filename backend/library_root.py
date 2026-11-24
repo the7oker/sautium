@@ -139,10 +139,14 @@ def apply() -> None:
     logger.info("music folder: %s (roots: %s)", path or "not chosen", ", ".join(roots()))
     mounts = _mounts()
     for root in roots():
-        if _gone(root, mounts):
+        if not _gone(root, mounts):
+            continue
+        if _held(root):
             logger.warning("music root %s is empty: its disk is not mounted, or the folder was removed; "
                            "its albums are away. Forget it on the machine: ./sautium roots --forget %s",
                            root, shlex.quote(root))
+        else:
+            logger.info("music root %s is empty: nothing is in it yet", root)
 
 
 def choose(path: str) -> str:
@@ -312,6 +316,19 @@ def _gone(root: str, mounts: Dict[str, bool]) -> bool:
         return False
 
 
+def _held(root: str) -> bool:
+    """Whether the library holds a copy from under `root`: what tells a root
+    that lost its music (its disk out, its folder removed) from a folder
+    named a moment ago with nothing in it yet. Under roots a copy's stored
+    folder is the path this process reads."""
+    row = db_query_one("""
+        SELECT EXISTS (SELECT 1 FROM album_variants
+                        WHERE location = 'local'
+                          AND (directory_path = %s OR starts_with(directory_path, %s))) AS held""",
+                       (root, root.rstrip("/") + "/"))
+    return bool(row["held"])
+
+
 def _disk_points(mounts: Dict[str, bool]) -> List[tuple]:
     """(path, root, name) of each disk a choice can start at: every one
     mounted in the disks' folder — by the automount or by a line of
@@ -381,12 +398,15 @@ def _count_audio(folder: str) -> Dict[str, Any]:
 
 def folders(under: Optional[str] = None) -> Dict[str, Any]:
     """The picker's listing. With no `under`: where a choice can start — each
-    root that is a folder of music itself (`empty` where its disk is out or
-    the folder was removed), each disk mounted beneath a root (the
-    automount's folder) or as a root, with its label and size — and, last,
-    each volume plugged in that nothing mounted (kind "unread": no path, a
-    row to read, never to open). With `under`: that folder's own folders,
-    its audio count, and the way back up."""
+    root that is a folder of music itself (`empty` where nothing is in it,
+    and then `held`: the library holds copies from it, so its disk is out or
+    the folder was removed — else it is new), each disk mounted beneath a
+    root (the disks' folder) or as a root, with its label and size — and,
+    last, each volume plugged in that nothing mounted (kind "unread": no
+    path, a row to read, never to open). With `under`: that folder's own
+    folders, its audio count, the way back up, and the disk it lies on
+    (`disk`: its path, label and size; None under a folder named at setup) —
+    what a page names the place by, where the path holds a UUID."""
     if not picks():
         raise Refused("This node's music folder is named where the node was set up")
     if under is None:
@@ -404,8 +424,9 @@ def folders(under: Optional[str] = None) -> Dict[str, Any]:
                               for path, of, name in points if of == root)
             else:
                 # a folder named at setup: itself the place
+                empty = _gone(root, mounts)
                 places.append({"path": root, "name": root, "kind": "folder", "label": None,
-                               "size_bytes": None, "empty": _gone(root, mounts)})
+                               "size_bytes": None, "empty": empty, "held": _held(root) if empty else None})
         # A volume nothing mounted is a place that cannot be opened: no path
         places.extend({"path": None, "name": volume["device"], "kind": "unread", "label": volume["label"],
                        "size_bytes": None, "format": volume["format"], "mounts": volume["mounts"],
@@ -420,10 +441,14 @@ def folders(under: Optional[str] = None) -> Dict[str, Any]:
         names = _subfolders(real)
     except OSError as e:
         raise Refused(f"That folder could not be read ({e.strerror or e})")
-    # Up from a root, or from a disk in the automount's folder, is the list of places
+    # Up from a root, or from a disk in the disks' folder, is the list of places
     top = real in roots() or (parent in roots() and _disks_folder(parent))
+    on = next(((path, root, name) for path, root, name in _disk_points(_mounts())
+               if real == path or real.startswith(path.rstrip("/") + "/")), None)
     return {"under": real,
             "parent": None if top else parent,
+            "disk": on and {"path": on[0], "name": on[2], "size_bytes": _size(on[0]),
+                            "label": _label(on[1], on[2]) if on[2] else _root_labels().get(on[0])},
             "folders": [{"name": name, "path": os.path.join(real, name)} for name in names],
             "chosen": settings.music_library_path or None,
             **_count_audio(real)}

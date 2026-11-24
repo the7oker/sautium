@@ -1288,10 +1288,13 @@ def unit_dir() -> Path:
     return Path(base) / "systemd" / "user"
 
 
-def install(root: Path = None, systemctl=None) -> int:
+def install(root: Path = None, systemctl=None, by_hand: bool = False) -> int:
     """The agent for this checkout, as the person: its folder, the channel's
     key, the requests folder, the starter, the units. Run again, it writes
-    the starter and the units again and keeps the key."""
+    the starter and the units again and keeps the key. `by_hand`: installed
+    by this file's own command, not by the console setup — which prints the
+    lingering step among its own root steps and starts the node next, so
+    neither is said to it a second time."""
     root = root or ROOT
     if os.geteuid() == 0:
         raise SystemExit("[host-agent] run install as the person who owns the checkout, not as root")
@@ -1341,12 +1344,13 @@ def install(root: Path = None, systemctl=None) -> int:
     ctl("enable", f"{UNIT}-boot.service")
     ctl("enable", "--now", f"{UNIT}.path")
     print(f"The host agent is installed for {root}.")
-    user = os.environ.get("USER") or str(os.getuid())
-    linger = _run(["loginctl", "show-user", user, "-p", "Linger", "--value"], cwd=root, check=False)
-    if linger.stdout.decode().strip() != "yes":
-        print("It runs while you are logged in. To keep it running with nobody logged in, the "
-              f"machine's administrator runs once:\n    sudo loginctl enable-linger {user}")
-    print("The node learns of the agent when it is made again: docker compose up -d")
+    if by_hand:
+        user = os.environ.get("USER") or str(os.getuid())
+        linger = _run(["loginctl", "show-user", user, "-p", "Linger", "--value"], cwd=root, check=False)
+        if linger.stdout.decode().strip() != "yes":
+            print("It runs while you are logged in. To keep it running with nobody logged in, the "
+                  f"machine's administrator runs once:\n    sudo loginctl enable-linger {user}")
+        print("The node learns of the agent when it is made again: docker compose up -d")
     return 0
 
 
@@ -1385,7 +1389,7 @@ def main(argv: List[str]) -> int:
     if args.command == "selftest":
         return selftest()
     if args.command == "install":
-        return install()
+        return install(by_hand=True)
     if args.command == "uninstall":
         return uninstall()
     return status()

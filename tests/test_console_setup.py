@@ -1912,6 +1912,24 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
         f"  mounted: {mounted} exfat ro,nosuid", f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
     (tmp_path / "plugged").mkdir()                   # installed, no disk plugged in: not a library gone
     assert f"Music root {tmp_path}/plugged: there  (plugged disks)" in setup.root_lines(roots, "", {})
+    # An empty root the node never read a copy under is a new folder, not a library that is away
+    # (PI-NODE-2C F2); one it holds copies from, and one the node said nothing of, may have lost its music
+    new = setup.root_lines([str(empty)], "", {}, held={str(empty): False})
+    assert new == [f"Music root {empty}: empty — nothing is in it yet"]
+    for held in ({str(empty): True}, {}, None):
+        assert "its disk is not mounted, or the folder was removed" in setup.root_lines(
+            [str(empty)], "", {}, held=held)[0], held
+    assert "is not mounted, or the folder was removed" in setup.root_lines(      # gone is never new
+        [str(gone)], "", {}, held={str(gone): False})[0]
+    # the node's answer is a stranger's: only a path with a true or a false is believed
+    monkeypatch.setattr(setup, "signed_get", lambda path: {"places": [
+        {"path": str(empty), "kind": "folder", "empty": True, "held": False},
+        {"path": str(there), "kind": "folder", "empty": False, "held": None},
+        {"path": None, "kind": "unread", "held": True}, "not a place", {"path": 7, "held": True}]})
+    assert setup.held_by_the_node() == {str(empty): False}
+    for answer in (None, [], {"places": "none"}, {"detail": "no"}):
+        monkeypatch.setattr(setup, "signed_get", lambda path, a=answer: a)
+        assert setup.held_by_the_node() is None
     # … and where the setup has a step for it, that is said
     assert setup.root_lines([str(mounted)], table, {}, [str(mounted)])[0].endswith(
         "when Sautium started (./sautium shows the step)")

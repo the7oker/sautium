@@ -777,13 +777,16 @@ def root_state(root: str, mount_points: List[str]) -> str:
 
 
 def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
-               stepped: Optional[List[str]] = None) -> List[str]:
+               stepped: Optional[List[str]] = None, held: Optional[Dict[str, bool]] = None) -> List[str]:
     """What `status` and `roots` say of each root: there, empty or gone, what
     is mounted on or under it, its label. A root that is itself a mount point
     is named as that — the node holds what was mounted there at its start —,
     and `stepped` are the roots the setup has a step for (the line of before
     2026-11-24, whose mount point is the root whether its disk is in or out;
-    a disk someone mounted by hand)."""
+    a disk someone mounted by hand). `held`: for each empty root, whether the
+    node's library holds copies from it (held_by_the_node) — one it never
+    read is a new folder, not a library that is away; where the node gave no
+    answer the root is said as one that may have lost its music."""
     mounted = mounts_under(roots, findmnt_rn)
     points = [mount_target(line) for line in mounted]
     lines = []
@@ -798,10 +801,24 @@ def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
         elif state == "there":
             label = f'  "{printable(labels[root])}"' if labels.get(root) else ""
             lines.append(f"Music root {root}: there{label}" + ("  (plugged disks)" if root == AUTOMOUNT_BASE else ""))
+        elif state == "empty" and (held or {}).get(root) is False:
+            lines.append(f"Music root {root}: empty — nothing is in it yet")
         else:
             lines.append(f"Music root {root}: {state} — its disk is not mounted, or the folder was removed. "
                          f"Its albums show as away. To forget it: ./sautium roots --forget {shlex.quote(root)}")
     return lines + ["  mounted: " + printable(line) for line in mounted]
+
+
+def held_by_the_node() -> Optional[Dict[str, bool]]:
+    """For each root the node lists as an empty folder: whether its library
+    holds copies from under it. The node's own answer (the folder sheet's
+    listing), read as a stranger's; None where it gave none."""
+    asked = signed_get("/api/settings/library/folders")
+    places = asked.get("places") if isinstance(asked, dict) else None
+    if not isinstance(places, list):
+        return None
+    return {p["path"]: p["held"] for p in places
+            if isinstance(p, dict) and isinstance(p.get("path"), str) and isinstance(p.get("held"), bool)}
 
 
 def chosen_roots(music: Optional[str], held: List[str], docker_root: Optional[str] = None) -> List[str]:
@@ -1950,7 +1967,7 @@ def say_roots() -> List[str]:
     systemd = systemd_version()
     stepped = [r for r in roots if r != AUTOMOUNT_BASE and (old_boot_mount(r) or disk_of(r, systemd))]
     for line in root_lines(roots, out(run(["findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"])), held_labels(override),
-                           stepped):
+                           stepped, held_by_the_node()):
         say(line)
     return roots
 

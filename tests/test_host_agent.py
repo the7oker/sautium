@@ -560,6 +560,28 @@ def test_install_makes_the_folders_the_key_the_starter_and_the_units(tmp_path, m
     assert ha.channel_key(root) == key
 
 
+def test_only_a_hand_install_is_told_of_lingering_and_of_making_the_node_again(tmp_path, monkeypatch, capsys):
+    """The console setup prints the lingering step among its own root steps
+    and starts the node next: said again by the agent's install, the step was
+    printed twice, with a line after it that was stale there (PI-NODE-2C F3)."""
+    root = tmp_path / "sautium"
+    root.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(ha, "_run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"no", b""))
+    assert ha.install(root, systemctl=lambda *args: None) == 0                 # as the setup calls it
+    assert capsys.readouterr().out == f"The host agent is installed for {root}.\n"
+    monkeypatch.setattr(ha, "install", lambda root=None, systemctl=None, by_hand=False: print(f"by hand: {by_hand}") or 0)
+    assert ha.main(["install"]) == 0 and capsys.readouterr().out == "by hand: True\n"
+    monkeypatch.undo()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(ha, "_run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"no", b""))
+    assert ha.install(root, systemctl=lambda *args: None, by_hand=True) == 0
+    said = capsys.readouterr().out
+    assert "    sudo loginctl enable-linger " in said and "docker compose up -d" in said
+
+
 def test_install_refuses_root_a_strange_path_and_a_requests_folder_docker_made(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr(os, "geteuid", lambda: 0)

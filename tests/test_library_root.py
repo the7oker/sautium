@@ -176,6 +176,11 @@ def test_a_folders_listing_is_its_real_folders_and_a_count_of_its_music(tree):
     assert jazz["parent"] == str(tree.music)
     disk = library_root.folders(str(tree.disks / "4A21-0000"))
     assert disk["parent"] is None and disk["audio_files"] == 1
+    # the disk a folder lies on, for a page to name the place by: the mount point's own name is a UUID
+    assert top["disk"] is None and jazz["disk"] is None
+    on = library_root.folders(str(tree.disks / "4A21-0000" / "Rock"))["disk"]
+    assert (on["path"], on["name"], on["label"]) == (str(tree.disks / "4A21-0000"), "4A21-0000", "Elements <b>")
+    assert on["size_bytes"] > 0 and disk["disk"] == on
     for refused in (str(tree.outside), str(tree.music / "Jazz" / "way-out"),
                     str(tree.music / "none"), str(tree.music / "Jazz" / "Album" / "01.flac")):
         with pytest.raises(library_root.Refused):
@@ -664,13 +669,43 @@ def test_only_a_folder_on_a_disk_mounted_read_only_can_be_pulled(tree, monkeypat
 
 # -- a root that is gone (§6.3) -------------------------------------------------------------------
 
-def test_a_root_that_is_an_empty_folder_and_no_disk_lists_as_empty(tree, monkeypatch):
+def _copy_under(cursor, folder) -> str:
+    """A copy the library holds from `folder`; the album's id, to remove it by."""
+    import uuid
+    album = str(uuid.uuid4())
+    cursor.execute("INSERT INTO albums (id, title) VALUES (%s, 'Held')", (album,))
+    cursor.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s)", (album, str(folder)))
+    return album
+
+
+def test_a_root_that_is_an_empty_folder_and_no_disk_lists_as_empty(tree, db, monkeypatch):
     gone = tree.top / "mnt" / "sautium-5678-EF01"
     gone.mkdir(parents=True)
     monkeypatch.setattr(settings, "sautium_library_roots", f"{tree.music}:{tree.disks}:{gone}")
     places = {p["path"]: p for p in library_root.folders()["places"]}
     assert places[str(gone)]["kind"] == "folder" and places[str(gone)]["empty"] is True
     assert places[str(tree.music)]["empty"] is False
+    # An empty folder the library never read a copy under is new, not lost (PI-NODE-2C F2): `held`
+    # tells them apart, and is asked only of an empty one
+    assert places[str(gone)]["held"] is False and places[str(tree.music)]["held"] is None
+    albums = [_copy_under(db, str(gone) + "-beside" + "/Album"), _copy_under(db, tree.music / "Jazz" / "Album")]
+    assert not library_root._held(str(gone))               # a folder whose name only begins like the root's
+    albums.append(_copy_under(db, gone / "Rock" / "Album"))
+    try:
+        assert library_root._held(str(gone)) and library_root._held(str(gone) + "/")
+        assert {p["path"]: p for p in library_root.folders()["places"]}[str(gone)]["held"] is True
+        # a copy at an HQPlayer under the same folder's name is not this node's file
+        db.execute("DELETE FROM albums WHERE id = %s", (albums.pop(),))
+        db.execute("INSERT INTO hqp_endpoints (name) VALUES ('box') RETURNING id")
+        endpoint = db.fetchone()[0]
+        album = _copy_under(db, tree.top / "elsewhere")
+        albums.append(album)
+        db.execute("UPDATE album_variants SET location = 'hqplayer', hqp_endpoint_id = %s, directory_path = %s "
+                   "WHERE album_id = %s", (endpoint, str(gone / "Rock" / "Album"), album))
+        assert not library_root._held(str(gone))
+    finally:
+        db.execute("DELETE FROM albums WHERE id = ANY(%s::uuid[])", (albums,))
+        db.execute("DELETE FROM hqp_endpoints WHERE name = 'box'")
     # its disk mounted: a disk, whatever it holds
     monkeypatch.setattr(library_root, "_mounts", lambda: {str(gone): True})
     assert library_root.folders()["places"][-1]["kind"] == "disk"
@@ -683,7 +718,17 @@ def test_the_start_says_which_root_is_gone_and_how_to_forget_it(tree, db, monkey
     gone = tree.top / "mnt" / "sautium-5678-EF01"
     gone.mkdir(parents=True)
     monkeypatch.setattr(settings, "sautium_library_roots", f"{tree.music}:{tree.disks}:{gone}")
+    caplog.set_level("INFO")
     library_root.apply()
-    said = [r.getMessage() for r in caplog.records if "is empty" in r.getMessage()]
-    assert said == [f"music root {gone} is empty: its disk is not mounted, or the folder was removed; "
-                    f"its albums are away. Forget it on the machine: ./sautium roots --forget {gone}"]
+    said = [(r.levelname, r.getMessage()) for r in caplog.records if "is empty" in r.getMessage()]
+    # a folder nothing was ever read under is new: no warning of a library away (PI-NODE-2C F2)
+    assert said == [("INFO", f"music root {gone} is empty: nothing is in it yet")]
+    caplog.clear()
+    album = _copy_under(db, gone / "Album")
+    try:
+        library_root.apply()
+    finally:
+        db.execute("DELETE FROM albums WHERE id = %s", (album,))
+    said = [(r.levelname, r.getMessage()) for r in caplog.records if "is empty" in r.getMessage()]
+    assert said == [("WARNING", f"music root {gone} is empty: its disk is not mounted, or the folder was removed; "
+                                f"its albums are away. Forget it on the machine: ./sautium roots --forget {gone}")]

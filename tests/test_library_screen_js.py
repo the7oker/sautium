@@ -161,6 +161,7 @@ const MUSIC_FOLDER_LINES = { pick: '', setup: 'Named where this node was set up.
 %(safe)s
 %(copy)s
 %(row)s
+%(crumb)s
 %(paint)s
 const sub = { textContent: '', hidden: true };
 const pathRow = pullable => ({ dataset: { musicFolder: 'pick', musicPullable: pullable ? '1' : '' },
@@ -170,6 +171,7 @@ const painted = (pullable, missing) => { paintMusicPathRow(pathRow(pullable), mi
 console.log(JSON.stringify({
   copies: %(volumes)s.map(unreadDiskCopy),
   rows: %(places)s.map(_folderPlaceRow),
+  crumbs: %(crumbs)s.map(c => _folderCrumb(c[0], c[1])),
   path: [painted(true, false), painted(false, false), painted(true, true)],
   safe: SAFE_TO_PULL,
 }));
@@ -180,12 +182,14 @@ SAFE = ("Sautium only reads this disk and writes nothing to it. You can unplug i
 READS = "Sautium reads FAT, exFAT, NTFS and ext4 disks."
 
 
-def _disks(volumes=(), places=()):
+def _disks(volumes=(), places=(), crumbs=()):
     start = SOURCE.index("\n  const SAFE_TO_PULL = ") + 1
     script = DISKS % {"safe": SOURCE[start:SOURCE.index(";\n", start) + 1],
                       "copy": _function("unreadDiskCopy(d)"), "row": _function("_folderPlaceRow(p)"),
+                      "crumb": _function("_folderCrumb(at, disk)"),
                       "paint": _function("paintMusicPathRow(row, missing)"),
-                      "volumes": json.dumps(list(volumes)), "places": json.dumps(list(places))}
+                      "volumes": json.dumps(list(volumes)), "places": json.dumps(list(places)),
+                      "crumbs": json.dumps(list(crumbs))}
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
@@ -241,7 +245,7 @@ def test_the_folder_sheets_rows_a_disk_to_open_with_its_line_and_a_volume_only_t
         {"path": "/srv/music", "name": "/srv/music", "kind": "disk", "label": None, "size_bytes": 9,
          "read_only": False},
         {"path": "/mnt/sautium-5678", "name": "/mnt/sautium-5678", "kind": "folder", "label": None,
-         "size_bytes": None, "empty": True},
+         "size_bytes": None, "empty": True, "held": True},
         {"path": "/home/pi/Music", "name": "/home/pi/Music", "kind": "folder", "label": None,
          "size_bytes": None, "empty": False},
         {"path": None, "name": "sda1", "kind": "unread", "label": "<i>Win</i>", "size_bytes": None,
@@ -252,13 +256,54 @@ def test_the_folder_sheets_rows_a_disk_to_open_with_its_line_and_a_volume_only_t
     assert 'data-path="/media/sautium/4A21"' in plugged and "Elements &lt;b&gt;" in plugged
     assert "— 512 B" in plugged and SAFE in plugged
     # a disk the machine mounted to write goes by its path, and is not said to be safe to pull
-    assert ">/srv/music " in written and SAFE not in written
+    assert ">/srv/music <" in written and "— 9 B" in written and SAFE not in written
     assert "Empty — its disk is not mounted, or the folder was removed." in gone
     assert "Empty" not in folder and SAFE not in folder and 'data-path="/home/pi/Music"' in folder
     # no path, no button: a row to read
     assert "data-path" not in unread and "<button" not in unread and "data-unread" in unread
     assert "&lt;i&gt;Win&lt;/i&gt;" in unread and "— NTFS, could not be read" in unread
     assert "<i>" not in unread
+
+
+def test_a_disk_with_no_label_is_named_by_what_it_is_and_its_uuid_is_nowhere():
+    """PI-NODE-2C F9: the mount point's name is the disk's UUID, which is
+    nothing to a person — in the list and in the line that says where the
+    sheet stands."""
+    disk = {"path": "/media/sautium/01DD7A027355D0B0", "name": "01DD7A027355D0B0", "kind": "disk", "label": None,
+            "size_bytes": 15, "read_only": True}
+    out = _disks(places=[disk, dict(disk, size_bytes=None), dict(disk, label="Elements")],
+                 crumbs=[["/media/sautium/01DD7A027355D0B0/Music/Jazz", dict(disk)],
+                         ["/media/sautium/01DD7A027355D0B0", dict(disk)],
+                         ["/media/sautium/4A21-0000/Music", {"path": "/media/sautium/4A21-0000", "name": "4A21-0000",
+                                                             "label": "Elements <b>"}],
+                         ["/mnt/sautium-5678/Music", {"path": "/mnt/sautium-5678", "name": None, "label": "Old line"}],
+                         ["/srv/music/Jazz", {"path": "/srv/music", "name": None, "label": None}],
+                         ["/home/pi/Music/Jazz", None]])
+    unnamed, sizeless, named = out["rows"]
+    assert ">USB disk · 15 B<" in unnamed and ">USB disk<" in sizeless
+    assert ">Elements <span" in named and "— 15 B" in named
+    for row in (unnamed, sizeless):
+        assert "01DD7A027355D0B0" not in row.replace('data-path="/media/sautium/01DD7A027355D0B0"', "")
+    assert out["crumbs"] == ["USB disk › Music › Jazz", "USB disk", "Elements <b> › Music", "Old line › Music",
+                             "/srv/music/Jazz", "/home/pi/Music/Jazz"]
+
+
+def test_an_empty_folder_the_library_never_read_is_new_not_lost():
+    """PI-NODE-2C F2: a folder named a moment ago with nothing in it was said
+    as a root whose disk is not mounted."""
+    folder = {"path": "/home/pi/New", "name": "/home/pi/New", "kind": "folder", "label": None, "size_bytes": None}
+    new, lost, full = _disks(places=[dict(folder, empty=True, held=False), dict(folder, empty=True, held=True),
+                                     dict(folder, empty=False, held=None)])["rows"]
+    assert "Empty — nothing is in it yet." in new and "not mounted" not in new
+    assert "Empty — its disk is not mounted, or the folder was removed." in lost
+    assert "Empty" not in full
+
+
+def test_the_sheets_foot_promises_only_what_the_sheet_shows():
+    """It said "can read every disk plugged into this machine" under a row
+    for a disk it could not read (PI-NODE-2C F13)."""
+    assert "Sautium reads the disks listed here and writes to none of them." in SOURCE
+    assert "can read every disk plugged into this machine" not in SOURCE
 
 
 def test_the_chosen_folders_row_says_it_can_be_pulled_while_it_is_on_a_plugged_disk():
