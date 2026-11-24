@@ -437,3 +437,54 @@ def test_a_sheet_that_goes_takes_its_slices_tracklist_with_it(cur, library, temp
     assert materialise() == [("Live (whole)", 1)]
     cur.execute("SELECT DISTINCT source::text FROM album_tracks")
     assert cur.fetchall() == [("tag",)]
+
+
+def _album_rows(cur):
+    cur.execute("""SELECT al.title, (SELECT count(*) FROM album_variants av WHERE av.album_id = al.id),
+                          ARRAY(SELECT at.source::text FROM album_tracks at WHERE at.album_id = al.id
+                                 ORDER BY at.position)
+                     FROM albums al ORDER BY 1""")
+    return cur.fetchall()
+
+
+def _materialise(cur):
+    import psycopg2.extras
+    import sign_audio
+    with cur.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+        sign_audio._materialize_owned_tracklists(c)
+
+
+def test_an_album_retagged_whole_follows_its_copy_once_its_tracklist_was_written(cur, library, template):
+    """A title fixed in all an album's files renames the album. The slots a
+    signing pass had written from those files' tags counted as a tracklist
+    the album held apart from its copy, so the old album stayed behind with
+    no file (PI-NODE-2D item 5: the shape a removal left, by a re-tag)."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2)]
+    _scan()
+    _materialise(cur)
+    assert _album_rows(cur) == [("LP", 1, ["tag", "tag"])]
+    for f in files:
+        _tag(f, album="LP (fixed)")
+    _scan()
+    assert _album_rows(cur) == [("LP (fixed)", 1, ["tag", "tag"])]
+
+
+def test_a_copy_retagged_out_of_an_album_musicbrainz_wrote_takes_its_own_slots_only(cur, library, template):
+    """The album MusicBrainz wrote a tracklist for stays as the phantom it
+    was; the slot the copy's tags added to it goes with the copy."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2, 3)]
+    _scan()
+    cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position)
+                   SELECT av.album_id, mf.track_id, 1, mf.track_number
+                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                    WHERE mf.track_number < 3""")
+    _materialise(cur)
+    assert _album_rows(cur) == [("LP", 1, ["mb", "mb", "tag"])]
+    for f in files:
+        _tag(f, album="LP (fixed)")
+    _scan()
+    assert _album_rows(cur) == [("LP", 0, ["mb", "mb"]), ("LP (fixed)", 1, [])]

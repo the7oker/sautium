@@ -1094,9 +1094,11 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
     the folder's shape did) move to the album of their new group, by the
     folder rule (_Albums.resolve). A copy all of whose files move to one
     group moves whole (_merge_album_variants), and an album left with no
-    other copy follows it (_update_album_uuid: sessions' album origins,
-    descriptions, genres and its seal with it) — so a title fixed in all an
-    album's files renames the album rather than leaving an empty one. A copy
+    other copy and no tracklist but the one its own files' tags wrote follows
+    it (_update_album_uuid: sessions' album origins, descriptions, genres,
+    those slots and its seal with it) — so a title fixed in all an album's
+    files renames the album rather than leaving an empty one; from an album
+    that stays, the slots the moved files' tags wrote go with them. A copy
     or an album left holding nothing goes, as the CUE supersede drops what
     it leaves: nothing the owner sees is removed — the files are there under
     their new album. Returns how many files moved."""
@@ -1114,6 +1116,8 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                                   {"v": vid}).scalars())
             groups = {group_key(t, c) for _f, t, c, _d in files}
             _f0, title, credit, _disc = files[0]
+            tracks = list(db.execute(text(f"SELECT DISTINCT track_id FROM {table} WHERE id = ANY(:f)"),
+                                     {"f": [f for f, *_ in files]}).scalars())
             with db.begin_nested():
                 if held <= {f for f, *_ in files} and len(groups) == 1:
                     target, minted = albums.resolve(v.directory_path, title, credit,
@@ -1121,9 +1125,15 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                     if minted:
                         _ensure_album(db, target, title, credit)
                     if target != v.album_id:
+                        # The slots its own files' tags wrote are the copy's,
+                        # not a tracklist the album holds apart from it: with
+                        # them counted, every album a signing pass had met
+                        # stayed behind its re-tagged copy as an album with
+                        # no file (PI-NODE-2D item 5).
                         alone = not db.execute(text("""
                             SELECT EXISTS (SELECT 1 FROM album_variants WHERE album_id = :a AND id <> :v)
-                                OR EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a)"""),
+                                OR EXISTS (SELECT 1 FROM album_tracks WHERE album_id = :a
+                                                                        AND (source = 'mb' OR imported))"""),
                             {"a": v.album_id, "v": vid}).scalar()
                         if alone:
                             # the old album's credits are its raw tags' (or the
@@ -1133,6 +1143,7 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                             _update_album_uuid(db, v.album_id, target)
                         else:
                             _merge_album_variants(db, target, variant_ids=[vid])
+                            drop_tag_slots(db, [v.album_id], tracks)
                         if minted:
                             # minted from (title, credit): its credit is that one, not
                             # the one the merge brought along from the old album
@@ -1171,6 +1182,7 @@ def move_albums(moves: Dict[int, List[Tuple[int, str, str, Optional[int]]]], sin
                         db.execute(text(f"UPDATE {table} SET album_variant_id = :dest WHERE id = :f"),
                                    {"dest": dest, "f": fid})
                         touched_albums.update({v.album_id, target})
+                    drop_tag_slots(db, [v.album_id], tracks)
                     db.execute(text("""DELETE FROM album_variants av WHERE av.id = :v
                                          AND NOT EXISTS (SELECT 1 FROM media_files WHERE album_variant_id = :v)
                                          AND NOT EXISTS (SELECT 1 FROM hqp_library_files
