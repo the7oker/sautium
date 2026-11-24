@@ -46,6 +46,7 @@ from test_hqp_backend import (_QUESTIONS, _GatedStream, _album, _attach, _item, 
 from test_dlna_backend import (PHONE_SINK, FakeRenderer, _gena_port, _on_renderer, _playing_at,  # noqa: E402,F401
                                _seconds, heard, manager, nodes, proxy, quality, renderers, stored, streamed, track,
                                wait_for)
+from test_hqp_horizon import _manager as _lane_manager, _streamed, lane  # noqa: E402,F401
 
 from hqplayer_client import PlaybackState, TrackStatus  # noqa: E402
 from playback import hqp_backend as hb  # noqa: E402
@@ -80,6 +81,9 @@ class FakeRoon:
 
     def __init__(self, port: int):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        # Its end of the connection: what HQPlayer received on it is Roon's
+        # (FakeHqp.received)
+        self.port = self.sock.getsockname()[1]
         self.n = 0
         self.sent: list[str] = []
         self._lock = threading.Lock()
@@ -182,6 +186,14 @@ def _node_commands(fake, since: tuple, roon: FakeRoon) -> list:
     sent = collections.Counter(c for c, _ in fake.commands[since[0]:] if c not in _QUESTIONS)
     sent.subtract(collections.Counter(roon.sent[since[1]:]))
     return sorted((+sent).elements())
+
+
+def _from_node(fake, since: int, roon: FakeRoon) -> list:
+    """What HQPlayer received from the node since `since` (a length of
+    fake.received), its questions aside, in the order it carried them out:
+    every (command, attributes) that came on another connection than
+    Roon's."""
+    return [(c, a) for port, c, a in fake.received[since:] if port != roon.port and c not in _QUESTIONS]
 
 
 def _node_plays_slot_2(fake, monkeypatch):
@@ -6057,3 +6069,276 @@ def test_b_the_renderers_end_is_judged_where_the_audio_was_at_a_takeover(tmp_pat
         b._wall_base, b._wall_t0 = 5.0, b._clock() - 6.0
         b._taken_by_another()
         assert (b._index, b._resume) == spot and (b._cut is not None) is cut
+
+
+# -- a Play on a shared HQPlayer sends nothing until its first slot opens ---------------
+#
+# PI-NODE-2D §3.6 (F20): two nodes drove one HQPlayer; a Play on the one whose
+# queue held nothing that opened sent Stop, PlaylistClear and eight adds that
+# failed — the other node's music gone, nothing played. The other controller
+# is FakeRoon, the assertion what HQPlayer received from the node
+# (FakeHqp.received, _from_node).
+
+def _another_controller(fake, lane, monkeypatch, state: str):
+    """The node attached to HQPlayer, idle, one file in its queue; then
+    another controller's playlist on it: its entry playing ("plays"), or
+    handed and not played ("rests"). Returns (manager, backend, the lane's
+    provider, that controller, how it left HQPlayer)."""
+    monkeypatch.setattr(hb, "DRIFT_CHECK_EVERY", 1)
+    fake.raw_streams = "uri"
+    prov, _proxy = lane
+    mgr = _lane_manager(lane, monkeypatch, [_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    assert _wait(lambda: fake.playlist == ["file:///E:/Music/A/01.flac"])
+    other = FakeRoon(fake.port)
+    if state == "plays":
+        other.play_track()
+        assert _wait(lambda: b._taken() and mgr._latest_status.get("source") == "external", 15)
+    else:
+        other.start_before_its_play()
+        assert _wait(b._rests_on_another, 15)
+    return mgr, b, prov, other, (fake.state, fake.track, list(fake.playlist))
+
+
+def _loading(mgr, slot: int) -> bool:
+    st = mgr._latest_status
+    return (st.get("state"), st.get("track_index")) == ("loading", slot)
+
+
+def _settled(fake, ticks: int = 3) -> None:
+    k = len(fake.commands)
+    _wait(lambda: _statuses(fake, k) >= ticks)
+
+
+@pytest.mark.parametrize("state", ["plays", "rests"])
+def test_a_played_queue_whose_streams_all_fail_sends_a_shared_hqplayer_nothing(fake, lane, listens, monkeypatch,
+                                                                                state):
+    """Another controller holds HQPlayer — its entry playing, or its playlist
+    resting there — and the node plays a new queue whose first slot is a
+    stream still to come: the queue is the queue's alone and the start waits
+    on slot 1, Now Playing "loading" it. The stream fails: the next slot that
+    may open is waited for; it fails too: HQPlayer received no Stop, no
+    PlaylistClear, no PlaylistAdd from the node — its playlist and its state
+    as the other controller left them — and each row says it failed."""
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, state)
+    try:
+        prov.fails.update({"stream-1", "stream-2"})
+        n = len(fake.received)
+        added, _gen = mgr.replace_queue([_streamed(1), _streamed(2)], play=True)
+        assert added == 2 and [it.track_id for it in mgr.queue.snapshot()] == ["stream-1", "stream-2"]
+        assert _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+        _settled(fake)
+        waiting = _from_node(fake, n, other)
+        prov.land("stream-1")
+        assert _wait(lambda: _loading(mgr, 2)), mgr._latest_status
+        prov.land("stream-2")
+        assert _wait(lambda: b._parked is None and all(b.gap(it) is not None for it in mgr.queue.snapshot())
+                     and mgr._latest_status.get("state") != "loading"), mgr._latest_status
+        _settled(fake)
+        sent = _from_node(fake, n, other)
+        _observed("F20-fails", state=state, waiting=waiting, sent=sent, hqplayer=(fake.state, fake.track),
+                  playlist=[u[-22:] for u in fake.playlist])
+        assert waiting == [] and sent == []
+        assert (fake.state, fake.track, fake.playlist) == left
+        assert [t["stream"] for t in mgr.playlist()["tracks"]] == [{"state": "failed", "reason": "unknown"}] * 2
+        if state == "rests":
+            # Said at once, as a Play whose slots all fail is (PlaybackManager._slot_failed)
+            event = mgr._latest_status.get("stream_event") or {}
+            assert (event.get("kind"), event.get("all")) == ("not_streamable", True), mgr._latest_status
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+        other.close()
+
+
+@pytest.mark.skip(reason="waits for PlaybackManager._on_backend_status (playback/manager.py, not this slice's part) to "
+                         "count a Play's run as played only when what sounds is the queue's own — a status whose "
+                         "`source` is not \"external\": today another controller's entry playing on marks the run "
+                         "played (_played) and takes back what _slot_failed said")
+def test_the_failure_of_a_played_queue_is_said_while_the_other_controller_plays_on(fake, lane, listens, monkeypatch):
+    """The same, the other controller's entry playing on: the Play's failure
+    is said (PlaybackManager._slot_failed: `stream_event`, every slot failed)
+    and stays said — what that controller plays is no sound of the queue's."""
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, "plays")
+    try:
+        prov.fails.update({"stream-1", "stream-2"})
+        added, _gen = mgr.replace_queue([_streamed(1), _streamed(2)], play=True)
+        assert added == 2 and _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+        prov.land("stream-1", "stream-2")
+        assert _wait(lambda: b._parked is None and all(b.gap(it) is not None for it in mgr.queue.snapshot()))
+        _settled(fake)
+        event = mgr._latest_status.get("stream_event") or {}
+        assert (event.get("kind"), event.get("all")) == ("not_streamable", True), mgr._latest_status
+        assert (fake.state, fake.track, fake.playlist) == left
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+        other.close()
+
+
+@pytest.mark.parametrize("state", ["plays", "rests"])
+def test_a_played_queue_takes_a_shared_hqplayer_only_once_its_first_stream_landed(fake, lane, listens, monkeypatch,
+                                                                                  state):
+    """The same, the stream landing: while it is on its way HQPlayer receives
+    nothing from the node and the other controller's entry stands; the Stop
+    and the clear — on the first add — arrive only after the landing, and the
+    node's own entry plays."""
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, state)
+    try:
+        n = len(fake.received)
+        added, _gen = mgr.replace_queue([_streamed(1), _streamed(2)], play=True)
+        assert added == 2 and _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+        _settled(fake)
+        waiting, during = _from_node(fake, n, other), (fake.state, fake.track, list(fake.playlist))
+        m = len(fake.received)
+        prov.land("stream-1")
+        assert _wait(lambda: fake.state == PLAYING and fake.track == 1 and len(fake.playlist) == 1
+                     and "/preview/" in fake.playlist[0], timeout=15), (fake.state, fake.track, fake.playlist)
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("track_index") == 1), mgr._latest_status
+        sent = _from_node(fake, m, other)
+        names = [c for c, _ in sent]
+        _observed("F20-lands", state=state, waiting=waiting, sent=names, status=mgr._latest_status.get("source"))
+        assert waiting == [] and during == left
+        assert names[0] == "Stop" and names[1] == "PlaylistAdd" and sent[1][1].get("clear") == "1", sent
+        assert names.index("SelectTrack") > 1 and mgr._latest_status.get("source") != "external"
+        prov.land("stream-2")                   # what follows it is an append behind it
+        assert _wait(lambda: len(fake.playlist) == 2 and fake.track == 1), fake.playlist
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+        other.close()
+
+
+def test_with_no_other_controller_a_played_streamed_queue_empties_the_playlist_at_the_tap(fake, lane, listens,
+                                                                                         monkeypatch):
+    """The node's own music is another question (PI-NODE-2D Q7: shared only):
+    with no other controller, a streamed album played over what the node
+    plays takes its place at the tap — HQPlayer stopped and its playlist
+    emptied at once, the start waiting on slot 1 — as before."""
+    prov, _proxy = lane
+    mgr = _lane_manager(lane, monkeypatch, [_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        with fake._lock:
+            fake.state, fake.track, fake.position = PLAYING, 1, 41.0
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing" and not b._taken())
+        n = len(fake.received)
+        added, _gen = mgr.replace_queue([_streamed(1), _streamed(2)], play=True)
+        sent = [c for _port, c, _a in fake.received[n:] if c not in _QUESTIONS]
+        assert added == 2 and sent == ["Stop", "PlaylistClear"], sent
+        assert fake.playlist == [] and fake.state == int(PlaybackState.STOPPED)
+        assert _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+        prov.land("stream-1")
+        assert _wait(lambda: fake.state == PLAYING and fake.track == 1 and len(fake.playlist) == 1), fake.playlist
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+
+
+@pytest.mark.skip(reason="waits for PlaybackManager.replace_queue(play=True) to look at the first slot's file before "
+                         "any output is handed a new queue for a start (PI-NODE-2D §3.3, the stat in "
+                         "playback/manager.py — not this slice's part): until it does, a file that is not there "
+                         "reaches HqpBackend.queue_replace as a file, and HQPlayer's answer to it comes after the "
+                         "Stop")
+def test_a_played_queue_whose_first_file_is_not_there_sends_a_shared_hqplayer_nothing(fake, listens, monkeypatch):
+    """PI-NODE-2D §3.6, the table's first row: another controller plays, and
+    the node plays a new queue whose first slot is a file of its own that is
+    not there. The playback manager's look misses before HQPlayer is handed
+    anything: the way in is read again — a stream to wait for, or, where
+    nothing streams, the refusal — and HQPlayer received nothing from the
+    node. How the file is made to miss here, and what the manager raises, are
+    that stat's: the assertion is HQPlayer's own log."""
+    mgr, b, roon = _roon_holds_an_idle_hqplayer(fake, monkeypatch)
+    try:
+        left = (fake.state, fake.track, list(fake.playlist))
+        n = len(fake.received)
+        try:
+            mgr.replace_queue([_item("E:/Music/Gone/01.flac", 31), _item("E:/Music/Gone/02.flac", 32)], play=True)
+        except Exception as refused:        # where nothing streams: refused before the queue is touched
+            _observed("F20-file", refused=str(refused))
+        _settled(fake)
+        assert _from_node(fake, n, roon) == [] and (fake.state, fake.track, fake.playlist) == left
+    finally:
+        b.shutdown()
+        roon.close()
+
+
+def _queued_under_another(fake, lane, monkeypatch):
+    """Another controller plays; the node's queue, put together without
+    playing it, is two streams still to come (the queue's alone)."""
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, "plays")
+    mgr.replace_queue([_streamed(1), _streamed(2)], play=False)
+    assert [it.track_id for it in mgr.queue.snapshot()] == ["stream-1", "stream-2"]
+    return mgr, b, prov, other, left
+
+
+def test_a_play_on_a_shared_hqplayer_waits_for_the_stream_it_would_start(fake, lane, listens, monkeypatch):
+    """The rule is the play press's too — the Play of a queue the node
+    already holds, the incident's own press: while another controller holds
+    HQPlayer and the slot the press would start is a stream still to come,
+    the press waits on it in the node ("loading") and HQPlayer receives
+    nothing; its landing takes HQPlayer — Stop, the queue afresh, the start."""
+    mgr, b, prov, other, left = _queued_under_another(fake, lane, monkeypatch)
+    try:
+        n = len(fake.received)
+        assert b.play()
+        assert _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+        _settled(fake)
+        waiting, during = _from_node(fake, n, other), (fake.state, fake.track, list(fake.playlist))
+        prov.land("stream-1")
+        assert _wait(lambda: fake.state == PLAYING and fake.track == 1 and len(fake.playlist) == 1
+                     and "/preview/" in fake.playlist[0], timeout=15), (fake.state, fake.track, fake.playlist)
+        names = [c for c, _ in _from_node(fake, n, other)]
+        _observed("F20-press", waiting=waiting, sent=names)
+        assert waiting == [] and during == left and names[:2] == ["Stop", "PlaylistAdd"], names
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+        other.close()
+
+
+def test_a_play_on_a_shared_hqplayer_that_nothing_of_the_queue_opens_on_is_refused_in_words(fake, lane, listens,
+                                                                                           monkeypatch):
+    """...and where nothing of the queue from the press's slot on opens (every
+    stream failed), the Play is refused in words and HQPlayer receives
+    nothing: a press with nothing to hand it sent its Stop all the same."""
+    mgr, b, prov, other, left = _queued_under_another(fake, lane, monkeypatch)
+    try:
+        prov.fails.update({"stream-1", "stream-2"})
+        prov.land("stream-1", "stream-2")
+        assert _wait(lambda: all(b.gap(it) is not None for it in mgr.queue.snapshot()))
+        n = len(fake.received)
+        assert not b.play()
+        words = b.refusal()
+        _settled(fake)
+        sent = _from_node(fake, n, other)
+        _observed("F20-press-none", words=words, sent=sent)
+        assert sent == [] and (fake.state, fake.track, fake.playlist) == left
+        assert words == "nothing from slot 1 on is on this HQPlayer"
+    finally:
+        b.shutdown()
+        other.close()
+
+
+def test_while_a_start_waits_on_an_hqplayer_that_rests_on_another_controllers_playlist_it_is_that_controllers_still(
+        fake, lane, listens, monkeypatch):
+    """HQPlayer rests on another controller's playlist and a played queue's
+    start waits for its stream: the status says "loading" the slot it waits
+    on, and the playlist HQPlayer rests on is that controller's all the same
+    (the poller's own reading, never the status's) — a queue put together
+    without playing it meanwhile sends HQPlayer nothing."""
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, "rests")
+    try:
+        added, _gen = mgr.replace_queue([_streamed(1), _streamed(2)], play=True)
+        assert added == 2 and _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+        _settled(fake)
+        assert b._rests_on_another()
+        n = len(fake.received)
+        mgr.replace_queue([_item("E:/Music/C/01.flac", 21), _item("E:/Music/C/02.flac", 22)], play=False)
+        _settled(fake)
+        assert _from_node(fake, n, other) == [] and (fake.state, fake.track, fake.playlist) == left
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+        other.close()
