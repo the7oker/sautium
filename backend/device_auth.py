@@ -583,8 +583,13 @@ def _after_rotation(pubkey: str) -> None:
     p2p_chat.soon(p2p_router.restart_identity_worker())
     p2p_chat.soon(p2p_identity.changed())
     _record_signing_key(pubkey)
-    # The Worker's invite code → mailbox mapping named the old code.
+    # The Worker's invite code → mailbox mapping named the old code. Said to
+    # the pages by the write itself, as the routes' writes are
+    # (routers.p2p._record_email_verified) — the identity line and the
+    # guidance trail read it: the workers' restarts above publish when they
+    # get to it, or never (a key with no certificate yet)
     db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
+    db_execute("NOTIFY sautium_identity")
     # Tokens are bound to the public key, so every paired browser is out
     # already; the epoch bump makes that an explicit, logged event.
     bump_epoch()
