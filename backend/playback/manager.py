@@ -1251,17 +1251,25 @@ class PlaybackManager:
         for it, play in zip(read, substitute.native_plays(read, backend.id, None)):
             it.play = play
 
-    def _first_opens(self, items: list) -> None:
+    @staticmethod
+    def _first_opens(backend: PlayerBackend, items: list) -> None:
         """The play path's own look, beside the events (reach_changed): a
         folder can stop answering with no event — a network share, a root
         that is itself a mount point. Before a new queue is handed to an
         output for a start, the first slot's file is asked for once, where
-        that slot is a file of this node the node takes for reachable; a
-        miss is a producer's observation — the folder is looked at
-        (scanner.check_folder, waited for no longer than the look's
-        patience) — and the new slots' ways in are read after it. Outside
-        the queue lock: this is where the file system is asked."""
-        src = items[0].source if items else {}
+        that slot's way in is a file of this node the node takes for
+        reachable (a slot that is the track itself is read for it: its copy
+        here opens as a file); a miss is a producer's observation — the
+        folder is looked at (scanner.check_folder, waited for no longer
+        than the look's patience) — and the new slots' ways in are read
+        after it. Outside the queue lock: this is where the file system is
+        asked."""
+        if not items:
+            return
+        src = items[0].source
+        if src.get("kind") != "file" and substitute.by_copies(items[0]):
+            src = substitute.native_plays(items[:1], backend.id,
+                                          getattr(backend, "endpoint_id", None))[0] or src
         if src.get("kind") != "file" or any(src["path"].startswith(g) for g in gone_prefixes()):
             return
         if not src["path"].startswith(settings.library_db_root() + "/"):
@@ -1307,7 +1315,7 @@ class PlaybackManager:
             # more, with no scan
             gated = self.ensure_active()
             pick = lambda: gated if self._active is gated and gated.healthy() else self._gate_once()  # noqa: E731
-            self._first_opens(items)
+            self._first_opens(gated, items)
         with self._output_mutation(pick) as backend:
             self._read_ways_in(backend, items)
             self._refuse_if_none_opens(backend, items)

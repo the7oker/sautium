@@ -494,6 +494,20 @@ def test_a_play_whose_first_file_is_missing_looks_at_the_folder_and_streams(node
     assert mgr.queue.snapshot() == items
 
 
+def test_a_first_slot_that_is_the_track_itself_is_asked_by_the_file_it_would_open(node):
+    """A slot queued as the track opens its copy here as a file: the look
+    asks about that file, as about a slot that is a file."""
+    import scanner
+    from playback.queue import QueueItem
+    mgr, out = node["mgr"], node["out"]
+    _pull_the_disk(node)
+    track = QueueItem(track_id=node["tracks"][0], media_file_id=None, source={"kind": "track"},
+                      title="Owned 1", album_id=node["owned"])
+    mgr.replace_queue([track], play=True)
+    assert scanner.gone_prefixes() == [node["db_root"] + "/"]
+    assert out.replaced == [["pending"]]
+
+
 def test_a_play_of_which_nothing_opens_where_nothing_streams_is_refused_before_the_output(node):
     from playback.manager import NotHere
     from playback.queue import items_for_media_ids
