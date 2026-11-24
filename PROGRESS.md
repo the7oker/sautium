@@ -4627,7 +4627,10 @@ ever fill on a node with the streaming library off.
   shape only a copy that went leaves; the mint always has a release group,
   the seed and a share write `imported`. A leftover that has a release
   group cannot be told from a phantom and stays one; an album the seed
-  picked is spared here as everywhere.
+  picked is spared here as everywhere. The step takes what the yes named —
+  the slots, their tracks nothing else refers to, the albums — and no
+  artist: one left credited by nothing stays, as a minted similar does,
+  with its bio, tags and similars.
 
 ### New is what entered last (2026-11-24)
 

@@ -6,8 +6,9 @@ While no tracklist slot said who wrote it, a removed copy left its album and
 tracks behind, held by the slots its own tags had written. The step takes
 exactly the albums with no copy, no release group, not imported and with no
 imported slot: their slots, then those slots' tracks that nothing else
-refers to, then the albums and the artists nothing credits any more — and
-nothing of a phantom, a peer's record or an album that has a copy.
+refers to, then the albums — what the yes named, and no artist: one left
+credited by nothing stays, as a minted similar does — and nothing of a
+phantom, a peer's record or an album that has a copy.
 
 On a real PostgreSQL — the module's scratch database (conftest.scratch_dsn).
 Skipped where there is no cluster.
@@ -110,7 +111,7 @@ def test_a_leftover_goes_with_its_slots_and_the_tracks_nothing_else_holds(conn, 
     s = _Seed(conn)
     left_artist, kept_artist = s.artist("Only The Leftover's"), s.artist("Still Owned")
     composer, heard_composer = s.artist("A Composer Of The Gone"), s.artist("A Composer Of The Heard")
-    stub = s.artist("A Similar Nothing Credits")           # the phantom layer's: not this step's
+    s.artist("A Similar Nothing Credits")                  # the phantom layer's: not this step's
     gone = s.track("Gone", left_artist, composer)
     owned = s.track("Owned Elsewhere", kept_artist)
     heard = s.track("Heard", left_artist, heard_composer)
@@ -122,15 +123,21 @@ def test_a_leftover_goes_with_its_slots_and_the_tracks_nothing_else_holds(conn, 
     elsewhere = s.album("The Real Album", kept_artist)
     s.copy(elsewhere, [owned], "/music/The Real Album")
 
-    assert _step(scratch_dsn) == {"albums": 2, "slots": 3, "tracks": 1, "artists": 2}
+    assert _step(scratch_dsn) == {"albums": 2, "slots": 3, "tracks": 1}
 
     assert s.titles("albums") == ["The Real Album"]
     assert s.titles("tracks") == ["Heard", "Owned Elsewhere"]
     assert (s.slot_count(leftover), s.slot_count(elsewhere)) == (0, 0)
-    # the heard track keeps its credits; the gone track's composer and the
-    # empty album's artist went; the uncredited stub was never in the scope
-    assert s.titles("artists") == ["A Composer Of The Heard", "A Similar Nothing Credits",
+    # No artist goes: the yes named slots, tracks and albums. The gone
+    # track's credit went with its track (the RESTRICT is on the artist), and
+    # its composer stays as a row nothing credits, like the stub beside it.
+    assert s.titles("artists") == ["A Composer Of The Gone", "A Composer Of The Heard",
+                                   "A Similar Nothing Credits", "Of The Empty One",
                                    "Only The Leftover's", "Still Owned"]
+    s.cur.execute("SELECT count(*) FROM track_credits WHERE artist_id = %s", (composer,))
+    assert s.cur.fetchone()[0] == 0
+    s.cur.execute("SELECT a.name FROM track_credits tc JOIN artists a ON a.id = tc.artist_id")
+    assert s.cur.fetchall() == [("A Composer Of The Heard",)]
 
 
 def test_a_phantom_a_peers_record_and_an_album_with_a_copy_are_untouched(conn, scratch_dsn):
@@ -169,7 +176,7 @@ def test_a_phantom_a_peers_record_and_an_album_with_a_copy_are_untouched(conn, s
     s.cur.execute("INSERT INTO seed_picks (album_id, tier, rank) VALUES (%s, 1, 1)", (albums["picked"],))
     before = (s.titles("albums"), s.titles("tracks"), {k: s.slot_count(a) for k, a in albums.items()})
 
-    assert _step(scratch_dsn) == {"albums": 0, "slots": 0, "tracks": 0, "artists": 0}
+    assert _step(scratch_dsn) == {"albums": 0, "slots": 0, "tracks": 0}
 
     assert (s.titles("albums"), s.titles("tracks"),
             {k: s.slot_count(a) for k, a in albums.items()}) == before
@@ -199,10 +206,10 @@ def test_the_start_runs_it_once_and_says_what_it_removed(conn, scratch_dsn, monk
         s.slots(s.album("Best"), [s.track("Gone")], source="tag")
         with caplog.at_level(logging.INFO, logger="db_migrate"):
             out = db_migrate.apply_pending()
-        assert out["tracklist_leftovers"] == {"albums": 1, "slots": 1, "tracks": 1, "artists": 0}
+        assert out["tracklist_leftovers"] == {"albums": 1, "slots": 1, "tracks": 1}
         said = [r.getMessage() for r in caplog.records
                 if r.levelno == logging.INFO and r.getMessage().startswith("tracklist leftovers")]
-        assert len(said) == 1 and "'albums': 1, 'slots': 1, 'tracks': 1, 'artists': 0" in said[0]
+        assert len(said) == 1 and "{'albums': 1, 'slots': 1, 'tracks': 1}" in said[0]
         assert (s.titles("albums"), s.titles("tracks")) == ([], [])
 
         s.slots(s.album("Left Later"), [s.track("Later")], source="tag")
