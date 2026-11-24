@@ -128,7 +128,7 @@ def test_a_folder_that_is_gone_is_refused_as_unreachable_not_reported_as_a_faile
         main_module._scan_thread.join()
 
     assert main_module._scan_state["running"] is False
-    assert main_module._scan_state["progress"] == f"Scan failed: {scanner.UNREACHABLE}"
+    assert main_module._scan_state["progress"] == f"Scan failed: {scanner.unreachable_words()}"
     said = [r for r in caplog.records if r.name == "main"]
     assert [r.levelname for r in said] == ["WARNING"] and said[0].exc_info is None
     assert _last_scan(cur) is None
@@ -328,7 +328,7 @@ def test_scan_start_refuses_an_unreachable_folder_and_wakes_the_notices(
         asyncio.run(main_module.scan_start())
 
     assert refused.value.status_code == 409
-    assert refused.value.detail == scanner.UNREACHABLE
+    assert refused.value.detail == scanner.unreachable_words()
     assert main_module._scan_state["running"] is False
     assert heard() == ["sautium_notices"]         # every open tab learns the onset
 
@@ -370,7 +370,7 @@ def test_the_cli_is_refused_as_the_queue_is(cur, library, backend_here, heard):
     from click.testing import CliRunner
     _owned_file(cur)
     refused = CliRunner().invoke(backend_here.cli, ["scan"])
-    assert refused.exit_code == 1 and scanner.UNREACHABLE in refused.output, refused.output
+    assert refused.exit_code == 1 and scanner.unreachable_words() in refused.output, refused.output
     assert heard() == ["sautium_notices"]         # the look's news
 
 
@@ -385,8 +385,8 @@ def _empty_the_folder_during_the_walk(monkeypatch, library):
 
 
 @pytest.mark.parametrize("case, progress, wakes", [
-    ("gone before the walk", f"Scan failed: {scanner.UNREACHABLE}", ["sautium_notices"]),
-    ("gone during the walk", f"Scan failed: {scanner.UNREACHABLE}", ["sautium_notices"]),
+    ("gone before the walk", f"Scan failed: {scanner.unreachable_words()}", ["sautium_notices"]),
+    ("gone during the walk", f"Scan failed: {scanner.unreachable_words()}", ["sautium_notices"]),
     ("a fresh node's empty folder", "No audio files found", []),
 ], ids=["gone-before", "gone-during", "fresh-node"])
 def test_an_empty_walk_records_no_scan(cur, library, main_module, heard, monkeypatch,

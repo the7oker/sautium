@@ -101,11 +101,31 @@ def scope_admitted(library_path, rel: str) -> bool:
     return not library_root.picks() or library_root.within(os.path.join(str(library_path), rel)) is not None
 
 
-# A Docker bind is fixed when its container starts: a drive reconnected under
-# a running node stays invisible to it until the restart.
-UNREACHABLE = ("The music folder is empty or not mounted, so nothing was scanned. "
-               "Reconnect it and scan again — a Docker node sees it again only "
-               "after a restart.")
+# What a refused scan says, by the way the node is given its music folder —
+# what brings the folder back differs with it. Under roots (library_root:
+# the owner picks the folder under folders bound `rslave`) a disk put back
+# is seen as it arrives, and the wake scans it. A Docker node whose folder
+# is its .env line's bind sees what was there when its container started:
+# a drive reconnected under it stays invisible until the restart. A
+# launcher reads the folder itself. Drafts for the words sitting
+# (PI-NODE-2D-DESIGN §9.2).
+UNREACHABLE = {
+    "pick": ("The music folder is not connected, so nothing was scanned. "
+             "Connect its disk — Sautium scans it by itself."),
+    "setup": ("The music folder is empty or not mounted, so nothing was scanned. "
+              "Reconnect it and restart Sautium: this node sees a disk only as it "
+              "was at its start."),
+    "launcher": ("The music folder is empty or not connected, so nothing was scanned. "
+                 "Reconnect it and scan again."),
+}
+
+
+def unreachable_words() -> str:
+    """The refusal's sentence on this node (UNREACHABLE)."""
+    import library_root
+    from claude_code import is_launcher_mode
+    return UNREACHABLE["pick" if library_root.picks()
+                       else "launcher" if is_launcher_mode() else "setup"]
 
 
 def library_unreachable(wake: bool = True) -> bool:
@@ -316,7 +336,7 @@ def refuse_if_unreachable() -> None:
     launcher, cli.py, a walk that came back empty). Its look at the folder
     wakes the notices when the answer changed, so every open tab learns."""
     if library_unreachable():
-        raise LibraryUnreachable(UNREACHABLE)
+        raise LibraryUnreachable(unreachable_words())
 
 
 @dataclass(frozen=True)
@@ -1447,7 +1467,7 @@ class LibraryScanner:
                 # away all the same.
                 import library_root
                 if library_root.picks():
-                    raise LibraryUnreachable(UNREACHABLE)
+                    raise LibraryUnreachable(unreachable_words())
             raise ValueError(f"Library path does not exist: {self.library_path}")
 
         logger.info(f"Initialized scanner for: {self.library_path}")

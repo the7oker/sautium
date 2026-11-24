@@ -800,3 +800,30 @@ def test_an_owned_track_streamed_for_want_of_its_file_spends_the_demo_listen_lik
     query = seen[0]
     assert (query.title, query.artist, query.duration) == ("Owned 1", "Hidden Orchestra", 200.0)
     assert query.media_file_id is None              # no word of a file of his
+
+
+# -- F11: what a refused scan says (§2.7, §9.2) ----------------------------------
+
+
+def test_a_refused_scan_says_what_brings_the_folder_back_on_this_node(monkeypatch):
+    """One sentence said "a Docker node sees it again only after a restart"
+    on every node: true only where the folder is the .env line's bind."""
+    import claude_code
+    import library_root
+    import scanner
+    monkeypatch.setattr(library_root, "picks", lambda: True)
+    monkeypatch.setattr(claude_code, "is_launcher_mode", lambda: True)
+    assert scanner.unreachable_words() == (
+        "The music folder is not connected, so nothing was scanned. "
+        "Connect its disk — Sautium scans it by itself.")
+    monkeypatch.setattr(library_root, "picks", lambda: False)
+    assert scanner.unreachable_words() == (
+        "The music folder is empty or not connected, so nothing was scanned. "
+        "Reconnect it and scan again.")
+    monkeypatch.setattr(claude_code, "is_launcher_mode", lambda: False)
+    assert scanner.unreachable_words() == (
+        "The music folder is empty or not mounted, so nothing was scanned. "
+        "Reconnect it and restart Sautium: this node sees a disk only as it was at its start.")
+    with pytest.raises(scanner.LibraryUnreachable, match="restart Sautium"):
+        monkeypatch.setattr(scanner, "library_unreachable", lambda wake=True: True)
+        scanner.refuse_if_unreachable()
