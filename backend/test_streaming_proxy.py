@@ -369,6 +369,48 @@ def test_file_tokens_are_deterministic_per_node_key_and_span():
     assert a.file_url(t) == f"http://127.0.0.1:0/file/{t}"
 
 
+def test_a_library_file_asked_for_here_speaks_for_the_music_folder(tmp_path, monkeypatch):
+    """/file/{token} — what a DLNA renderer and an HQPlayer on another
+    machine read — is a producer of the music folder's state as the
+    browser's route is: a file found missing has the folder looked at (the
+    moment a dropped mount becomes visible), one served as it lies says the
+    folder answers. Before, a missing file here was a 500 and a log line:
+    nothing told the node its disk was out."""
+    import sys
+    import types
+    import urllib.error
+    import urllib.request
+    said = []
+    monkeypatch.setitem(sys.modules, "scanner", types.SimpleNamespace(
+        check_folder=lambda wait=False: said.append("looked at"),
+        folder_seen=lambda unreachable: said.append(("answers", not unreachable))))
+    proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k",
+                       bind_host="127.0.0.1")
+    proxy.start()
+    port = proxy._httpd.server_address[1]
+    track = tmp_path / "t.flac"
+    track.write_bytes(b"x" * 1000)
+    tok = proxy.register_file(str(track), "audio/flac")
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/file/{tok}", timeout=5) as r:
+            assert r.status == 200 and len(r.read()) == 1000
+        assert said == [("answers", True)]
+        track.unlink()                              # the disk pulled under a running node
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/file/{tok}", timeout=5)
+        assert e.value.code == 500 and said == [("answers", True), "looked at"]
+        # the DLNA backend's own read before a URL is handed to a renderer says it too
+        with pytest.raises(OSError):
+            proxy.materialize_file(tok, None)
+        assert said[2:] == ["looked at"]
+    finally:
+        proxy._httpd.shutdown()
+    # a process that never loaded the scanner looks at no folder
+    monkeypatch.delitem(sys.modules, "scanner")
+    with pytest.raises(OSError):
+        proxy.materialize_file(tok, None)
+
+
 def test_the_proxy_remembers_what_each_token_was_asked_for(tmp_path):
     """The consumer's side of a hand-over, for the HQPlayer playback trace:
     each request's status, range and the bytes that actually went out."""

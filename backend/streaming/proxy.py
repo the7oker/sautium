@@ -69,6 +69,25 @@ _REQUEST_READ_S = 10.0
 _REQUEST_HEAD_S = 15.0
 
 
+def _library_file(*, missing: bool) -> None:
+    """A file of the library asked for here — by a DLNA renderer, by an
+    HQPlayer on another machine — speaks for the music folder exactly as one
+    asked for by the browser does (routers/media.py): found missing, the
+    folder is looked at, not waited for (scanner.check_folder — the moment a
+    dropped mount becomes visible; its record is the notice's and the
+    queue's event); served as it lies on disk, the folder answers
+    (scanner.folder_seen — never a cache file's word). Read off the process's
+    own scanner, never imported here: one that never loaded it looks at no
+    folder (playback.queue.gone_prefixes)."""
+    scanner = sys.modules.get("scanner")
+    if scanner is None:
+        return
+    if missing:
+        scanner.check_folder()
+    else:
+        scanner.folder_seen(False)
+
+
 def shown(token: str) -> str:
     """A token as a log line names it: enough to tell two apart, never one a
     reader of the log could fetch with."""
@@ -519,11 +538,28 @@ class MediaProxy:
         is frozen until the probe returns, so a first-GET transcode of a long
         track (tens of seconds for a DJ mix) froze every SOAP call and read as
         the renderer leaving the network. The GET handler still materializes
-        for consumers that come unannounced (HQPlayer, the browser)."""
+        for consumers that come unannounced (HQPlayer, the browser).
+
+        What it finds of the library's own file is said to the node, as the
+        browser's route says it (_library_file): missing, the music folder
+        is looked at; served as it lies, the folder answers."""
         import os
         fe = self.file_entry(token)
         if fe is None:
             raise KeyError(token)
+        try:
+            found = self._materialize(fe, q, ss)
+        except Exception:
+            if not os.path.exists(fe.path):
+                _library_file(missing=True)
+            raise
+        if found[0] == fe.path:
+            _library_file(missing=False)
+        return found
+
+    @staticmethod
+    def _materialize(fe: "_FileEntry", q: Optional[str], ss: float) -> tuple[str, str, int]:
+        import os
         path, mime = fe.path, fe.mime
         if fe.start is not None:
             path = transcode.flac_slice_path_for_file(
