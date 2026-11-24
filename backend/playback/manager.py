@@ -1406,16 +1406,34 @@ class PlaybackManager:
         if moved or gone_prefixes() != was:
             # the look's own record follows on a thread: the start needs it
             # now — as it does a file the look alone did not find, which is
-            # no way in of its slot from here on (another copy, its stream)
-            self.reach_changed()
+            # no way in of its slot from here on (another copy, its stream).
+            # Never behind a queue edit in flight — a play intent waits for
+            # none: the edit's own mirror reads what it hands the output
+            # under the same record and observation, and the queue's slots
+            # are read once it is done, on the thread the record's change uses
+            if self._mutate_lock.acquire(blocking=False):
+                try:
+                    self.reach_changed()
+                finally:
+                    self._mutate_lock.release()
+            else:
+                threading.Thread(target=self.reach_followed, daemon=True,
+                                 name="queue-reach").start()
         if not tapped:
             self._refuse_if_none_opens(backend, items)
 
     def before_step(self, backend: PlayerBackend, step: int) -> None:
         """Next (`step` 1) or Previous (-1) is about to hand the output a
-        start of the slot beside the one it is on: the same one look at the
-        file that start would open (before_start, as a tap on that row)."""
-        at = self._latest_status.get("track_index")
+        start of the slot beside the one it is on — beside the spot a Play
+        would resume, where the status names one: the same one look at the
+        file that start would open (before_start, as a tap on that row).
+        Not while a queue mutation is in flight, as for a tap: the slots
+        move under it, and the output carries the word out on the queue it
+        is handed."""
+        if self.queue.view()[2]:
+            return
+        status = self._latest_status
+        at = (status.get("resume") or {}).get("index") or status.get("track_index")
         if isinstance(at, int) and 1 <= at + step <= len(self.queue):
             self.before_start(backend, at + step)
 

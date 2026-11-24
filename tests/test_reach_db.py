@@ -697,6 +697,31 @@ def test_next_and_previous_take_the_look_at_the_slot_they_would_start(node):
     assert _streams(items[0]) and items[1].play is None
 
 
+def test_the_look_before_a_start_never_waits_behind_a_queue_edit_in_flight(node):
+    """A play intent waits for no queue edit: what its look found is read
+    into the queue once the edit is done — on a thread of its own, as the
+    folder's recorded change is — and the Play goes on meanwhile."""
+    mgr, out = node["mgr"], node["out"]
+    items = _queue(node)
+    (node["root"] / "NW" / "01.flac").unlink()
+    looked = threading.Event()
+    held, release = threading.Event(), threading.Event()
+
+    def edit():                                     # a queue edit still committing
+        with mgr._mutate_lock:
+            held.set()
+            release.wait(10)
+    threading.Thread(target=edit, daemon=True).start()
+    assert held.wait(5)
+    try:
+        threading.Thread(target=lambda: (mgr.before_start(out), looked.set()), daemon=True).start()
+        assert looked.wait(5)                       # the Play's look came back with the edit in flight
+        assert items[0].play is None
+    finally:
+        release.set()
+    assert _wait(lambda: _streams(items[0]))        # read once the edit was done
+
+
 def test_a_refusal_names_no_disk_for_slots_that_were_never_files(node):
     """A held queue of streamed tracks, streaming off, the folder gone: none
     of it is "on a disk that is not connected" — the manager refuses nothing
