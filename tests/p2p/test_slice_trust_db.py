@@ -763,7 +763,7 @@ def test_the_lb_requester_counts_a_false_proof_under_its_relay_and_asks_a_refuse
     author, forger, refused = _key(), _key(), _key()
     cert = certificate(pub(author), method="pow")
     cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=None, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
+                                        has_identity=lambda: True, sharing_enabled=lambda: True)
 
     def offer(nonce, relay=None, node="a-node"):
         artist = str(uuid.uuid4())
@@ -794,7 +794,7 @@ def test_the_lb_requester_records_who_passed_each_slice_on(conn, scratch_dsn):
     peer = Peer({artist: lb_entry(author, artist, one)}, pub(relay), base_url="https://203.0.113.8:21002")
     addr = lb_slice_queries.addr_uuid(peer.base_url)
     cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=None, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
+                                        has_identity=lambda: True, sharing_enabled=lambda: True)
     out = asyncio.run(cycle._exchange(peer, "a-node", addr, [artist], None))
     assert (out["imported"], out["recordings"], out["missing"]) == (1, 1, [])
     assert _rows(conn, """SELECT artist_mbid::text, source_node, source_pubkey, btrim(relay), source_addr::text

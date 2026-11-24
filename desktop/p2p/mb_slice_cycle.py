@@ -136,6 +136,7 @@ class MbSliceCycle:
         dead: DeadAddresses,
         after_import: Callable[[], None],
         sharing_enabled: Callable[[], bool],
+        has_identity: Callable[[], bool],
         config: Optional[dict] = None,
         dht=None,
         lan=None,
@@ -153,6 +154,9 @@ class MbSliceCycle:
             backend's in-process trigger).
         sharing_enabled: the "P2P sharing" switch — off, the cycle asks no
             peer and probes no source, as the walk does.
+        has_identity: the walk's has_identity — while this node has no
+            identity the cycle probes no source and asks no peer, as the
+            walk does not (sync_walk.SyncWalk.has_identity says why).
         config: the `mb_slice` block (fetch / auto_interval_min).
         dht / lan: the runtime's DHTService / LANDiscovery (either None).
         manual_peers: explicit `scheme://host:port` entries, tried first.
@@ -164,6 +168,7 @@ class MbSliceCycle:
         self.db_dsn = db_dsn
         self.config = dict(config or {})
         self._sharing_enabled = sharing_enabled
+        self._has_identity = has_identity
         self._sources = SourceFinder(
             "MB slice", capability="mbdump", directory=("mbslices", "mbdump"),
             # A node whose owner turned sharing off answers no slice request:
@@ -293,7 +298,7 @@ class MbSliceCycle:
         """On-demand source re-probe (the backend NOTIFYs when a remote search
         exhausted every known source — the 'dump node disappeared' moment);
         a full-dump node has nothing to probe."""
-        if self._probe_lock.locked() or not self._sharing_enabled():
+        if self._probe_lock.locked() or not self._sharing_enabled() or not self._has_identity():
             return
         async with self._probe_lock:
             loop = asyncio.get_event_loop()
@@ -329,6 +334,8 @@ class MbSliceCycle:
     async def run(self, trigger: str = "auto") -> dict:
         loop = asyncio.get_event_loop()
         if not self.config.get("fetch", True):
+            return {}
+        if not self._has_identity():
             return {}
         if await loop.run_in_executor(None, local_dump_available, self.db_dsn):
             # A dump node serves; it has nothing to ask for — and nothing to

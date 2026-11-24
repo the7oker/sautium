@@ -373,7 +373,7 @@ def test_the_lb_exchange_takes_nothing_from_a_source_penalized_since_its_sources
         cur.execute("INSERT INTO slice_penalties (pubkey, party) VALUES (%s, 'relay')", (pub(relay),))
     peer = Peer({artist: lb_entry(author, artist, one)}, pub(relay))
     cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=None, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
+                                        has_identity=lambda: True, sharing_enabled=lambda: True)
     assert asyncio.run(cycle._exchange(peer, pub(relay), None, [artist], None)) == {
         "error": "source carries a penalty"}
     assert _count(conn, "lb_slice_blobs") == 0 and _count(conn, "lb_recording") == 0
