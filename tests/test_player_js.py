@@ -52,6 +52,11 @@ vm.runInNewContext(fs.readFileSync(process.argv[process.argv.length - 1], 'utf8'
 """
 
 
+
+def _no_look(backend, slot=None):
+    """The manager's look before a start (PlaybackManager.before_start), for a
+    stand-in manager: these tests are about what the output answers."""
+
 def test_a_pause_a_stop_or_a_seek_the_output_did_not_take_is_said():
     """A Pause, a Stop or a Seek the route answers it did not take —
     HQPlayer building, or not answering past a short silence — is said, as a
@@ -206,7 +211,7 @@ def test_a_pause_and_a_seek_hqplayer_refused_are_each_said_once_in_its_words(tra
     fake.replies["Pause"] = '<Pause result="Error"/>'
     fake.replies["Seek"] = '<Seek result="Error">Not seekable</Seek>'
     monkeypatch.setattr(player, "manager", types.SimpleNamespace(
-        ensure_active=lambda: traced, backend=lambda: traced))
+        ensure_active=lambda: traced, backend=lambda: traced, before_start=_no_look))
     paused = player.pause()
     sought = player.seek(player.SeekRequest(position=60))
     assert paused == {"ok": False, "refusal": "HQPlayer refused Pause"}, paused
@@ -231,7 +236,7 @@ def test_a_play_hqplayer_refused_is_said_once_with_its_diagnosis(traced, fake, m
 
     fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
     monkeypatch.setattr(player, "manager", types.SimpleNamespace(
-        ensure_active=lambda: traced, backend=lambda: traced))
+        ensure_active=lambda: traced, backend=lambda: traced, before_start=_no_look))
     answer = player.play()
     a = _closed(timeout=5.0)
     assert answer == {"ok": False, "refusal": "Empty transport", "attempt": a.id}, answer
@@ -257,7 +262,7 @@ def test_a_failure_said_is_not_said_again_when_its_diagnosis_comes_back(traced, 
 
     fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
     monkeypatch.setattr(player, "manager", types.SimpleNamespace(
-        ensure_active=lambda: traced, backend=lambda: traced))
+        ensure_active=lambda: traced, backend=lambda: traced, before_start=_no_look))
     answer = player.play()
     a = _closed(timeout=5.0)
     assert _wait(lambda: traced._last_closed is a, 5.0)
@@ -282,7 +287,7 @@ def test_a_tab_opened_after_a_failure_never_says_it(traced, fake, monkeypatch):
 
     fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
     monkeypatch.setattr(player, "manager", types.SimpleNamespace(
-        ensure_active=lambda: traced, backend=lambda: traced))
+        ensure_active=lambda: traced, backend=lambda: traced, before_start=_no_look))
     player.play()
     a = _closed(timeout=5.0)
     assert _wait(lambda: traced._last_closed is a, 5.0)
@@ -332,7 +337,7 @@ def test_a_refused_play_whose_diagnosis_came_first_in_a_failing_run_is_said(trac
 
     fake.replies["Play"] = '<Play result="Error">Empty transport</Play>'
     monkeypatch.setattr(player, "manager", types.SimpleNamespace(
-        ensure_active=lambda: traced, backend=lambda: traced))
+        ensure_active=lambda: traced, backend=lambda: traced, before_start=_no_look))
     stopped = TrackStatus(state=PlaybackState.STOPPED, track_index=1, track_id="", position=0.0,
                           length=300.0, volume=-3.0)
     for _ in range(4):
@@ -357,7 +362,7 @@ def test_a_tap_hqplayer_refused_is_said_once_with_its_why(traced, fake, monkeypa
 
     fake.replies["SelectTrack"] = '<SelectTrack result="Error">No such track</SelectTrack>'
     monkeypatch.setattr(player, "manager", types.SimpleNamespace(
-        ensure_active=lambda: traced, backend=lambda: traced, active=traced, queue=traced._queue))
+        ensure_active=lambda: traced, backend=lambda: traced, before_start=_no_look, active=traced, queue=traced._queue))
     answer = player.jump(player.JumpRequest(index=2, track_id="track-2"))
     assert answer["ok"] is False and answer["refusal"] == "No such track" and answer["attempt"], answer
     assert _wait(lambda: traced._last_closed is not None
