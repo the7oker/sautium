@@ -1726,6 +1726,10 @@ def _transport(intent: bool, command: str, *args) -> dict:
     a Pause, a Stop or any newer intent that supersedes it dropped it."""
     try:
         b = manager.ensure_active() if intent else manager.backend()
+        if command == "play":
+            # the file that Play would start, looked at before the output
+            # is asked; nothing of the queue opening here is said in words
+            manager.before_start(b)
         ok = getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
@@ -2000,6 +2004,8 @@ def jump(req: JumpRequest):
         # play() after it raced the DLNA load and resumed the OLD track for
         # the seconds the new one took to buffer
         b = manager.ensure_active()
+        if not manager.queue.view()[2]:
+            manager.before_start(b, slot)       # the file the tap would start, looked at first
         ok = b.select(slot, req.track_id)
     except Exception as e:
         raise _output_error(e)
@@ -2838,7 +2844,7 @@ def _output_error(e: Exception, refusal: Optional[tuple[int, str]] = None) -> HT
     not do (said_with: a track tapped while a new queue that did not commit
     loaded) — for the person, never for the log."""
     if isinstance(e, NotHere):
-        return _not_here(e.why)
+        return _not_here(e.why, e.album or None)
     status, why = refusal or _output_refusal(e)
     said = said_with(e)
     return HTTPException(status_code=status, detail=f"{why} — {said}" if said else why)

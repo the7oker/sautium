@@ -6309,6 +6309,51 @@ def test_a_played_queue_whose_first_file_is_not_there_sends_a_shared_hqplayer_no
         other.close()
 
 
+@pytest.mark.parametrize("streams", [True, False])
+def test_a_play_of_the_queue_held_whose_folder_went_unseen_sends_a_shared_hqplayer_nothing(fake, lane, listens,
+                                                                                         monkeypatch, streams):
+    """The evening's own trigger: two nodes on one HQPlayer, the other one
+    playing; this node's queue holds an album whose disk left with no event,
+    and Play is pressed here (POST /api/player/play). The play intent looks
+    at the file that Play would start before the output is asked: the folder
+    is recorded gone and the queue's ways in read at once. Where this node
+    streams the press waits on the slot's stream — its row says so — and
+    HQPlayer is taken only when it landed; where nothing streams the Play is
+    refused with the words. HQPlayer received nothing from the node — before
+    this, Stop came first and the other node's music was gone."""
+    from fastapi import HTTPException
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, "plays")
+    player_router = _routes_on(monkeypatch, mgr)
+    mgr.replace_queue([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)], play=False)
+    looks = _the_folder_went_unseen(monkeypatch)
+    try:
+        n = len(fake.received)
+        if streams:
+            assert player_router.play()["ok"]
+            assert _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+            rows = mgr.playlist()["tracks"]
+            assert [r["id"] for r in rows] == [1, 2] and all(r["stream"]["state"] in ("waiting", "buffering")
+                                                             for r in rows), rows
+        else:
+            monkeypatch.setattr(streaming_service, "is_enabled", lambda: False)
+            with pytest.raises(HTTPException) as refused:
+                player_router.play()
+            assert (refused.value.status_code, refused.value.detail) == (409, _NOT_HERE)
+        _settled(fake)
+        sent = _from_node(fake, n, other)
+        _observed("F20-held", streams=streams, looks=looks, sent=sent, hqplayer=(fake.state, fake.track))
+        assert looks == [True] and sent == [] and (fake.state, fake.track, fake.playlist) == left
+        assert [(it.source["kind"], it.media_file_id) for it in mgr.queue.snapshot()] == [("file", 1), ("file", 2)]
+        if streams:
+            prov.land("track-1")
+            assert _wait(lambda: fake.state == PLAYING and fake.track == 1 and len(fake.playlist) == 1
+                         and "/preview/" in fake.playlist[0], timeout=15), (fake.state, fake.track, fake.playlist)
+    finally:
+        prov.land("track-1", "track-2")
+        b.shutdown()
+        other.close()
+
+
 def _queued_under_another(fake, lane, monkeypatch):
     """Another controller plays; the node's queue, put together without
     playing it, is two streams still to come (the queue's alone)."""
