@@ -20,6 +20,12 @@ store opens its connection at the start's load and saves through it. A
 connection that went meanwhile (PostgreSQL restarted under a running node)
 is found by the next periodic save and made again there, while a new
 connection is still taken.
+
+A connection that is held must find out that its peer is gone (LIVENESS): a
+PostgreSQL made again at another address sends nothing back, and a save on
+such a connection would wait out TCP's own retransmits — a quarter of an
+hour, with the store's lock held — where it now fails in seconds and its one
+retry connects anew.
 """
 
 from __future__ import annotations
@@ -28,6 +34,17 @@ import threading
 from typing import Callable, Optional
 
 import psycopg2
+
+
+# What the held connection is opened with. The keepalives are the ones the
+# backend's other connection that sits on PostgreSQL for the node's life has
+# (db_pool.Listener): an idle peer that vanished is found in a minute. They
+# say nothing while a statement waits for its answer — unacknowledged bytes
+# are TCP's retransmits' — so that wait has its own bound (tcp_user_timeout,
+# in milliseconds; no effect where the system has no such option), as have a
+# connect that gets no answer and a statement a live server does not finish.
+LIVENESS = {"connect_timeout": 5, "keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10,
+            "keepalives_count": 3, "tcp_user_timeout": 5000, "options": "-c statement_timeout=5000"}
 
 
 class DhtStateStore:
@@ -40,7 +57,7 @@ class DhtStateStore:
 
     def _held(self):
         if self._conn is None or self._conn.closed:
-            self._conn = psycopg2.connect(self._dsn)
+            self._conn = psycopg2.connect(self._dsn, **LIVENESS)
             self._conn.autocommit = True
         return self._conn
 
