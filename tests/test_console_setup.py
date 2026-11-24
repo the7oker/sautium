@@ -649,6 +649,10 @@ def test_a_disk_someone_mounted_by_hand_is_offered_the_line_and_taken_as_named_m
     assert "its present hold is let go here" in said and "    sudo umount /dev/sda1\n" in said
     assert "T=" not in said                              # a label with a quote: the disk goes by its UUID
     assert "is not seen until Sautium is started" not in said          # the block, instead of the sentence
+    # what follows the block, said beside it: the root forgotten (which binds the disks' folder and
+    # makes the node again), the folder chosen at its new place
+    assert (f"    sudo systemctl daemon-reload\n\nThen run:  ./sautium roots --forget {music}\n"
+            "and choose the disk as the music folder in Sautium (More › Library).\n") in said
     assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [str(music), setup.AUTOMOUNT_BASE]
     # … and a later run with no folder named offers it again, with what follows it
     assert setup.main(["--yes"]) == 0

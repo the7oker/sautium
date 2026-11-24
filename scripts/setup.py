@@ -1629,9 +1629,18 @@ def boot_mount_steps(roots: List[str], labels: Dict[str, str], shown: Optional[s
             if found is None or found["point"] == shown:
                 continue
             boot_mount_block(found, f"{root} is {on_a_mount(root)}: {SEEN_AT_START}", found["mounted_at"])
-        say(f"Then run:  ./sautium roots --forget {shlex.quote(root)}")
-        say(f"and choose {named(found)} as the music folder in Sautium (More › Library).")
-        say()
+        follows(root, found)
+
+
+def follows(root: str, found: dict) -> None:
+    """What follows the block that moves a root's disk under the folder disks
+    are mounted in: the root, an empty folder from then on, is forgotten —
+    which writes the override again (the disks' folder bound, where the block
+    made it) and makes the node again — and the folder is chosen at its new
+    place."""
+    say(f"Then run:  ./sautium roots --forget {shlex.quote(root)}")
+    say(f"and choose {named(found)} as the music folder in Sautium (More › Library).")
+    say()
 
 
 def on_a_mount(real: str) -> Optional[str]:
@@ -1700,6 +1709,8 @@ def root_steps(args, state: dict, automount: bool = True, disk: Optional[dict] =
             say("Install the package ntfs-3g with this system's package manager.")
     if disk is not None:
         boot_mount_block(disk, disk["why"], disk["mounted_at"], "the desktop's" if disk["desktop"] else "its present")
+        if not disk["desktop"]:
+            follows(disk["real"], disk)
         shown.append("music disk")
     if not shown:
         return
@@ -1777,7 +1788,7 @@ def cmd_setup(args) -> int:
                        "signed in, and Sautium starts with the machine. Mount the disk at every start (a line of "
                        "/etc/fstab: read-only, nofail) and name the folder where it then lies")
         if disk is not None:
-            disk["desktop"] = desktop
+            disk["desktop"], disk["real"] = desktop, real
             disk["why"] = (f"{music} is on a disk this machine's desktop mounts only while you are signed in to it.\n"
                            "Sautium starts with the machine, before that." if desktop
                            else f"{music} is {on_a_mount(real)}: {SEEN_AT_START}")
@@ -1802,13 +1813,15 @@ def cmd_setup(args) -> int:
     root_steps(args, state, automount=not by_line, disk=disk)
 
     if not by_line:
-        # The line pasted: its disk is under the folder the node reads disks
-        # in, and the folder named is chosen there, in the Web UI
-        moved = disk is not None and fstab_line(disk["point"]) is not None
+        # A folder on a disk the desktop mounts is never a root: its bind
+        # would be made by Docker whenever the disk is out — a folder of
+        # root's in the desktop's own place for that disk. With the line
+        # pasted its disk lies under the folder the node reads disks in, and
+        # the folder named is chosen there, in the Web UI. (A disk someone
+        # mounted by hand stays the root it was named as until it is
+        # forgotten: `follows`.)
+        moved = disk is not None and disk["desktop"] and fstab_line(disk["point"]) is not None
         if disk is not None and disk["desktop"] and not moved:
-            # Never a root: a bind of a folder ON a disk the desktop mounts
-            # is made by Docker whenever the disk is out — a folder of root's
-            # in the desktop's own place for that disk
             raise Stop(f"the music disk is not set, so Sautium would not read {music}: paste the block above, "
                        f"then run ./sautium again and choose {named(disk)} as the music folder in Sautium "
                        "(More › Library)")
