@@ -520,3 +520,22 @@ def test_a_reread_and_a_retag_leave_a_copy_where_it_entered(cur, library, templa
         _tag(f, album="First (fixed)")
     _scan()
     assert (shelf(), entered()) == (["Second", "First (fixed)"], at)
+
+
+def test_a_file_retagged_off_a_track_other_copies_hold_takes_its_slot_along(cur, library, template):
+    """One file of a track two albums hold is re-titled: it moves alone, and
+    the slot its tags had written for the track it left moved with nothing —
+    it kept the position from the track the file is on now, and held the
+    album behind its copy's removal (PI-NODE-2D item 5)."""
+    _clean(cur)
+    _flac(template, library / "A" / "LP" / "01.flac", "Song", "Aurora", "LP", track=1)
+    b = _flac(template, library / "A" / "Best Of" / "07.flac", "Song", "Aurora", "Best Of", track=7)
+    _scan()
+    _materialise(cur)
+    _tag(b, title="Song (Live)")
+    _scan()
+    _materialise(cur)
+    cur.execute("""SELECT al.title, t.title, at.position FROM album_tracks at
+                     JOIN albums al ON al.id = at.album_id JOIN tracks t ON t.id = at.track_id
+                    ORDER BY 1""")
+    assert cur.fetchall() == [("Best Of", "Song (Live)", 7), ("LP", "Song", 1)]

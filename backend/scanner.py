@@ -1033,6 +1033,12 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                         db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
                                    {"id": row.id})
                         stats["moved"] = stats.get("moved", 0) + (track != row.track_id)
+                        if track != row.track_id:
+                            # the slot this file's tags wrote for the track it
+                            # left, where no other file of its album holds it:
+                            # it would keep the position from the track the
+                            # file is on now
+                            drop_tag_slots(db, [row.album_id], [row.track_id])
                     if row.stat_mtime_ns is not None and (
                             row.stat_mtime_ns != (st.mtime_ns if st else None)
                             or row.file_size_bytes != md.get("file_size_bytes")):

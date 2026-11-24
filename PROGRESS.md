@@ -4619,7 +4619,8 @@ ever fill on a node with the streaming library off.
   an album's files left the old album behind with no file. The slots its
   own files' tags wrote no longer count as a tracklist the album holds apart
   from its copy; from an album that stays (MusicBrainz's slots, another
-  copy), the moved files' `tag` slots go with them.
+  copy), the moved files' `tag` slots go with them. So does the slot of a
+  track one file was re-titled off while another copy still holds the track.
 - **The rows already left are removed once**, at the owner's yes for the
   one named step (`db_migrate`'s `tracklist_leftovers_v1`): the albums with
   no copy, no release group, not imported and with no imported slot — a
