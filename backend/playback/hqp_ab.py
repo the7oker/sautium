@@ -35,8 +35,9 @@ and keeps the person's answers.
   HQPlayer's own frames before the source and through a pause are exactly
   zero. A marked frame before the pause's zeros is a pause that took hold
   inside the lead: that fragment is a slip, never a duel; a HQPlayer on
-  which it never takes hold before the source (the first filter's every
-  warm-up play) ends the sitting in words. The onset and the end are each
+  which it never takes hold before the source (every try of the test's
+  first step) ends the sitting in words. The check reads what arrived
+  before the resume — the silence itself ends at the first such frame. The onset and the end are each
   frame's own time in its read (§13 Q9 (a): a read the reader came to late
   reads late — a check long, a false slip; an end late, the next silence
   long by that much; each slip's cause is recorded, BACKLOG B-140).
@@ -585,7 +586,9 @@ class Sitting:
         # A Stop never interrupts the link: a command it cut would have gone
         # out unanswered (a Play HQPlayer carries out, unpaused, while the
         # put-back reconnects), and every wait of the sitting wakes on it
-        # anyway. Only the app's stop (halt) interrupts.
+        # anyway. Only the app's stop (halt) interrupts. A Stop during a
+        # build waits for its end: the Pause's answer holds the link until
+        # then, and HQPlayer answers no put-back sooner (review round 2, L2).
 
     def halt(self) -> None:
         self._halt.set()
@@ -856,10 +859,14 @@ class Sitting:
                 else:
                     if not self._held:
                         raise Refused(NEVER_HOLDS)
+                    if name == self.yours and name in self.timings:
+                        self._own_again = False     # its re-measure: the first timing stands
+                        continue
                     if name == self.yours:
                         raise Refused("HQPlayer's timing kept missing your filter here, so it cannot "
                                       "be compared")
                     self._leave("late", name)
+                    ended = self._settle_on_own(ended)   # its rate unknown: the next pays no switch
                     continue
                 ended = played.ended
                 own_rate = (self.timings[self.yours].rate if self.yours in self.timings
@@ -867,10 +874,7 @@ class Sitting:
                 if played.timing.rate != own_rate:
                     self.left_rates[name] = played.timing.rate
                     self._leave("other_rate", name, rate=played.timing.rate)
-                    try:
-                        ended = self._fragment(self.yours, None, warm=True, since=ended).ended
-                    except _WarmLate:
-                        ended = time.time()
+                    ended = self._settle_on_own(ended)
                     continue
                 if name != self.yours and played.timing.start > search.START_MAX_S:
                     self._leave("long_start", name)
@@ -896,6 +900,15 @@ class Sitting:
                 self.link("stop")
             self._unmute()
             self.phase = phase if phase != "warming" else "ready"
+
+    def _settle_on_own(self, since: float) -> float:
+        """Their filter played once, unmeasured: after a filter at another
+        rate (or of a rate unknown) the next play would pay the switch back
+        in its start (review round 1, M4)."""
+        try:
+            return self._fragment(self.yours, None, warm=True, since=since).ended
+        except _WarmLate:
+            return time.time()
 
     def _leave(self, reason: str, name: str, **kw) -> None:
         """Out of the sitting, whichever form asked for it, said with its reason."""
@@ -953,7 +966,8 @@ class Sitting:
         played_at = time.time()
         if not link("play"):
             raise Refused(f"HQPlayer did not play the passage ({link.refusal()})")
-        link("pause")
+        if not link("pause"):
+            raise Refused(f"HQPlayer did not pause the passage ({link.refusal()})")
         paused = time.time()
         first = self._wait(lambda: self._first_frame(played_at), FIRST_FRAME_S, "frame of the passage")
         # Ready to resume: the pause answered (a build may hold its answer)
@@ -967,7 +981,11 @@ class Sitting:
             resume = anchor + silence_s - (lead + timing.r)
             if began + start > resume:
                 self._slipped(name, "late", start=start, before=before)
-            self._sleep_until(resume, silence_s)
+            seen = self._sleep_until(resume, silence_s)
+            if seen is not None:
+                # the source moved while it should be held: stopped now, not
+                # heard through the silence (review round 2, M1)
+                self._not_held(name, seen, warm, anchor, resume, silence_s)
         resumed = time.time()
         link("play")
         # A pause held before the source shows nothing but HQPlayer's zeros
@@ -1194,17 +1212,23 @@ class Sitting:
                     raise Refused(f"HQPlayer's meter showed no {what}")
                 self._cv.wait(left)
 
-    def _sleep_until(self, t: float, silence_s: float) -> None:
-        """The silence: the one timed wait, ended by the resume."""
+    def _sleep_until(self, t: float, silence_s: float) -> Optional[str]:
+        """The silence: the one timed wait, ended by the resume — or by a
+        frame of the source the meter shows meanwhile (a pause that did not
+        hold, §13 Q8): its cause, at once."""
         self.sounding = {"which": None, "silence_s": round(silence_s, 2)}
         self._publish()
         with self._cv:
             while (left := t - time.time()) > 0:
                 if self._stopping:
                     raise _Stopped()
+                seen = self._source_before(time.time())
+                if seen is not None:
+                    return seen
                 self._cv.wait(left)
             if self._stopping:
                 raise _Stopped()
+        return None
 
     def _pause(self, seconds: float) -> None:
         with self._cv:
@@ -1269,8 +1293,12 @@ class Sitting:
                 break
             labels = (["yours", "next"] if step.kind == "first"
                       else ["yours"] if step.kind == "check" else ["next"])
+            # Whether their filter plays in the step or is what it is compared
+            # with — its slow start, if it has one, is in the step's P
+            yours = self.yours in step.plays or (len(step.plays) == 1 and chain.last == self.yours)
             self.step_view = {"kind": step.kind, "n": search.CHAIN_STEPS - chain.steps_left + 1,
-                              "of": min(search.CHAIN_STEPS, len(self.pool)), "answerable": False}
+                              "of": min(search.CHAIN_STEPS, len(self.pool)), "answerable": False,
+                              "yours": yours}
             self._publish()
             p = self._step(step.plays, anchor, labels,
                            ref=chain.last if len(step.plays) == 1 else None)
@@ -1576,8 +1604,8 @@ def _path(p: str):
 
 def _track(manager) -> Dict[str, Any]:
     """The queue's current entry as a sitting cuts it: an owned PCM file
-    here (Q4) — its path, the image's offset for a CUE slice, its length,
-    rate and depth."""
+    here (Q4) — its path, the image's offset for a CUE slice, its length
+    and rate."""
     from pathlib import Path
     from config import settings
     here = manager.spot()
@@ -1591,7 +1619,7 @@ def _track(manager) -> Dict[str, Any]:
         raise Refused(f"Comparing plays a cut of a file on this computer; this track plays "
                       f"from {where}.")                                             # W17
     row = db_query_one("""
-        SELECT file_path, file_format::text AS format, sample_rate, bit_depth, channels,
+        SELECT file_path, file_format::text AS format, sample_rate,
                duration_seconds, cue_start_seconds, cue_end_seconds
           FROM media_files WHERE id = %(id)s
     """, {"id": item.media_file_id})
@@ -1611,8 +1639,7 @@ def _track(manager) -> Dict[str, Any]:
     if length < LENGTH_MIN_S:
         raise Refused("This track is too short to compare a passage of it")
     return {"track_id": item.track_id, "title": item.title, "artist": item.artist, "path": path,
-            "offset": start, "length": length, "rate": int(row["sample_rate"]),
-            "bits": row["bit_depth"], "channels": row["channels"] or 2}
+            "offset": start, "length": length, "rate": int(row["sample_rate"])}
 
 
 def _screen(s: Sitting, filters: List[dict], own: str, shaper: str, mode_name: str):

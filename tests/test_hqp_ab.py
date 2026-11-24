@@ -530,7 +530,7 @@ def ab(dsn, tmp_path, monkeypatch):
     # The track: an owned file here (its own test reads the database)
     monkeypatch.setattr(hqp_ab, "_track", lambda mgr: {
         "track_id": None, "title": "Song 1", "artist": "Artist", "path": str(tmp_path / "song.flac"),
-        "offset": 0.0, "length": 120.0, "rate": 44100, "bits": 24, "channels": 2})
+        "offset": 0.0, "length": 120.0, "rate": 44100})
 
     def cut(path, start, length, *, lead, fade):
         out = tmp_path / f"cut-{start:.3f}-{length:.3f}-{lead:.3f}.flac"
@@ -647,8 +647,10 @@ def test_a_build_slower_than_its_warm_up_is_played_again_with_the_silence_grown(
 
 
 def test_a_pause_landing_late_moves_the_resume_and_never_the_sound(ab, monkeypatch):
-    """The sitting's thread woken late on a fragment's first frame: its pause
-    lands further into the lead, and its resume is timed from there."""
+    """The sitting's thread woken late on a fragment's first frame: its pause,
+    sent at Play's answer, held before the source all the same (§13 Q7), and
+    the resume, timed from the later of that and the first frame, keeps the
+    silence."""
     real = hqp_ab.Sitting._wait
     late = []
 
@@ -746,11 +748,13 @@ def test_a_slow_probe_stretches_only_the_steps_it_is_in(ab):
     ab.wait_phase("result", "ended")
     gaps = _silences(ab, t0)
     assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
-    rows = ab.q("SELECT first_name, second_name, silence_s::float FROM hqp_ab_duels ORDER BY n")
+    # like against like: the one-fragment steps after the first (the first
+    # plays two, so its P holds a tail the others have not)
+    rows = ab.q("SELECT first_name, second_name, silence_s::float FROM hqp_ab_duels WHERE n > 1 ORDER BY n")
     with_slow = [p for a, b, p in rows if "hires" in (a, b)]
     without = [p for a, b, p in rows if "hires" not in (a, b)]
-    assert with_slow and without, rows
-    assert max(without) < min(with_slow) - 0.4, rows
+    assert with_slow and without, rows          # the search's order is its own: the same each run
+    assert max(without) < min(with_slow) - 0.5, rows
 
 
 def test_a_candidate_over_the_start_cap_leaves_with_its_reason(ab, monkeypatch):
@@ -870,23 +874,12 @@ def test_a_pause_whose_answer_a_build_holds_still_holds_before_the_source(ab):
     assert gaps and all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
 
 
-def test_a_pause_taking_hold_inside_the_lead_is_a_slip_said_by_the_mark(ab, monkeypatch):
-    """§13 Q8: a marked frame before the pause's zeros — the pause took hold
-    inside the lead — is a slip, played again, counted with its cause."""
+def test_a_pause_taking_hold_inside_the_lead_is_a_slip_said_by_the_mark(ab):
+    """§13 Q8: a marked frame before the resume — the pause took hold inside
+    the lead — is a slip, played again, counted with its cause."""
     hqp_ab.open_sitting("pair", "ext2")
     ab.wait_phase("ready")
-    fake = ab.fake
-    once = []
-    real = fake._pause
-
-    def late_once(now):
-        _, kind, _, f, _ = fake._now_seg(now)
-        if kind in ("build", "preroll") and not once and hqp_ab._sitting.phase == "testing":
-            once.append(now)
-            f2 = Params(**{**f.__dict__, "pause_late": 0.1})
-            fake.seg = [x if x[3] is not f else (x[0], x[1], x[2], f2, x[4]) for x in fake.seg]
-        real(now)
-    fake._pause = late_once
+    once = _late_pause_once(ab, 0.1)
     gaps = _silences(ab, _run_pair(ab))
     assert once and hqp_ab._sitting.slipped == 1
     assert ab.q("SELECT cause::text, warm FROM hqp_ab_slips") == [("mark", False)]
@@ -957,6 +950,48 @@ def test_a_warm_up_after_a_filter_at_another_rate_settles_on_theirs_first(ab, mo
     assert "long_start" not in s.screened.left_out, s.screened.left_out
     assert all(t.start < 0.8 for t in s.timings.values()), s.timings
     assert v["own_slow"] is None
+
+
+def _late_pause_once(ab, late):
+    """The next test fragment's pause takes hold `late` s into the source."""
+    fake = ab.fake
+    once = []
+    real = fake._pause
+
+    def late_once(now):
+        _, kind, _, f, _ = fake._now_seg(now)
+        if kind in ("build", "preroll") and not once and hqp_ab._sitting.phase == "testing":
+            once.append(now)
+            f2 = Params(**{**f.__dict__, "pause_late": late})
+            fake.seg = [x if x[3] is not f else (x[0], x[1], x[2], f2, x[4]) for x in fake.seg]
+        real(now)
+    fake._pause = late_once
+    return once
+
+
+def test_a_pause_that_does_not_hold_is_stopped_at_its_first_frame_not_heard_through(ab, monkeypatch):
+    """Review round 2, M1: a pause that did not hold before the source — here
+    it would take hold only in the music — is seen at the first frame of the
+    source the meter shows during the silence (the lead's mark), and the
+    fragment is stopped then: its music never reaches the output, nor plays
+    through the silence to its resume."""
+    monkeypatch.setattr(S, "MARGIN_S", 1.5)               # a silence long enough to tell
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    fake = ab.fake
+    stops = []
+    real_stop = fake._stop
+    fake._stop = lambda now: (stops.append(now), real_stop(now))[1]
+    t0 = time.time()
+    once = _late_pause_once(ab, S.LEAD_MIN_S + 0.1)       # past the lead: in the music
+    _run_pair(ab)
+    assert once and ab.q("SELECT cause::text FROM hqp_ab_slips WHERE NOT warm") == [("mark",)]
+    source = once[0] + Params().b + PRE_S                  # when that fragment's source began
+    # stopped before the music would have left HQPlayer, and before anything
+    # of that fragment was heard
+    assert any(once[0] < t < source + S.LEAD_MIN_S for t in stops), (once, stops, source)
+    heard = [(on, off) for on, off, _ in fake.output(t0) if once[0] < on < source + S.LEAD_MIN_S + 1.0]
+    assert heard == [], heard
 
 
 def test_a_slow_build_s_slip_is_recorded_as_late_and_a_resume_that_moved_as_the_check(ab):

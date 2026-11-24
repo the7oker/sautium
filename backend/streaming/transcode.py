@@ -245,7 +245,7 @@ def flac_fragment_path_for_file(source_path: str, start: float, length: float, *
     layout is kept as it is."""
     mtime = int(os.path.getmtime(source_path))
     span = f"{start:.6f}|{length:.6f}|{lead:.3f}|{fade:.3f}"
-    key = hashlib.sha1(f"{source_path}|{mtime}|fragment-mark1|{span}".encode()).hexdigest()
+    key = hashlib.sha1(f"{source_path}|{mtime}|fragment-mark2|{span}".encode()).hexdigest()
     k = FRAGMENT_MARK_LSB24 / 2 ** 23
     mark = (f"if(lt(t\\,{lead:.3f})\\,if(eq(mod(n\\,4)\\,1)\\,{k!r}\\,"
             f"if(eq(mod(n\\,4)\\,3)\\,{-k!r}\\,0))\\,val(ch))")

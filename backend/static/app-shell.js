@@ -11398,8 +11398,9 @@
       ? `<p class="ab-warn">Your filter takes ${abNum(`${v.own_slow} s`)} to start here, so the pause before it is long.</p>` : '';
   }
 
-  // `own`: the step plays their filter — the pair's every round, the chain's
-  // first step; its slow start is said there, never under another's
+  // `own`: their filter is in the step — played, or what it is compared with
+  // (the pair's every round; the chain's step says, `step.yours`); its slow
+  // start is said there, never under another's
   function abWarnings(v, own = false) {
     return (own ? abOwnSlow(v) : '')
       + (v.long_silence ? '<p class="ab-warn">Long pauses make small differences harder to hear.</p>' : '')
@@ -11559,7 +11560,7 @@
             ${abSay(ab)}
             ${v.silence_s != null ? `<p class="ab-warn">Silence before ${st.kind === 'first' ? 'each' : 'this one'}: ${
               abNum(`${v.silence_s} s`)} · fragment ${abNum(`${v.passage.length_s} s`)}</p>` : ''}
-            ${abWarnings(v, st.kind === 'first')}
+            ${abWarnings(v, !!st.yours)}
           </div>
         </div>`;
     },
