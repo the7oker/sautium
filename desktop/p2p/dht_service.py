@@ -107,6 +107,10 @@ TAIL_IDLE_RECHECK = 60.0
 
 # How long to wait for DHT bootstrap (seconds)
 DHT_BOOTSTRAP_TIMEOUT = 30
+# How long the service's stop waits for its save of the routing table: inside
+# the ten seconds a backend's stop has in all (the compose files' grace, the
+# launcher's), whatever the database's connection does
+STOP_SAVE_S = 5.0
 
 # How long to wait for get_peers results, and the collection window a
 # want_all lookup spends gathering replies. 15 s because a traversal runs
@@ -459,12 +463,20 @@ class DHTService:
                     await task
                 except asyncio.CancelledError:
                     pass
+        saved = True
         if self._session:
-            self._save_state()
+            # Off the loop, as every other save, and waited for only so long:
+            # a save that does not return — a periodic one caught on a peer
+            # that vanished holds the store, and this one waits behind it —
+            # must not hold the node's stop with it
+            save = asyncio.get_running_loop().run_in_executor(None, self._save_state)
+            saved = bool((await asyncio.wait({save}, timeout=STOP_SAVE_S))[0])
+            if not saved:
+                logger.warning(f"DHT: state not saved at the stop: the database did not answer in {STOP_SAVE_S:g} s")
             self._session.pause()
             del self._session
             self._session = None
-        if self._state_store:
+        if self._state_store and saved:
             # Saved through the connection the store has held since the
             # start's load (a PostgreSQL told to stop takes no new one), and
             # only now let go: PostgreSQL waits for its clients to leave
