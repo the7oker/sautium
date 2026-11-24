@@ -164,3 +164,191 @@ def test_config_says_the_release_as_its_version(monkeypatch):
         "app_name": "Sautium", "app_version": "1.2.3", **identity}
     identity["release"] = None
     assert asyncio.run(main.get_config())["app_version"] is None
+
+
+def test_a_packed_ref_is_held_to_the_tags_own_name_as_a_loose_one_is(repo):
+    """One rule for both: `refs/tags/v1.2.3` over a tag object called v9.9.9
+    is no release 1.2.3, loose or after a pack-refs — whose peeled line
+    names HEAD all the same."""
+    _git(repo, "tag", "-a", "v9.9.9", "-m", "another name on HEAD")
+    _git(repo, "update-ref", "refs/tags/v1.2.3", _git(repo, "rev-parse", "refs/tags/v9.9.9"))
+    assert _release(repo) is None
+    _git(repo, "pack-refs", "--all")
+    assert "refs/tags/v1.2.3\n^" + _git(repo, "rev-parse", "HEAD") in (repo / ".git" / "packed-refs").read_text()
+    assert _release(repo) is None
+    # ... and the release's own tag is one, packed whole: its ref, its object
+    _git(repo, "tag", "-d", "v1.2.3")
+    _git(repo, "tag", "-a", "v1.2.3", "-m", "Sautium 1.2.3")
+    _git(repo, "pack-refs", "--all")
+    _git(repo, "repack", "-adq")
+    assert _release(repo) == "v1.2.3"
+
+
+# -- a checkout that is not as git writes it -------------------------------------
+#
+# The folder is the host's (a Docker node's is mounted beside its code) and
+# is read where the backend is imported: nothing in it may cost a start.
+
+@pytest.fixture
+def said(monkeypatch, caplog):
+    """The reader's one warning, counted."""
+    import logging
+    monkeypatch.setattr(updater, "_unreadable_said", False)
+    caplog.set_level(logging.WARNING, logger=updater.__name__)
+    return lambda: [r.getMessage() for r in caplog.records if "not readable as git writes it" in r.getMessage()]
+
+
+def _says(repo, monkeypatch) -> tuple:
+    """What a node on this checkout says it runs — computed, never raised."""
+    import config
+    monkeypatch.setenv("SAUTIUM_CHECKOUT", str(repo))
+    monkeypatch.setattr(updater, "installed_build", lambda: None)
+    return config.running_line(), config.running_version()
+
+
+def test_packed_refs_that_are_no_text_cost_no_start(repo, monkeypatch, said):
+    _git(repo, "tag", "-a", "v1.2.3", "-m", "Sautium 1.2.3")
+    _git(repo, "pack-refs", "--all")
+    head = _git(repo, "rev-parse", "HEAD")[:12]
+    packed = repo / ".git" / "packed-refs"
+    whole = packed.read_bytes()
+    # rot before the lines that matter: they are still read
+    packed.write_bytes(b"\xff\xfe\x00 not text \x80\n" + whole)
+    assert _says(repo, monkeypatch) == (f"Sautium 1.2.3 ({head})", "1.2.3")
+    # nothing but rot: no commit is known, and that is all
+    packed.write_bytes(b"\xff\xfe" * 4000)
+    assert _says(repo, monkeypatch) == ("Sautium (unknown build)", "unknown build")
+    assert said() == []                                     # nothing git could not have written is claimed
+
+
+def test_a_head_that_names_no_ref_is_not_followed(repo, tmp_path, monkeypatch, said):
+    outside = tmp_path / "outside"
+    outside.write_text("c" * 40 + "\n")
+    for pointer in ("ref: ../../outside", f"ref: {outside}", "ref: refs/heads/../../../outside"):
+        (repo / ".git" / "HEAD").write_text(pointer + "\n")
+        assert updater.head_commit(repo) is None, pointer
+        assert _says(repo, monkeypatch) == ("Sautium (unknown build)", "unknown build")
+    assert len(said()) == 1 and "which is no ref" in said()[0]         # said once, however often it is met
+
+
+def test_a_ref_of_fifty_megabytes_is_not_read(repo, monkeypatch, said):
+    import tracemalloc
+    (repo / ".git" / "refs" / "heads" / "main").write_bytes(b"a" * (50 * 2 ** 20))
+    (repo / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    tracemalloc.start()
+    try:
+        assert _says(repo, monkeypatch) == ("Sautium (unknown build)", "unknown build")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 2 ** 20, f"{peak} bytes held to read one ref"
+    assert len(said()) == 1 and "over 4096 bytes" in said()[0]
+    # a HEAD of that size, and one that is no text
+    (repo / ".git" / "HEAD").write_bytes(b"b" * (50 * 2 ** 20))
+    assert updater.head_commit(repo) is None
+    (repo / ".git" / "HEAD").write_bytes(b"ref: refs/heads/\xff\xfe\n")
+    assert updater.head_commit(repo) is None
+
+
+def _index_of_the_packed_tag(repo):
+    """The release's tag object in a pack, its ref loose: (the pack's index, the tag's id)."""
+    _git(repo, "tag", "-a", "v1.2.3", "-m", "Sautium 1.2.3")
+    _git(repo, "repack", "-adq")
+    (index,) = (repo / ".git" / "objects" / "pack").glob("*.idx")
+    index.chmod(0o644)
+    assert _release(repo) == "v1.2.3"
+    return index, bytes.fromhex(_git(repo, "rev-parse", "refs/tags/v1.2.3"))
+
+
+@pytest.mark.parametrize("entry", ["the tag's own", "the last"])
+def test_a_fanout_entry_of_four_billion_is_not_walked(repo, monkeypatch, said, entry):
+    """A corrupt fanout made the lookup count to its entry: some four
+    billion steps, where the backend is imported."""
+    import time
+    index, tag = _index_of_the_packed_tag(repo)
+    head = _git(repo, "rev-parse", "HEAD")[:12]
+    raw = bytearray(index.read_bytes())
+    at = 8 + 4 * (tag[0] if entry == "the tag's own" else 255)
+    raw[at:at + 4] = b"\xff\xff\xff\xff"
+    index.write_bytes(bytes(raw))
+    started = time.monotonic()
+    assert _says(repo, monkeypatch) == (f"Sautium (commit {head})", f"commit {head}")
+    assert time.monotonic() - started < 5
+    assert len(said()) == 1 and "its fanout does not fit its length" in said()[0]
+
+
+def test_an_object_a_corrupt_index_does_not_hold_is_not_counted_for(repo, said):
+    """Where the hang was: the lookup counted to the fanout's entry while it
+    did not find the name — for an object in another pack, or in none."""
+    import time
+    index, tag = _index_of_the_packed_tag(repo)
+    raw = bytearray(index.read_bytes())
+    raw[8 + 4 * tag[0]:12 + 4 * tag[0]] = b"\xff\xff\xff\xff"
+    index.write_bytes(bytes(raw))
+    absent = bytes([tag[0]]) + bytes(19)
+    started = time.monotonic()
+    assert updater._pack_offset(index, absent) is None
+    assert time.monotonic() - started < 5
+    assert len(said()) == 1
+
+
+def test_a_corrupt_pack_beside_the_one_that_holds_the_tag_hides_nothing(repo, monkeypatch, said):
+    _git(repo, "repack", "-adq")                            # the commit's pack
+    (first,) = (repo / ".git" / "objects" / "pack").glob("*.idx")
+    _git(repo, "tag", "-a", "v1.2.3", "-m", "Sautium 1.2.3")
+    _git(repo, "repack", "-dq")                             # the tag's, beside it
+    assert len(list((repo / ".git" / "objects" / "pack").glob("*.idx"))) == 2
+    head = _git(repo, "rev-parse", "HEAD")[:12]
+    tag = bytes.fromhex(_git(repo, "rev-parse", "refs/tags/v1.2.3"))
+    first.chmod(0o644)
+    raw = bytearray(first.read_bytes())
+    raw[8 + 4 * tag[0]:12 + 4 * tag[0]] = b"\xff\xff\xff\xff"
+    first.write_bytes(bytes(raw))
+    assert _says(repo, monkeypatch) == (f"Sautium 1.2.3 ({head})", "1.2.3")
+
+
+def test_a_truncated_pack_index_or_pack_costs_no_start(repo, monkeypatch, said):
+    index, _tag = _index_of_the_packed_tag(repo)
+    head = _git(repo, "rev-parse", "HEAD")[:12]
+    whole = index.read_bytes()
+    for cut in (4, 600, 8 + 1024, 8 + 1024 + 30, len(whole) - 41):
+        index.write_bytes(whole[:cut])
+        assert _says(repo, monkeypatch) == (f"Sautium (commit {head})", f"commit {head}"), cut
+    index.write_bytes(whole)
+    pack = index.with_suffix(".pack")
+    pack.chmod(0o644)
+    pack.write_bytes(pack.read_bytes()[:20])                # the index names an offset past its end
+    assert _says(repo, monkeypatch) == (f"Sautium (commit {head})", f"commit {head}")
+    index.write_bytes(b"\xfftOc\x00\x00\x00\x02" + b"\x00\x00\x00\x09" * 256)   # an index of nine objects, none there
+    assert _says(repo, monkeypatch) == (f"Sautium (commit {head})", f"commit {head}")
+
+
+def test_whatever_else_the_folder_holds_is_said_and_never_raised(repo, monkeypatch, said):
+    """The readers' last line: a failure nobody listed is "not known" too."""
+    def broken(root):
+        raise RuntimeError("a folder nobody foresaw")
+    monkeypatch.setattr(updater, "_git_dirs", broken)
+    assert updater.head_commit(repo) is None and updater.head_release(repo) is None
+    assert _says(repo, monkeypatch) == ("Sautium (unknown build)", "unknown build")
+    assert len(said()) == 1 and "a folder nobody foresaw" in said()[0]
+
+
+def test_a_tag_stored_as_a_delta_is_read_through_it():
+    """Two tags of one commit share most of their bytes, and a repack may keep
+    one as git's copy/insert instructions over the other."""
+    base = b"object " + b"a" * 40 + b"\ntype commit\ntag v9.9.9\ntagger t <t@example.org> 0 +0000\n\nnine\n"
+    target = base.replace(b"v9.9.9", b"v1.2.3").replace(b"nine", b"Sautium 1.2.3")
+    cut = base.index(b"v9.9.9")
+    tail = base.index(b"\ntagger")
+    delta = (bytes([len(base), len(target)])
+             + bytes([0x90, cut])                                   # copy base[0:cut]
+             + bytes([6]) + b"v1.2.3"                               # insert the name
+             + bytes([0x91, tail, base.index(b"nine") - tail])      # copy from "\ntagger" up to the message
+             + bytes([14]) + b"Sautium 1.2.3\n")
+    assert updater._delta_applied(base, delta) == target
+    # ... and nothing is made of instructions that do not fit their base or their own length
+    assert updater._delta_applied(base[:-1], delta) is None
+    assert updater._delta_applied(base, delta[:-3]) is None
+    assert updater._delta_applied(base, delta + bytes([0])) is None
+    assert updater._delta_applied(base, bytes([len(base), 4, 0x91, 250, 200])) is None
+    assert updater._varint(b"\x80\x80", 0) == (None, 2)
