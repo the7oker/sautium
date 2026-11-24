@@ -499,7 +499,24 @@ def test_an_unread_volume_is_a_place_that_cannot_be_opened(tree, unread):
     places = library_root.folders()["places"]
     assert [p["kind"] for p in places] == ["folder", "disk", "unread"]
     assert places[-1] == {"path": None, "name": "sda1", "kind": "unread", "label": "Elements",
-                          "size_bytes": None, "format": "NTFS", "mounts": True, "driver": None}
+                          "size_bytes": None, "format": "NTFS", "mounts": True, "driver": None, "unclear": None}
+
+
+@pytest.mark.parametrize("word", ["ambivalent", "unknown"])
+def test_a_volume_no_one_filesystem_is_found_on_is_read_by_the_automounts_own_word(tree, unread, word):
+    """The automount's two words where blkid names no filesystem (PI-NODE-2D
+    §5): the marks of more than one, or none. The file keeps its four lines —
+    no label, no driver — and the word, never a format, chooses the sentence."""
+    _volume(unread, "sda1", word)
+    (volume,) = library_root.unread()
+    assert (volume["unclear"], volume["format"], volume["mounts"], volume["label"], volume["driver"]) == (
+        word, None, False, None, None)
+    place = library_root.folders()["places"][-1]
+    assert (place["kind"], place["path"], place["unclear"]) == ("unread", None, word)
+    # a type blkid did name is never one of the two, whatever a stick calls itself
+    for named in ("ntfs", "apfs", "zfs_member", "Unknown", "ambivalent2", "unknown\x00"):
+        (unread / "sda1").write_bytes(f"{BOOT}\n{named}\nLabel\n-\n".encode())
+        assert library_root.unread()[0]["unclear"] is None, named
 
 
 def _readable(fd: int, seconds: float) -> bool:
@@ -571,13 +588,18 @@ def test_an_unread_volume_is_a_notice_that_leaves_with_its_file(tree, unread, db
     path = _volume(unread, "sda1", "ntfs", "Elements <b>", driver="ntfs-3g")
     (item,) = notices().values()
     assert (item["key"], item["kind"], item["until"]) == ("disk.unread.sda1", "warning", None)
-    assert item["data"] == {"label": "Elements <b>", "format": "NTFS", "mounts": True, "driver": "ntfs-3g"}
+    assert item["data"] == {"label": "Elements <b>", "format": "NTFS", "mounts": True, "driver": "ntfs-3g",
+                            "unclear": None}
     onset = item["since"]
     # plugged in again: another file, another onset — news for the toast
     path.unlink()
     assert notices() == {}
     os.utime(_volume(unread, "sda1", "ntfs", "Elements <b>"), (1_800_000_000, 1_800_000_000))
     assert notices()["disk.unread.sda1"]["since"] != onset
+    # a volume the automount found no one filesystem on: the notice carries its word for the page's sentence
+    _volume(unread, "sdb1", "ambivalent")
+    assert notices()["disk.unread.sdb1"]["data"] == {"label": None, "format": None, "mounts": False, "driver": None,
+                                                     "unclear": "ambivalent"}
 
 
 # -- what a disk is, and what can be pulled (§9, §13) ---------------------------------------------

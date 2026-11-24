@@ -352,6 +352,12 @@ AUTOMOUNT_RULE = """\
 # into a reader that was already plugged in is a "change", never an "add".
 ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
 ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
+# A volume the system names no filesystem on at all (none found, or the marks
+# of two: a quick format over an older one) is the script's to say; one that
+# is named and is no filesystem of files (swap, an encrypted volume) is not.
+# No size: a card reader's empty slot.
+ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
+ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
 """
 
 AUTOMOUNT_UNIT = """\
@@ -379,7 +385,11 @@ ExecStop=/usr/local/lib/sautium/automount unmount %I
 # (so that "NTFS, and no ntfs-3g here" is told from "ntfs-3g refused it"),
 # each cut here and read as a stranger's text there
 # (backend/library_root.py). The unit stays active for such a volume, so
-# that its stop at the pull takes the file away.
+# that its stop at the pull takes the file away. Where blkid names no
+# filesystem the type line is one of the script's own two words:
+# `ambivalent` (the low-level probe finds the marks of more than one — its
+# exit 8), `unknown` (it finds none — its exit 2; said only of a volume that
+# can be one of files, see the script).
 AUTOMOUNT_SCRIPT = """\
 #!/bin/sh
 # Sautium: mount a plugged disk read-only under {base}/<its UUID>, for the
@@ -444,6 +454,42 @@ if [ "$(lsblk -n -o NAME "$dev" 2>/dev/null | wc -l)" -gt 1 ]; then exit 0; fi
 
 type=$(blkid -o value -s TYPE "$dev" || true)
 uuid=$(blkid -o value -s UUID "$dev" || true)
+if [ -z "$type" ]; then
+    # No filesystem the system names. The person plugged a disk in and is
+    # owed why it shows nothing — but never for what is no volume of files:
+    # an eMMC's own areas; an empty reader slot and an extended partition's
+    # container (under 1 MiB)
+    case "$name" in mmcblk*boot*|mmcblk*rpmb) exit 0 ;; esac
+    size=$(lsblk -n -d -b -o SIZE "$dev" 2>/dev/null | head -n 1 | tr -d ' ' || true)
+    case "$size" in ""|*[!0-9]*) exit 0 ;; esac
+    [ "$size" -ge 1048576 ] || exit 0
+    probe=0
+    blkid -p "$dev" >/dev/null 2>&1 || probe=$?
+    case "$probe" in
+        8)  type=ambivalent
+            unread "it carries the marks of more than one filesystem (wipefs lists them)" - ;;
+        2)  ;;
+        *)  echo "sautium-automount: $name: no filesystem named, and blkid -p answered $probe" >&2
+            exit 0 ;;
+    esac
+    # None found. Beside other partitions, only one whose type is for data:
+    # a disk Windows partitioned carries a reserved partition with nothing on
+    # it next to its NTFS one, and others a boot or recovery partition —
+    # nobody put music there. A disk's only volume is said whatever its type.
+    if [ "$dev_disk" != "$name" ] && [ "$(lsblk -n -o NAME "/dev/$dev_disk" 2>/dev/null | wc -l)" -gt 2 ]; then
+        parttype=$(lsblk -n -d -o PARTTYPE "$dev" 2>/dev/null | head -n 1 | tr -d ' ' | tr 'A-F' 'a-f' || true)
+        case "$parttype" in
+            ebd0a0a2-b9e5-4433-87c0-68b6b72699c7) ;;    # GPT: Microsoft basic data (FAT, exFAT, NTFS)
+            0fc63daf-8483-4772-8e79-3d69d8477de4) ;;    # Linux filesystem
+            933ac7e1-2eb4-4f13-b844-0e14e2aef915) ;;    # Linux /home
+            48465300-0000-11aa-aa11-00306543ecac) ;;    # Apple HFS+
+            7c3457ef-0000-11aa-aa11-00306543ecac) ;;    # Apple APFS
+            0x1|0x4|0x6|0x7|0xb|0xc|0xe|0x83|0xaf) ;;   # MBR: FAT, NTFS and exFAT, Linux, HFS
+            *) exit 0 ;;
+        esac
+    fi
+    unread "no filesystem is found on it" -
+fi
 safe="ro,nosuid,nodev,noexec"
 owned="uid=${{OWNER%%:*}},gid=${{OWNER##*:}},fmask=0133,dmask=0022"
 # FAT keeps its stamps in local time: pinned to UTC, a file's stamp is the
@@ -457,7 +503,7 @@ case "$type" in
     ntfs)  if command -v ntfs-3g >/dev/null 2>&1; then fs=ntfs-3g; else fs=ntfs3; fi
            opts="$safe,$owned" ;;
     ext4)  fs=ext4;  opts="$safe,noload" ;;
-    ""|swap|crypto_LUKS|LVM2_member|linux_raid_member|zfs_member) exit 0 ;;   # no filesystem of files
+    swap|crypto_LUKS|LVM2_member|linux_raid_member|zfs_member) exit 0 ;;   # no filesystem of files
     *) unread "not a format this script mounts (FAT, exFAT, NTFS, ext4)" - ;;
 esac
 case "$uuid" in ""|*[!A-Za-z0-9-]*) unread "it has no UUID to name its mount point by" - ;; esac
@@ -513,7 +559,8 @@ def automount_installed() -> bool:
 def automount_stale(files: Dict[str, Path], places: Dict[str, str] = None) -> bool:
     """Whether an installed automount is not the one this setup writes: any
     of the three files differs from its bytes here (an earlier release's
-    script knows no ntfs-3g and says nothing of a disk it could not mount)."""
+    script knows no ntfs-3g, or says nothing of a disk it could not mount or
+    of one it finds no one filesystem on)."""
     def same(kind: str) -> bool:
         try:
             with open((places or AUTOMOUNT_PLACES)[kind], "rb") as f:
@@ -541,8 +588,8 @@ def automount_block(files: Dict[str, Path], update: bool = False) -> None:
         title, why = ("Plugged disks: an update of the automount",
                       "The three small files that mount a plugged disk are an earlier release's. This release's\n"
                       "open a disk formatted by Windows where the old ones could not, and tell Sautium of a disk\n"
-                      "they could not open. A disk that is plugged in now stays as it is until it is plugged in\n"
-                      "again.\n")
+                      "they could not open or tell the format of. A disk that is plugged in now stays as it is\n"
+                      "until it is plugged in again.\n")
     block(title, why + f"Read them first: {files['rule'].parent}/",
           [f"A={shlex.quote(str(files['rule'].parent))}",
            f"B={AUTOMOUNT_BASE}",

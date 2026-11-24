@@ -1443,7 +1443,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     for volume in library_root.unread():
         items.append({"key": f"disk.unread.{volume['device']}", "kind": "warning",
                       "since": volume["since"], "until": None,
-                      "data": {k: volume[k] for k in ("label", "format", "mounts", "driver")}})
+                      "data": {k: volume[k] for k in ("label", "format", "mounts", "driver", "unclear")}})
     missing = [t for t in _MEDIA_TOOLS if not shutil.which(t)]
     since = _derived("tools.missing", bool(missing))
     if since:

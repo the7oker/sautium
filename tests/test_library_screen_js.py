@@ -214,6 +214,26 @@ def test_an_unread_disk_is_said_by_what_it_is_and_its_label_is_a_strangers_text(
     assert copies[3]["text"] == f"This disk is in a format this machine does not know. {READS}"
 
 
+def test_a_disk_no_one_format_is_found_on_is_said_by_which_of_the_two_it_is():
+    """The automount's two words (PI-NODE-2D §5, §9.4): the marks of two
+    formats, or none found. No label came with either; the toast and the
+    sheet's row say the same sentence."""
+    told = "Sautium cannot tell what is on it."
+    two = ("It carries the marks of two formats (a quick format over an older one); formatting it again in full "
+           "on your computer clears them.")
+    none = "It may be empty, or in a format this machine does not know."
+    volume = {"label": None, "format": None, "mounts": False, "driver": None}
+    out = _disks(volumes=[dict(volume, unclear="ambivalent"), dict(volume, unclear="unknown")],
+                 places=[dict(volume, path=None, name="sda1", kind="unread", size_bytes=None, unclear="ambivalent"),
+                         dict(volume, path=None, name="sdb", kind="unread", size_bytes=None, unclear="unknown")])
+    assert [c["text"] for c in out["copies"]] == [f"A disk — {told} {two}", f"A disk — {told} {none}"]
+    assert {c["title"] for c in out["copies"]} == {"A disk could not be read"}
+    for row, sub in zip(out["rows"], (two, none)):
+        assert "A disk <span" in row and f"— {told}</span>" in row and sub in row
+        assert "data-path" not in row and "<button" not in row and "unknown format" not in row
+        assert "sda1" not in row and "sdb" not in row               # the kernel's name is nothing to a person
+
+
 def test_the_folder_sheets_rows_a_disk_to_open_with_its_line_and_a_volume_only_to_read():
     out = _disks(places=[
         {"path": "/media/sautium/4A21", "name": "4A21", "kind": "disk", "label": "Elements <b>",

@@ -20,9 +20,11 @@ runs none.
   under its UUID with the pinned time options (NTFS by ntfs-3g where it is
   installed), leaves alone the system's own disk, a disk already mounted or
   named in fstab and a whole disk that holds partitions, and says a volume
-  it did not mount in one small file the node watches for. The fstab line
-  of a music disk: systemd's own generator makes the disk's device want its
-  mount.
+  it did not mount — or one no one filesystem is found on (PI-NODE-2D §5) —
+  in one small file the node watches for. The fstab line of a music disk
+  mounts it at the automount's own point for that disk (PI-NODE-2D §2):
+  systemd's own generator makes the disk's device want its mount, and an
+  install whose line mounts at the root itself is named and offered the move.
 - remove: the data only after the nickname; run twice, the second finds
   nothing left.
 """
@@ -1118,14 +1120,29 @@ case "$*" in
   "-n "*) grep -qx "$2" "$STUB/mounted-points" 2>/dev/null ;;
 esac
 ''',
+    # the column asked for (after -o) of the device named last. NAME: the
+    # device's own line and its children's — the plugged device's from
+    # `partitions`, its parent disk's from `siblings`
     "lsblk": '''#!/bin/sh
-case "$3:$4" in
+for dev; do :; done
+col=""; prev=""
+for arg; do [ "$prev" != -o ] || col="$arg"; prev="$arg"; done
+case "$col:$dev" in
   PKNAME:/dev/nvme0n1p2|PKNAME:/dev/nvme0n1p3) echo nvme0n1 ;;
   PKNAME:*) cat "$STUB/pkname" 2>/dev/null ;;
-  NAME:*) echo "${4#/dev/}"; cat "$STUB/partitions" 2>/dev/null ;;
+  NAME:/dev/loop0) echo loop0; cat "$STUB/partitions" 2>/dev/null ;;
+  NAME:*) echo "${dev#/dev/}"; cat "$STUB/siblings" 2>/dev/null ;;
+  SIZE:*) cat "$STUB/size" 2>/dev/null || echo 15500000000 ;;
+  PARTTYPE:*) cat "$STUB/parttype" 2>/dev/null ;;
 esac
 ''',
+    # `blkid -p`: the low-level probe's exit alone (2: nothing found, as on a
+    # blank volume) — or the real blkid's on an image, where a test has one
     "blkid": '''#!/bin/sh
+if [ "$1" = -p ]; then
+  if [ -e "$STUB/image" ]; then exec "$(cat "$STUB/real-blkid")" -p "$STUB/image"; fi
+  exit "$(cat "$STUB/probe" 2>/dev/null || echo 2)"
+fi
 cat "$STUB/blkid-$4" 2>/dev/null
 ''',
     "mount": '''#!/bin/sh
@@ -1192,8 +1209,8 @@ def test_the_automounts_shell_parses_and_carries_the_owner(automount):
     assert 'SUBSYSTEMS=="usb"' in rule and 'KERNEL=="mmcblk[0-9]*"' in rule
     # Every event but a removal: a card put into a reader already plugged in is a change, never an add
     lines = [line for line in rule.splitlines() if line and not line.startswith("#")]
-    assert len(lines) == 2 and all(line.startswith('ACTION!="remove", SUBSYSTEM=="block", ') for line in lines)
-    assert all('ENV{ID_FS_USAGE}=="filesystem"' in line for line in lines)     # an encrypted volume is not one
+    assert len(lines) == 4 and all(line.startswith('ACTION!="remove", SUBSYSTEM=="block", ') for line in lines)
+    assert all(line.endswith('TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"') for line in lines)
     # Root runs only the installed copy, never a file the person's own user can write
     assert str(automount.files["script"].parent) not in unit
     # Nothing root removes is named by a variable that could be empty
@@ -1233,7 +1250,7 @@ def test_what_is_not_a_plugged_music_disk_is_left_alone(automount):
         before = len(automount.calls())
         assert automount.plug(**blkid).returncode == 0
         return len(automount.calls()) == before and not automount.unread.exists()
-    for nothing in ("swap", "crypto_LUKS", "LVM2_member", "linux_raid_member", ""):
+    for nothing in ("swap", "crypto_LUKS", "LVM2_member", "linux_raid_member", "zfs_member"):
         assert left(TYPE=nothing, UUID="4A21-0000"), nothing            # no filesystem of files
     (automount.stub / "pkname").write_text("nvme0n1\n")                # the system's own disk
     assert left(TYPE="vfat", UUID="4A21-0000")
@@ -1309,6 +1326,213 @@ def test_what_was_said_of_a_name_goes_when_the_name_is_plugged_again(automount):
     automount.unread.write_text("another-boot\nntfs\nold\nntfs3\n")
     assert automount.plug(TYPE="vfat", UUID="4A21-0000", LABEL="ok").returncode == 0
     assert not automount.unread.exists() and len(automount.calls()) == 1
+
+
+def _rule_matches(properties: dict) -> list:
+    """The lines of the automount's rule that match a device, by udev's own
+    reading of a match key: `==` and `!=` against a shell pattern, an absent
+    property the empty string, SUBSYSTEMS any device above it. `properties`:
+    as `udevadm info` names them — ACTION, SUBSYSTEM, KERNEL, SUBSYSTEMS (a
+    list), ATTR{size}, ENV{…}."""
+    import fnmatch
+    import re
+    matched = []
+    for line in setup.AUTOMOUNT_RULE.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        keys = re.findall(r'([A-Z]+(?:\{[A-Za-z_]+\})?)(==|!=)"([^"]*)"', line)
+        assert keys and line.count('=="') + line.count('!="') == len(keys), line
+
+        def holds(key, op, pattern):
+            values = properties.get(key, "")
+            values = values if isinstance(values, list) else [values]
+            return any(fnmatch.fnmatchcase(v, pattern) for v in values) == (op == "==")
+        if all(holds(*key) for key in keys):
+            matched.append(line)
+    return matched
+
+
+USB = {"ACTION": "add", "SUBSYSTEM": "block", "SUBSYSTEMS": ["block", "scsi", "usb"], "ATTR{size}": "30310400"}
+
+
+@pytest.mark.parametrize("what, properties, wants", [
+    ("a stick's FAT volume", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": "filesystem"}), 1),
+    # PI-NODE-2C §11.10's stick: a quick format over an older filesystem — no ID_FS_* at all
+    ("a volume the system names no filesystem on", dict(USB, KERNEL="sda1"), 1),
+    ("the same, a property set and empty", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": ""}), 1),
+    ("a card in the slot, no filesystem named", {"ACTION": "change", "SUBSYSTEM": "block", "KERNEL": "mmcblk1p1",
+                                                 "SUBSYSTEMS": ["block", "mmc"], "ATTR{size}": "62333952"}, 1),
+    ("swap", dict(USB, KERNEL="sda2", **{"ENV{ID_FS_USAGE}": "other"}), 0),
+    ("an encrypted volume", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": "crypto"}), 0),
+    ("a RAID member", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": "raid"}), 0),
+    ("a card reader's empty slot", dict(USB, KERNEL="sdb", **{"ATTR{size}": "0"}), 0),
+    ("a pull", dict(USB, KERNEL="sda1", ACTION="remove"), 0),
+    ("a SATA disk", {"ACTION": "add", "SUBSYSTEM": "block", "KERNEL": "sdc1", "SUBSYSTEMS": ["block", "scsi", "ata"],
+                     "ATTR{size}": "30310400"}, 0),
+    ("a USB device that is no block device", dict(USB, KERNEL="ttyUSB0", SUBSYSTEM="tty"), 0)])
+def test_the_rule_brings_a_volume_with_no_filesystem_named_to_the_script(what, properties, wants):
+    """Until PI-NODE-2D the rule matched ID_FS_USAGE=="filesystem" alone: a
+    volume udev found no one filesystem on started no unit, and the person
+    who plugged it in was told nothing (F18)."""
+    assert len(_rule_matches(properties)) == wants, what
+
+
+def _nothing_named(automount, **stub):
+    """A plugged volume blkid names no type on; the stub's files as given."""
+    for name, text in stub.items():
+        (automount.stub / name.replace("_", "-")).write_text(str(text) + "\n")
+    return automount.plug(TYPE="", UUID="", LABEL="")
+
+
+@pytest.mark.parametrize("probe, said, why", [
+    (8, "ambivalent", "it carries the marks of more than one filesystem"),
+    (2, "unknown", "no filesystem is found on it")])
+def test_a_volume_with_no_one_filesystem_is_said_to_the_node(automount, probe, said, why):
+    """`blkid -p` tells the two apart: 8 — more than one signature (a quick
+    format over an older filesystem), 2 — none. Either way the file keeps its
+    four lines; there is no label to give and no driver was tried (F18)."""
+    if not BOOT_ID.exists():
+        pytest.skip("no boot id on this system")
+    result = _nothing_named(automount, probe=probe)
+    assert result.returncode == 0 and f"loop0 ({said}) is not mounted: {why}" in result.stderr
+    assert automount.unread.read_text() == f"{BOOT_ID.read_text().strip()}\n{said}\n\n-\n"
+    assert automount.calls() == [] and not (automount.state / "loop0").exists()
+    assert automount.plug("unmount").returncode == 0 and not automount.unread.exists()      # gone at the pull
+
+
+def test_what_is_no_volume_of_files_is_never_said(automount):
+    def silent(name="loop0", **stub):
+        for leftover in ("probe", "size", "pkname", "siblings", "parttype", "partitions"):
+            (automount.stub / leftover).unlink(missing_ok=True)
+        for key, text in stub.items():
+            (automount.stub / key).write_text(str(text) + "\n")
+        result = automount.plug(name=name, TYPE="", UUID="", LABEL="")
+        assert result.returncode == 0, result.stderr
+        return not (automount.base / ".unread").exists() and automount.calls() == []
+    assert not silent(probe=2)                                    # the case itself: said
+    shutil.rmtree(automount.base / ".unread")
+    assert silent(size=0) and silent(size=1024) and silent(size=1048575)       # an empty slot; an extended
+    assert not silent(size=1048576)                                             # partition's container
+    shutil.rmtree(automount.base / ".unread")
+    assert silent(size="")                                         # no size to read: not a volume
+    assert silent(partitions="loop0p1")                            # a whole disk that holds partitions
+    assert silent(probe=4) and silent(probe=0)                     # the probe failed, or found what plain blkid did not
+    # an eMMC's own areas never were volumes of files (the names are the kernel's)
+    script = automount.files["script"].read_text()
+    assert 'case "$name" in mmcblk*boot*|mmcblk*rpmb) exit 0 ;; esac' in script
+    import fnmatch
+    for name, own in (("mmcblk0boot0", True), ("mmcblk0boot1", True), ("mmcblk0rpmb", True), ("mmcblk0p1", False),
+                      ("mmcblk1", False), ("sda1", False)):
+        assert any(fnmatch.fnmatchcase(name, p) for p in ("mmcblk*boot*", "mmcblk*rpmb")) is own, name
+
+
+MSR, BASIC_DATA, EFI_SYSTEM = ("e3c9e316-0b5c-4db8-817d-f92df00215ae", "ebd0a0a2-b9e5-4433-87c0-68b6b72699c7",
+                               "c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+
+
+def test_a_disk_windows_partitioned_is_one_mount_and_no_unread_row(automount):
+    """A GPT disk as Windows makes one: a "Microsoft reserved" partition with
+    no filesystem beside the NTFS one. Every plug of such a disk would have
+    said "a disk Sautium cannot tell" of a partition nobody put music on
+    (PI-NODE-2D §14, Q10)."""
+    (automount.stub / "pkname").write_text("sda\n")
+    (automount.stub / "siblings").write_text("sda1\nsda2\n")
+    (automount.stub / "parttype").write_text(MSR + "\n")
+    assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0           # the reserved partition
+    assert automount.calls() == [] and not (automount.base / ".unread").exists()
+    (automount.stub / "parttype").write_text(BASIC_DATA + "\n")
+    automount.ntfs_3g()
+    assert automount.plug(TYPE="ntfs", UUID="01DC5A7E6B2F4C10", LABEL="Music").returncode == 0
+    (call,) = automount.calls()                                                   # one mount
+    assert call.startswith("-t ntfs-3g -o ro,nosuid,nodev,noexec") and not (automount.base / ".unread").exists()
+
+
+@pytest.mark.parametrize("parttype, said", [
+    (MSR, False), (EFI_SYSTEM, False), ("21686148-6449-6e6f-744e-656564454649", False),        # BIOS boot
+    ("426f6f74-0000-11aa-aa11-00306543ecac", False), ("52637672-7900-11aa-aa11-00306543ecac", False),  # Apple's
+    ("0x5", False), ("0xef", False), ("", False), ("a type; reboot", False),
+    (BASIC_DATA, True), (BASIC_DATA.upper(), True), ("0fc63daf-8483-4772-8e79-3d69d8477de4", True),
+    ("48465300-0000-11aa-aa11-00306543ecac", True), ("0x7", True), ("0xc", True), ("0x83", True)])
+def test_beside_other_partitions_only_one_for_data_is_said_as_unknown(automount, parttype, said):
+    (automount.stub / "pkname").write_text("sda\n")
+    (automount.stub / "siblings").write_text("sda1\nsda2\n")
+    (automount.stub / "parttype").write_text(parttype + "\n")
+    assert _nothing_named(automount, probe=2).returncode == 0
+    assert automount.unread.exists() is said
+    if said:
+        assert automount.unread.read_text().splitlines()[1:] == ["unknown", "", "-"]
+
+
+def test_a_disks_only_volume_is_said_whatever_its_partition_type(automount):
+    """A blank stick with its one partition, and an unpartitioned one: the
+    person plugged a disk in and is owed why it shows nothing."""
+    (automount.stub / "pkname").write_text("sda\n")
+    (automount.stub / "siblings").write_text("sda1\n")
+    assert _nothing_named(automount, probe=2, parttype=MSR).returncode == 0
+    assert automount.unread.read_text().splitlines()[1] == "unknown"
+    automount.plug("unmount")
+    (automount.stub / "pkname").write_text("")                                    # a whole disk, no table
+    (automount.stub / "siblings").unlink()
+    assert _nothing_named(automount, probe=2).returncode == 0
+    assert automount.unread.read_text().splitlines()[1] == "unknown"
+
+
+def test_the_marks_of_two_filesystems_are_said_wherever_they_are_met(automount):
+    (automount.stub / "pkname").write_text("sda\n")
+    (automount.stub / "siblings").write_text("sda1\nsda2\n")
+    assert _nothing_named(automount, probe=8, parttype=MSR).returncode == 0
+    assert automount.unread.read_text().splitlines()[1] == "ambivalent"
+
+
+def _image(tmp_path, first, second):
+    """PI-NODE-2D §5.2's recipe, on a plain file with no root: a filesystem,
+    its superblock's block saved, a second format over it — and the block,
+    which the caller puts back: what a quick format over an older filesystem
+    leaves."""
+    image = tmp_path / "stick.img"
+    with open(image, "wb") as f:
+        f.truncate(64 * 1024 * 1024)
+    subprocess.run([first, "-q", "-F", "-L", "ALIEN", str(image)], check=True, capture_output=True)
+    with open(image, "rb") as f:
+        f.seek(1024)
+        superblock = f.read(1024)
+    subprocess.run(second + [str(image)], check=True, capture_output=True)
+    return image, superblock
+
+
+@pytest.mark.parametrize("second", [["mkntfs", "-Q", "-F", "-L", "16Gb"], ["mkfs.vfat", "-F", "32", "-n", "STICK"]],
+                         ids=["ntfs over ext2", "fat over ext2"])
+def test_the_real_blkid_tells_two_signatures_from_none(automount, tmp_path, second):
+    """The script's branch rests on what the system's own blkid answers: run
+    here on a real two-signature image and on a blank one, through the
+    script (the stub hands `blkid -p` to the real one over the image)."""
+    tools = {name: shutil.which(name, path=os.environ["PATH"] + ":/usr/sbin:/sbin")
+             for name in ("blkid", "mkfs.ext2", second[0])}
+    if not all(tools.values()) or not BOOT_ID.exists():
+        pytest.skip("no " + ", ".join(name for name, path in tools.items() if not path) + " on this system")
+    image, superblock = _image(tmp_path, tools["mkfs.ext2"], [tools[second[0]]] + second[1:])
+    blkid = tools["blkid"]
+
+    def probe():
+        return subprocess.run([blkid, "-p", str(image)], capture_output=True, text=True)
+    assert probe().returncode == 0                                 # one format: named
+    with open(image, "r+b") as f:
+        f.seek(1024)
+        f.write(superblock)
+    answered = probe()
+    assert answered.returncode == 8 and "ambivalent result" in answered.stderr
+    plain = subprocess.run([blkid, "-c", "/dev/null", "-o", "value", "-s", "TYPE", str(image)], capture_output=True)
+    assert plain.returncode == 2 and plain.stdout == b""           # what the script's first question gets
+    (automount.stub / "real-blkid").write_text(blkid)
+    shutil.copy(image, automount.stub / "image")
+    assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0
+    assert automount.unread.read_text().splitlines()[1:] == ["ambivalent", "", "-"]
+    automount.plug("unmount")
+    with open(automount.stub / "image", "wb") as f:                # a blank volume
+        f.truncate(64 * 1024 * 1024)
+    assert subprocess.run([blkid, "-p", str(automount.stub / "image")], capture_output=True).returncode == 2
+    assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0
+    assert automount.unread.read_text().splitlines()[1:] == ["unknown", "", "-"]
 
 
 def test_a_second_volume_claiming_a_mounted_uuid_gets_another_name(automount):

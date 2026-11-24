@@ -689,7 +689,15 @@ See:
   override. An install whose line mounts at `/mnt/sautium-<UUID>` (that point
   its root) is named by `status` and `roots` and offered the move as one
   block; a `--music` folder that is someone's own mount point is taken as
-  named and said — never its parent, which the person did not name.
+  named and said — never its parent, which the person did not name. The
+  automount says a volume blkid names no filesystem on, too: the type line of
+  its `.unread` file is then `ambivalent` (`blkid -p` exits 8: the marks of
+  more than one filesystem, a quick format over an older one) or `unknown`
+  (it exits 2: none found) — the latter only of a disk's only volume, or
+  beside other partitions of one whose partition type is for data (a
+  Windows-partitioned disk's reserved partition, a boot or recovery one, an
+  eMMC's own areas, a reader's empty slot and anything under 1 MiB are
+  silent).
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
   names it). `config.build_identity()` is the one reader — `/config`,
@@ -947,8 +955,8 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
-| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`): standard library, never root, root steps printed and never run |
-| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
+| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`; the automount's rule, unit and script, and the `/etc/fstab` line that mounts one music disk at the automount's own point for it, since 2026-11-24): standard library, never root, root steps printed and never run |
+| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type — or, since 2026-11-24, `ambivalent` / `unknown` for a volume no one filesystem is found on —, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
 | `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
 | `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8) |
