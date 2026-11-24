@@ -66,12 +66,15 @@ PAIR_SURE = 0.95
 OTHERS_WEIGHT = 0.5
 
 # The sitting's timing (§15.1, §16)
-LEAD_MIN_S = 1.0                  # the cut's digital silence before the music
-LEAD_ABOVE_S = 0.3                # the lead over the latest pause the warm-up saw
-LEAD_SLIP_S = 0.1                 # a pause this near the music is a slip
+LEAD_MIN_S = 1.0                  # the cut's lead (its mark) before the music: the pause holds at its start
 MARGIN_S = 0.5
 TOLERANCE_S = {"pcm": 0.15, "sdm": 0.3}       # Q10, Q18
 LONG_SILENCE_S = 5.0              # §14's W20 from here
+# A candidate whose warm-up start (Play to its first frame, the build in it)
+# is longer leaves the sitting (B-131, the owner 2026-11-22): above every
+# build within a rate family in Legion's HQPlayer log (1 399 of 1 407 ≤ 1 s,
+# all ≤ 10 s); the person's own filter is excepted — it defines the sitting
+START_MAX_S = 10.0
 
 
 # -- who is compared ----------------------------------------------------------------
@@ -99,8 +102,8 @@ class Filter:
 
 # The reasons a filter is left out, in the order a tie between them goes
 # (dominant)
-REASONS = ("not_measured_here", "too_slow", "rate", "not_in_atlas", "slow_start", "refused",
-           "unstarted", "identical", "other_rate", "late", "listed")
+REASONS = ("not_measured_here", "too_slow", "rate", "not_in_atlas", "slow_start", "long_start",
+           "refused", "unstarted", "identical", "other_rate", "late", "listed")
 
 
 @dataclass
@@ -599,30 +602,34 @@ class Pair:
 
 @dataclass
 class Timing:
-    """A filter's warm-up (§15.1, §16): `d` its output delay; `start` from
-    the end of the fragment before to its first frame (its pause's landing
-    less `p`: a pause landing late changes neither); `p` the meter's
-    position when its pause landed; `r` from its resume to its sound at the
-    output beyond the lead its pause left (`lead − p`) — so a pause landing
-    later, the lead played further, moves the resume and not the sound;
-    `tail` how long after its last sound left the output its fragment's end
-    showed (Status stopped and the meter quiet); the output rate it plays at."""
+    """A filter's warm-up (§15.1, §16, AB-2 §13): `d` its output delay;
+    `start` from the end of the fragment before to the moment it may resume
+    (its pause, sent at Play's answer, answered — a build may hold that —
+    and its first frame shown, whichever came last); `r` from its resume to
+    its sound at the output beyond the lead (the pause holds at the lead's
+    start: the whole lead plays out after the resume); `tail` how long after
+    its last sound left the output its fragment's end showed (Status stopped
+    and the meter quiet); the output rate it plays at; `grown` what its
+    slips added to its start (a slip's step, held per filter: it stretches
+    only the steps it plays in)."""
     d: float
     start: float
     r: float
-    p: float
     tail: float
     rate: int
+    grown: float = 0.0
 
 
-def lead(timings: Iterable[Timing]) -> float:
-    return max([LEAD_MIN_S] + [t.p + LEAD_ABOVE_S for t in timings])
-
-
-def silence(timings: Sequence[Timing], lead_s: float) -> float:
-    """P: the silence before every fragment. The resume of the filter that
-    waits longest is never asked for before its pause has landed — after
-    the slowest end of a fragment before it, its own start to its first
-    frame, the lead of `lead_s` and its resume's way to the output — plus
-    MARGIN_S."""
-    return (max(t.tail for t in timings) + max(t.start + lead_s + t.r for t in timings) + MARGIN_S)
+def silence(plays: Sequence[Timing], lead_s: float, ref: Optional[Timing] = None) -> float:
+    """P of a step (AB-2: per step, B-131) — what plays between two taps,
+    every fragment of it at the same silence. The resume of the fragment
+    that waits longest is never asked for before its pause has landed: after
+    the end of the fragment before it in the step (the tail of each one
+    followed by another), its own start to its first frame, the lead of
+    `lead_s` and its resume's way to the output — plus MARGIN_S. `ref`, the
+    fragment heard last that a one-fragment step is compared with, counts
+    as one of its plays: the two silences are equal whenever it needed at
+    least as long."""
+    needs = list(plays) + ([ref] if ref is not None else [])
+    return (max([t.tail for t in plays[:-1]], default=0.0)
+            + max(t.start + t.grown + lead_s + t.r for t in needs) + MARGIN_S)

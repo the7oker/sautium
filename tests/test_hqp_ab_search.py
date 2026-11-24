@@ -255,23 +255,38 @@ def test_the_beta_rule():
 
 # -- the silence and the lead (§15.1, §16) ------------------------------------------------------------
 
-def test_the_lead_covers_the_latest_pause_and_never_under_a_second():
-    t = [S.Timing(d=1.0, start=0.0, r=2.0, p=0.1, tail=0.4, rate=705600),
-         S.Timing(d=3.2, start=0.1, r=4.3, p=0.9, tail=2.6, rate=705600)]
-    assert S.lead(t[:1]) == 1.0
-    assert S.lead(t) == pytest.approx(1.2)
+def test_a_steps_silence_waits_for_its_own_slowest_end_start_and_resume():
+    t = [S.Timing(d=1.0, start=0.0, r=2.0, tail=0.4, rate=705600),
+         S.Timing(d=3.2, start=0.1, r=4.3, tail=2.6, rate=705600)]
+    # the end of the first before the second (its tail), then the slowest start
+    # to a first frame, the lead, the resume's way — the last one's tail is no
+    # part of it: an answer comes only after it
+    assert S.silence(t, 1.0) == pytest.approx(0.4 + (0.1 + 1.0 + 4.3) + 0.5)
+    assert S.silence(t[::-1], 1.0) == pytest.approx(2.6 + (0.1 + 1.0 + 4.3) + 0.5)
+    # a longer lead lengthens every resume's way to the output
+    assert S.silence(t, 1.5) == pytest.approx(0.4 + (0.1 + 1.5 + 4.3) + 0.5)
 
 
-def test_the_silence_waits_for_the_slowest_end_start_and_resume():
-    t = [S.Timing(d=1.0, start=0.0, r=2.0, p=0.1, tail=0.4, rate=705600),
-         S.Timing(d=3.2, start=0.1, r=4.3, p=0.1, tail=2.6, rate=705600)]
-    # the slowest end, then the slowest start to a first frame, the lead, the resume's way
-    assert S.silence(t, 1.0) == pytest.approx(2.6 + (0.1 + 1.0 + 4.3) + 0.5)
-    # a longer lead lengthens every resume's way to the output; where the pause
-    # landed (p) does not enter
-    assert S.silence(t, 1.5) == pytest.approx(2.6 + (0.1 + 1.5 + 4.3) + 0.5)
-    assert S.silence([S.Timing(d=3.2, start=0.1, r=4.3, p=0.6, tail=2.6, rate=705600)], 1.0) \
-        == pytest.approx(S.silence(t[1:], 1.0))
+def test_a_slow_filter_stretches_only_the_steps_it_is_in():
+    """AB-2, B-131: P per step from its own filters — a slow start is paid
+    only where that filter plays, or is the fragment a one-fragment step is
+    compared with."""
+    fast = S.Timing(d=1.0, start=0.2, r=1.1, tail=0.3, rate=705600)
+    other = S.Timing(d=1.0, start=0.3, r=1.2, tail=0.3, rate=705600)
+    slow = S.Timing(d=1.0, start=8.0, r=1.1, tail=0.3, rate=705600)
+    assert S.silence([fast, other], 1.0) == pytest.approx(0.3 + (0.3 + 1.0 + 1.2) + 0.5)
+    assert S.silence([fast, slow], 1.0) == pytest.approx(0.3 + (8.0 + 1.0 + 1.1) + 0.5)
+    # one fragment: its own need, or the reference's when that is longer
+    assert S.silence([other], 1.0) == pytest.approx((0.3 + 1.0 + 1.2) + 0.5)
+    assert S.silence([other], 1.0, slow) == pytest.approx((8.0 + 1.0 + 1.1) + 0.5)
+    # a slip's step is held by its filter
+    grown = S.Timing(d=1.0, start=0.3, r=1.2, tail=0.3, rate=705600, grown=0.1)
+    assert S.silence([grown], 1.0) == pytest.approx(S.silence([other], 1.0) + 0.1)
+
+
+def test_long_start_is_a_reason_between_the_benchmarks_slow_start_and_a_refusal():
+    assert S.REASONS.index("slow_start") + 1 == S.REASONS.index("long_start") == S.REASONS.index("refused") - 1
+    assert S.START_MAX_S == 10.0
 
 
 # -- the assistant's door (§7.1, §14.3) ----------------------------------------------------------

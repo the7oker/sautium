@@ -11391,8 +11391,16 @@
     return [said, ab.line].filter(Boolean).map(l => `<p class="ab-say">${escapeHtml(l)}</p>`).join('');
   }
 
+  // Their filter starts slowly here (B-131): the sitting keeps it and says
+  // its pauses are long (C3, a draft for the words sitting)
+  function abOwnSlow(v) {
+    return v.own_slow != null
+      ? `<p class="ab-warn">Your filter takes ${abNum(`${v.own_slow} s`)} to start here, so the pause before it is long.</p>` : '';
+  }
+
   function abWarnings(v) {
-    return (v.long_silence ? '<p class="ab-warn">Long pauses make small differences harder to hear.</p>' : '')
+    return abOwnSlow(v)
+      + (v.long_silence ? '<p class="ab-warn">Long pauses make small differences harder to hear.</p>' : '')
       + (v.sdm ? '<p class="ab-warn">Your DAC may click between fragments in DSD — the same for every filter.</p>' : '');
   }
 
@@ -11521,6 +11529,7 @@
           <div class="ab-pad">
             <p class="ab-ctx">${abContext(v.context.words)}</p>
             <p class="ab-warn">Keep HQPlayer's window and your DAC's display out of sight.</p>
+            ${abOwnSlow(v)}
             ${v.sdm ? '<p class="ab-warn">Your DAC may click between fragments in DSD — the same for every filter.</p>' : ''}
             ${abSay(ab)}
           </div>
@@ -11546,7 +11555,8 @@
           </div>
           <div class="ab-pad ab-after">
             ${abSay(ab)}
-            <p class="ab-warn">Silence before each: ${abNum(`${v.silence_s} s`)} · fragment ${abNum(`${v.passage.length_s} s`)}</p>
+            ${v.silence_s != null ? `<p class="ab-warn">Silence before ${st.kind === 'first' ? 'each' : 'this one'}: ${
+              abNum(`${v.silence_s} s`)} · fragment ${abNum(`${v.passage.length_s} s`)}</p>` : ''}
             ${abWarnings(v)}
           </div>
         </div>`;

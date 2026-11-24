@@ -729,10 +729,12 @@ def test_a_runs_onset_is_its_first_sounding_frames_own_time_not_its_bursts(meter
     """AB-1-DESIGN §2.2 item 2: a burst of 160 ms holds seven frames; the
     run's `start` is the read's arrival, its `onset` the first sounding
     frame's time — the arrival less the hops of the frames after it. A tap
-    is told of the read itself."""
+    is told of the read itself: each frame's largest bin, 0.0 for an all-zero
+    one (AB-2: the sitting classes them)."""
     reads = []
     attachment = meter.attach("127.0.0.1", port.port)
-    assert meter.tap("ab", attachment, lambda at, hop, sounds: reads.append((at, hop, sounds)))
+    assert meter.tap("ab", attachment, lambda at, hop, levels: reads.append(
+        (at, hop, tuple(lv > 0.0 for lv in levels), levels)))
     port.wait(lambda: port.accepts == 1)
     _wait(meter.metering)
     x = np.zeros((7 * HOP, 2))
@@ -742,8 +744,9 @@ def test_a_runs_onset_is_its_first_sounding_frames_own_time_not_its_bursts(meter
     _wait(lambda: meter.seen()["runs"])
     (run,) = meter.seen()["runs"]
     hop = HOP / 44100
-    at, read_hop, sounds = next(r for r in reads if any(r[2]))
+    at, read_hop, sounds, levels = next(r for r in reads if any(r[2]))
     assert read_hop == pytest.approx(hop)
+    assert all(lv == 0.0 for lv, s in zip(levels, sounds) if not s)
     first = sounds.index(True)
     assert run["start"] == at
     assert run["onset"] == pytest.approx(at - (len(sounds) - 1 - first) * hop)
