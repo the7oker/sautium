@@ -624,7 +624,7 @@ def test_an_album_half_out_is_read_per_track(node):
     node["gone"](True)
     segments, missing, left = player._entity_segments(_album_ref(node).items)
     assert [(kind, len(rows)) for kind, rows in segments] == [("owned", 1), ("phantom", 1)]
-    assert segments[0][1] == [{"id": other, "location": "local"}]
+    assert [(r["id"], r["location"]) for r in segments[0][1]] == [(other, "local")]
     assert (segments[1][1][0].track_id, segments[1][1][0].album_id) == (node["tracks"][1], node["owned"])
     assert (missing, left) == ([], [])
     answer = player.play_entities(_album_ref(node))

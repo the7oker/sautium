@@ -2041,14 +2041,14 @@ def play_track(req: PlayTrackRequest):
     """Replace the queue with a single track and play it — its file where
     that opens here now, else a copy that does, else its stream
     (_add_owned)."""
-    rows = _file_rows([req.track_id])
-    if not rows:
+    row = _db_query_one(_FILE_ROWS, {"ids": [req.track_id], "hqp_id": active_hqp_endpoint(),
+                                     "gone": _gone()})
+    if not row:
         raise HTTPException(status_code=404, detail="Track not found")
-    row = rows[0]
 
     try:
         left: list = []
-        added = _add_owned(rows, clear_first=True, left=left, archive=lambda: sessions.rotate_session(
+        added = _add_owned([row], clear_first=True, left=left, archive=lambda: sessions.rotate_session(
             manager.queue, 'track', seed_media_file_id=req.track_id))
         if left:
             raise HTTPException(status_code=404, detail="Nothing in that list streams here")
@@ -3110,13 +3110,12 @@ def _album_rows(album_id: str) -> list[dict]:
     """, {"id": album_id, "hqp_id": active_hqp_endpoint(), "gone": _gone()})
 
 
-def _file_rows(ids: list) -> list[dict]:
-    """The media files `ids` name, in that order, as slots: the file itself
-    where it opens here now (`id`, `location` 'local'), else the best copy
-    of its track that does — one on the same album first — else `id` None
-    with `why` ('disk' | 'away'). `asked` is the id named; every row carries
-    its track's UUID, the file's album and the display fields."""
-    return _db_query(f"""
+# The media files %(ids)s names, in that order, as slots: the file itself
+# where it opens here now (`id`, `location` 'local'), else the best copy of
+# its track that does — one on the same album first — else `id` None with
+# `why` ('disk' | 'away'). `asked` is the id named; every row carries its
+# track's UUID, the file's album and the display fields.
+_FILE_ROWS = f"""
         SELECT mf.id AS asked,
                CASE WHEN own.here THEN mf.id ELSE c.id END AS id,
                CASE WHEN own.here THEN 'local' ELSE c.location::text END AS location,
@@ -3154,7 +3153,13 @@ def _file_rows(ids: list) -> list[dict]:
             ORDER BY {owned_rank('f')}, (f.album_id = av.album_id) DESC, {best_rip_order('f')}
             LIMIT 1) c ON NOT own.here
         ORDER BY s.ord
-    """, {"ids": list(ids), "hqp_id": active_hqp_endpoint(), "gone": _gone()})
+"""
+
+
+def _file_rows(ids: list) -> list[dict]:
+    """The slots of the media files `ids` name (_FILE_ROWS), in that order."""
+    return _db_query(_FILE_ROWS, {"ids": list(ids), "hqp_id": active_hqp_endpoint(),
+                                  "gone": _gone()})
 
 
 def _stream_queries(slots: list) -> dict:
@@ -3204,7 +3209,7 @@ def _reach_segments(rows: list) -> tuple[list, list]:
     left: list = []
     for r in rows:
         if r.get("id") is not None:
-            _push_segment(segments, "owned", [{"id": r["id"], "location": r.get("location") or "local"}])
+            _push_segment(segments, "owned", [r])
             continue
         away = bool(r.get("why")) and not streams
         q = None if away else (r["query"] if "query" in r
