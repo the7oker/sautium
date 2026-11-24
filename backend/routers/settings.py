@@ -14,6 +14,7 @@ need to know about them directly.
 import asyncio
 import json
 import logging
+import secrets
 import shutil
 import threading
 import uuid
@@ -33,6 +34,7 @@ import library_watch
 from config import settings as app_settings
 from database import get_db_context
 from db_pool import Listener, db_execute, db_query, db_query_one, get_conn
+from desktop.p2p import load_meter
 from serving import EventStream
 from routers.auth import StepUp, boxed, step_up
 from sql_queries import ARTIST_OWNED
@@ -43,21 +45,65 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 # ============================================================
-# SSE: live updates for the Library screen
+# SSE: the Library stream
 # ============================================================
 #
-# Workers (scan / enrich) mutate _scan_state / _enrich_state in
-# main.py. Whenever they reach a meaningful checkpoint they call
-# notify_library_subscribers() from this module. Each subscriber is
-# an (asyncio.Event, loop) pair that the SSE endpoint registers when
-# a client connects. Workers wake every subscriber via
-# loop.call_soon_threadsafe(evt.set). Client then re-fetches
-# /api/settings/library to read the fresh state. Same shape as the
-# /api/p2p/chat/stream pattern — wake-event, not payload queue, so
-# workers don't pay serialization cost on every progress tick.
+# The one connection a page holds on every route (app-shell.js
+# libraryWake). Three things ride it:
+#
+#   a wake ("data: {}") — workers (scan / enrich) mutate _scan_state /
+#     _enrich_state in main.py and call notify_library_subscribers() at a
+#     meaningful checkpoint; the page re-fetches what its open screen shows.
+#     Wake-event, not payload queue, so workers don't pay serialization
+#     cost on every progress tick.
+#   `event: guidance` — the guidance trail, at connect and whenever its set
+#     of tasks changes (_GuidanceTrail).
+#   `event: load` — the node's load as its meter published it (NOTIFY
+#     sautium_load), for the one screen that shows it.
+#
+# A named event is no wake: a page acts on one only where it subscribed to
+# it by name. Until 2026-11-24 every NOTIFY on sautium_identity and
+# sautium_notices woke this stream too, the load meter said its band changes
+# on sautium_identity, and the page asked GET /guidance at every wake: under
+# any activity, a request every two seconds from every open page (B-138).
 
-_library_sse_clients: List[Tuple[asyncio.Event, asyncio.AbstractEventLoop]] = []
+
+class _LibraryStream:
+    """One connection of the Library stream: what it is owed, said from any
+    thread (a worker, a listener), read on its own loop."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.evt = asyncio.Event()
+        self._owed: set = set()         # the loop's alone
+
+    def owe(self, kind: str) -> None:
+        self.loop.call_soon_threadsafe(self._owe, kind)
+
+    def _owe(self, kind: str) -> None:
+        self._owed.add(kind)
+        self.evt.set()
+
+    def take(self) -> set:
+        owed, self._owed = self._owed, set()
+        self.evt.clear()
+        return owed
+
+
+_library_streams: List[_LibraryStream] = []
 _library_sse_lock = threading.Lock()
+
+
+def _tell_library_streams(kind: str) -> None:
+    with _library_sse_lock:
+        streams = list(_library_streams)
+    for stream in streams:
+        try:
+            stream.owe(kind)
+        except RuntimeError:
+            # Loop closed; the stream leaves the list in its generator's
+            # finally block.
+            continue
 
 # Mirror channel for the AI > Claude Code screen. Wake events fire
 # from the install worker thread when state transitions (running →
@@ -229,15 +275,85 @@ def _identity_row() -> Dict[str, Any]:
 
 def notify_library_subscribers() -> None:
     """Thread-safe wake of every connected Library SSE client.
-    Workers call this after start / phase transition / completion."""
-    with _library_sse_lock:
-        for evt, loop in list(_library_sse_clients):
-            try:
-                loop.call_soon_threadsafe(evt.set)
-            except RuntimeError:
-                # Loop closed; subscriber will clean itself up on the
-                # next iteration of its generator's finally block.
-                continue
+    Workers call this after start / phase transition / completion. What
+    moved may be something the guidance trail reads: it is computed again."""
+    _tell_library_streams("wake")
+    _guidance.moved()
+
+
+class _GuidanceTrail:
+    """The guidance trail (_guidance_state) as the Library streams hear it.
+
+    One thread computes it, once for every stream, whenever something it
+    reads moved — a Library wake, the node's identity, the notices — and the
+    streams are told only when the set of tasks changed. The routes that
+    answer with the trail and a stream's connect compute it through here
+    too, under the same lock: computations never overlap, so a later one
+    read later state, and `seq` orders every answer a page gets — on its
+    stream, to its first read, to a "seen" — whichever arrives first. `run`
+    names this process: a node started again counts from one."""
+
+    # Workers report in bursts (an enrichment's first second holds a dozen
+    # progress wakes, a scan several a second): one computation serves a
+    # burst — the page's own 200 ms fan-out did this while it asked.
+    PACE_S = 0.2
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._moved = threading.Event()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._id = secrets.token_hex(4)
+        self._seq = 0
+        self.said: Optional[Dict[str, Any]] = None      # the answer of the last change
+
+    def moved(self) -> None:
+        self._moved.set()
+
+    def compute(self) -> Dict[str, Any]:
+        with self._lock:
+            tasks = _guidance_state()["tasks"]
+            self._seq += 1
+            answer = {"tasks": tasks, "seq": self._seq, "run": self._id}
+            if self.said is None or self.said["tasks"] != tasks:
+                self.said = answer
+                _tell_library_streams("guidance")
+            return answer
+
+    def start(self) -> None:
+        if self._thread is not None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="guidance-trail")
+        self._thread.start()
+
+    def stop(self) -> None:
+        thread, self._thread = self._thread, None
+        if thread is None:
+            return
+        self._stop.set()
+        self._moved.set()
+        thread.join(2.0)
+
+    def _run(self) -> None:
+        while True:
+            self._moved.wait()
+            if self._stop.is_set():
+                return
+            self._moved.clear()
+            with _library_sse_lock:
+                listened = bool(_library_streams)
+            # With no page open nobody is told: a stream's connect computes
+            if listened:
+                try:
+                    self.compute()
+                except Exception:
+                    logger.exception("The guidance trail was not computed; the next wake computes it")
+            if self._stop.wait(self.PACE_S):
+                return
+
+
+_guidance = _GuidanceTrail()
 
 
 def notify_claude_subscribers() -> None:
@@ -279,34 +395,58 @@ claude_code.auth.on_change(_claude_signin_changed)
 codex_cli.auth.on_change(_codex_signin_changed)
 
 
-# Sync DB listener: bridge between launcher's P2PManager and the
-# library SSE channel. The launcher fires NOTIFY sautium_sync_done
-# after each P2P sync. We listen here, then wake
-# library subscribers so the Settings screen re-fetches and shows
-# the new last_sync_at / items_received. Same NOTIFY pattern used
-# by chat (routers/p2p.py); no polling. Beside it: sautium_identity
-# (identity proof progress) and sautium_notices (a condition began or
-# ended).
+# Sync DB listener: bridge between what another process says (the
+# launcher's P2PManager, a CLI) or another thread of this one, and the
+# pages. Each channel wakes the readers of what changed, and no others:
+#
+#   sautium_sync_done — a P2P sync ended (sync_walk): the Library stream, so
+#     the Settings screen re-fetches last_sync_at / items_received.
+#   sautium_identity — the node's network state for its pages (identity
+#     proof progress, the reachability verdict, what Support knows, the
+#     Support row's moments, the account's email verified): the identity
+#     subscribers of /api/events.
+#   sautium_notices — a condition began or ended: the notices subscribers
+#     of /api/events.
+#   sautium_load — the load meter's band change, with its snapshot
+#     (desktop/p2p/load_meter.message): the Library streams' `load` event.
+#
+# The guidance trail reads the identity state and the notices, so those two
+# also have it computed again; a page hears of it only when its set changed.
+# Same NOTIFY pattern used by chat (routers/p2p.py); no polling.
+
+_load_said: Optional[Dict[str, Any]] = None
 
 
 def _on_sync_notify(notifies: list) -> None:
-    if any(note.channel == "sautium_notices" for note in notifies):
+    global _load_said
+    channels = {note.channel for note in notifies}
+    if "sautium_sync_done" in channels:
+        notify_library_subscribers()
+    if "sautium_notices" in channels:
         notify_notice_subscribers()
-    if any(note.channel == "sautium_identity" for note in notifies):
+        _guidance.moved()
+    if "sautium_identity" in channels:
         notify_identity_subscribers()
-    notify_library_subscribers()
+        _guidance.moved()
+    loads = [note.payload for note in notifies if note.channel == load_meter.CHANNEL]
+    if loads:
+        _load_said = json.loads(loads[-1])
+        _tell_library_streams("load")
 
 
 _sync_listener = Listener("sync-sse-listener",
-                          ("sautium_sync_done", "sautium_identity", "sautium_notices"),
+                          ("sautium_sync_done", "sautium_identity", "sautium_notices",
+                           load_meter.CHANNEL),
                           _on_sync_notify)
 
 
 def start_sync_listener() -> None:
     _sync_listener.start()
+    _guidance.start()
 
 
 def stop_sync_listener() -> None:
+    _guidance.stop()
     _sync_listener.stop()
 
 
@@ -1627,7 +1767,9 @@ def _notice_items() -> List[Dict[str, Any]]:
 
 @router.get("/guidance")
 def get_guidance() -> Dict[str, Any]:
-    return _guidance_state()
+    """The trail for a page's first paint — {"tasks", "seq", "run"}; every
+    change after it comes on the page's Library stream."""
+    return _guidance.compute()
 
 
 @router.get("/notices")
@@ -1675,7 +1817,7 @@ def post_guidance_seen(task: str) -> Dict[str, Any]:
     else:
         _write(f"guidance.{task}_seen", True)
     notify_library_subscribers()
-    return _guidance_state()
+    return _guidance.compute()
 
 
 @router.get("/library")
@@ -1685,37 +1827,65 @@ async def get_library_state() -> Dict[str, Any]:
 
 @router.get("/library/stream")
 async def library_stream() -> EventStream:
-    """SSE channel. Emits a wake event whenever scan / enrich workers
-    transition state. The client receives "data: {}" and pulls fresh
-    state via GET /api/settings/library. Replaces 1.5s polling.
+    """The Library stream (the section at this module's top). A wake —
+    "data: {}" — whenever scan / enrich workers transition state: the client
+    pulls fresh state via GET /api/settings/library. Replaces 1.5s polling.
 
-    Pattern mirrors /api/p2p/chat/stream — wake-event, not payload."""
-    loop = asyncio.get_event_loop()
-    evt = asyncio.Event()
+    `event: guidance` carries the trail, {"tasks", "seq", "run"}: at
+    connect and whenever the set differs from the last one this connection
+    sent. `event: load` carries the load meter's band change, {"load",
+    "gate"}."""
+    stream = _LibraryStream(asyncio.get_event_loop())
+
+    def named(event: str, payload: Dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
     async def event_generator():
+        sent = None                     # the tasks of this connection's last `guidance`
+
+        def guidance() -> Optional[str]:
+            nonlocal sent
+            said = _guidance.said
+            if said is None or said["tasks"] == sent:
+                return None
+            sent = said["tasks"]
+            return named("guidance", said)
+
         try:
             with _library_sse_lock:
-                _library_sse_clients.append((evt, loop))
+                _library_streams.append(stream)
 
             # Initial ping so the client knows the channel is live.
             yield "data: {}\n\n"
+            try:
+                await asyncio.to_thread(_guidance.compute)
+            except Exception:
+                # The stream stands without it: the next wake computes
+                logger.exception("The guidance trail was not computed for a stream's connect")
+            message = guidance()
+            if message:
+                yield message
 
             while True:
                 try:
-                    await asyncio.wait_for(evt.wait(), timeout=20.0)
-                    evt.clear()
+                    await asyncio.wait_for(stream.evt.wait(), timeout=20.0)
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
                     continue
-                yield "data: {}\n\n"
+                owed = stream.take()
+                if "wake" in owed:
+                    yield "data: {}\n\n"
+                if "guidance" in owed:
+                    message = guidance()
+                    if message:
+                        yield message
+                if "load" in owed:
+                    yield named("load", _load_said)
         except asyncio.CancelledError:
             pass
         finally:
             with _library_sse_lock:
-                _library_sse_clients[:] = [
-                    (e, l) for e, l in _library_sse_clients if e is not evt
-                ]
+                _library_streams[:] = [s for s in _library_streams if s is not stream]
 
     return EventStream(event_generator())
 
@@ -2858,6 +3028,9 @@ def put_sync_prefs(req: SyncPrefs) -> Dict[str, Any]:
         db_execute("NOTIFY sautium_mb_sources")
         if req.p2p_enabled:
             db_execute("NOTIFY sautium_sync_request")
+        # The guidance trail reads the switch (_synced_since_scan: with
+        # sharing off there is no sync to wait for before the analysis)
+        notify_library_subscribers()
     if req.auto_interval_min is not None:
         # None gets coerced to null serverside via _write — explicit
         # 0 here means "every 0 min" (disabled in the UI). We store

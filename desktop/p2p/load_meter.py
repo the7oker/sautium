@@ -29,11 +29,20 @@ chunk pause) and `mining_hold()` (a reason to pause the identity miner —
 playback only: mining is one nice'd core, and letting it pause itself on
 its own CPU would oscillate).
 
+A band change is published by the process that runs the meter:
+user_settings['p2p.load'] (what a support bundle and the Sync screen's first
+paint read) and a NOTIFY on `CHANNEL` that carries the snapshot (`message`),
+which the backend passes to the one screen that shows the load. A channel of
+its own since 2026-11-24: on sautium_identity, where it was said before,
+every band change — one nearly every sample under any activity — woke every
+reader of the node's identity and of the Library on every open page.
+
 Shared by the launcher and the Docker backend; psutil when importable
 (both requirements list it), `os.times()` otherwise. One meter per
 process: `install()` / `current()`.
 """
 
+import json
 import logging
 import os
 import threading
@@ -55,6 +64,7 @@ BAND = 0.1
 PACE_MAX = 8.0
 VERIFY_MIN_HEADROOM = 0.1           # below this the discretionary verifiers (gate R·w, 2 GiB
                                     # identity proof) answer 503 instead of spending — the ceiling wins
+CHANNEL = "sautium_load"
 
 _current: Optional["LoadMeter"] = None
 
@@ -67,6 +77,13 @@ def install(meter: "LoadMeter") -> "LoadMeter":
 
 def current() -> Optional["LoadMeter"]:
     return _current
+
+
+def message(snap: dict, gate: Optional[dict]) -> str:
+    """The payload of a band change's NOTIFY on CHANNEL: the meter's snapshot
+    and, where this process runs the admission gate's pricer, its snapshot
+    (its multipliers move with the load)."""
+    return json.dumps({"load": snap, "gate": gate})
 
 
 def default_profile() -> str:

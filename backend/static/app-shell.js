@@ -850,19 +850,41 @@
      which would have made a fourth connection to a single endpoint
      against the browser's six-per-origin budget. Subscribers get the
      same abort() shape sseStream returns, so leaving a screen still
-     reads the same at the call site. */
+     reads the same at the call site.
+
+     Two kinds of word come down it. A wake (`on`) says "something a screen
+     here shows moved" and carries nothing: the screen reads its own state
+     again. A named event (`onEvent`) carries its payload — `guidance`, the
+     trail; `load`, the node's load — and is no wake: only who asked for it
+     by name hears it, and nobody fetches anything. */
   const libraryWake = {
     subs: new Set(),
+    named: new Map(),
     ctrl: null,
     timer: null,
+    _open() {
+      if (this.ctrl) return;
+      this.ctrl = window.sseStream('/api/settings/library/stream',
+        (event) => this._heard(event),
+        (_err) => { /* sseStream auto-reconnects with backoff */ });
+    },
     on(fn) {
       this.subs.add(fn);
-      if (!this.ctrl) {
-        this.ctrl = window.sseStream('/api/settings/library/stream',
-          () => this._fanOut(),
-          (_err) => { /* sseStream auto-reconnects with backoff */ });
-      }
+      this._open();
       return { abort: () => this.subs.delete(fn) };
+    },
+    onEvent(name, fn) {
+      if (!this.named.has(name)) this.named.set(name, new Set());
+      this.named.get(name).add(fn);
+      this._open();
+      return { abort: () => this.named.get(name).delete(fn) };
+    },
+    _heard(event) {
+      if (event.type === 'message') { this._fanOut(); return; }
+      const subs = this.named.get(event.type);
+      if (!subs || !subs.size) return;
+      const payload = JSON.parse(event.data);
+      subs.forEach(f => f(payload));
     },
     // A single enrichment run hits the server's progress callback a dozen
     // times in the first second (GPU init, text embeddings, lyrics
@@ -880,8 +902,12 @@
   };
 
   /* ---------- Guidance trail ----------
-     The node knows what still needs a human (GET /api/settings/guidance);
-     this side knows where that thing lives. A task id is painted on every
+     The node knows what still needs a human; this side knows where that
+     thing lives. The node says the trail on the Library stream (`guidance`:
+     at connect, and whenever its set of tasks changes), so the page asks for
+     it once, for the first paint, and never at a wake — until 2026-11-24 it
+     asked GET /api/settings/guidance at every wake of the stream, which
+     under any activity was every two seconds. A task id is painted on every
      element carrying `data-guide="<id>"` — the More tab, the drawer row,
      the control itself — so the user follows one mark down to the button
      instead of hunting for it. `data-guide="*"` stands for any open task,
@@ -892,6 +918,12 @@
      below: the mark is useless on a control that sits past the fold. */
   const guide = {
     tasks: new Set(),
+    // The answer applied last: the node numbers them (`seq`, within one run
+    // of the node), so an answer computed earlier that arrives later — the
+    // first read after the stream's first word, a "seen" behind a change —
+    // paints nothing
+    run: null,
+    seq: 0,
 
     has(id) { return id === '*' ? this.tasks.size > 0 : this.tasks.has(id); },
 
@@ -910,12 +942,27 @@
       this.paint();
     },
 
-    async refresh() {
+    /* One of the node's answers — { tasks, seq, run } — applied unless a
+       later computation's was already. */
+    _take(answer) {
+      if (answer.run === this.run && answer.seq <= this.seq) return;
+      this.run = answer.run;
+      this.seq = answer.seq;
+      this._apply(answer.tasks);
+    },
+
+    /* The first paint, then the stream's word for every change after it. */
+    start() {
+      libraryWake.onEvent('guidance', answer => this._take(answer));
+      this._read();
+    },
+
+    async _read() {
       try {
         const r = await fetch('/api/settings/guidance');
-        if (!r.ok) return;             // keep the last painted trail
-        this._apply((await r.json()).tasks);
-      } catch (_) { /* offline: the next wake repaints */ }
+        if (!r.ok) return;             // the stream's first word paints it
+        this._take(await r.json());
+      } catch (_) { /* offline: the stream's first word paints it */ }
     },
 
     /* Retire a task whose completion is a judgement, not a state we can
@@ -924,8 +971,8 @@
       if (!this.tasks.has(id)) return;
       try {
         const r = await fetch(`/api/settings/guidance/${id}/seen`, { method: 'POST' });
-        if (r.ok) this._apply((await r.json()).tasks);
-      } catch (_) { /* the wake from the write repaints */ }
+        if (r.ok) this._take(await r.json());
+      } catch (_) { /* the stream's word from the write repaints */ }
     },
   };
 
@@ -13813,8 +13860,8 @@
       this.list().forEach(n => { n.seen = true; });
       try {
         const r = await fetch('/api/settings/guidance/notices/seen', { method: 'POST' });
-        if (r.ok) guide._apply((await r.json()).tasks);
-      } catch (_) { /* the next wake repaints the trail */ }
+        if (r.ok) guide._take(await r.json());
+      } catch (_) { /* the stream's word from the write repaints the trail */ }
     },
 
     /* kind: info | warning | error | success. At most two buttons, in one
@@ -16319,11 +16366,11 @@
         </div>
         <div class="form-row">
           <span class="form-label">Headroom</span>
-          <span class="form-value mono" title="${escapeProfileHtml(loadDetail(sync.load))}">${escapeProfileHtml(loadLabel(sync.load))}</span>
+          <span class="form-value mono" data-sync-load title="${escapeProfileHtml(loadDetail(sync.load))}">${escapeProfileHtml(loadLabel(sync.load))}</span>
         </div>
         <div class="form-row">
           <span class="form-label">Market</span>
-          <span class="form-value mono" title="${escapeProfileHtml(gateDetail(sync.gate))}">${escapeProfileHtml(gateLabel(sync.gate))}</span>
+          <span class="form-value mono" data-sync-gate title="${escapeProfileHtml(gateDetail(sync.gate))}">${escapeProfileHtml(gateLabel(sync.gate))}</span>
         </div>
         ${supportRow}
       </div>
@@ -19315,18 +19362,31 @@
   /* SSE-driven refresh — re-renders ONLY the [data-sync-content] block
      and re-wires its actions. Does NOT touch the SSE subscription, so
      the server's initial-ping → renderSync → re-subscribe loop is
-     impossible. Mirrors Library's refresh() / sseStream pattern. */
+     impossible. Mirrors Library's refresh() / sseStream pattern.
+
+     The screen shows more than the Library's state, and hears each part
+     where its change is said: a Library wake (a sync's end, the background
+     pass); the node's identity state on the page's event stream — the
+     Identity and Reachable rows, the Support row's moments; the notices on
+     the same stream — a support request that waits or was withdrawn; the
+     chat's events there — a friend came online; and the node's load as the
+     Library stream's `load` event, which carries the Headroom and Market
+     rows' values and is painted in place, nothing fetched. Until 2026-11-24
+     the identity's state and the notices arrived as Library wakes, the load
+     as one of them every two seconds, and the friends online were read at
+     whichever of those came next. */
   function _subscribeSyncStream(root) {
     if (_syncStreamCtrl) { _syncStreamCtrl.abort(); _syncStreamCtrl = null; }
+    const here = () => parseHash().startsWith('more/sync');
+    const stop = () => { if (_syncStreamCtrl) { _syncStreamCtrl.abort(); _syncStreamCtrl = null; } };
 
     async function refresh() {
-      if (!parseHash().startsWith('more/sync')) {
-        _syncStreamCtrl && _syncStreamCtrl.abort();
-        _syncStreamCtrl = null;
-        return;
-      }
+      if (!here()) { stop(); return; }
+      // Three sources may say "read again" within one moment (a page back
+      // from sleep hears all of them): the newest read paints
+      const fresh = claimFresh('sync.state');
       const sync = await _fetchSyncState();
-      if (!sync) return;
+      if (!sync || !fresh()) return;
 
       const contentDiv = root.querySelector('[data-sync-content]');
       if (!contentDiv) return;
@@ -19335,7 +19395,36 @@
       _wireSyncActions(root, sync);
     }
 
-    _syncStreamCtrl = libraryWake.on(refresh);
+    function paintLoad(said) {
+      if (!here()) { stop(); return; }
+      _paintSyncLoad(root, said);
+    }
+
+    const wake = libraryWake.on(refresh);
+    const load = libraryWake.onEvent('load', paintLoad);
+    const said = ['sautium:identity', 'sautium:notice', 'sautium:chat-changed'];
+    said.forEach(name => window.addEventListener(name, refresh));
+    _syncStreamCtrl = {
+      abort() {
+        wake.abort();
+        load.abort();
+        said.forEach(name => window.removeEventListener(name, refresh));
+      },
+    };
+  }
+
+  /* The node-load rows from a `load` event: { load, gate } — `gate` null
+     where the process that measured runs no pricer (its row stays). */
+  function _paintSyncLoad(root, said) {
+    const set = (el, label, detail) => {
+      if (!el) return;
+      if (el.textContent !== label) el.textContent = label;
+      if (el.title !== detail) el.title = detail;
+    };
+    set(root.querySelector('[data-sync-load]'), loadLabel(said.load), loadDetail(said.load));
+    if (said.gate) {
+      set(root.querySelector('[data-sync-gate]'), gateLabel(said.gate), gateDetail(said.gate));
+    }
   }
 
   /* ---------- Wire it up ---------- */
@@ -19392,8 +19481,7 @@
     queue.init();
     moreDrawer.init();
     refreshAiAvailability();
-    guide.refresh();
-    libraryWake.on(() => guide.refresh());
+    guide.start();
     // Notices ride /api/events (player.js re-dispatches the snapshot); the
     // link state comes from the same stream's transport.
     window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));

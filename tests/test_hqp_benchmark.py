@@ -2539,7 +2539,7 @@ def test_the_restored_notice_is_gone_once_seen(run, monkeypatch):
     store = {"output.type": "hqplayer"}
     monkeypatch.setattr(settings_router, "_read", store.get)
     monkeypatch.setattr(settings_router, "_write", store.__setitem__)
-    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {})
+    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {"tasks": []})
     monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
     assert _run_restored() is not None
     settings_router.post_guidance_seen("notices")
@@ -3015,7 +3015,7 @@ def test_a_restored_notice_once_seen_stays_gone_at_a_later_visit(run, monkeypatc
     store = {"output.type": "hqplayer"}
     monkeypatch.setattr(settings_router, "_read", store.get)
     monkeypatch.setattr(settings_router, "_write", store.__setitem__)
-    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {})
+    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {"tasks": []})
     monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
     settings_router.post_guidance_seen("notices")
     assert _run_restored() is None

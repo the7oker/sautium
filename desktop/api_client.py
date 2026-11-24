@@ -664,14 +664,16 @@ class BackendAPIClient:
 
     def stream(self, path: str,
                stop: Optional[threading.Event] = None) -> Iterator[None]:
-        """Yield once per server-sent event on `path`, forever — or until
-        `stop` is set: checked on every frame, keepalives included, so a
-        subscriber scoped to a dialog is gone within one keepalive period
-        of the dialog closing.
+        """Yield once per wake on `path`, forever — or until `stop` is set:
+        checked on every frame, keepalives included, so a subscriber scoped
+        to a dialog is gone within one keepalive period of the dialog
+        closing.
 
         Deliberately not a payload reader: every channel we consume is a wake
         event whose whole meaning is "re-read state over the signed API", so
-        parsing frames would only invite the two to disagree. Blocks; run it
+        parsing frames would only invite the two to disagree. A named event
+        (`event: x` — the Library stream's `guidance` and `load` carry
+        payloads for the page) is no wake and is passed over. Blocks; run it
         on a thread and end it with close_streams().
 
         Reconnects on drop with a backoff, because the launcher restarts the
@@ -695,11 +697,17 @@ class BackendAPIClient:
                 self._streams.append(breaker)
                 delay = 1.0
                 try:
+                    named = False
                     for raw in resp:
                         if stopped():
                             return
-                        if raw.startswith(b"data:"):
-                            yield None
+                        if raw.startswith(b"event:"):
+                            named = True
+                        elif raw.startswith(b"data:"):
+                            if not named:
+                                yield None
+                        elif not raw.strip():
+                            named = False           # the event's end
                 finally:
                     self._streams.remove(breaker)
                     breaker.close()

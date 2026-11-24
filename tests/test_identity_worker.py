@@ -1109,10 +1109,11 @@ def test_a_reachability_verdict_is_said_once(node, caplog):
     from desktop.p2p import chat_client as cc
     client = cc.ChatClient.__new__(cc.ChatClient)
     client._on_reachability, client._reachability_said = None, None
-    written = []
+    written, told = [], []
 
-    async def write(values):
+    async def write(values, notify=None):
         written.append(values["p2p.reachability"])
+        told.append(notify)
     client._write_settings = write
 
     async def verdicts():
@@ -1123,3 +1124,5 @@ def test_a_reachability_verdict_is_said_once(node, caplog):
     said = [(r.levelname, r.getMessage()) for r in caplog.records if "Reachability" in r.getMessage()]
     assert [level for level, _ in said] == ["INFO", "DEBUG", "DEBUG", "INFO"]
     assert written == ["unknown"] * 3 + ["reachable"]         # the setting is written every time
+    # ... and the pages are told of a verdict that changed, on the channel of the node's network state
+    assert told == ["sautium_identity", None, None, "sautium_identity"]
