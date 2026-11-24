@@ -26,7 +26,7 @@ CACHE_DIR = BUILD_DIR / "cache"
 DIST_DIR = PROJECT_ROOT / "dist"
 
 APP_NAME = "Sautium"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # python-build-standalone: relocatable CPython with tkinter and its own OpenSSL.
 # Bump both together — the URL embeds each.

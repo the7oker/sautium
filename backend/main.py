@@ -690,6 +690,16 @@ async def lifespan(app: FastAPI):
     # DB on the event loop (the auth middleware runs there).
     await asyncio.to_thread(device_auth.prime)
     await asyncio.to_thread(device_auth.prepare_setup)
+    # A start about to make its account from P2P_USERNAME under the nickname
+    # kept for Support refuses before that key is on record (B-132), as the
+    # master's refusal above does: a state, not a crash
+    refusal = await asyncio.to_thread(device_auth.reserved_name_refusal)
+    if refusal:
+        import os
+        from uvicorn.main import STARTUP_FAILURE
+        logger.error(refusal)
+        logging.shutdown()
+        os._exit(STARTUP_FAILURE)
     # The key this node signs with on record — or, with none, whether the
     # database says it had one (the account setup's question)
     await asyncio.to_thread(device_auth.record_identity_state)

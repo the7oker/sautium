@@ -11,10 +11,9 @@ Identity is derived in-memory at startup (no files saved).
 import hashlib
 import json
 import logging
-import re
 from typing import Optional
 
-from desktop.node_identity import CERT_FILENAME
+from desktop.node_identity import CERT_FILENAME, validate_username
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +22,6 @@ ARGON2_TIME_COST = 4
 ARGON2_MEMORY_COST = 262144  # 256 MB
 ARGON2_PARALLELISM = 2
 ARGON2_HASH_LEN = 32
-
-# Mirrors desktop/node_identity.USERNAME_RE and worker/verify.js — the
-# username is embedded in invite codes and Worker KV keys, so it must stay
-# URL/CLI-safe at every identity-creation boundary.
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
-
 
 def make_invite_code(username: str, public_key_raw: bytes) -> str:
     """Mirror of desktop/node_identity.make_invite_code — keep in step."""
@@ -69,9 +62,7 @@ def derive_identity(username: str, password: str, email: str = "") -> dict:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from cryptography.hazmat.primitives import serialization
 
-    if not USERNAME_RE.match(username):
-        raise ValueError(
-            "Nickname: 3-32 Latin letters, digits, '-' or '_'")
+    validate_username(username)
 
     # Derive seed (same algorithm as desktop)
     salt = f"{username}:sautium".encode("utf-8")

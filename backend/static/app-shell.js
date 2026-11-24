@@ -8229,8 +8229,15 @@
   // Support's line, in its row and its chat header: what becomes of a
   // message, never a presence — "offline" reads as "nobody will get this",
   // and Support answers when a person does (row.reach, the server's word:
-  // this node can deliver or deposit). Draft words for the owner's review.
+  // this node can deliver or deposit; row.support_wait, what a message waits
+  // for before either — SUPPORT-FIRST). Draft words for the owner's review.
   function supportLine(friend) {
+    if (friend.support_wait === 'handshake') {
+      return "Support isn't online yet — write now, and your message goes when it is";
+    }
+    if (friend.support_wait === 'key') {
+      return 'Support has not learned your new key yet — your message goes once it has';
+    }
     return friend.reach
       ? 'Write any time — your message is kept until Support reads it'
       : 'Your message waits on this node and is sent once it can reach Support';
@@ -8345,14 +8352,15 @@
     return null;
   }
 
-  // Stable URL handle — public_key_hex is the same on every device
-  // for the same friend, while friends.id is a per-device SERIAL.
-  // 16 hex chars = 64 bits of identity, comfortably collision-free
-  // within any realistic contact list.
+  // Stable URL handle — a key is the same on every device for the same
+  // friend, while friends.id is a per-device SERIAL. 16 hex chars = 64
+  // bits of identity, comfortably collision-free within any realistic
+  // contact list. The server names it (row.chat_key): a resolved friend's
+  // key, and the Support contact's from the node's first minute — the
+  // pinned key its fingerprint binds (B-116).
   function friendUrlKey(friend) {
-    const k = friend && friend.public_key_hex;
-    return (typeof k === 'string' && k && !k.startsWith('pending:'))
-      ? k.slice(0, 16) : '';
+    const k = friend && friend.chat_key;
+    return typeof k === 'string' ? k : '';
   }
 
   function friendRowInner(friend) {
@@ -8699,8 +8707,8 @@
         return;
       }
       const key = row.dataset.friendKey;
-      // Pending invites have no resolved public_key_hex yet — there's
-      // no chat thread to open until the handshake completes.
+      // A friend's pending invite has no thread yet — there's nothing to
+      // open until the handshake completes (Support's has one: chat_key).
       if (!key) {
         showHint(
           'Waiting for handshake — you can chat once both sides accept.',
@@ -9247,9 +9255,12 @@
   // An outgoing message's state as the server names it (row.state, B-92),
   // shown only where it says something: under every message still waiting
   // here or kept for Support, and `Delivered` under the newest delivered one.
+  // One still here for Support says what it waits for (row.support_wait).
   const MESSAGE_STATE_LINE = {waiting: 'Not sent yet', kept: 'Kept for Support'};
+  const SUPPORT_WAIT_LINE = {handshake: 'Waiting for Support',
+                             key: 'Waiting for Support to learn your new key'};
 
-  function renderThreadHTML(messages) {
+  function renderThreadHTML(messages, friend) {
     if (!messages || messages.length === 0) {
       return `<div class="thread-empty">No messages yet — say hi.</div>`;
     }
@@ -9272,25 +9283,23 @@
       out.push(`<div class="msg-row ${side}">
         <div class="bubble ${side}">${escapeHtml(m.content || '')}</div>
       </div>`);
-      const line = m === newestDelivered ? 'Delivered' : MESSAGE_STATE_LINE[m.state];
+      const line = m === newestDelivered ? 'Delivered'
+        : (m.state === 'waiting' && SUPPORT_WAIT_LINE[friend && friend.support_wait])
+          || MESSAGE_STATE_LINE[m.state];
       if (line) out.push(`<div class="msg-state">${line}</div>`);
     }
     return out.join('');
   }
 
   async function renderChatThread(root, friendKey) {
-    // friendKey is the first 16 hex chars of public_key_hex —
-    // see friendUrlKey(). Resolve to the per-device friends.id at
-    // mount time so backend API calls stay unchanged.
+    // friendKey is the row's chat_key — see friendUrlKey(). Resolve to
+    // the per-device friends.id at mount time so backend API calls stay
+    // unchanged.
     const key = String(friendKey || '').toLowerCase();
     if (!key) { navigate('friends'); return; }
     let friend = null;
     try {
-      friend = await findFriend(f => {
-        const k = f.public_key_hex || '';
-        return !k.startsWith('pending:')
-          && k.toLowerCase().startsWith(key);
-      });
+      friend = await findFriend(f => (f.chat_key || '') === key);
     } catch (_) { friend = null; }
     if (!friend) {
       // Stale bookmark / wiped DB / unresolved peer — drop back to
@@ -9394,7 +9403,7 @@
         const banner = threadEl.querySelector('.e2ee-banner');
         threadEl.innerHTML = '';
         if (banner) threadEl.appendChild(banner);
-        threadEl.insertAdjacentHTML('beforeend', renderThreadHTML(msgs));
+        threadEl.insertAdjacentHTML('beforeend', renderThreadHTML(msgs, friend));
         threadEl.scrollTop = threadEl.scrollHeight;
       } catch (err) {
         console.warn('Could not load messages', err);
@@ -9436,10 +9445,10 @@
       window.removeEventListener('sautium:identity', paintIdentity);
       window.removeEventListener('sautium:route', onRoute);
     };
-    const onChat = () => {
+    const onChat = async () => {
       if (!document.contains(threadEl)) return detach();
+      await loadFriend();      // status may have changed — and the bubbles' line reads it
       loadMessages();
-      loadFriend();            // status may have changed
       markRead();
     };
     const onRoute = () => {
@@ -11753,8 +11762,19 @@
     return [said, ab.line].filter(Boolean).map(l => `<p class="ab-say">${escapeHtml(l)}</p>`).join('');
   }
 
-  function abWarnings(v) {
-    return (v.long_silence ? '<p class="ab-warn">Long pauses make small differences harder to hear.</p>' : '')
+  // Their filter starts slowly here (B-131): the sitting keeps it and says
+  // its pauses are long (C3, a draft for the words sitting)
+  function abOwnSlow(v) {
+    return v.own_slow != null
+      ? `<p class="ab-warn">Your filter takes ${abNum(`${v.own_slow} s`)} to start here, so the pause before it is long.</p>` : '';
+  }
+
+  // `own`: their filter is in the step — played, or what it is compared with
+  // (the pair's every round; the chain's step says, `step.yours`); its slow
+  // start is said there, never under another's
+  function abWarnings(v, own = false) {
+    return (own ? abOwnSlow(v) : '')
+      + (v.long_silence ? '<p class="ab-warn">Long pauses make small differences harder to hear.</p>' : '')
       + (v.sdm ? '<p class="ab-warn">Your DAC may click between fragments in DSD — the same for every filter.</p>' : '');
   }
 
@@ -11883,6 +11903,7 @@
           <div class="ab-pad">
             <p class="ab-ctx">${abContext(v.context.words)}</p>
             <p class="ab-warn">Keep HQPlayer's window and your DAC's display out of sight.</p>
+            ${abOwnSlow(v)}
             ${v.sdm ? '<p class="ab-warn">Your DAC may click between fragments in DSD — the same for every filter.</p>' : ''}
             ${abSay(ab)}
           </div>
@@ -11908,8 +11929,9 @@
           </div>
           <div class="ab-pad ab-after">
             ${abSay(ab)}
-            <p class="ab-warn">Silence before each: ${abNum(`${v.silence_s} s`)} · fragment ${abNum(`${v.passage.length_s} s`)}</p>
-            ${abWarnings(v)}
+            ${v.silence_s != null ? `<p class="ab-warn">Silence before ${st.kind === 'first' ? 'each' : 'this one'}: ${
+              abNum(`${v.silence_s} s`)} · fragment ${abNum(`${v.passage.length_s} s`)}</p>` : ''}
+            ${abWarnings(v, !!st.yours)}
           </div>
         </div>`;
     },
@@ -11928,7 +11950,7 @@
           <div class="ab-pad ab-after">
             ${abSay(ab)}
             <p class="ab-warn">Each filter plays first in half the rounds. Up to ${abNum(st.of || 0)} rounds; it stops earlier when your answers settle.</p>
-            ${abWarnings(v)}
+            ${abWarnings(v, true)}
           </div>
         </div>`;
     },

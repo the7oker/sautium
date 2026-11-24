@@ -387,7 +387,8 @@ class ChatService:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, username, public_key_hex, invite_code,
-                           display_name, is_blocked, source::text AS source
+                           display_name, is_blocked, source::text AS source,
+                           bound_identity
                     FROM friends WHERE public_key_hex = %s
                 """, (public_key_hex,))
                 row = cur.fetchone()
@@ -572,6 +573,22 @@ class ChatService:
         finally:
             self._return_db(conn)
 
+    def kept_for(self, public_key_hex: str) -> bool:
+        """Whether a message to this key waits kept in its Worker mailbox:
+        undelivered, deposited within the mailbox's keep."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM p2p_messages m JOIN friends f ON f.id = m.friend_id
+                         WHERE f.public_key_hex = %s AND m.direction = 'out' AND NOT m.delivered
+                           AND m.parked_at > now() - make_interval(secs => %s))
+                """, (public_key_hex, chat_wire.MAILBOX_TTL_S))
+                return cur.fetchone()[0]
+        finally:
+            self._return_db(conn)
+
     def mark_delivered(self, message_id: int):
         """Mark an outgoing message as delivered — the chat on screen hears
         it from the row's state trigger (trg_p2p_messages_state)."""
@@ -596,6 +613,55 @@ class ChatService:
                     UPDATE p2p_messages SET parked_at = now()
                     WHERE id = %s AND direction = 'out' AND NOT delivered
                 """, (message_id,))
+        finally:
+            self._return_db(conn)
+
+    def keep_mail_voucher(self, voucher: dict) -> None:
+        """The master's voucher for its mailbox (checked by the caller,
+        chat_wire.mail_voucher_holds), kept for the key it is for — the
+        newest of them."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO mail_vouchers (public_key_hex, issued_at, expires_at, signature)
+                    VALUES (%s, to_timestamp(%s), to_timestamp(%s), %s)
+                    ON CONFLICT (public_key_hex) DO UPDATE
+                       SET issued_at = EXCLUDED.issued_at, expires_at = EXCLUDED.expires_at,
+                           signature = EXCLUDED.signature
+                     WHERE EXCLUDED.expires_at > mail_vouchers.expires_at
+                """, (voucher["pubkey"].lower(), voucher["issued_at"], voucher["expires_at"],
+                      bytes.fromhex(voucher["sig"])))
+        finally:
+            self._return_db(conn)
+
+    def mail_voucher(self, public_key_hex: str) -> Optional[dict]:
+        """The voucher kept for this key while it is alive, as a drop carries it."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT extract(epoch FROM issued_at)::bigint, extract(epoch FROM expires_at)::bigint,
+                           encode(signature, 'hex')
+                      FROM mail_vouchers
+                     WHERE public_key_hex = %s AND expires_at > now()
+                """, (public_key_hex.lower(),))
+                row = cur.fetchone()
+        finally:
+            self._return_db(conn)
+        if row is None:
+            return None
+        return {"v": 1, "pubkey": public_key_hex.lower(), "issued_at": row[0],
+                "expires_at": row[1], "sig": row[2]}
+
+    def forget_mail_voucher(self, voucher: dict) -> None:
+        """A kept voucher the Worker refused (signed by a master key it no
+        longer takes) — that one alone; a newer one kept meanwhile stays."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM mail_vouchers WHERE public_key_hex = %s AND signature = %s",
+                            (voucher["pubkey"].lower(), bytes.fromhex(voucher["sig"])))
         finally:
             self._return_db(conn)
 

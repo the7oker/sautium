@@ -263,9 +263,9 @@ class SetupWizard(ctk.CTkToplevel):
                 return False
 
             if username:
-                from desktop.node_identity import validate_username
+                from desktop.node_identity import validate_new_username
                 try:
-                    validate_username(username)
+                    validate_new_username(username)
                 except ValueError as e:
                     self._account_error.configure(text=str(e))
                     return False

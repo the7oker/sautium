@@ -234,6 +234,28 @@ REFUSED_SQL = """(EXISTS (SELECT 1 FROM p2p_node_bans WHERE pubkey = {key})
                               WHERE pubkey = {key} AND status = 'failed'))"""
 
 
+# Whom the master vouchers for at its Worker mailbox (SUPPORT-FIRST §2.3): a
+# friend it takes mail from — not blocked, with `can_message`
+# (invite_tokens.friend_has_right's rule) — whose identity this gate verified
+# and that no ban holds. Both peer surfaces ask it.
+_MAIL_VOUCHER_SQL = """
+    SELECT EXISTS (
+        SELECT 1 FROM friends f
+         WHERE lower(f.public_key_hex) = %(k)s AND NOT f.is_blocked
+           AND (f.source != 'token'
+                OR EXISTS (SELECT 1 FROM friend_rights fr
+                            WHERE fr.friend_id = f.id AND fr.p2p_right = 'can_message'))
+           AND EXISTS (SELECT 1 FROM p2p_identities i
+                        WHERE i.pubkey = %(k)s AND i.status = 'verified')
+           AND NOT EXISTS (SELECT 1 FROM p2p_node_bans b WHERE b.pubkey = %(k)s))"""
+
+
+def takes_mail_voucher(conn, pubkey: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(_MAIL_VOUCHER_SQL, {"k": pubkey.lower()})
+        return bool(cur.fetchone()[0])
+
+
 def refused(conn, pubkey: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("SELECT " + REFUSED_SQL.format(key="%(k)s"), {"k": pubkey.lower()})

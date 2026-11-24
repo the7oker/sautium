@@ -63,8 +63,8 @@ frame — up to a 160 ms burst late; its `onset` is that frame's own time,
 the read's arrival less the hops of the frames after it in the read (the
 lab run of AB-1, 2026-11-17: the frame's time is the start's clock to a σ
 of 12–23 ms in PCM). A comparison by ear (playback.hqp_ab) taps the stream
-itself (tap): every read's arrival, hop and which of its frames sound, told
-on the meter's thread while the tap lasts — the tap holds the socket open
+itself (tap): every read's arrival, hop and each of its frames' largest
+bin, told on the meter's thread while the tap lasts — the tap holds the socket open
 as a start window does.
 """
 
@@ -362,14 +362,15 @@ class HqpMeter:
             if not self._wanted_locked():
                 self._stop_locked()
 
-    def tap(self, key, attachment: int, fn: Callable[[float, float, Tuple[bool, ...]], None]) -> bool:
-        """`fn(at, hop_s, sounds)` is told of every read of frames for the
+    def tap(self, key, attachment: int, fn: Callable[[float, float, Tuple[float, ...]], None]) -> bool:
+        """`fn(at, hop_s, levels)` is told of every read of frames for the
         attachment `attachment` (attach's number), on the meter's thread,
         until untap or a detach: when the read arrived (time.time()), the
-        hop between its frames in seconds, and for each frame in order
-        whether it sounds. The tap wants the stream as a start window does
-        — and is a fresh edge: it connects even after a port that refused
-        (the person asked for it now). False when that attachment is gone."""
+        hop between its frames in seconds, and for each frame in order its
+        largest bin's magnitude (0.0: an all-zero frame). The tap wants the
+        stream as a start window does — and is a fresh edge: it connects even
+        after a port that refused (the person asked for it now). False when
+        that attachment is gone."""
         with self._cond:
             if attachment != self._generation or self._target is None:
                 return False
@@ -659,14 +660,18 @@ class HqpMeter:
                 return delivered, ("protocol", str(e))
             if frames:
                 delivered = True
-                sounds = tuple(bool(spectra.any()) for _, spectra in frames)
+                # each frame's largest bin: 0.0 exactly for HQPlayer's all-zero
+                # frames (a pause, a tail), a comparison's lead mark far below
+                # any sound (hqp_ab) — the taps class them, the runs count non-zero
+                levels = tuple(float(np.abs(spectra).max()) for _, spectra in frames)
+                sounds = tuple(lv > 0.0 for lv in levels)
                 rate, spectra = frames[0]
                 hop = (spectra.shape[1] - 1) / rate
                 began, paging, taps = self._came(sock, at, sounds, hop)
                 if began is not None:
                     began()
                 for fn in taps:
-                    fn(at, hop, sounds)
+                    fn(at, hop, levels)
                 if not paging:
                     rebuild = None      # a page that turns the meter on later starts afresh
                 for rate, spectra in frames if paging else ():

@@ -61,7 +61,7 @@ LIFE_TABLES = (
     "p2p_identities", "p2p_node_bans", "p2p_witness", "user_settings",
     # Comparisons by ear (AB-1), and the HQPlayers they were made on — read
     # to map a sitting to this node's row of the same HQPlayer, never merged
-    "hqp_endpoints", "hqp_ab_sittings", "hqp_ab_duels",
+    "hqp_endpoints", "hqp_ab_sittings", "hqp_ab_duels", "hqp_ab_slips",
 )
 
 # Preferences of the person, never of the machine: no hosts, ports, paths,
@@ -655,11 +655,20 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
             ON CONFLICT (hqp_endpoint_id, started_at) DO NOTHING""")
         merged["duels"] = run("""
             INSERT INTO hqp_ab_duels (sitting_id, n, first_name, second_name, answer, axis,
-                                      check_step, counted, swapped, answered_at)
+                                      check_step, counted, swapped, silence_s, answered_at)
             SELECT n.id, d.n, d.first_name, d.second_name, d.answer, d.axis, d.check_step,
-                   d.counted, d.swapped, d.answered_at
+                   d.counted, d.swapped, d.silence_s, d.answered_at
               FROM _S_.hqp_ab_duels d
               JOIN _S_.hqp_ab_sittings s ON s.id = d.sitting_id
+              JOIN _ab_map m ON m.old_id = s.id
+              JOIN hqp_ab_sittings n ON n.hqp_endpoint_id = m.endpoint_id
+                                    AND n.started_at = s.started_at
+            ON CONFLICT DO NOTHING""")
+        merged["slips"] = run("""
+            INSERT INTO hqp_ab_slips (sitting_id, n, filter, cause, warm, slipped_at)
+            SELECT n.id, x.n, x.filter, x.cause, x.warm, x.slipped_at
+              FROM _S_.hqp_ab_slips x
+              JOIN _S_.hqp_ab_sittings s ON s.id = x.sitting_id
               JOIN _ab_map m ON m.old_id = s.id
               JOIN hqp_ab_sittings n ON n.hqp_endpoint_id = m.endpoint_id
                                     AND n.started_at = s.started_at
