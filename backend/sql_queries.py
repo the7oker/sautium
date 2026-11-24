@@ -55,13 +55,19 @@ def best_rip_order(alias: str) -> str:
 # absent_since: a Rescan found none of its files) and its path lies under no
 # folder the node knows unreachable (param `gone`: scanner.gone_prefixes(),
 # the process's recorded observation — an empty array where every folder
-# answers, and the expression then costs nothing a plan would show). For a
-# media_files row aliased `mf` joined to its album_variants row `av`; a file
-# in an HQPlayer's own library is `here` as it stands (its presence is that
+# answers, and the query then plans as it did without it). A file in an
+# HQPlayer's own library is `here` as it stands (its presence is that
 # HQPlayer's). Every row source that feeds a choice of copy computes it as
 # the column `here`, which owned_rank reads.
-HERE = ("(av.absent_since IS NULL AND NOT EXISTS (SELECT 1 FROM unnest(%(gone)s::text[]) g "
-        "WHERE starts_with(mf.file_path, g)))")
+
+def here(mf: str = "mf", av: str = "av") -> str:
+    """The expression, for a media_files row aliased `mf` joined to its
+    album_variants row `av`."""
+    return (f"({av}.absent_since IS NULL AND NOT EXISTS (SELECT 1 FROM unnest(%(gone)s::text[]) g "
+            f"WHERE starts_with({mf}.file_path, g)))")
+
+
+HERE = here()
 
 
 def owned_rank(alias: str, style: str = "psycopg") -> str:

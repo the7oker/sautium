@@ -1053,7 +1053,7 @@ def test_a_copy_away_while_another_is_found_keeps_one_analysis(
     # a play of the album takes the copy found, not the one away
     from routers import player
     cur.execute("SELECT id FROM albums WHERE title = 'Pulse Archive'")
-    picked = [r["id"] for r in player._album_media_rows(str(cur.fetchone()[0]))]
+    picked = [r["id"] for r in player._album_rows(str(cur.fetchone()[0]))]
     cur.execute("SELECT file_path FROM media_files WHERE id = ANY(%s)", (picked,))
     assert len(picked) == 2 and all("Disk/" in p for (p,) in cur.fetchall())
 
@@ -1089,10 +1089,11 @@ def test_an_equal_copy_back_leaves_the_analysis_where_it_is(
         assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
 
 
-def test_a_track_away_plays_as_a_missing_file_and_a_present_copy_first(
+def test_a_track_away_streams_and_a_present_copy_plays_first(
         cur, library, main_module, monkeypatch, tmp_path, scanned_library):
     """The queue's way in: a present copy outranks one that is away, and a
-    track only away still opens its file — a 404, as an unreachable root."""
+    track only away streams — a copy that does not open here now is never a
+    way in (before 2026-11-24 it opened its missing file, a 404)."""
     from playback import substitute
     from playback.queue import QueueItem
     carrier, _ = scanned_library["Carrier"]
@@ -1101,8 +1102,7 @@ def test_a_track_away_plays_as_a_missing_file_and_a_present_copy_first(
     item = QueueItem(track_id=carrier, media_file_id=None, source={"kind": "track"},
                      title="Carrier")
 
-    [only_away] = substitute.native_plays([item], None, None)
-    assert only_away["path"].endswith("Ostrava Unit/Pulse Archive/01.flac")
+    assert substitute.native_plays([item], None, None) == [{"kind": "pending"}]
 
     target = library / "Disk" / "Pulse Archive" / "01.flac"
     target.parent.mkdir(parents=True)
@@ -1495,7 +1495,7 @@ def test_a_copy_found_elsewhere_and_kept_is_away(
 
     assert _away(cur) == ["Pulse Archive"]
     cur.execute("SELECT id FROM albums WHERE title = 'Pulse Archive'")
-    picked = [r["id"] for r in player._album_media_rows(str(cur.fetchone()[0]))]
+    picked = [r["id"] for r in player._album_rows(str(cur.fetchone()[0]))]
     cur.execute("SELECT file_path FROM media_files WHERE id = ANY(%s)", (picked,))
     assert all("(2019)/" in p for (p,) in cur.fetchall())
 

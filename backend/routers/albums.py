@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException, Query
 from db_pool import db_query, db_query_one
 from desktop.p2p.mb_slice_queries import BANDCAMP_PAGE
 from genre_queries import album_genre_chips
+from playback import substitute
 from playback.manager import active_hqp_endpoint
 from sql_queries import ALBUM_FILES, best_rip_order, owned_rank, rip_quality
 
@@ -37,14 +38,20 @@ router = APIRouter(prefix="/api/albums", tags=["albums"])
 # first (owned_rank). The header (quality, duration, which variant
 # is showing) and the tracklist all read THIS pick, so the badge and the
 # variant pill can never describe another file than the one a row plays.
+# `here`: the picked file opens now (sql_queries.HERE) — a track none of
+# whose copies does keeps its best one as the row's (its length, its
+# quality: "your copy"), one on a folder that does not answer before one a
+# Rescan set away, and `why` names which.
 _PICKED_FILES = f"""
     SELECT DISTINCT ON (f.track_id)
            f.id, f.location, f.track_id, f.album_variant_id, f.is_lossless,
            f.sample_rate, f.bit_depth, f.duration_seconds,
-           f.disc_number, f.track_number
+           f.disc_number, f.track_number, f.here,
+           CASE WHEN f.here THEN NULL WHEN f.absent_since IS NOT NULL THEN 'away'
+                ELSE 'disk' END AS why
     FROM ({ALBUM_FILES}) f
     WHERE (%(vid)s::int IS NULL OR f.album_variant_id = %(vid)s::int)
-    ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
+    ORDER BY f.track_id, {owned_rank('f')}, (f.absent_since IS NOT NULL), {best_rip_order('f')}
 """
 
 
@@ -479,6 +486,8 @@ def get_album(
                p.disc_number,
                p.track_number,
                p.duration_seconds AS duration,
+               p.here,
+               p.why,
                af.bpm,
                af.key,
                af.mode
@@ -487,6 +496,15 @@ def get_album(
         LEFT JOIN audio_features af ON af.track_id = t.id
         ORDER BY p.disc_number NULLS LAST, p.track_number NULLS LAST, t.title
     """, params)
+    # An album no picked file of which opens here now — its disk out, its
+    # copy away — is still the owner's: `away` says why and whether this
+    # node streams it meanwhile (what the play routes ask); `away_part` the
+    # same where only some of its tracks are out.
+    out = [t for t in album["tracks"] if not t["here"]]
+    reach = ({"why": "disk" if any(t["why"] == "disk" for t in out) else "away",
+              "streams": substitute.streams()} if out else None)
+    album["away"] = reach if out and len(out) == len(album["tracks"]) else None
+    album["away_part"] = reach if out and len(out) < len(album["tracks"]) else None
     _composer_lines(album)
 
     # Full variant list, always returned (UI hides the selector when
