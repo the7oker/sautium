@@ -167,7 +167,14 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     def gone(flag: bool) -> None:
         monkeypatch.setattr(scanner, "_folder_unreachable", flag)
 
-    def copy(n: int, path: str, *, sample_rate=44100) -> int:
+    elsewhere = (tmp_path / "elsewhere").as_posix()
+
+    def copy(n: int, name: str, *, sample_rate=44100) -> int:
+        """A second copy of track n at `elsewhere`/`name` — a folder that
+        is not the music folder, the file there."""
+        path = f"{elsewhere}/{name}"
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(b"fLaC")
         cur.execute("INSERT INTO album_variants (album_id, directory_path, sample_rate) "
                     "VALUES (%s, %s, %s) RETURNING id", (owned, path.rsplit("/", 1)[0], sample_rate))
         v = cur.fetchone()[0]
@@ -196,7 +203,8 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     yield {"mgr": mgr, "prov": prov, "proxy": proxy, "out": out, "player": player, "cur": cur,
            "owned": owned, "streamed": streamed, "files": files, "tracks": tracks,
            "phantoms": phantoms, "variant": variant, "root": root, "db_root": db_root,
-           "gone": gone, "copy": copy, "streaming": streaming_service, "monkeypatch": monkeypatch}
+           "gone": gone, "copy": copy, "elsewhere": elsewhere, "streaming": streaming_service,
+           "monkeypatch": monkeypatch}
     prov.land(*phantoms, *tracks)
     assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
     _wait(lambda: not [t for t in threading.enumerate() if t.name == "queue-reach"])
@@ -236,12 +244,13 @@ def test_a_file_under_a_folder_that_does_not_answer_is_no_way_in_and_its_origin_
 def test_a_second_copy_that_is_here_is_the_way_in(node):
     from playback.queue import items_for_media_ids
     from playback.substitute import native_plays
-    other = node["copy"](0, "/elsewhere/NW/01.flac")
+    other = node["copy"](0, "NW/01.flac")
     it = items_for_media_ids(node["files"][:1])[0]
     assert native_plays([it], "browser", None) == [None]
     node["gone"](True)
     play = native_plays([it], "browser", None)[0]
-    assert (play["kind"], play["media_file_id"], play["path"]) == ("file", other, "/elsewhere/NW/01.flac")
+    assert (play["kind"], play["media_file_id"], play["path"]) == (
+        "file", other, f"{node['elsewhere']}/NW/01.flac")
     assert it.source["path"] == f"{node['db_root']}/NW/01.flac"
 
 
@@ -254,7 +263,7 @@ def test_an_away_copy_with_no_other_streams_and_a_copy_here_stands_in_for_it(nod
     node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
                         (node["variant"],))
     assert native_plays([it], "browser", None) == [{"kind": "pending"}]
-    other = node["copy"](0, "/elsewhere/NW/01.flac")
+    other = node["copy"](0, "NW/01.flac")
     assert native_plays([it], "browser", None)[0]["media_file_id"] == other
     # the track itself (a slot queued while the copy was away) reads the same
     from playback.queue import QueueItem
@@ -289,8 +298,8 @@ def test_with_every_folder_answering_the_copies_rank_as_before(node):
     HQPlayer that is the output, the local rips best first, a copy at
     another HQPlayer, a copy that is away last."""
     cd = node["files"][0]
-    hires = node["copy"](0, "/elsewhere/hi/01.flac", sample_rate=96000)
-    away = node["copy"](0, "/elsewhere/gone/01.flac", sample_rate=192000)
+    hires = node["copy"](0, "hi/01.flac", sample_rate=96000)
+    away = node["copy"](0, "gone/01.flac", sample_rate=192000)
     node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = "
                         "(SELECT album_variant_id FROM media_files WHERE id = %s)", (away,))
     ep, held = _held(node, "box", 0)
@@ -563,7 +572,7 @@ def test_an_album_half_out_is_read_per_track(node):
     """All-or-nothing before: an album with one track's copy elsewhere and
     its folder gone queued the missing file beside it."""
     player, mgr = node["player"], node["mgr"]
-    other = node["copy"](0, "/elsewhere/NW/01.flac")
+    other = node["copy"](0, "NW/01.flac")
     node["gone"](True)
     segments, missing, left = player._entity_segments(_album_ref(node).items)
     assert [(kind, len(rows)) for kind, rows in segments] == [("owned", 1), ("phantom", 1)]
@@ -616,7 +625,7 @@ def test_an_away_copy_is_read_by_the_routes_as_a_copy_on_a_disk_that_is_out(node
     assert [(r["id"], r["why"]) for r in player._album_rows(node["owned"])] == [(None, "away")] * 2
     player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
     assert _kinds(mgr) == [("track", "Owned 1"), ("track", "Owned 2")]
-    other = node["copy"](0, "/elsewhere/NW/01.flac")     # a present copy stands in
+    other = node["copy"](0, "NW/01.flac")     # a present copy stands in
     player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
     assert [(it.source["kind"], it.media_file_id) for it in mgr.queue.snapshot()] == [
         ("file", other), ("track", None)]
@@ -673,7 +682,7 @@ def test_where_nothing_streams_the_routes_refuse_before_the_queue_or_the_output(
 
 def test_a_mix_keeps_its_files_and_leaves_the_rest_out_with_the_reason(node):
     player, mgr = node["player"], node["mgr"]
-    other = node["copy"](0, "/elsewhere/NW/01.flac")
+    other = node["copy"](0, "NW/01.flac")
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
     node["gone"](True)
     left = [{"track_id": node["tracks"][1], "title": "Owned 2", "reason": "not_here", "why": "disk"}]
@@ -740,7 +749,7 @@ def test_the_album_payload_says_what_is_here_and_whether_this_node_streams_it(no
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
     assert albums.get_album(node["owned"], variant_id=None)["away"] == {"why": "disk", "streams": False}
 
-    other = node["copy"](0, "/elsewhere/NW/01.flac")
+    other = node["copy"](0, "NW/01.flac")
     part = albums.get_album(node["owned"], variant_id=None)
     assert [(t["media_file_id"], t["here"]) for t in part["tracks"]] == [(other, True), (node["files"][1], False)]
     assert (part["away"], part["away_part"]) == (None, {"why": "disk", "streams": False})

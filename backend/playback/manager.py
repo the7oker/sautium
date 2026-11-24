@@ -1260,6 +1260,8 @@ class PlaybackManager:
         src = items[0].source if items else {}
         if src.get("kind") != "file" or any(src["path"].startswith(g) for g in gone_prefixes()):
             return
+        if not src["path"].startswith(settings.library_db_root() + "/"):
+            return                      # no file of the music folder: the look would say nothing of it
         try:
             os.stat(settings.translate_to_local_path(src["path"]))
         except OSError:
