@@ -187,7 +187,10 @@ def insert_structural(conn, structural: dict) -> None:
     """Structural rows in FK order, batches first; every statement is
     ON CONFLICT DO NOTHING (a node that holds a row keeps its own). Shared
     with the share import (backend/share.py), which feeds it one section
-    chunk at a time."""
+    chunk at a time — from a CLI's process, so the rows are said to the
+    pages with their commit (NOTIFY sautium_library: the streaming
+    library's footprint is theirs), as the records are
+    (SyncClient._import_items)."""
     from desktop.sync_client import SyncClient
     with conn.cursor() as cur:
         batches = structural.get("batches") or {}
@@ -205,6 +208,7 @@ def insert_structural(conn, structural: dict) -> None:
             if rows:
                 psycopg2.extras.execute_values(cur, sql, rows, template=template,
                                                page_size=500)
+        cur.execute("NOTIFY sautium_library")
     conn.commit()
 
 

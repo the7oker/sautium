@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 _SCROBBLE_MIN_SECONDS = 240  # Last.fm: scrobble after >50% OR >4 min, whichever first
 
 _play_session: "Optional[_PlaySession]" = None
+# A status tick and a re-key of the playing item's track (follow) never
+# interleave: a tick reads the item's uuid and the session's as of one moment
+_lock = threading.Lock()
 # The listen in progress goes on on the output a switch went to, until that
 # output plays (carry_listen)
 _carried = False
@@ -56,6 +59,10 @@ class _PlaySession:
         # from past 30 s of it is a play from the top
         self.reached = 0.0
         self.scrobbled = False
+        # The queue item this listen is of, as its latest playing tick named
+        # it: the listen follows that very item when its track's uuid is
+        # rewritten under it (follow)
+        self.item = None
 
     @property
     def percent_listened(self) -> float:
@@ -184,6 +191,20 @@ def open_listen_started_at() -> Optional[datetime]:
     return s.started_at if s is not None else None
 
 
+def follow(item, track_id: str) -> None:
+    """`item`'s track is another uuid now — the canon rewrote it (a rename,
+    a merge), or the item's file belongs to another track — written onto the
+    item here, in one step with the listen in progress of that very item: a
+    listen is one listen across a rewrite of its track's uuid. Nothing is
+    saved and nothing reopened — no second now-playing, no second scrobble —
+    and what is saved at its end goes against the uuid that exists."""
+    with _lock:
+        item.track_id = track_id
+        s = _play_session
+        if s is not None and s.item is item:
+            s.track_id = track_id
+
+
 def _play_identity(item) -> Optional[dict]:
     """Source-agnostic identity for the playing QueueItem: its track UUID
     (owned AND phantom carry it) + optional media_file_id. None when the item
@@ -214,20 +235,25 @@ def _save_play_session(s: "_PlaySession") -> None:
         # The references as their foreign keys keep them — the row is written
         # when the listen ends, after the fact: a file that left the library
         # meanwhile is NULL (ON DELETE SET NULL), a track that did takes the
-        # listen with it (ON DELETE CASCADE).
-        _db_execute(
+        # listen with it (ON DELETE CASCADE). The track is the one the
+        # listen's file belongs to as it ends — the canon may have rewritten
+        # the uuid moments ago, its word (follow) still on its way — else
+        # the listen's own.
+        row = _db_execute(
             "INSERT INTO listening_history "
             "(media_file_id, track_id, started_at, ended_at, "
             " duration_listened, percent_listened, completed, skipped) "
             "SELECT (SELECT mf.id FROM media_files mf WHERE mf.id = %(mf)s), t.id, "
             "       %(start)s, %(end)s, %(dur)s, %(pct)s, %(comp)s, %(skip)s "
-            "FROM tracks t WHERE t.id = %(tid)s::uuid",
+            "FROM tracks t WHERE t.id = COALESCE("
+            "    (SELECT mf.track_id FROM media_files mf WHERE mf.id = %(mf)s), %(tid)s::uuid) "
+            "RETURNING track_id::text AS track_id",
             {"mf": s.media_file_id, "tid": s.track_id, "start": s.started_at,
              "end": datetime.now(timezone.utc),
              "dur": s.max_position, "pct": s.percent_listened,
              "comp": completed, "skip": skipped},
         )
-        _db_execute(PLAY_STATS_SQL, {"ids": [s.track_id]})
+        _db_execute(PLAY_STATS_SQL, {"ids": [row["track_id"] if row else s.track_id]})
         if completed:
             if not s.scrobbled and _scrobble_async(
                     "scrobble", artist=s.artist, title=s.title,
@@ -277,7 +303,16 @@ def track_play_event(state_name: str, position: float, length: float,
     it was, none of the other controller's seconds counted; taken back at its
     spot the same listen goes on — one history row, one scrobble at the
     usual line, no second now-playing — and another track started instead
-    ends it at its own seconds."""
+    ends it at its own seconds. The playing item's track rewritten under the
+    listen (follow) is the same listen: the tick reads the item's uuid and
+    the session's under one lock with that re-key."""
+    with _lock:
+        _track_play_event(state_name, position, length, item, external=external,
+                          holds=holds, corrected=corrected, taken=taken)
+
+
+def _track_play_event(state_name: str, position: float, length: float, item, *,
+                      external: bool, holds: bool, corrected: bool, taken: bool) -> None:
     global _play_session, _carried
 
     if taken and _play_session is not None and (external or state_name != "playing"):
@@ -346,6 +381,7 @@ def track_play_event(state_name: str, position: float, length: float,
             title=ident["title"] or "", album=ident.get("album"),
             duration=int(ident["duration"]) if ident.get("duration") else None)
 
+    _play_session.item = item
     _play_session.update(position, length)
     if (not _play_session.scrobbled and _play_session.scrobble_ready
             and _scrobble_async(

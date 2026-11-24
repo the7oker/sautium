@@ -336,7 +336,7 @@ def _fetch_remote_slice(artist_name: str) -> dict:
     identity = peer_identity(app_settings)
     retry_after = None
     for url in ordered:
-        api = BackendAPIClient(url, peer=identity)
+        api = BackendAPIClient(url, peer=identity, remote=True)
         # The person's own lookup: what it brings serves this node alone.
         client = MBSliceClient(api, db_dsn=app_settings.database_url, source_node=url,
                                for_person=True)

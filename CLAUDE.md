@@ -110,7 +110,12 @@ See:
   startup job, boot-streak counter or tier
   heuristic may drop them. The phantom layer's growth is the owner's switch
   (`discovery.phantom_layer`, default on). The lite phantom prune of
-  2026-07-10 broke this rule and was removed 2026-08-27.
+  2026-07-10 broke this rule and was removed 2026-08-27. One start-up step
+  removes such rows, once a database, at the owner's own yes of 2026-11-24
+  for that named step: `db_migrate`'s `tracklist_leftovers_v1` completes
+  removals he had confirmed — the albums they left with no copy, no release
+  group and no imported row or slot (never one the seed picked), their
+  slots, and those slots' tracks nothing else refers to.
 - **No mocking the database or external enrichment APIs in tests** that are
   supposed to verify DB behavior. Integration tests that run against a real
   pgvector DB catch migration-and-query mismatches that mocks hide.
@@ -405,7 +410,29 @@ See:
   leaves the library (the `media_files` delete trigger wakes
   `PlaybackManager.rebind_files`: a live copy of the track, else the track
   itself, streamed) and, since 2026-11-09, when its file's copy is away
-  while a copy of the track is here (it moves to that copy). How an owned file reaches HQPlayer is read off its
+  while a copy of the track is here (it moves to that copy). Since
+  2026-11-24 a slot's way in is also read again when the folder its file
+  lies in stops or starts answering (`scanner.gone_prefixes`, the process's
+  recorded observation; its change is the queue's event,
+  `PlaybackManager.reach_changed` — the slot the output sounds is read when
+  the output leaves it), and a file that does not open here now — its
+  folder not answering, its copy away, or the file itself not found by the
+  one look a start takes at the file it would open (`substitute.observe`:
+  the latest look's observation, never a second definition of "here") — is
+  never a way in: the slot keeps
+  its origin and streams like a phantom, the demo channel's one listen
+  included, or is refused where nothing streams (`sql_queries.HERE`; the
+  play routes' one split, 409 `not_here`), and is its file again, with no
+  question, when the file is back. A slot an automatic fill queued as the owner's own
+  copy (radio, Play similar: `QueueItem.own_fill`) never streams for want of
+  that copy unless `radio.streamed` is on — it is a gap of its slot until
+  the file is back. A listen in progress is one listen across the canon's
+  rewrite of its track's uuid: the rewrite says so with its wake, and a
+  slot bound to a file and its open listen follow in one step
+  (`tracker.follow`); a streamed slot keeps the uuid it was queued with
+  (its outputs know its stream by it), so a streamed listen of a track the
+  canon rewrote meanwhile is not written — open since before 2026-11-24. A slot that is a file is read by its `media_file_id`, never by
+  the track uuid its enqueue saw (the canon rewrites it). How an owned file reaches HQPlayer is read off its
   address, never configured (`_stream_mode`, `auth_hmac.is_own_address`):
   on this machine by path, anywhere else as a stream from the media proxy
   — a share the HQPlayer would mount is an extra setup for the same bytes,
@@ -661,7 +688,9 @@ See:
   `poll()` on the mount table (`backend/mount_watch.py`), never a timer. The
   setup never runs `sudo`: it prints root steps (lingering; the automount,
   not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
-  `--music` folder on a disk such a desktop mounts). `SAUTIUM_BIRTH_PRESET`
+  `--music` folder on a removable disk such a desktop — or a person by hand —
+  mounts).
+  `SAUTIUM_BIRTH_PRESET`
   (`nano`) is read once per database (`db_migrate`, `birth_preset_v1`).
   Since 2026-11-22 (PI-NODE-2C): a root's bind makes its own folder
   (`create_host_path`), so a root that is gone never stops the node's start —
@@ -678,12 +707,41 @@ See:
   preset reads the MEDIUM under Docker's data (`machine_tier.storage_medium`:
   a microSD card or a USB stick is born Nano, an SSD in a USB case is not),
   and a swap file on a card is said with its root step.
+  Since 2026-11-24 (PI-NODE-2D): **a root is never a mount point the setup
+  makes** — the fstab line mounts its disk at `/media/sautium/<UUID>`, the
+  automount's own point for that disk (its label in `.names/<UUID>`, written
+  by the block), under the one root the node has for disks; bound into a
+  container made while the disk was in, a mount point was the disk's
+  filesystem itself, and the node saw neither its pull nor its return. A disk
+  keeps its path whoever mounts it, and a disk added later changes no
+  override. An install whose line mounts at `/mnt/sautium-<UUID>` (that point
+  its root) is named by `status` and `roots` and offered the move as one
+  block; a `--music` folder that is someone's own mount point is taken as
+  named and said — never its parent, which the person did not name; the
+  setup's own line is offered only for a disk a person pulls (USB storage, a
+  card in the slot, by `machine_tier.storage_medium`) that nobody set up a
+  mount for (a line of fstab, a `.mount`/`.automount` unit, autofs). The
+  automount says a volume blkid names no filesystem on, too: the type line of
+  its `.unread` file is then `ambivalent` (`blkid -p` exits 8: the marks of
+  more than one filesystem, a quick format over an older one) or `unknown`
+  (it exits 2: none found) — the latter only of a disk's only volume, or
+  beside other partitions of one whose partition type is for data (a
+  Windows-partitioned disk's reserved partition, a boot or recovery one, an
+  eMMC's own areas, a reader's empty slot and anything under 1 MiB are
+  silent). The unit ends with the medium, not the reader: a USB card reader
+  that stays when its card is pulled keeps its device at size 0, and the rule
+  says that device is not there (`SYSTEMD_READY=0`), so what was mounted or
+  said of the card goes with it and the next card starts the unit afresh.
 - Build identity: `./.git` → `/checkout/.git:ro` in every compose file
   (since 2026-09-21; at `/app/.git` until 2026-11-15, `SAUTIUM_CHECKOUT`
   names it). `config.build_identity()` is the one reader — `/config`,
   the backup manifest and the share export report the running commit through
   it; HEAD is read from `.git` by hand (`desktop/updater.head_commit`), never
-  by spawning git.
+  by spawning git. Since 2026-11-24 it also names the release the checkout
+  is ON (`head_release`: the tag of the version the tree states, naming
+  HEAD's commit, read by hand the same way) — what the start line,
+  `/config`'s `app_version` and the API's version say; off a release a node
+  says its commit alone, and no constant says a version.
 - **Never bake models into the image.** Cache lives on the host, survives container deletes.
 - **Restart backend after model/prompt changes**: `docker restart sautium-backend` then check logs for "Application startup complete".
 
@@ -935,8 +993,8 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
-| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`): standard library, never root, root steps printed and never run |
-| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
+| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`; the automount's rule, unit and script, and the `/etc/fstab` line that mounts one music disk at the automount's own point for it, since 2026-11-24): standard library, never root, root steps printed and never run |
+| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type — or, since 2026-11-24, `ambivalent` / `unknown` for a volume no one filesystem is found on —, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
 | `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
 | `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8) |

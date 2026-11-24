@@ -19,7 +19,8 @@ class _Client:
     answers: dict = {}
     refusals: dict = {}
 
-    def __init__(self, base_url, peer=None, expected_pubkey=None):
+    def __init__(self, base_url, peer=None, expected_pubkey=None, remote=False):
+        assert remote                   # a dial of the walk's is a peer's, whatever identity it holds
         self.base_url = base_url
         self.peer_pubkey = _Client.answers.get(base_url)
         self.last_http_error = None

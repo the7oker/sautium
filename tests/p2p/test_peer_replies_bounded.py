@@ -374,6 +374,7 @@ def test_a_slice_source_whose_session_is_over_keeps_its_place(monkeypatch):
     cycle = cycle_mod.MbSliceCycle.__new__(cycle_mod.MbSliceCycle)
     cycle.db_dsn, cycle.config, cycle._status_cleared = "postgresql://unused", {}, False
     cycle._sharing_enabled, cycle._asked_at = (lambda: True), {}
+    cycle._has_identity = lambda: True
     cycle._sources = SimpleNamespace(drop=dropped.append)
 
     async def publish(**state):

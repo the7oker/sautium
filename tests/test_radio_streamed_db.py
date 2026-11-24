@@ -153,6 +153,7 @@ def node(scratch_dsn, monkeypatch):
     monkeypatch.setattr(streaming_service, "_proxy", proxy)
     monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
     monkeypatch.setattr(streaming_service, "providers_preferred", lambda: list(provs))
+    monkeypatch.setattr(streaming_service, "providers_registered", lambda: bool(provs))
     monkeypatch.setattr(streaming_service, "note_provider_health", lambda silent, answered: False)
     monkeypatch.setattr(player, "_chain_cache", {})
     monkeypatch.setattr(player, "_refusals", {})
@@ -406,7 +407,10 @@ def test_radio_appends_its_batch_whole_and_takes_the_switch_at_each_batch(node):
     player._radio_played.clear()
     player._radio_fill("seed", gen)
     assert len(mgr.queue) == 10
-    assert sum(1 for it in mgr.queue.snapshot() if it.whole) == 2
+    assert sum(1 for it in mgr.queue.snapshot() if it.source["kind"] == "track") == 2
+    assert all(it.whole for it in mgr.queue.snapshot())     # every slot of a fill says so
+    # ...and which it is: his own copy, or a stream his switch allowed
+    assert all(it.own_fill == (it.source["kind"] == "file") for it in mgr.queue.snapshot())
     _switch(node, False)
     player._radio_played.clear()
     player._radio_fill("seed", gen)
@@ -449,7 +453,7 @@ def test_play_similar_follows_the_switch(node):
     answer = player.play_similar(player.PlaySimilarRequest(track_id=s[7]["track_id"], limit=6))
     assert answer["count"] == 3
     assert all(t["is_owned"] for t in answer["tracks"])
-    assert all(it.source["kind"] == "file" for it in mgr.queue.snapshot())
+    assert all(it.source["kind"] == "file" and it.whole for it in mgr.queue.snapshot())
     _switch(node, True)
     answer = player.play_similar(player.PlaySimilarRequest(track_id=s[7]["track_id"], limit=6))
     assert answer["count"] == 6
@@ -476,7 +480,8 @@ def test_play_similar_leaves_out_what_the_node_knows_plays_only_as_an_excerpt(no
     answer = player.play_similar(player.PlaySimilarRequest(track_id=s[7]["track_id"], limit=4))
     assert [m["reason"] for m in answer["not_streamable"]] == ["excerpt_only"]
     assert answer["count"] == 3
-    assert [it.track_id for it in mgr.queue.snapshot() if it.whole] == [s[1]["track_id"]]
+    assert [it.track_id for it in mgr.queue.snapshot()
+            if it.source["kind"] == "track"] == [s[1]["track_id"]]
 
 
 def test_a_radio_slot_keeps_its_rule_across_a_restart(node):
@@ -514,6 +519,173 @@ def test_the_real_scorer_filters_the_served_rows_before_its_limit(node):
     # past the mixed recall horizon too: a recall of 3 nearest holds no owned
     # track, the owner's own recall walks to them
     assert [r["track_id"] for r in _SCORER(seed, limit=3, served=True, pool=3)] == owned[:3]
+
+
+def _music_folder(monkeypatch, gone: bool) -> None:
+    """The node's music folder as the fixture's paths have it, and what the
+    node has recorded of it."""
+    import scanner
+    from config import settings
+    monkeypatch.setattr(settings, "music_library_path", "E:/Music")
+    monkeypatch.setattr(settings, "music_host_path", None)
+    monkeypatch.setattr(scanner, "_folder_unreachable", gone)
+
+
+def test_the_real_scorer_serves_no_track_whose_only_copy_is_not_here_now(node, monkeypatch):
+    """PI-NODE-2D Q6: a track whose only copy lies under a folder that does
+    not answer is, for radio's rule, not the owner's to play — `served=True`
+    leaves it out, `served=False` has it among the ones that stream."""
+    seed = node["streamed"][7]["track_id"]
+    _embed(node, seed, 0.0)
+    owned = [r["track_id"] for r in node["owned"][:3]]
+    for i, t in enumerate(owned):
+        _embed(node, t, 0.1 * (i + 1))
+    _music_folder(monkeypatch, gone=False)
+    assert [r["track_id"] for r in _SCORER(seed, limit=5, served=True)] == owned
+    _music_folder(monkeypatch, gone=True)
+    assert _SCORER(seed, limit=5, served=True) == []
+    out = _SCORER(seed, limit=5, served=False)
+    assert [r["track_id"] for r in out] == owned
+    assert all(r["is_owned"] and not r["playable"] for r in out)
+    # a copy in a folder that answers serves it again
+    cur = node["cur"]
+    cur.execute("INSERT INTO album_variants (album_id, directory_path) "
+                "SELECT album_id, '/elsewhere/M' FROM album_variants LIMIT 1 RETURNING id")
+    cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, sample_rate, bit_depth, "
+                "duration_seconds, track_number) VALUES (%s, %s, '/elsewhere/M/01.flac', 44100, 16, 200, 1) "
+                "RETURNING id", (owned[0], cur.fetchone()[0]))
+    copy = cur.fetchone()[0]
+    assert [(r["track_id"], r["file_id"]) for r in _SCORER(seed, limit=5, served=True)] == [(owned[0], copy)]
+
+
+def test_radio_and_play_similar_never_stream_his_album_from_a_disk_that_is_out_on_their_own(node, monkeypatch):
+    """Automatic fills do not spend his listens: with radio.streamed off a
+    track with no copy here now is left out, and no provider is asked; with
+    it on it is a slot played whole, like any streamed track."""
+    from fastapi import HTTPException
+    mgr, player, cur = node["mgr"], node["player"], node["cur"]
+    monkeypatch.setattr(player.track_similarity, "similar_tracks", _SCORER)
+    seed = node["streamed"][7]["track_id"]
+    _embed(node, seed, 0.0)
+    owned = [r["track_id"] for r in node["owned"][:3]]
+    for i, t in enumerate(owned):
+        _embed(node, t, 0.1 * (i + 1))
+        cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                    "SELECT av.album_id, %s, %s, 200000 FROM album_variants av LIMIT 1", (t, i + 1))
+    node["full"].has.update(owned)
+    _music_folder(monkeypatch, gone=False)
+    batch, _passed = player._radio_build_batch(seed, {seed}, None)
+    assert [item.source["kind"] for item, _r in batch] == ["file"] * 3
+
+    _music_folder(monkeypatch, gone=True)
+    batch, _passed = player._radio_build_batch(seed, {seed}, None)
+    assert batch == [] and node["full"].resolved == []
+    with pytest.raises(HTTPException) as e:
+        player.play_similar(player.PlaySimilarRequest(track_id=seed, limit=6))
+    assert e.value.status_code == 404 and len(mgr.queue) == 0
+    assert node["full"].resolved == node["demo"].resolved == node["clip"].resolved == []
+
+    _switch(node, True)
+    batch, _passed = player._radio_build_batch(seed, {seed}, None)
+    assert sorted(item.track_id for item, _r in batch) == sorted(owned)
+    assert all(item.source == {"kind": "track"} and item.whole for item, _r in batch)
+
+
+def _station(node, monkeypatch, n: int = 4) -> list:
+    """A station of the owner's first `n` tracks, radio's own fill; each has
+    a tracklist slot, so nothing but the rule keeps it from streaming."""
+    mgr, player, cur = node["mgr"], node["player"], node["cur"]
+    _music_folder(monkeypatch, gone=False)
+    node["pool"][:] = node["owned"][:n]
+    for i, r in enumerate(node["owned"][:n]):
+        cur.execute("INSERT INTO album_tracks (album_id, track_id, position, length_ms) "
+                    "SELECT av.album_id, %s, %s, 200000 FROM album_variants av LIMIT 1",
+                    (r["track_id"], i + 1))
+    mgr.set_radio_mode(True)
+    player._radio_played.clear()
+    player._radio_fill("seed", mgr.queue.generation)
+    items = mgr.queue.snapshot()
+    assert [it.source["kind"] for it in items] == ["file"] * n and all(it.whole for it in items)
+    return items
+
+
+def _no_resolve_runs() -> bool:
+    return not [t for t in threading.enumerate() if t.name == "queue-resolve"]
+
+
+def test_a_stations_own_files_whose_folder_goes_are_gaps_never_streams(node, monkeypatch):
+    """PI-NODE-2D Q6 / §3.4, at the re-read: radio on, the owner's switch
+    off, the folder goes mid-station — no slot of the station becomes a
+    stream, no provider is asked and nothing is fetched; each is a gap said
+    on its row, which an output walks past; a batch built before the pull
+    and appended after it the same; the folder back, every slot is its file
+    again."""
+    from playback import queue as queue_mod
+    mgr, player = node["mgr"], node["player"]
+    items = _station(node, monkeypatch)
+    node["full"].has.update(it.track_id for it in items)
+    _music_folder(monkeypatch, gone=True)
+    mgr.reach_changed()
+    gap = {"kind": "unplayable", "reason": "its file is not here now", "code": "not_here",
+           "lane": True}
+    assert [it.play for it in items] == [gap] * 4
+    assert _wait(_no_resolve_runs) and mgr.lane.pick() is None
+    assert node["full"].resolved == node["demo"].resolved == node["clip"].resolved == []
+    assert node["full"].downloads == node["demo"].downloads == node["clip"].downloads == []
+    assert [(s["state"], s["reason"]) for s in mgr.lane.slots()] == [("failed", "not_here")] * 4
+    late = player._fills(queue_mod.items_for_owned_rows(
+        [{"id": node["owned"][5]["file_id"], "location": "local"}]))
+    assert mgr.append(late) == 1 and late[0].play == gap
+    assert _wait(_no_resolve_runs) and node["full"].resolved == []
+    _music_folder(monkeypatch, gone=False)
+    mgr.reach_changed()
+    assert [it.play for it in mgr.queue.snapshot()] == [None] * 5
+    mgr.set_radio_mode(False)
+
+
+def test_with_radios_switch_on_a_stations_file_that_is_not_here_streams_whole_or_not_at_all(
+        node, monkeypatch):
+    """The owner's switch lets radio stream what he has no copy of here:
+    then a station's own slot whose folder went streams — from a
+    full-length link or not at all, radio's rule for every slot of its."""
+    mgr = node["mgr"]
+    items = _station(node, monkeypatch)
+    node["full"].has.update(it.track_id for it in items[:3])
+    node["clip"].has.add(items[3].track_id)             # only its 30 s clip streams
+    _music_folder(monkeypatch, gone=True)
+    mgr.reach_changed()                                 # the switch off: gaps
+    assert all(it.play["code"] == "not_here" for it in items)
+    _switch(node, True)
+    mgr.reach_changed()
+    assert _wait(lambda: items[3].opener().get("code") == "excerpt_only")
+    assert _wait(lambda: all(it.opener()["kind"] == "proxy" for it in items[:3]))
+    assert node["clip"].downloads == []
+    mgr.set_radio_mode(False)
+
+
+def test_a_fills_own_slot_whose_file_left_the_library_is_still_no_stream_behind_his_back(
+        node, monkeypatch):
+    """A station's own file leaves the library with no other copy, the track
+    kept: the re-bind makes the slot the track itself — and it is still the
+    slot a fill queued as his own copy (QueueItem.own_fill, whatever its
+    origin became, kept by a persisted queue too): no stream with his
+    switch off, no provider asked; with it on, whole."""
+    from dataclasses import asdict
+    from playback.queue import QueueItem
+    mgr, cur = node["mgr"], node["cur"]
+    items = _station(node, monkeypatch)
+    node["full"].has.update(it.track_id for it in items)
+    cur.execute("DELETE FROM media_files WHERE id = %s", (items[0].media_file_id,))
+    mgr.rebind_files()
+    assert items[0].source == {"kind": "track"} and items[0].own_fill
+    assert items[0].play["code"] == "not_here"
+    assert _wait(_no_resolve_runs) and node["full"].resolved == node["demo"].resolved == []
+    assert QueueItem(**asdict(items[0])).own_fill           # as a persisted queue restores it
+    _switch(node, True)
+    mgr.reach_changed()
+    assert _wait(lambda: items[0].opener()["kind"] == "proxy")
+    assert node["clip"].downloads == []
+    mgr.set_radio_mode(False)
 
 
 def test_play_similar_on_a_seed_not_analysed_says_so_whatever_the_switch(node):

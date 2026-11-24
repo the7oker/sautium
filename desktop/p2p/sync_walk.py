@@ -418,7 +418,8 @@ class SyncWalk:
         identity: () -> peer_auth.PeerIdentity | None — this node as a peer
             CLIENT; also how the walk recognises its own address (a DHT
             lookup returns us too, and the Docker surface has no observed
-            external IP to subtract).
+            external IP to subtract). While it answers None — no account
+            yet, no key — the walk asks no peer (has_identity).
         sharing_enabled: the "P2P sharing" switch — off, the walk asks no
             peer and no DHT key and carries nothing, exactly as serving
             stops.
@@ -463,6 +464,25 @@ class SyncWalk:
         self.first_source: Optional[asyncio.Event] = None      # LAN peer seen / DHT ready
         self._running = False
         self._run_deadline = float("inf")                      # time.monotonic() the current run ends by
+        self._no_identity_said = False
+
+    def has_identity(self) -> bool:
+        """Whether this node has an identity to ask the network as — the one
+        answer the walk and both slice cycles read at the start of a run.
+
+        A node with none dials no peer, not for a /health either (since
+        2026-11-24): what it would ask says what its owner has and listens
+        to — the tracks with gaps, the names and MBIDs of the owned and
+        engaged artists — and a node with no account has no one who agreed
+        to that. Before PI-NODE-2D such a dial ended at the peer's
+        certificate (the client built with no identity carried no pin), so
+        it was true by accident; the peer client since pins and bounds with
+        or without an identity (api_client), and the rule is said here. The
+        runs start by themselves when the identity appears: the backend's
+        follower of that event asks for a run (main._requesters_follow_
+        identity → NOTIFY sautium_sync_request), and the walk's end asks the
+        cycles. What the node SERVES is another matter, and unchanged."""
+        return self._identity() is not None
 
     # ------------------------------------------------------------ lifecycle
 
@@ -560,6 +580,11 @@ class SyncWalk:
                     await loop.run_in_executor(
                         None, self._diag_record, "sync.failed",
                         {"trigger": trigger, "error": str(e)[:500]})
+            if stats.get("status") == "no_identity":
+                # No run took place: no sync to record (the guidance trail
+                # waits for one before it offers the analysis), nothing for
+                # the slice cycles to follow
+                return
 
             items = sum(v for v in stats.values() if isinstance(v, int))
             await loop.run_in_executor(
@@ -583,6 +608,13 @@ class SyncWalk:
 
         self._run_deadline = time.monotonic() + RUN_MAX_S
         self._run_cache = {}
+
+        if not self.has_identity():
+            if not self._no_identity_said:
+                self._no_identity_said = True
+                _progress("This node has no identity yet — it asks no peer until its account is made")
+            return {"status": "no_identity"}
+        self._no_identity_said = False
 
         if not self._sharing_enabled():
             # Before the gap set and the DHT: off, nothing of the catalogue
@@ -847,7 +879,7 @@ class SyncWalk:
 
         if "://" in peer_addr:
             api = BackendAPIClient(peer_addr, peer=peer_identity,
-                                   expected_pubkey=expected_pubkey)
+                                   expected_pubkey=expected_pubkey, remote=True)
             attempts = 2 if is_lan else 1
             for attempt in range(attempts):
                 if await _healthy(api):
@@ -858,7 +890,7 @@ class SyncWalk:
             return None
 
         api = BackendAPIClient(f"https://{peer_addr}", peer=peer_identity,
-                               expected_pubkey=expected_pubkey)
+                               expected_pubkey=expected_pubkey, remote=True)
         if await _healthy(api):
             self.dead.answered(peer_addr)
             return api

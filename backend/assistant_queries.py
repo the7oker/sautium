@@ -75,20 +75,23 @@ _ALB_TRACKS = """
 # One row per track with both layers resolved: the owned file that would play
 # (if any — a local rip or a copy in the HQPlayer's library, the one the active
 # output opens natively first: param hqp_id) and the tracklist
-# row that carries a not-owned track's album, length and cover.
+# row that carries a not-owned track's album, length and cover. `here` is the
+# copy's own row alone (not away): the MCP server is a process of its own and
+# holds no record of which folders answer (scanner.gone_prefixes) — the play
+# routes its tools call read each slot's way in themselves.
 _OWN_LATERAL = f"""
     LEFT JOIN LATERAL (
         SELECT f.id, f.location::text AS location, f.cover_id, f.duration_seconds,
                f.is_lossless, f.track_number, f.disc_number, f.sample_rate, f.bit_depth,
                f.file_path, al.id AS album_id, al.title AS album, al.release_year
         FROM (
-            SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+            SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since IS NULL AS here,
                    mf.album_variant_id, mf.cover_id, mf.duration_seconds, mf.is_lossless,
                    mf.track_number, mf.disc_number, mf.sample_rate, mf.bit_depth, mf.file_path
             FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
             WHERE mf.track_id = t.id
             UNION ALL
-            SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+            SELECT hf.id, av.location, av.hqp_endpoint_id, true,
                    hf.album_variant_id, NULL::uuid, hf.duration_seconds, hf.is_lossless,
                    hf.track_number, hf.disc_number, hf.sample_rate, hf.bit_depth, hf.hqp_path
             FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id

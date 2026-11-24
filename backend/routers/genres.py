@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 
 from db_pool import db_query, db_query_one
 from playback.manager import active_hqp_endpoint
-from sql_queries import best_rip_order, owned_rank
+from sql_queries import HERE, best_rip_order, owned_rank
 
 
 router = APIRouter(prefix="/api/genres", tags=["genres"])
@@ -185,6 +185,7 @@ def get_genre(genre_id: str) -> dict:
     # for the output, not for the tag); the outer SELECT applies the
     # two-tier order and LIMITs to top 5, so we never haul tens of
     # thousands of rows into Python for a genre with a large catalogue.
+    from scanner import gone_prefixes
     hqp_id = active_hqp_endpoint()
     genre["popular_tracks"] = db_query(f"""
         WITH g AS (
@@ -230,12 +231,12 @@ def get_genre(genre_id: str) -> dict:
             JOIN (
                 SELECT mf.id, mf.track_id, mf.duration_seconds,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth,
-                       av.location, av.hqp_endpoint_id, av.absent_since, av.album_id
+                       av.location, av.hqp_endpoint_id, {HERE} AS here, av.album_id
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 UNION ALL
                 SELECT hf.id, hf.track_id, hf.duration_seconds,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth,
-                       av.location, av.hqp_endpoint_id, av.absent_since, av.album_id
+                       av.location, av.hqp_endpoint_id, true, av.album_id
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
             ) f ON f.track_id = t.id
             JOIN albums al ON al.id = f.album_id
@@ -256,7 +257,7 @@ def get_genre(genre_id: str) -> dict:
             local_plays * relevance_pct DESC,
             title
         LIMIT 5
-    """, {"id": genre_id, "hqp_id": hqp_id})
+    """, {"id": genre_id, "hqp_id": hqp_id, "gone": gone_prefixes()})
     # The credit line names ListenBrainz only where its numbers actually
     # ranked something on this page.
     genre["listenbrainz_used"] = any(t.pop("from_listenbrainz", False)

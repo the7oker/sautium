@@ -196,6 +196,20 @@ rest of P2P: announces and lookups await readiness, chat and friends do not.
 **Smart seed reuse**: 1 DHT lookup + 1 inventory call instead of N lookups for
 N artists.
 
+**A node with no identity dials no peer (2026-11-24).** While a node has no
+key — a Docker node before its first-run form — its walk and both slice
+cycles make no request, not for a `/health` either: what they ask says what
+the owner has and listens to (the tracks with gaps, the names and MBIDs of the
+owned and engaged artists), and nobody has agreed to that yet. One answer,
+`SyncWalk.has_identity`, read at the start of every run of the three on both
+runtimes; the runs start by themselves when the identity appears (the
+backend's follower of that event, `main._requesters_follow_identity`, asks on
+`sautium_sync_request`; the walk's end asks the cycles). Before that day the
+same dials were made and died at the peer's certificate — the client carried
+no pin without an identity — which kept this true by accident. What such a
+node ANSWERS on its peer surface is not touched, and the anonymous lane below
+is the serving side's: who may ask a node unsigned, not who asks.
+
 **One walk, two runtimes (2026-09-08).** The walk above is
 `desktop/p2p/sync_walk.SyncWalk`, imported by the launcher's P2PManager and by
 the Docker backend's lifespan alike — never copied. Until then a Docker node

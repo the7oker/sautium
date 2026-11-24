@@ -404,3 +404,218 @@ def test_a_rip_replaced_in_place_with_the_same_tags_is_read_again_by_the_canon(c
     assert _scan()["reread"] == 1
     cur.execute("SELECT content_at > '2026-01-02' FROM media_files")
     assert cur.fetchone() == (True,)
+
+
+def test_a_sheet_that_goes_takes_its_slices_tracklist_with_it(cur, library, template):
+    """The CUE supersede removes the slices' rows, and with them the slots
+    their tags wrote (scanner.drop_tag_slots): they held the slices' tracks
+    as an album's with no file — and the first position against the whole
+    image that takes it (PI-NODE-2D item 5)."""
+    import psycopg2.extras
+    import sign_audio
+    _clean(cur)
+    d = library / "A" / "Live"
+    _flac(template, d / "image.flac", "Live (whole)", "Aurora", "Live", track=1)
+    sheet = d / "image.cue"
+    sheet.write_text('PERFORMER "Aurora"\nTITLE "Live"\nFILE "image.flac" WAVE\n'
+                     '  TRACK 01 AUDIO\n    TITLE "Open"\n    INDEX 01 00:00:00\n'
+                     '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 01 00:01:00\n')
+    _scan()
+
+    def materialise():
+        with cur.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            sign_audio._materialize_owned_tracklists(c)
+        cur.execute("""SELECT t.title, at.position FROM album_tracks at
+                         JOIN tracks t ON t.id = at.track_id ORDER BY at.position""")
+        return cur.fetchall()
+    assert materialise() == [("Open", 1), ("Two", 2)]
+
+    sheet.unlink()
+    assert _scan()["superseded"] == 2
+    cur.execute("SELECT title FROM tracks ORDER BY 1")
+    assert cur.fetchall() == [("Live (whole)",)]
+    assert materialise() == [("Live (whole)", 1)]
+    cur.execute("SELECT DISTINCT source::text FROM album_tracks")
+    assert cur.fetchall() == [("tag",)]
+
+
+def _album_rows(cur):
+    cur.execute("""SELECT al.title, (SELECT count(*) FROM album_variants av WHERE av.album_id = al.id),
+                          ARRAY(SELECT at.source::text FROM album_tracks at WHERE at.album_id = al.id
+                                 ORDER BY at.position)
+                     FROM albums al ORDER BY 1""")
+    return cur.fetchall()
+
+
+def _materialise(cur):
+    import psycopg2.extras
+    import sign_audio
+    with cur.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+        sign_audio._materialize_owned_tracklists(c)
+
+
+def test_an_album_retagged_whole_follows_its_copy_once_its_tracklist_was_written(cur, library, template):
+    """A title fixed in all an album's files renames the album. The slots a
+    signing pass had written from those files' tags counted as a tracklist
+    the album held apart from its copy, so the old album stayed behind with
+    no file (PI-NODE-2D item 5: the shape a removal left, by a re-tag)."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2)]
+    _scan()
+    _materialise(cur)
+    assert _album_rows(cur) == [("LP", 1, ["tag", "tag"])]
+    for f in files:
+        _tag(f, album="LP (fixed)")
+    _scan()
+    assert _album_rows(cur) == [("LP (fixed)", 1, ["tag", "tag"])]
+
+
+def test_a_copy_retagged_out_of_an_album_musicbrainz_wrote_takes_its_own_slots_only(cur, library, template):
+    """The album MusicBrainz wrote a tracklist for stays as the phantom it
+    was; the slot the copy's tags added to it goes with the copy."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2, 3)]
+    _scan()
+    cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position)
+                   SELECT av.album_id, mf.track_id, 1, mf.track_number
+                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                    WHERE mf.track_number < 3""")
+    _materialise(cur)
+    assert _album_rows(cur) == [("LP", 1, ["mb", "mb", "tag"])]
+    for f in files:
+        _tag(f, album="LP (fixed)")
+    _scan()
+    assert _album_rows(cur) == [("LP", 0, ["mb", "mb"]), ("LP (fixed)", 1, [])]
+
+
+def test_a_reread_and_a_retag_leave_a_copy_where_it_entered(cur, library, template):
+    """A copy enters the library once, at the scan round that made its row
+    (album_variants.entered_at): a file read again in place and an album
+    re-tagged whole do not make it new on "New in my collection"."""
+    from routers import home
+    _clean(cur)
+    first = [_flac(template, library / "A" / "First" / f"{i:02d}.flac", f"F{i}", "Aurora", "First", track=i)
+             for i in (1, 2)]
+    _scan()
+    _flac(template, library / "A" / "Second" / "01.flac", "S1", "Aurora", "Second", track=1)
+    _scan()
+
+    def shelf():
+        return [a["title"] for a in home.get_new_in_library(
+            limit=20, before=None, before_arrived=None, before_id=None)["albums"]]
+
+    def entered():
+        cur.execute("SELECT id, entered_at FROM album_variants ORDER BY id")
+        return cur.fetchall()
+    assert shelf() == ["Second", "First"]
+    at = entered()
+    assert at[0][1] < at[1][1]                      # two scans, two rounds
+
+    _tag(first[0], title="F1 (fixed)")
+    assert _scan()["reread"] == 1
+    assert (shelf(), entered()) == (["Second", "First"], at)
+    for f in first:
+        _tag(f, album="First (fixed)")
+    _scan()
+    assert (shelf(), entered()) == (["Second", "First (fixed)"], at)
+
+
+def test_a_file_retagged_off_a_track_other_copies_hold_takes_its_slot_along(cur, library, template):
+    """One file of a track two albums hold is re-titled: it moves alone, and
+    the slot its tags had written for the track it left moved with nothing —
+    it kept the position from the track the file is on now, and held the
+    album behind its copy's removal (PI-NODE-2D item 5)."""
+    _clean(cur)
+    _flac(template, library / "A" / "LP" / "01.flac", "Song", "Aurora", "LP", track=1)
+    b = _flac(template, library / "A" / "Best Of" / "07.flac", "Song", "Aurora", "Best Of", track=7)
+    _scan()
+    _materialise(cur)
+    _tag(b, title="Song (Live)")
+    _scan()
+    _materialise(cur)
+    cur.execute("""SELECT al.title, t.title, at.position FROM album_tracks at
+                     JOIN albums al ON al.id = at.album_id JOIN tracks t ON t.id = at.track_id
+                    ORDER BY 1""")
+    assert cur.fetchall() == [("Best Of", "Song (Live)", 7), ("LP", "Song", 1)]
+
+
+def _pick(cur, title):
+    cur.execute("INSERT INTO seed_picks (album_id, tier, rank) SELECT id, 1, 1 FROM albums WHERE title = %s",
+                (title,))
+
+
+def _picked(cur):
+    cur.execute("SELECT al.title FROM seed_picks sp JOIN albums al ON al.id = sp.album_id")
+    return [r[0] for r in cur.fetchall()]
+
+
+def test_a_picks_album_stays_behind_its_retagged_copy(cur, library, template):
+    """An album the seed picked is not nothing apart from its copy: its
+    tracklist is the seed's to export. Re-tagged whole, the copy moves and
+    the album stays with its slots and its pick, as every album did before
+    2026-11-24 (PI-NODE-2D, review round 1 B2)."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2)]
+    _scan()
+    _materialise(cur)
+    _pick(cur, "LP")
+    for f in files:
+        _tag(f, album="LP (fixed)")
+    _scan()
+    assert _album_rows(cur) == [("LP", 0, ["tag", "tag"]), ("LP (fixed)", 1, [])]
+    assert _picked(cur) == ["LP"]
+
+
+@pytest.mark.parametrize("picked", [True, False], ids=["picked", "not-picked"])
+def test_a_folder_retagged_into_two_albums_leaves_only_a_pick_behind(cur, library, template, picked):
+    """The files of one album re-tagged as two: each half moves to its own
+    album. The album they left goes with the slots their tags wrote — unless
+    the seed picked it, whose slots are not the copy's to take."""
+    _clean(cur)
+    files = [_flac(template, library / "A" / "LP" / f"{i:02d}.flac", f"T{i}", "Aurora", "LP", track=i)
+             for i in (1, 2, 3, 4)]
+    _scan()
+    _materialise(cur)
+    if picked:
+        _pick(cur, "LP")
+    for n, f in enumerate(files):
+        _tag(f, album="North" if n < 2 else "South", tracknumber=n % 2 + 1)
+    _scan()
+    halves = [("North", 1, []), ("South", 1, [])]
+    assert _album_rows(cur) == ([("LP", 0, ["tag"] * 4)] if picked else []) + halves
+    assert _picked(cur) == (["LP"] if picked else [])
+
+
+@pytest.mark.parametrize("held_by", ["mb", "pick"])
+def test_a_superseded_copy_leaves_an_album_its_tracklist_holds(cur, library, template, held_by):
+    """The CUE supersede's album delete asked only for copies: an album
+    MusicBrainz wrote a tracklist for went with its slots when a sheet's
+    removal emptied its copy, and so would a pick's. It asks for slots as
+    every other album delete does."""
+    _clean(cur)
+    d = library / "A" / "Live"
+    _flac(template, d / "image.flac", "The Whole Set", "Aurora", "Live (image)", track=1)
+    sheet = d / "image.cue"
+    sheet.write_text('PERFORMER "Aurora"\nTITLE "Live"\nFILE "image.flac" WAVE\n'
+                     '  TRACK 01 AUDIO\n    TITLE "Open"\n    INDEX 01 00:00:00\n'
+                     '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 01 00:01:00\n')
+    _scan()
+    if held_by == "mb":
+        cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position)
+                       SELECT av.album_id, mf.track_id, 1, mf.track_number
+                         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id""")
+    else:
+        _materialise(cur)
+        _pick(cur, "Live")
+    slots = ["mb", "mb"] if held_by == "mb" else ["tag", "tag"]
+    assert _album_rows(cur) == [("Live", 1, slots)]
+
+    sheet.unlink()
+    assert _scan()["superseded"] == 2
+    assert _album_rows(cur) == [("Live", 0, slots), ("Live (image)", 1, [])]
+    cur.execute("SELECT title FROM tracks ORDER BY 1")
+    assert cur.fetchall() == [("Open",), ("The Whole Set",), ("Two",)]
+    assert _picked(cur) == (["Live"] if held_by == "pick" else [])

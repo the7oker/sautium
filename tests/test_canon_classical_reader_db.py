@@ -185,3 +185,40 @@ def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
     cur.execute("SELECT value FROM user_settings WHERE key = %s", (scanner.TAGS_READ_KEY,))
     assert cur.fetchone() == (scanner.TAGS_READ_REV,)
     assert _scan()["reread"] == 0                    # read once
+
+
+def test_a_split_takes_the_files_own_slots_and_leaves_musicbrainzs_and_a_peers(cur, library, tone):
+    """The split re-derives the slots the merged track's FILES made. It
+    deleted every slot of the album that named the merged track — the ones
+    MusicBrainz and a peer wrote among them (PI-NODE-2D, review round 1 B10)."""
+    import psycopg2.extras
+    import sign_audio
+    _clean(cur)
+    for n, mvt in enumerate(("I. Allegro", "II. Largo", "III. Allegro"), 1):
+        _flac(tone, library / "Spring" / f"0{n}.flac", title=["Concerto No. 1 in E major, RV 269", mvt],
+              artist="Anne Akiko Meyers", album="The Four Seasons", tracknumber=n)
+    with pytest.MonkeyPatch.context() as old_reader:
+        old_reader.setattr(scanner, "joined_title", lambda values: values[0] if values else None)
+        old_reader.setattr(scanner, "TAGS_READ_REV", 0)
+        _scan()
+    # the first slot MusicBrainz's, the second a peer's record, the third the files' own
+    cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position, imported)
+                   SELECT av.album_id, mf.track_id, 1, mf.track_number, mf.track_number = 2
+                     FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+                    WHERE mf.track_number < 3""")
+    cur.execute("SELECT DISTINCT track_id::text FROM media_files")
+    (merged,), = cur.fetchall()
+    slots = cur.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # the merged track holds a slot already: the files add none of their own
+    assert sign_audio._materialize_owned_tracklists(slots) == []
+    cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position, source)
+                   SELECT album_id, track_id, 1, 3, 'tag' FROM album_tracks WHERE position = 1""")
+
+    assert _scan().get("split") == 1
+    cur.execute("SELECT position, source::text, imported, track_id::text = %s FROM album_tracks ORDER BY 1",
+                (merged,))
+    assert cur.fetchall() == [(1, "mb", False, True), (2, "mb", True, True)]
+    # and the freed position is the movement's
+    assert len(sign_audio._materialize_owned_tracklists(slots)) == 1
+    cur.execute("SELECT at.position FROM album_tracks at JOIN media_files mf ON mf.track_id = at.track_id")
+    assert cur.fetchall() == [(3,)]

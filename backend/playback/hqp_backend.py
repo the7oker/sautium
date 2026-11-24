@@ -1016,9 +1016,11 @@ class _Parked:
     track by identity, the second it starts at, the intent it serves — a
     newer one that supersedes it lets it go — the stream's token, whether
     it goes as a play press: HQPlayer holds the entry in a shape it must be
-    handed again in, and only a hand-over afresh replaces it — and whether
-    it was asked while another controller held HQPlayer (a takeover then is
-    no newer word than it: _taken_over)."""
+    handed again in, or was never handed the queue this start is of (a
+    start that waits before it takes HQPlayer from another controller:
+    _press, queue_replace), and only a hand-over afresh gives it — and
+    whether it was asked while another controller held HQPlayer (a takeover
+    then is no newer word than it: _taken_over)."""
     item: QueueItem
     second: int
     start: Item
@@ -1208,6 +1210,11 @@ class HqpBackend(PlayerBackend):
         # holds HQPlayer's own entries beside ours (_follow_queue)
         self._lost_from = "step"
         self._reconverge_due = False
+        # A re-bind found HQPlayer at rest with a start under way — the
+        # node's own, or HQPlayer moving on by itself: a hand-over then would
+        # stop it, so the playlist follows once that start is over (the
+        # poller's next answer that finds none under way)
+        self._converge_due = False
         # The losses so far (a play press holding the queue meanwhile none)
         self.mirror_losses = 0
         # Every change of the mirror's state goes under this lock and counts
@@ -1268,6 +1275,11 @@ class HqpBackend(PlayerBackend):
         self._held_paused = False
         self._held_read_at = 0.0
         self._cleared_at = 0.0
+        # The queue item that tick found HQPlayer reading, or resting at a
+        # spot on (None: nothing of ours) — the poller's own reading again,
+        # never the status's item: a start that waits for its stream names
+        # the slot it waits on (_rests_on_another)
+        self._read_ours: Optional[QueueItem] = None
         # Every URI this attachment handed HQPlayer since its last full mirror
         # (a clear: what it held before is gone): an entry it reads that is
         # one of them is ours at a switch away (_reads_any)
@@ -1887,17 +1899,22 @@ class HqpBackend(PlayerBackend):
             self._late = [it for it in before
                           if any(it is x for x in late) or any(it is x for x in landed)]
 
-    def _ways_in(self, items: Optional[list] = None) -> None:
+    def _ways_in(self, items: Optional[list] = None, *, plays_on: Optional[QueueItem] = None) -> None:
         """How this HQPlayer opens each slot, read again at every mirroring
         (playback.substitute.native_plays): a copy that came back is handed
         over, one that left is a gap — the queue's own slots, under the queue
-        lock, or `items` it does not hold yet (a new queue, an append)."""
+        lock, or `items` it does not hold yet (a new queue, an append).
+        `plays_on`: the slot HQPlayer goes on playing at its second once the
+        mirror is done (a rebuild around it) keeps its way in — one read
+        under it would be that slot started over another way, or, a stream
+        still to come, not started at all; it is read once HQPlayer leaves
+        it (PlaybackManager._reach_follows)."""
         from playback.substitute import native_plays
 
         def resolve(its: list) -> list:
             return native_plays(its, self.id, self.endpoint_id)
         if items is None:
-            self._queue.reresolve(resolve)
+            self._queue.reresolve(resolve, hold=plays_on)
             return
         for it, play in zip(items, resolve(items)):
             it.play = play
@@ -1993,7 +2010,7 @@ class HqpBackend(PlayerBackend):
         return src["token"] if proxy is not None and proxy.bytes_away(src["token"]) else None
 
     def _park(self, item: QueueItem, second: float, token: str,
-              start: Optional[Item] = None) -> bool:
+              start: Optional[Item] = None, *, press: bool = False) -> bool:
         """A start of a streamed slot whose bytes are out of RAM: HQPlayer
         would open the entry and wait out the fetch on its control thread —
         live, 32.8 s of silence on a tap, the person's next tap refused as
@@ -2003,7 +2020,8 @@ class HqpBackend(PlayerBackend):
         (_status_of) while what plays plays on, and the start goes once the
         fetch ends (_land) — the bytes in, or its error met. A newer word
         supersedes it (a tap, Next, Previous, Pause, Stop, a new queue); a
-        Play while it waits is its own; a Seek moves its second."""
+        Play while it waits is its own; a Seek moves its second. `press`: it
+        goes as a play press, whatever the mirror says by then (_Parked)."""
         from streaming import service as streaming_service
         if start is None:
             start = self._link.item("start", self._link.accept("transport"),
@@ -2011,7 +2029,8 @@ class HqpBackend(PlayerBackend):
         with self._spot_lock:
             if self._parked is not None and self._parked.start.n > start.n:
                 return True         # a newer start waits already: this one is over
-            self._parked = _Parked(item, int(second), start, token, under_another=self._taken())
+            self._parked = _Parked(item, int(second), start, token, press=press,
+                                   under_another=self._taken())
         proxy = streaming_service.get_proxy()
         logger.info("HQPlayer: slot %s waits for its stream", self._queue.index_of(item))
         self.poke()
@@ -2159,7 +2178,9 @@ class HqpBackend(PlayerBackend):
         """A parked start goes, as the intent it serves — dropped once a newer
         one superseded it — a build it meets waited out (background): at the
         slot's entry on a playlist in step, else — or when HQPlayer must be
-        handed the entry again first — as a play press."""
+        handed the entry again first — as a play press, which sends an
+        HQPlayer another controller holds nothing where nothing from the
+        slot on opens (_press)."""
         link = self._link
 
         def go() -> None:
@@ -2173,22 +2194,19 @@ class HqpBackend(PlayerBackend):
                 beyond = next((it for it in self._queue.snapshot()[index:]
                                if self.gap(it) is None), None)
                 if beyond is not None and beyond.opener().get("kind") == "pending":
-                    self._park(beyond, 0, _PENDING, start=park.start)
+                    self._park(beyond, 0, _PENDING, start=park.start, press=park.press)
                     return
             if (self.gap(park.item) is None and park.item.opener().get("kind") != "pending"
                     and self._layout().entry(index) is None):
                 # Beyond the horizon (a tap past it, a slot left out behind
                 # the playhead): whatever the mirror, HQPlayer is handed the
                 # queue from it afresh
-                self._move_mirror("lost", by="press")
-                self._press(park.item, park.second, item=park.start)
+                self._press(park.item, park.second, item=park.start, afresh=True)
                 return
-            if park.press:
-                # HQPlayer holds the entry in a shape it must be handed again
-                # in: whatever the mirror, the press takes the queue afresh
-                self._move_mirror("lost", by="press")
             if park.press or self._mirror != "step" or self._live(self._pressed) is not None:
-                self._press(park.item, park.second, item=park.start)
+                # A start that goes as a press (_Parked.press): whatever the
+                # mirror, the press takes the queue afresh
+                self._press(park.item, park.second, item=park.start, afresh=park.press)
                 return
             start = self._start_point(index, park.second)
             if start is None:
@@ -2558,24 +2576,13 @@ class HqpBackend(PlayerBackend):
                 and self._first_reshaped(playlist, Entry(0)) is None):
             self._in_step()                             # it holds the queue as it is
             return
-        playing = self._playing(status, mutating=True)
-        # The same file at more than one slot it holds: which one HQPlayer
-        # reads is no verdict to repair on, nor a spot to resume at
-        twice = len(self._named(status, layout.handed)) > 1
         if status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED):
-            reads = Entry.read(status)
-            passing = self._plays_out(status)
-            if passing is not None and reads is not None and reads.n <= len(playlist):
-                # The node's own removal plays out: behind it, the queue from its place
-                self._repair_tail(reads, self._out_at(passing, layout.items), playlist, layout,
-                                  plays_out=True)
-                return
-            if (playing is None or playing[2] or twice or reads is None
-                    or reads.n > len(playlist)):
-                return              # not one entry of ours: the play press re-mirrors
-            self._repair_tail(reads, playing[0], playlist, layout,
-                              stale=self._first_reshaped(playlist, reads))
+            self._follow_behind(status, playlist)   # not one entry of ours: the play press re-mirrors
         elif status.state == PlaybackState.STOPPED:
+            playing = self._playing(status, mutating=True)
+            # The same file at more than one slot it holds: which one HQPlayer
+            # reads is no spot to resume at
+            twice = len(self._named(status, layout.handed)) > 1
             named = [r for t in playlist for r in self._readings(t.get("uri") or "")]
             if (any(not self.gave(t.get("uri") or "", layout) for t in playlist)
                     and ((self._mirror == "lost" and self._lost_from != "tail") or not layout.handed
@@ -2596,6 +2603,48 @@ class HqpBackend(PlayerBackend):
             self._remirror(at=playing[1] if playing is not None and not playing[2]
                            and not twice else None)
 
+    def _follow_behind(self, status, playlist: list) -> Optional[bool]:
+        """HQPlayer plays or pauses: what lies behind the entry it reads is
+        made the queue's again (_repair_tail) — the reconverge's step, and a
+        re-bind's (_converge_mirror). The entry itself is never touched —
+        its end of the file, or of the stream, is HQPlayer's own until it
+        leaves it, whatever way in its slot has by now — and what lies
+        before it is the past: no divergence to mend. Its playlist ends
+        before the first slot behind it whose stream is still to come
+        (_horizon_behind). Returns whether HQPlayer holds the queue behind
+        it now; None, and nothing sent, where it reads not one entry of
+        ours — another controller's, one nothing names, or, on a playlist
+        that is no mirror in step, a file queued at more than one slot it
+        holds (which one it reads is no verdict to repair on). Under the
+        queue lock."""
+        reads = Entry.read(status)
+        if reads is None or reads.n > len(playlist):
+            return None
+        passing = self._plays_out(status)
+        if passing is not None:
+            # The node's own removal plays out: behind it, the queue from its place
+            q = self._out_at(passing, self._queue.snapshot())
+        else:
+            playing = self._playing(status, mutating=True)
+            if (playing is None or playing[2] or (
+                    self._mirror != "step" and len(self._named(status, self._layout().handed)) > 1)):
+                return None
+            q = playing[0]
+        self._horizon_behind(q)
+        return self._repair_tail(reads, q, playlist, self._layout(), plays_out=passing is not None,
+                                 stale=None if passing is not None else self._first_reshaped(playlist, reads))
+
+    def _horizon_behind(self, q: int) -> None:
+        """What lies behind the queue's slot `q` is about to be made
+        HQPlayer's again (_follow_behind): its playlist ends before the first
+        slot behind `q` whose stream is still to come — the horizon, wherever
+        it stood — and a slot behind `q` left out till now (late) is handed
+        with the rest."""
+        with self._queue.reading(), self._late_lock:
+            after = self._queue.snapshot()[q:]
+            self._horizon = next((it for it in after if it.opener().get("kind") == "pending"), None)
+            self._late = [it for it in self._late if not any(it is x for x in after)]
+
     def _named(self, status, items: list) -> list:
         """Every one of `items` the entry HQPlayer's status names is — one
         file queued twice is two. Given what HQPlayer holds (the layout's
@@ -2605,7 +2654,7 @@ class HqpBackend(PlayerBackend):
         return [s for s, it in enumerate(items, 1) if any(_reads_item(r, it) for r in readings)]
 
     def _repair_tail(self, reads: Entry, q: int, playlist: list, layout: _Layout, *,
-                     plays_out: bool = False, stale: Optional[Entry] = None) -> None:
+                     plays_out: bool = False, stale: Optional[Entry] = None) -> bool:
         """HQPlayer reads our slot `q` at its entry `reads` — or, `plays_out`, the
         node's own removal playing out there, behind `q` of the queue's slots
         (never in step then): what lies behind
@@ -2614,10 +2663,13 @@ class HqpBackend(PlayerBackend):
         play-next does: the entry read is never touched, the sound never
         stops — read again in the repair's own sequence, so an HQPlayer that
         moved on meanwhile is repaired at its next answer instead. In step
-        when the part before it was the queue's too, else a tail mirror
-        (§ _mirror). `stale`: an entry behind it to hand again though it
-        names the queue's URI — its stream came back in another shape
-        (_rehand). Under the queue lock."""
+        when the entry read and the part before it are the queue's too, else
+        a tail mirror (§ _mirror) — the entry read is its slot's by what it
+        names, though the slot opens another way by now (a copy it was
+        re-bound to, a way in read under it). `stale`: an entry behind it to
+        hand again though it names the queue's URI — its stream came back in
+        another shape (_rehand). Under the queue lock. Returns whether
+        HQPlayer holds the queue behind that entry now."""
         after, want = playlist[reads.n:], layout.behind(q)
         first = self._first_divergence(after, want)
         if stale is not None and stale > reads:
@@ -2657,15 +2709,16 @@ class HqpBackend(PlayerBackend):
         elif out is None:
             self._drifted("HQPlayer did not take a removal behind the entry it reads")
         elif self._took(items, *out, "behind the entry it reads"):
-            before = layout.before(q)
-            head = (not plays_out and reads == layout.entry(q)
-                    and self._first_divergence(playlist[:reads.n - 1], before) is None)
+            head = (not plays_out and reads == layout.entry(q) and self._first_divergence(
+                playlist[:reads.n], layout.before(q) + [layout.items[q - 1]]) is None)
             if head:
                 self._in_step()
             else:
                 self._move_mirror("tail")
             logger.info("HQPlayer follows the queue behind the entry it reads (%s)",
                         "in step" if head else "a tail mirror")
+            return True
+        return False
 
     def _remirror(self, *, at: Optional[QueueItem] = None, position: int = 0) -> bool:
         """A stopped HQPlayer takes the queue afresh (a rebuild): each slot's
@@ -3032,6 +3085,10 @@ class HqpBackend(PlayerBackend):
                         self._reconverge_due = False
                         threading.Thread(target=self._reconverge, daemon=True,
                                          name="hqp-reconverge").start()
+                    if self._converge_due and not self._start_under_way():
+                        self._converge_due = False
+                        threading.Thread(target=self._converge_after_build, daemon=True,
+                                         name="hqp-rebind").start()
                     link.build.answering(_building(status) and self._embedded())
                     hqp_meter.meter.set_gain(None if status.track_gain is None
                                              else status.volume + status.track_gain)
@@ -3111,6 +3168,7 @@ class HqpBackend(PlayerBackend):
                             # A transit answer's position is the entry before's,
                             # running on: nothing of this one played yet
                             self._spot_played(playing)
+                        self._read_ours = playing[1]
                         self._last_tick = self._status_of(
                             status, playing, position, length,
                             taken=self._listen_held(status, playing, read_at))
@@ -3470,7 +3528,11 @@ class HqpBackend(PlayerBackend):
         slot of the spot: it is the one Now Playing shows and a queue edit
         anchors on, whatever entry HQPlayer's own pointer rests on. A slot
         the queue let go while HQPlayer reads it is ours at no slot while it
-        plays out (_Passing)."""
+        plays out (_Passing). An entry this attachment handed it that it
+        plays or pauses is its slot's though the layout holds that slot no
+        more — its way in read again under it, a stream to come now (since
+        2026-11-24: read as another controller's, it cut the listen that
+        went on sounding)."""
         items, version, pending = self._queue.view()
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
         if not busy:
@@ -3505,6 +3567,14 @@ class HqpBackend(PlayerBackend):
         found = next((j for j in _outward(slot or layout.near(entry), len(items))
                       if layout.entry(j) is not None
                       and any(_reads_item(r, items[j - 1]) for r in readings)), None)
+        if found is None and busy and self._handed_here(status.uri):
+            # No slot it holds — yet an entry this attachment handed it, for a
+            # slot whose way in was read again under it (what opens here
+            # changed, its file left the library: a stream to come now): the
+            # entry keeps its own end of the file, and is that slot's until
+            # HQPlayer leaves it — never another controller's
+            found = next((j for j in _outward(layout.near(entry), len(items))
+                          if any(_reads_item(r, items[j - 1]) for r in readings)), None)
         if pending and not mutating and found != slot:
             return None
         verdict = (found, items[found - 1], False) if found else (0, None, busy)
@@ -4040,10 +4110,11 @@ class HqpBackend(PlayerBackend):
         HQPlayer (_taken) — or since its takeover's verdict left a spot
         (_takeover: the listen it cut, the slot after a track that had played
         out): the spot names the status's track, never what HQPlayer reads
-        (F7's refused stream, Roon's Play sent again)."""
-        last = self._last_tick
-        return self._mirror == "drift" and self._edited and (last is None or last.item is None
-                                                             or self._takeover)
+        (F7's refused stream, Roon's Play sent again). The poller's own
+        reading, as _taken's is: the status a start that waits for its
+        stream presents names the slot it waits on, and HQPlayer rests on
+        that controller's playlist all the same (since 2026-11-24)."""
+        return self._mirror == "drift" and self._edited and (self._read_ours is None or self._takeover)
 
     def _foreign_in_step(self, status) -> Optional[tuple]:
         """Does HQPlayer read an entry of no queue slot while its playlist is
@@ -5456,12 +5527,16 @@ class HqpBackend(PlayerBackend):
         return True
 
     def _tail_holds(self, playlist: list, layout: _Layout, status) -> bool:
-        """A tail mirror's invariant: from the entry HQPlayer reads to its
-        end, its playlist is what it holds of the queue from the slot it
-        reads. One that reads nothing holds it as it was — the play press
-        rebuilds — while its playlist still holds an entry of the node's:
-        one that holds none is another controller's (Roon's Clear and its
-        stream, F7's refused one among them), drift, never a tail of ours."""
+        """A tail mirror's invariant: the entry HQPlayer reads is a slot of
+        the queue's by what it names (_playing) — whatever way in that slot
+        has by now: the entry keeps its own end of the file until HQPlayer
+        leaves it (a slot re-bound under it, a way in read under it) — and
+        behind it, to its end, its playlist is what it holds of the queue
+        behind that slot. One that reads nothing holds it as it was — the
+        play press rebuilds — while its playlist still holds an entry of the
+        node's: one that holds none is another controller's (Roon's Clear
+        and its stream, F7's refused one among them), drift, never a tail of
+        ours."""
         if status.state not in (PlaybackState.PLAYING, PlaybackState.PAUSED):
             return any(self.gave(t.get("uri") or "", layout) for t in playlist)
         playing = self._playing(status)
@@ -5469,13 +5544,10 @@ class HqpBackend(PlayerBackend):
         if playing is None or playing[2] or reads is None:
             return False
         passing = self._plays_out(status) if not playing[0] else None
-        if passing is not None:
-            # The node's own removal plays out: behind it, the queue from its place
-            want = [passing.item] + layout.behind(self._out_at(passing, layout.items))
-        else:
-            want = [playing[1]] + layout.behind(playing[0])
-        return (len(playlist) - reads.n + 1 == len(want)
-                and self._first_divergence(playlist[reads.n - 1:], want) is None)
+        # The node's own removal plays out: behind it, the queue from its place
+        behind = layout.behind(self._out_at(passing, layout.items) if passing is not None else playing[0])
+        return (len(playlist) - reads.n == len(behind)
+                and self._first_divergence(playlist[reads.n:], behind) is None)
 
     # -- transport -----------------------------------------------------------------
 
@@ -6023,7 +6095,8 @@ class HqpBackend(PlayerBackend):
             return True
         return self._press(target, spot[1] if spot is not None else 0, item=word)
 
-    def _press(self, target: QueueItem, position: int, *, item: Optional[Item] = None) -> bool:
+    def _press(self, target: QueueItem, position: int, *, item: Optional[Item] = None,
+               afresh: bool = False) -> bool:
         """A play press on a playlist that is no mirror (lost, drifted, a
         tail mirror): HQPlayer takes the queue afresh — once — and starts at
         `target` — at `position` while it took that very track, else at the
@@ -6038,10 +6111,43 @@ class HqpBackend(PlayerBackend):
         not there is refused in words). No retry; no route waits for it.
         While another controller holds HQPlayer its playlist is no mirror,
         whatever the canary last said: the press takes the queue afresh,
-        which stops that controller's playback."""
+        which stops that controller's playback — so a press that begins on
+        an HQPlayer another controller holds, or that rests on its playlist
+        (_rests_on_another), sends nothing until the slot it would start is
+        known to open (since 2026-11-24: a Play on a queue none of whose
+        files was there stopped the other node's music and played nothing).
+        The first slot from `target` on whose way in is not unplayable: a
+        stream still to come, or one whose bytes are out of RAM, is waited
+        for in the node (_park, as a press: its landing takes HQPlayer, and
+        a stream that fails walks on to the next); with none, nothing is
+        sent, refused in words. A file is known to open as far as this
+        output can tell: one this node holds is looked at by the playback
+        manager before a new queue's start and before a Play of the queue
+        held (PlaybackManager.before_start), never here — and HQPlayer
+        refusing a file the node can read still answers after the Stop.
+        `afresh`: HQPlayer is handed the queue again whatever the mirror
+        says (a slot it was never handed, an entry in another shape) — the
+        mirror is lost to the press as it begins, never by one that waits or
+        is refused here."""
         items = self._queue.snapshot()
         at = next((i for i, it in enumerate(items) if it is target), None)
         following = items[at:] if at is not None else [target]
+        opens = next((it for it in following if it.opener().get("kind") != "unplayable"), None)
+        to_come = self._bytes_away(opens)
+        with self._press_lock:
+            waits = (self._inflight is None and self._live(self._pressed) is None
+                     and (opens is None or to_come is not None)
+                     and (self._taken() or self._rests_on_another()))
+        if waits and opens is None:
+            logger.info("a play press on an HQPlayer another controller holds: nothing from slot %s on "
+                        "opens here — nothing sent", "-" if at is None else at + 1)
+            self._local.refusal = ("it is no longer in the queue" if at is None
+                                   else f"nothing from slot {at + 1} on is on this HQPlayer")
+            return False
+        if waits:
+            return self._park(opens, position if opens is target else 0, to_come, start=item, press=True)
+        if afresh:
+            self._move_mirror("lost", by="press")
         with self._press_lock:
             words = self._inflight
             if words is not None:
@@ -6693,7 +6799,8 @@ class HqpBackend(PlayerBackend):
     def queue_changed(self, kind: str, *, play: bool = False) -> None:
         """Every mutation is mirrored in the queue_* hooks, before its commit.
         A re-bind happens under the queue — files left the library
-        (PlaybackManager.rebind_files) — with nothing to mirror first, so
+        (PlaybackManager.rebind_files), or what opens here changed
+        (reach_changed) — with nothing to mirror first, so
         HQPlayer converges on it here; while it builds and answers nothing,
         once the build is done (_converge_after_build). Every change is the
         held rate check's event, a new queue generation asking State —
@@ -6726,7 +6833,8 @@ class HqpBackend(PlayerBackend):
                                  name="hqp-rebind").start()
 
     def _converge_after_build(self) -> None:
-        """A re-bind HQPlayer could not follow while it built: waited out off
+        """A re-bind HQPlayer could not follow while it built — or while a
+        start was under way (_converge_due): waited out off
         the queue lock, then converged under it (PlaybackManager.mirror_step)
         against the queue and the playlist as they stand by then — unless
         this backend was detached meanwhile or its link let go. A build
@@ -6744,24 +6852,36 @@ class HqpBackend(PlayerBackend):
             logger.info("re-bound slots: HQPlayer's playlist not converged: %s", e)
 
     def _converge_mirror(self) -> None:
-        """Bring HQPlayer's playlist back in step after slots were re-bound to
-        another copy of their track: its entries still name files that are
-        gone, and a slot whose file left with no copy this HQPlayer opens is
-        a gap now. Only a mirror that was in step is converged — any other is
-        the reconverge's or the play press's. Stopped, HQPlayer takes the
-        queue afresh (a rebuild) and the play press resumes at the slot it
-        was on — the spot it held, if one (a re-bind moves no slot). Busy,
-        the entry it reads is never touched while the first changed entry
-        lies past it: the entries from there are removed and what it holds
-        of the queue from there appended again, as queue_insert_next does.
-        One at or before it cannot be put back in place — the protocol has no
-        insert — so a playing HQPlayer is rebuilt around its position (the
-        gap a reorder rebuild costs; its start goes once the queue lock is
-        let go, waiting out a build it meets), and a paused one takes the
-        queue afresh, stopped, and resumes that slot where it was on the play
-        press. Raises Building while HQPlayer builds: the caller follows up
-        once it is done."""
-        if self._mirror != "step":
+        """Bring HQPlayer's playlist back to the queue after slots changed
+        under it — re-bound to another copy of their track (their file left
+        the library), or their way in read again because what opens here
+        changed (the music folder went, or came back): its entries name
+        files that are gone, streams where the files are back, and a slot
+        with nothing this HQPlayer opens is a gap now. A mirror in step or a
+        tail mirror is converged — any other is the reconverge's or the play
+        press's, and on an HQPlayer another controller holds the queue is
+        the queue's alone: nothing sent. While HQPlayer plays or pauses an
+        entry of ours, only what lies behind that entry follows
+        (_follow_behind): the entry it reads is never stopped, restarted or
+        handed again — since 2026-11-24; until then a changed entry at or
+        before it had a playing HQPlayer rebuilt around its position and a
+        paused one taken afresh, which cut the track that sounded whenever
+        the folder went or came back — and what lies before it is the past.
+        An entry behind it that names no slot of the queue is an edit made
+        elsewhere: the canary's to judge, never converged over. Stopped,
+        HQPlayer takes the queue afresh (_remirror) and the play press
+        resumes at the slot it was on — the spot it held, if one — unless a
+        start waits for its stream: a hand-over would supersede it, so the
+        playlist is marked no mirror and that start hands HQPlayer the queue
+        as a play press once it lands; nor while a start is under way (the
+        node's own, HQPlayer between two entries as it moves on by itself):
+        a hand-over would stop it, and the playlist follows once it is over
+        (_converge_due). Raises Building while HQPlayer builds: the caller
+        follows up once it is done."""
+        if self._mirror not in ("step", "tail"):
+            return
+        if self._taken():
+            self._drifted("another controller holds HQPlayer")
             return
         layout = self._layout()
 
@@ -6785,52 +6905,38 @@ class HqpBackend(PlayerBackend):
         # now would stop it — the next rebind, or the play press, converges
         if not status.state.known:
             return
-        # An entry that names no slot of the queue is an edit made elsewhere:
-        # the canary's to judge, never converged over
-        if not all(any(_reads_item(r, it) for r in self._readings(t.get("uri") or "")
-                       for it in layout.items) for t in playlist):
-            return
-        first = self._first_divergence(playlist, layout.handed)
-        if first is None:
-            if len(playlist) == len(layout.handed):
-                return
-            first = min(len(playlist), len(layout.handed)) + 1
-        reads = Entry.read(status)
         busy = status.state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
-        playing = self._playing(status, mutating=True)
-        if busy and (reads is None or reads.n > len(playlist)
-                     or playing is None or playing[2]):
-            return          # it reads an entry we cannot place: the canary's
+        reads = Entry.read(status)
+        # An entry that names no slot of the queue is an edit made elsewhere:
+        # the canary's to judge, never converged over — behind the entry a
+        # busy HQPlayer reads, which is all a converge touches then
+        ours = playlist[reads.n:] if busy and reads is not None else playlist
+        if not all(any(_reads_item(r, it) for r in self._readings(t.get("uri") or "")
+                       for it in layout.items) for t in ours):
+            return
         try:
-            if busy and first > reads.n:
-                items = layout.handed[first - 1:]
-                uris = [self._uri_for(it) for it in items]
-                gone = len(playlist) - first + 1
-
-                def follow(h: HQPlayerClient):
-                    # The URIs took their time: a playhead that moved on to
-                    # a changed entry meanwhile is not removed from under
-                    # itself — that entry names a gone file, and the play
-                    # press re-mirrors.
-                    now = h.get_status()
-                    moved = Entry.read(now) if now is not None else None
-                    # A removal HQPlayer did not take stops it there: what is
-                    # appended after it would sit beside what it kept
-                    if now is None or (moved is not None and moved.n >= first) or not all(
-                            _hqp_safe(self._link, lambda c: _remove(c, Entry(first)),
-                                      "PlaylistRemove") for _ in range(gone)):
-                        return None
-                    return _add_uris_with_retry(self._link, uris)
-                out = self._cmd(follow)
-                self.poke()
-                converged = out is not None and self._took(items, *out, "of the re-bound slots")
-            elif status.state == PlaybackState.PLAYING:
-                converged = self._rebuild(layout.items, playing[1], int(status.position),
-                                          resume=True, patient=True, what="of the re-bound queue")
+            if busy:
+                converged = self._follow_behind(status, playlist)
+                if converged is None:
+                    return          # it reads an entry we cannot place: the canary's
             else:
+                # A horizon whose slot is a stream to come no more (a file
+                # again) is of the queue as it was: what it holds now is read
+                # by the mirror afresh
+                h = self._horizon
+                if ((h is None or h.opener().get("kind") == "pending")
+                        and len(playlist) == len(layout.handed)
+                        and self._first_divergence(playlist, layout.handed) is None):
+                    return
+                if self._parked_now() is not None:
+                    self._drifted("the queue changed under a start that waits for its stream")
+                    return
+                if self._start_under_way():
+                    self._converge_due = True
+                    return
+                playing = self._playing(status, mutating=True)
                 converged = self._remirror(
-                    at=playing[1] if playing is not None and not playing[2] else None,
-                    position=int(status.position) if status.state == PlaybackState.PAUSED else 0)
+                    at=playing[1] if playing is not None and not playing[2] else None)
                 self.poke()
         except Building:
             raise
@@ -6838,8 +6944,8 @@ class HqpBackend(PlayerBackend):
             logger.warning("re-bound slots: HQPlayer's playlist could not follow (%s)", e)
             converged = None
         if converged:
-            logger.info("HQPlayer's playlist follows the re-bound slots from %d", first)
-        elif converged is None or self._mirror == "step":
+            logger.info("HQPlayer's playlist follows the re-bound slots")
+        elif converged is None or self._mirror in ("step", "tail"):
             self.lose_mirror("HQPlayer's playlist did not follow the re-bound slots")
 
     def _rebuild(self, items: list, target: QueueItem, position: int, *, resume: bool,
@@ -6871,7 +6977,7 @@ class HqpBackend(PlayerBackend):
         mirror is lost, HQPlayer gets what lies behind the entry it reads
         once it answers again — and None is returned. Under the queue lock.
         Returns whether HQPlayer holds the queue now — then it is in step."""
-        self._ways_in()
+        self._ways_in(plays_on=target if resume else None)
         self._link.refusals = []
         saved = self._horizon_state()
         self._place_horizon(items, target)
@@ -6947,7 +7053,14 @@ class HqpBackend(PlayerBackend):
         commits none — and HQPlayer is handed nothing. Put together without
         `play` while another controller holds HQPlayer (_taken), the new
         queue is the queue's alone: nothing sent, that controller's playback
-        left as it is — the press that takes HQPlayer back hands it over."""
+        left as it is — the press that takes HQPlayer back hands it over.
+        So it is with `play` there, or on an HQPlayer that rests on that
+        controller's playlist, while the first slot it would be handed is a
+        stream still to come (since 2026-11-24; PI-NODE-2D §3.6): no Stop,
+        no clear, no add until that slot is known to open — the start waits
+        on it in the node, and its landing hands HQPlayer the queue afresh.
+        With no other controller a streamed first slot empties the playlist
+        at the tap, as before."""
         if not items:
             return []
         # Refused before it is numbered or watched: it supersedes nothing
@@ -6964,9 +7077,25 @@ class HqpBackend(PlayerBackend):
             if not layout.handed and not waits:
                 self._restore_horizon(saved)
                 raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
-            if not play and (self._taken() or self._rests_on_another()):
-                self._drifted("another controller holds HQPlayer")
-                return list(items)
+            if self._taken() or self._rests_on_another():
+                first = (layout.handed[0] if layout.handed
+                         else next(it for it in items if it.opener().get("kind") == "pending"))
+                to_come = self._bytes_away(first)
+                if not play or to_come is not None:
+                    # Played with its first slot's stream still to come, it
+                    # takes HQPlayer only once that stream landed — the start
+                    # waits on it as a press (_park), numbered as the new
+                    # queue it is: one that fails is walked past, and where
+                    # none opens that controller's playback was never touched
+                    self._drifted("another controller holds HQPlayer")
+                    if play:
+                        self._owe_start(None, self._link.item("start", self._link.accept("queue")),
+                                        lambda it: self._park(first, 0, to_come, start=it, press=True))
+                    return list(items)
+            # From here HQPlayer is stopped before it says whether it opens
+            # what it is handed: a file the node can read and HQPlayer refuses
+            # (a format it does not open) still answers after the Stop — on
+            # an HQPlayer another controller holds too
             uris = [self._uri_for(it) for it in layout.handed]
             att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
                    if play and uris else None)

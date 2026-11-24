@@ -34,12 +34,14 @@ from playback.dlna_backend import AnswerRefused, read_answer
 from playback import hqp_link
 from playback.hqp_link import Building, Dropped, NotAnswering
 from playback.hqp_meter import meter as hqp_meter
-from playback.manager import OutputHeld, QueueChanged, active_hqp_endpoint, manager, said_with
+from playback import substitute
+from playback.manager import (NotHere, OutputHeld, QueueChanged, active_hqp_endpoint, manager,
+                              reach_key, said_with)
 from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
 from serving import EventStream
-from sql_queries import ALBUM_FILES, TRACK_FILES, best_rip_order, owned_rank, rip_quality
+from sql_queries import ALBUM_FILES, HERE, TRACK_FILES, best_rip_order, here, owned_rank, rip_quality
 
 logger = logging.getLogger(__name__)
 
@@ -1347,6 +1349,13 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
             # with the queue version it was read at; again whenever it moves
             last_slots = manager.slots_version
             yield "data: " + json.dumps({"t": "slots", "d": manager.slots_message()}) + "\n\n"
+            # What is reachable here now — the recorded answer of the music
+            # folder, as a key: at connect and whenever it changes (its
+            # record wakes this stream). A screen that shows the owner's
+            # files reads its payload again on a new key; the notice says
+            # the same to the person, but may say it before the look has
+            last_reach = reach_key()
+            yield "data: " + json.dumps({"t": "reach", "d": {"key": last_reach}}) + "\n\n"
             # Notices travel as the whole active set, never as single
             # events: the client diffs it, so a tab that was asleep learns
             # what is true now rather than replaying what happened. The
@@ -1409,6 +1418,9 @@ async def events_stream(tab: Optional[str] = Query(None, max_length=64,
                         yield ("data: "
                                + json.dumps({"t": "slots", "d": manager.slots_message()})
                                + "\n\n")
+                    if reach_key() != last_reach:
+                        last_reach = reach_key()
+                        yield "data: " + json.dumps({"t": "reach", "d": {"key": last_reach}}) + "\n\n"
                 if "preview" in kinds:
                     # Drain coalesced pings so one re-fetch covers the burst.
                     while not preview_q.empty():
@@ -1724,6 +1736,12 @@ def _transport(intent: bool, command: str, *args) -> dict:
     a Pause, a Stop or any newer intent that supersedes it dropped it."""
     try:
         b = manager.ensure_active() if intent else manager.backend()
+        if command == "play":
+            # the file that Play would start, looked at before the output
+            # is asked; nothing of the queue opening here is said in words
+            manager.before_start(b)
+        elif command in ("next", "previous"):
+            manager.before_step(b, 1 if command == "next" else -1)
         ok = getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
@@ -1998,6 +2016,8 @@ def jump(req: JumpRequest):
         # play() after it raced the DLNA load and resumed the OLD track for
         # the seconds the new one took to buffer
         b = manager.ensure_active()
+        if not manager.queue.view()[2]:
+            manager.before_start(b, slot)       # the file the tap would start, looked at first
         ok = b.select(slot, req.track_id)
     except Exception as e:
         raise _output_error(e)
@@ -2006,18 +2026,27 @@ def jump(req: JumpRequest):
 
 
 def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
-               archive: Optional[Callable[[], None]] = None) -> int:
-    """THE single path for queueing owned tracks: the rows (id, ...) become
-    full-metadata QueueItems, committed in ONE mutation — every slot in its
-    place at once, whatever the output makes of it: on HQPlayer an m4a or a
-    CUE slice it is not handed yet waits behind its horizon and the fetch
-    lane prepares it in the queue's order (playback.substitute), so a slow
-    transcode never blocks the add and nothing tapped after it lands inside
-    it. ``clear_first`` replaces the queue (and starts playback) —
-    ``archive``, the session rotation, once the output has taken it
-    (PlaybackManager.replace_queue); otherwise tracks append (``position``
-    next|end). Returns the count queued."""
-    items = queue_mod.items_for_owned_rows(rows)
+               archive: Optional[Callable[[], None]] = None,
+               left: Optional[list] = None) -> int:
+    """THE single path for queueing owned tracks by the rows a route read:
+    each row its file where one opens here now (`id`), else its track's
+    stream, queued as the track itself (_reach_segments, which refuses rows
+    none of which opens where nothing streams) — full-metadata QueueItems,
+    committed in ONE mutation: every slot in its place at once, whatever the
+    output makes of it: on HQPlayer an m4a or a CUE slice it is not handed
+    yet waits behind its horizon and the fetch lane prepares it in the
+    queue's order (playback.substitute), so a slow transcode never blocks
+    the add and nothing tapped after it lands inside it. ``clear_first``
+    replaces the queue (and starts playback) — ``archive``, the session
+    rotation, once the output has taken it (PlaybackManager.replace_queue);
+    otherwise tracks append (``position`` next|end). Returns the count
+    queued; ``left`` takes what was left out, each with why — the caller
+    expects ``len(rows) - len(left)`` slots."""
+    items, out = _segment_items(*_reach_segments(rows))
+    if left is not None:
+        left.extend(out)
+    if not items:
+        return 0
     if clear_first:
         added, _gen = manager.replace_queue(items, play=True, archive=archive)
     else:
@@ -2027,24 +2056,20 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
 
 @router.post("/play-track")
 def play_track(req: PlayTrackRequest):
-    """Replace the queue with a single track and play it."""
-    row = _db_query_one("""
-        SELECT mf.id, mf.file_path, mf.file_format, t.title, a.name as artist, al.title as album
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a ON ta.artist_id = a.id
-        JOIN album_variants av ON mf.album_variant_id = av.id
-        JOIN albums al ON av.album_id = al.id
-        WHERE mf.id = %(track_id)s
-    """, {"track_id": req.track_id})
-
+    """Replace the queue with a single track and play it — its file where
+    that opens here now, else a copy that does, else its stream
+    (_add_owned)."""
+    row = _db_query_one(_FILE_ROWS, {"ids": [req.track_id], "hqp_id": active_hqp_endpoint(),
+                                     "gone": _gone()})
     if not row:
         raise HTTPException(status_code=404, detail="Track not found")
 
     try:
-        added = _add_owned([row], clear_first=True, archive=lambda: sessions.rotate_session(
+        left: list = []
+        added = _add_owned([row], clear_first=True, left=left, archive=lambda: sessions.rotate_session(
             manager.queue, 'track', seed_media_file_id=req.track_id))
+        if left:
+            raise HTTPException(status_code=404, detail="Nothing in that list streams here")
         _exit_radio_mode()
         if not added:
             raise HTTPException(
@@ -2119,26 +2144,34 @@ def play_album(req: PlayAlbumRequest):
 
 
 def _play_album_rows(best_album: dict):
-    """Replace the queue with one album's tracks and play. Owned files load from
-    disk; an album with none is streamed instead."""
-    rows = _album_media_rows(str(best_album["id"]))
+    """Replace the queue with one album's tracks and play: each track its
+    best copy that opens here now, else its stream (_reach_segments); an
+    album with no copy for this output is streamed whole."""
+    album_id = str(best_album["id"])
+    rows = _album_rows(album_id)
 
     if not rows:
-        return play_phantom_album(PlayPhantomAlbumRequest(album_id=str(best_album["id"])))
+        return play_phantom_album(PlayPhantomAlbumRequest(album_id=album_id))
 
+    items, left = _segment_items(*_reach_segments(rows))
+    if not items:
+        raise HTTPException(status_code=404, detail="Nothing in that list streams here")
     try:
-        items = queue_mod.items_for_owned_rows(rows)
         added, _gen = manager.replace_queue(items, play=True, archive=lambda: sessions.rotate_session(
-            manager.queue, 'album', origin_album_id=str(best_album["id"]),
-            seed_media_file_id=next((r["id"] for r in rows if r["location"] == "local"), None)))
+            manager.queue, 'album', origin_album_id=album_id,
+            seed_media_file_id=next((r["id"] for r in rows if r["id"] is not None
+                                     and r["location"] == "local"), None),
+            seed_track_id=items[0].track_id if items[0].media_file_id is None else None))
         _exit_radio_mode()
 
-        if added < len(rows):
+        if added < len(items):
             raise HTTPException(
                 status_code=503,
-                detail=f"HQPlayer added {added} of {len(rows)} tracks "
+                detail=f"HQPlayer added {added} of {len(items)} tracks "
                        "(connection unstable). Try again.",
             )
+        gone = {t["track_id"] for t in left}
+        rows = [r for r in rows if r["track_id"] not in gone]
         return {
             "ok": True,
             "artist": rows[0]["artist"],
@@ -2150,6 +2183,7 @@ def _play_album_rows(best_album: dict):
                  "title": r["title"], "track_number": r.get("track_number")}
                 for r in rows
             ],
+            "not_streamable": left,
         }
     except HTTPException:
         raise
@@ -2821,6 +2855,8 @@ def _output_error(e: Exception, refusal: Optional[tuple[int, str]] = None) -> HT
     the route's answer, with what the person's words made meanwhile could
     not do (said_with: a track tapped while a new queue that did not commit
     loaded) — for the person, never for the log."""
+    if isinstance(e, NotHere):
+        return _not_here(e.why, e.album or None)
     status, why = refusal or _output_refusal(e)
     said = said_with(e)
     return HTTPException(status_code=status, detail=f"{why} — {said}" if said else why)
@@ -3015,21 +3051,69 @@ def queue_phantom_album(req: PlayPhantomAlbumRequest):
 # appended as its fetch lands, which let a later tap land in between.
 
 
-def _album_media_rows(album_id: str) -> list[dict]:
-    """The album's files in play order for the ACTIVE output: one row per
+@router.get("/reach")
+def reach():
+    """Whether this node streams now: what the owner's music with no file
+    here plays as — a stream, or nothing until its files are back — for the
+    pages' words about a folder that does not answer."""
+    return {"streams": substitute.streams()}
+
+
+def _gone() -> list:
+    """The stored-path prefixes of the folders that do not answer now — the
+    `gone` every copy-picking query takes (sql_queries.HERE)."""
+    from scanner import gone_prefixes
+    return gone_prefixes()
+
+
+# -- What opens here now ---------------------------------------------------------
+#
+# An owned track's file may not open here now — its copy away, or under a
+# folder that does not answer (sql_queries.HERE). No route queues such a file:
+# every one that takes owned music goes through ONE split (_reach_segments) —
+# a copy that opens where there is one, else the track's stream, queued as
+# the track itself, exactly as a not-owned track streams: the demo channel's
+# one full listen, then the excerpt (no ledger exemption for a copy the node
+# cannot read: it has rows, not bytes), a provider told nothing but title,
+# artist and length. Where this node streams nothing the track is left out
+# with why, and a request none of whose slots opens is refused before the
+# queue or the output is touched (_not_here).
+
+# Why a row of an owned track names no file that opens: its copies are away
+# (a Rescan set them aside), or lie under a folder that does not answer.
+_WHY = "CASE WHEN {f}.here THEN NULL WHEN {f}.absent_since IS NOT NULL THEN 'away' ELSE 'disk' END"
+
+_NOT_HERE_UNTIL = {"disk": "its disk is connected", "away": "its files are back"}
+
+
+def _not_here(why: str, album: Optional[str] = None) -> HTTPException:
+    """The refusal of a play or a queue-add of which nothing opens here now,
+    on a node that streams nothing: 409 with `reason` not_here, `why`
+    ('disk' | 'away') and the sentence the page says as a toast. `album`:
+    the one album every refused slot is of."""
+    return HTTPException(status_code=409, detail={
+        "reason": "not_here", "why": why,
+        "message": f"{album or 'This music'} cannot play until {_NOT_HERE_UNTIL[why]}."})
+
+
+def _album_rows(album_id: str) -> list[dict]:
+    """The album's tracks in play order for the ACTIVE output: one row per
     track, its best copy — the copy at the HQPlayer that is the output first
     (it plays that natively), then the local rips; a second variant must
     neither duplicate the tracklist nor win over a better one. A copy at
     another HQPlayer is left out: this output cannot open it, and an album
-    with nothing else streams like a phantom. Rows carry `id` + `location`
-    (queue.items_for_owned_rows) and the track UUID."""
-    hqp_id = active_hqp_endpoint()
+    with nothing else streams like a phantom. A track none of whose copies
+    opens here now has `id` None and `why` ('disk' | 'away'); the others
+    carry `id` + `location` (queue.items_for_owned_rows). All carry the
+    track UUID and the album's."""
     return _db_query(f"""
-        SELECT id, location, track_id, title, track_number, artist, album FROM (
+        SELECT CASE WHEN here THEN id END AS id, location, track_id, %(id)s AS album_id,
+               title, track_number, artist, album, why
+        FROM (
             SELECT DISTINCT ON (f.track_id)
                    f.id, f.location::text AS location, f.track_id::text AS track_id,
                    f.disc_number, f.track_number, t.title,
-                   a.name AS artist, al.title AS album
+                   a.name AS artist, al.title AS album, f.here, {_WHY.format(f='f')} AS why
             FROM ({ALBUM_FILES}) f
             JOIN tracks t ON t.id = f.track_id
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
@@ -3037,10 +3121,136 @@ def _album_media_rows(album_id: str) -> list[dict]:
             JOIN albums al ON al.id = %(id)s::uuid
             WHERE f.location = 'local'
                OR f.hqp_endpoint_id = %(hqp_id)s
-            ORDER BY f.track_id, {owned_rank('f')}, {best_rip_order('f')}
+            ORDER BY f.track_id, {owned_rank('f')}, (f.absent_since IS NOT NULL),
+                     {best_rip_order('f')}
         ) picked
         ORDER BY disc_number NULLS FIRST, track_number
-    """, {"id": album_id, "hqp_id": hqp_id})
+    """, {"id": album_id, "hqp_id": active_hqp_endpoint(), "gone": _gone()})
+
+
+# The media files %(ids)s names, in that order, as slots: the file itself
+# where it opens here now (`id`, `location` 'local'), else the best copy of
+# its track that does — one on the same album first — else `id` None with
+# `why` ('disk' | 'away'). `asked` is the id named; every row carries its
+# track's UUID, the file's album and the display fields.
+_FILE_ROWS = f"""
+        SELECT mf.id AS asked,
+               CASE WHEN own.here THEN mf.id ELSE c.id END AS id,
+               CASE WHEN own.here THEN 'local' ELSE c.location::text END AS location,
+               mf.track_id::text AS track_id, av.album_id::text AS album_id,
+               t.title, al.title AS album,
+               (SELECT ar.name FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id
+                 WHERE ta.track_id = t.id
+                 ORDER BY (ta.role = 'primary') DESC LIMIT 1) AS artist,
+               CASE WHEN own.here OR c.id IS NOT NULL THEN NULL
+                    WHEN EXISTS (SELECT 1 FROM media_files m3
+                                 JOIN album_variants v3 ON v3.id = m3.album_variant_id
+                                 WHERE m3.track_id = mf.track_id AND v3.absent_since IS NULL)
+                    THEN 'disk' ELSE 'away' END AS why
+        FROM unnest(%(ids)s::int[]) WITH ORDINALITY AS s(id, ord)
+        JOIN media_files mf ON mf.id = s.id
+        JOIN tracks t ON t.id = mf.track_id
+        JOIN album_variants av ON av.id = mf.album_variant_id
+        JOIN albums al ON al.id = av.album_id
+        CROSS JOIN LATERAL (SELECT {HERE} AS here) own
+        LEFT JOIN LATERAL (
+            SELECT f.id, f.location
+            FROM (
+                SELECT m2.id, v2.location, v2.hqp_endpoint_id, v2.album_id,
+                       {here('m2', 'v2')} AS here,
+                       m2.is_lossless, m2.sample_rate, m2.bit_depth
+                FROM media_files m2 JOIN album_variants v2 ON v2.id = m2.album_variant_id
+                WHERE m2.track_id = mf.track_id
+                UNION ALL
+                SELECT hf.id, v2.location, v2.hqp_endpoint_id, v2.album_id, true,
+                       hf.is_lossless, hf.sample_rate, hf.bit_depth
+                FROM hqp_library_files hf JOIN album_variants v2 ON v2.id = hf.album_variant_id
+                WHERE hf.track_id = mf.track_id
+            ) f
+            WHERE f.here AND (f.location = 'local' OR f.hqp_endpoint_id = %(hqp_id)s)
+            ORDER BY {owned_rank('f')}, (f.album_id = av.album_id) DESC, {best_rip_order('f')}
+            LIMIT 1) c ON NOT own.here
+        ORDER BY s.ord
+"""
+
+
+def _file_rows(ids: list) -> list[dict]:
+    """The slots of the media files `ids` name (_FILE_ROWS), in that order."""
+    return _db_query(_FILE_ROWS, {"ids": list(ids), "hqp_id": active_hqp_endpoint(),
+                                  "gone": _gone()})
+
+
+def _stream_queries(slots: list) -> dict:
+    """TrackQuery per (track_id, album_id) slot that streams, built per
+    album — the slot's album keeps the edition the listener pressed — and a
+    slot whose album does not list the track (or that names none) gets the
+    display edition. A slot no tracklist names is absent."""
+    by_album: dict[Optional[str], list[str]] = {}
+    for tid, album_id in slots:
+        by_album.setdefault(album_id, []).append(tid)
+    out: dict = {}
+    loose: list = []
+    for album_id, tids in by_album.items():
+        own = ({q.track_id: q for q in _phantom_album_queries(album_id)}
+               if album_id else {})
+        for tid in tids:
+            if tid in own:
+                out[(tid, album_id)] = own[tid]
+            else:
+                loose.append((tid, album_id))
+    if loose:
+        found = _phantom_track_queries([tid for tid, _a in loose])
+        for tid, album_id in loose:
+            if tid in found:
+                out[(tid, album_id)] = found[tid]
+    return out
+
+
+def _reach_segments(rows: list) -> tuple[list, list]:
+    """THE split of slots by what opens here now, in the rows' order. A row
+    with a file `id` (+ `location`) is an 'owned' segment's file row. One
+    with none is its track's stream — a 'phantom' segment's TrackQuery, the
+    row's own `query` or the one of its track on the album it was asked
+    from (`track_id`, `album_id`): always for a track with no copy for this
+    output at all (`why` None: the caller's _ensure_streaming_ready speaks
+    for it), and for an owned track whose copy is not here now (`why`
+    'disk' | 'away') only where this node streams (substitute.streams; no
+    provider answering right now is the streaming refusal, as for any
+    stream) — where it does not, the row is left out with reason `not_here`
+    and its why, as is one no tracklist names (`nowhere`). Returns (segments, left); rows none of
+    which makes a segment, every one left as not_here, are refused here
+    (_not_here) — before the queue or the output is touched."""
+    out = [r for r in rows if r.get("id") is None]
+    streams = substitute.streams() if any(r.get("why") for r in out) else True
+    queries = _stream_queries([(r["track_id"], r.get("album_id")) for r in out
+                               if "query" not in r and (streams or not r.get("why"))])
+    segments: list[tuple[str, list]] = []
+    left: list = []
+    his = False                 # a track of his own became its stream
+    for r in rows:
+        if r.get("id") is not None:
+            _push_segment(segments, "owned", [r])
+            continue
+        away = bool(r.get("why")) and not streams
+        q = None if away else (r["query"] if "query" in r
+                               else queries.get((r["track_id"], r.get("album_id"))))
+        if q is not None:
+            _push_segment(segments, "phantom", [q])
+            his = his or bool(r.get("why"))
+        else:
+            left.append({"track_id": r["track_id"], "title": r.get("title"),
+                         "reason": "not_here" if away else "nowhere",
+                         **({"why": r["why"], "album": r.get("album")} if away else {})})
+    if not segments and left and all(t["reason"] == "not_here" for t in left):
+        # named by the one album they are of, else — a single track — by its title
+        albums = {t["album"] for t in left}
+        name = albums.pop() if len(albums) == 1 else None
+        raise _not_here(left[0]["why"], name or (left[0]["title"] if len(left) == 1 else None))
+    if his:
+        # as a not-owned track's tap: a node that streams, none of whose
+        # providers answers right now, says that — in the words it has for it
+        _ensure_streaming_ready()
+    return segments, [{k: v for k, v in t.items() if k != "album"} for t in left]
 
 
 def _push_segment(segments: list, kind: str, items: list) -> None:
@@ -3054,51 +3264,64 @@ def _push_segment(segments: list, kind: str, items: list) -> None:
         segments.append((kind, list(items)))
 
 
-def _entity_segments(refs: list) -> tuple[list, list]:
-    """Expand canonical refs into consecutive ('owned', [media rows]) /
-    ('phantom', [TrackQuery]) segments, preserving the caller's order.
-    Returns (segments, ids that resolved to nothing playable)."""
-    segments: list[tuple[str, list]] = []
+def _entity_segments(refs: list) -> tuple[list, list, list]:
+    """Expand canonical refs into consecutive ('owned', [file rows]) /
+    ('phantom', [TrackQuery]) segments, preserving the caller's order. An
+    album is read per track: a file row where a copy opens here now, the
+    track's stream where none does (_reach_segments). Returns (segments,
+    ids that resolved to nothing playable, what of the owner's own was left
+    out for not being here where nothing streams); refs none of which opens,
+    all of them the owner's own, are refused (_not_here)."""
+    hqp_id = active_hqp_endpoint()
+    rows: list = []
     missing: list[str] = []
     for ref in refs:
         if ref.kind == "album":
-            rows = _album_media_rows(ref.id)
-            kind, items = ("owned", rows) if rows else ("phantom", _phantom_album_queries(ref.id))
+            found = _album_rows(ref.id) or [{"query": q, "track_id": q.track_id}
+                                            for q in _phantom_album_queries(ref.id)]
         else:
             # The track's best copy the ACTIVE output can open (local, or
-            # held at the HQPlayer that is the output); none → a stream.
-            hqp_id = active_hqp_endpoint()
+            # held at the HQPlayer that is the output) where one opens now;
+            # none here now, or none at all → a stream.
             row = _db_query_one(f"""
-                SELECT f.id, f.location::text AS location FROM ({TRACK_FILES}) f
+                SELECT CASE WHEN f.here THEN f.id END AS id, f.location::text AS location,
+                       %(tid)s AS track_id, {_WHY.format(f='f')} AS why,
+                       (SELECT t.title FROM tracks t WHERE t.id = %(tid)s::uuid) AS title
+                FROM ({TRACK_FILES}) f
                 WHERE f.location = 'local'
                    OR f.hqp_endpoint_id = %(hqp_id)s
-                ORDER BY {owned_rank('f')}, {best_rip_order('f')}
+                ORDER BY {owned_rank('f')}, (f.absent_since IS NOT NULL), {best_rip_order('f')}
                 LIMIT 1
-            """, {"tid": ref.id, "hqp_id": hqp_id})
+            """, {"tid": ref.id, "hqp_id": hqp_id, "gone": _gone()})
             if row:
-                kind, items = "owned", [row]
+                found = [row]
             else:
                 q = _phantom_track_query(ref.id)
-                kind, items = "phantom", ([q] if q else [])
-        if not items:
+                found = [{"query": q, "track_id": ref.id}] if q else []
+        if not found:
             missing.append(ref.id)
             continue
-        _push_segment(segments, kind, items)
-    return segments, missing
+        rows.extend(found)
+    segments, left = _reach_segments(rows)
+    return segments, missing, left
 
 
-def _segment_items(segments: list) -> tuple[list, list]:
+def _segment_items(segments: list, left: Optional[list] = None, *,
+                   fill: bool = False) -> tuple[list, list]:
     """One list of slots for ('owned', [file rows]) / ('phantom' | 'whole',
     [TrackQuery]) segments, in the caller's order — owned files as files,
     streamed tracks as the tracks themselves (their streams the lane's;
     'whole' ones never as an excerpt, radio's rule) — and
     what of the streamed ones the node already knows does not stream here,
-    left out with why. Committed in ONE mutation by the caller: nothing tapped
-    meanwhile lands between two segments."""
-    items, left = [], []
+    left out with why, after what the split already left (`left`).
+    Committed in ONE mutation by the caller: nothing tapped meanwhile lands
+    between two segments. `fill`: an automatic fill's slots (Play similar),
+    the owned ones marked as such (_fills)."""
+    items, left = [], list(left or [])
     for kind, payload in segments:
         if kind == "owned":
-            items.extend(queue_mod.items_for_owned_rows(payload))
+            owned = queue_mod.items_for_owned_rows(payload)
+            items.extend(_fills(owned) if fill else owned)
         else:
             streamed, out = _streamed_items(payload, whole=kind == "whole")
             items.extend(streamed)
@@ -3106,7 +3329,8 @@ def _segment_items(segments: list) -> tuple[list, list]:
     return items, left
 
 
-def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = True) -> list:
+def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = True,
+                   fill: bool = False) -> list:
     """Replace the queue with these segments, every slot at once (and start
     it, once the queue lock is let go). `archive`, the caller's session
     rotation, runs once the output has taken the queue, before the commit
@@ -3115,8 +3339,9 @@ def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = 
 
     `play=False` assembles the queue without starting it: "put together a
     playlist" is a curation act, not a play command, and the canonical queue is
-    independent of the output, so it works with nothing attached."""
-    items, left = _segment_items(segments)
+    independent of the output, so it works with nothing attached. `fill`: an
+    automatic fill's slots (_segment_items)."""
+    items, left = _segment_items(segments, fill=fill)
     if not items:
         raise HTTPException(status_code=404, detail="Nothing in that list streams here")
     added, _gen = manager.replace_queue(items, play=play, archive=archive)
@@ -3149,7 +3374,7 @@ def queue_entities(req: QueueEntitiesRequest):
     if bad:
         raise HTTPException(status_code=400, detail=f"invalid kind: {sorted(bad)[0]}")
 
-    segments, missing = _entity_segments(req.items)
+    segments, missing, gone = _entity_segments(req.items)
     if not segments:
         raise HTTPException(status_code=404, detail="Nothing playable in that list")
     owned = sum(len(p) for k, p in segments if k == "owned")
@@ -3163,7 +3388,7 @@ def queue_entities(req: QueueEntitiesRequest):
     except Exception as e:
         raise _output_error(e)
     return {"ok": True, "queued": owned, "streaming": phantom - len(left),
-            "not_found": missing, "not_streamable": left}
+            "not_found": missing, "not_streamable": gone + left}
 
 
 @router.post("/play-entities")
@@ -3183,7 +3408,7 @@ def play_entities(req: QueueEntitiesRequest):
     if bad:
         raise HTTPException(status_code=400, detail=f"invalid kind: {sorted(bad)[0]}")
 
-    segments, missing = _entity_segments(req.items)
+    segments, missing, gone = _entity_segments(req.items)
     if not segments:
         raise HTTPException(status_code=404, detail="Nothing playable in that list")
     owned = sum(len(p) for k, p in segments if k == "owned")
@@ -3213,7 +3438,7 @@ def play_entities(req: QueueEntitiesRequest):
     except Exception as e:
         raise _output_error(e)
     return {"ok": True, "playing": req.autoplay, "queued": owned,
-            "streaming": phantom - len(left), "not_found": missing, "not_streamable": left}
+            "streaming": phantom - len(left), "not_found": missing, "not_streamable": gone + left}
 
 
 # -- Listening-history replay --------------------------------------------------
@@ -3229,68 +3454,53 @@ def play_entities(req: QueueEntitiesRequest):
 
 def _session_segments(session_id: str) -> tuple[list, int]:
     """('owned', [media rows]) / ('phantom', [TrackQuery]) segments for a
-    session snapshot, in slot order, plus the count of slots nothing can play.
-    An owned slot plays the copy the ACTIVE output opens natively — held at
-    the HQPlayer that is the output, else its own file, else the track's
-    best rip (the file was removed, the track kept); a slot with no such
-    copy streams like a phantom. Streamed queries are built per album — the
-    slot's album_id keeps the edition the listener pressed — and a slot
-    whose album no longer lists the track (or never had one) gets the
-    display edition."""
+    session snapshot, in slot order, plus the count of slots nothing can
+    play. An owned slot plays the copy the ACTIVE output opens natively
+    — held at the HQPlayer that is the output, else its own file, else the
+    track's best rip (the file was removed, the track kept) — where one
+    opens here now; a slot with no such copy streams like a phantom, or is
+    left out where the owner's copy is not here and nothing streams
+    (_reach_segments, which refuses a snapshot none of whose slots opens).
+    Streamed queries are built per album — the slot's album_id keeps the
+    edition the listener pressed — and a slot whose album no longer lists
+    the track (or never had one) gets the display edition."""
     hqp_id = active_hqp_endpoint()
     rows = _db_query(f"""
         SELECT st.track_id::text AS track_id, st.album_id::text AS album_id,
-               f.id AS file_id, f.location::text AS location
+               f.id, f.location::text AS location, t.title, al.title AS album,
+               CASE WHEN f.id IS NOT NULL THEN NULL
+                    WHEN EXISTS (SELECT 1 FROM media_files m3
+                                 JOIN album_variants v3 ON v3.id = m3.album_variant_id
+                                 WHERE m3.track_id = st.track_id AND v3.absent_since IS NULL)
+                    THEN 'disk'
+                    WHEN EXISTS (SELECT 1 FROM media_files m3 WHERE m3.track_id = st.track_id)
+                    THEN 'away' END AS why
         FROM session_tracks st
+        LEFT JOIN tracks t ON t.id = st.track_id
+        LEFT JOIN albums al ON al.id = st.album_id
         LEFT JOIN LATERAL (
             SELECT f.id, f.location
             FROM (
-                SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                SELECT mf.id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                        mf.is_lossless, mf.sample_rate, mf.bit_depth,
                        (mf.id = st.media_file_id) AS own
                 FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
                 WHERE mf.track_id = st.track_id
                 UNION ALL
-                SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since,
+                SELECT hf.id, av.location, av.hqp_endpoint_id, true,
                        hf.is_lossless, hf.sample_rate, hf.bit_depth, false
                 FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
                 WHERE hf.track_id = st.track_id
             ) f
-            WHERE f.location = 'local'
-               OR f.hqp_endpoint_id = %(hqp_id)s
+            WHERE f.here AND (f.location = 'local'
+               OR f.hqp_endpoint_id = %(hqp_id)s)
             ORDER BY {owned_rank('f')}, f.own DESC, {best_rip_order('f')}
             LIMIT 1) f ON true
         WHERE st.session_id = %(id)s::uuid
         ORDER BY st.position
-    """, {"id": session_id, "hqp_id": hqp_id})
-
-    by_album: dict[Optional[str], list[str]] = {}
-    for r in rows:
-        if r["file_id"] is None:
-            by_album.setdefault(r["album_id"], []).append(r["track_id"])
-    queries: dict[str, object] = {}
-    loose: list[str] = []
-    for album_id, tids in by_album.items():
-        own = ({q.track_id: q for q in _phantom_album_queries(album_id)}
-               if album_id else {})
-        for tid in tids:
-            if tid in own:
-                queries[tid] = own[tid]
-            else:
-                loose.append(tid)
-    if loose:
-        queries.update(_phantom_track_queries(loose))
-
-    segments: list[tuple[str, list]] = []
-    missing = 0
-    for r in rows:
-        if r["file_id"] is not None:
-            _push_segment(segments, "owned", [{"id": r["file_id"], "location": r["location"]}])
-        elif r["track_id"] in queries:
-            _push_segment(segments, "phantom", [queries[r["track_id"]]])
-        else:
-            missing += 1
-    return segments, missing
+    """, {"id": session_id, "hqp_id": hqp_id, "gone": _gone()})
+    segments, left = _reach_segments(rows)
+    return segments, len(left)
 
 
 @router.post("/play-session")
@@ -3408,7 +3618,7 @@ def play_similar(req: PlaySimilarRequest):
         ORDER BY {best_rip_order('mf')} LIMIT 1
     """, {"tid": req.track_id})
     try:
-        left = _play_segments(segments, archive=lambda: sessions.rotate_session(
+        left = _play_segments(segments, fill=True, archive=lambda: sessions.rotate_session(
             manager.queue, 'radio', seed_track_id=req.track_id,
             seed_media_file_id=(seed_mf or {}).get("id")))
     except HTTPException:
@@ -3442,48 +3652,46 @@ def play_similar(req: PlaySimilarRequest):
 
 @router.post("/play-tracks")
 def play_tracks(req: PlayTracksRequest):
-    """Play multiple tracks by IDs."""
+    """Play multiple tracks by file ids — each its file where that opens
+    here now, else a copy that does, else its stream (_add_owned)."""
     if not req.track_ids:
         raise HTTPException(status_code=400, detail="No track IDs provided")
     if req.origin is not None and req.origin not in _SESSION_ORIGINS:
         raise HTTPException(status_code=400, detail=f"invalid origin: {req.origin}")
 
-    rows = _db_query("""
-        SELECT mf.id, mf.file_path, mf.file_format, t.title, a.name as artist, al.title as album
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a ON ta.artist_id = a.id
-        JOIN album_variants av ON mf.album_variant_id = av.id
-        JOIN albums al ON av.album_id = al.id
-        WHERE mf.id = ANY(%(ids)s)
-        ORDER BY array_position(%(ids)s, mf.id)
-    """, {"ids": req.track_ids})
-
+    rows = _file_rows(req.track_ids)
     if not rows:
         raise HTTPException(status_code=404, detail="No tracks found")
 
     try:
-        added = _add_owned(rows, clear_first=True, archive=lambda: sessions.rotate_session(
+        left: list = []
+        added = _add_owned(rows, clear_first=True, left=left, archive=lambda: sessions.rotate_session(
             manager.queue, req.origin or 'mix', origin_album_id=req.origin_album_id,
-            seed_media_file_id=rows[0]["id"]))
+            seed_media_file_id=rows[0]["asked"]))
+        wanted = len(rows) - len(left)
+        if not wanted:
+            raise HTTPException(status_code=404, detail="Nothing in that list streams here")
         _exit_radio_mode()
-        if added < len(rows):
+        if added < wanted:
             raise HTTPException(
                 status_code=503,
-                detail=f"HQPlayer added {added} of {len(rows)} tracks "
+                detail=f"HQPlayer added {added} of {wanted} tracks "
                        "(connection unstable). Try again.",
             )
+        gone = {t["track_id"] for t in left}
         return {
             "ok": True,
-            "count": len(rows),
+            "count": wanted,
             "tracks": [
-                {"id": r["id"], "title": r["title"], "artist": r["artist"]}
-                for r in rows
+                {"id": r["asked"], "title": r["title"], "artist": r["artist"]}
+                for r in rows if r["track_id"] not in gone
             ],
+            "not_streamable": left,
         }
     except HTTPException:
         raise
+    except NotHere as e:
+        raise _output_error(e)          # an expected refusal, said in words: no error of the node's
     except Exception as e:
         logger.error(f"play-tracks failed: {e}")
         raise _output_error(e)
@@ -3497,42 +3705,36 @@ def queue_tracks(req: QueueTracksRequest):
     "add exactly these tracks", not the similarity-driven batches Radio Mode
     appends. The position is the server's to apply: the client appending and
     then reordering took three round trips and lost the block to any queue
-    change in between."""
+    change in between. A file that does not open here now is queued as its
+    track (_add_owned)."""
     if not req.track_ids:
         raise HTTPException(status_code=400, detail="No track IDs provided")
     if req.position not in ("next", "end"):
         raise HTTPException(status_code=400, detail="position must be 'next' or 'end'")
 
-    rows = _db_query("""
-        SELECT mf.id, mf.file_path, mf.file_format, t.title, a.name as artist, al.title as album
-        FROM media_files mf
-        JOIN tracks t ON mf.track_id = t.id
-        JOIN track_artists ta ON t.id = ta.track_id AND ta.role = 'primary'
-        JOIN artists a ON ta.artist_id = a.id
-        JOIN album_variants av ON mf.album_variant_id = av.id
-        JOIN albums al ON av.album_id = al.id
-        WHERE mf.id = ANY(%(ids)s)
-        ORDER BY array_position(%(ids)s, mf.id)
-    """, {"ids": req.track_ids})
-
+    rows = _file_rows(req.track_ids)
     if not rows:
         raise HTTPException(status_code=404, detail="No tracks found")
 
     try:
-        added = _add_owned(rows, clear_first=False, position=req.position)
-        if added < len(rows):
+        left: list = []
+        added = _add_owned(rows, clear_first=False, position=req.position, left=left)
+        wanted = len(rows) - len(left)
+        if added < wanted:
             raise HTTPException(
                 status_code=503,
-                detail=f"HQPlayer added {added} of {len(rows)} tracks "
+                detail=f"HQPlayer added {added} of {wanted} tracks "
                        "(connection unstable). Try again.",
             )
+        gone = {t["track_id"] for t in left}
         return {
             "ok": True,
             "count": added,
             "tracks": [
-                {"id": r["id"], "title": r["title"], "artist": r["artist"], "album": r["album"]}
-                for r in rows
+                {"id": r["asked"], "title": r["title"], "artist": r["artist"], "album": r["album"]}
+                for r in rows if r["track_id"] not in gone
             ],
+            "not_streamable": left,
         }
     except HTTPException:
         raise
@@ -3579,6 +3781,17 @@ _radio_refilling = False        # one fill thread at a time
 _radio_last_artist: Optional[str] = None   # artist of the last queued track — the
                                 # next batch avoids opening with the same artist
 _radio_dry_seed: Optional[str] = None      # the seed whose fill gave nothing
+
+
+def _fills(items: list) -> list:
+    """`items`, the owner's own copies an automatic fill queues (a radio
+    batch, Play similar), marked as nobody's tap and as his own copy
+    (QueueItem.whole, own_fill): with
+    its copy not here such a slot never streams behind his back — only
+    while his switch lets radio stream, and then whole."""
+    for it in items:
+        it.whole = it.own_fill = True
+    return items
 
 
 def _radio_streams() -> bool:
@@ -3694,8 +3907,8 @@ def _radio_build_batch(seed_uuid: str, played: set,
     batch = []
     for r in _radio_interleave(owned, phantom, prev_artist):
         if r["is_owned"]:
-            item = next(iter(queue_mod.items_for_owned_rows(
-                [{"id": r["file_id"], "location": r["location"]}])), None)
+            item = next(iter(_fills(queue_mod.items_for_owned_rows(
+                [{"id": r["file_id"], "location": r["location"]}]))), None)
         else:
             item = queue_mod.items_for_streamed([queries[r["track_id"]]], whole=True)[0]
         if item is not None:

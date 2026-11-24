@@ -32,8 +32,8 @@ from pathlib import Path as _Path
 
 from auth_hmac import HMACAuthMiddleware, ensure_secret
 from auth_hmac import secret_path as _secret_path
-from config import (settings, get_settings, ui_build, build_identity, LOGGING_CONFIG,
-                    HEALTH_PROBE_PATH)
+from config import (settings, get_settings, ui_build, build_identity, running_line,
+                    running_version, LOGGING_CONFIG, HEALTH_PROBE_PATH)
 from db_pool import db_query_one
 import csp
 import device_auth
@@ -178,6 +178,7 @@ def _build_mb_cycle(walk):
         dead=walk.dead,
         after_import=_start_canon_trigger,
         sharing_enabled=sharing_enabled,
+        has_identity=walk.has_identity,
         config={"fetch": True, "auto_interval_min": 360},
         lan=_lan_discovery,
         diag_record=_diag_record,
@@ -196,6 +197,7 @@ def _build_lb_cycle(walk):
         connect=walk.connect_peer,
         dead=walk.dead,
         sharing_enabled=sharing_enabled,
+        has_identity=walk.has_identity,
         config={"fetch": True, "auto_interval_min": 360},
         lan=_lan_discovery,
         diag_record=_diag_record,
@@ -403,6 +405,23 @@ async def _gate_follows_identity() -> None:
         p2p_app._gate()
 
 
+async def _requesters_follow_identity() -> None:
+    """The node has a key from now on: the sync walk and both slice cycles,
+    which ask no peer while it has none (sync_walk.SyncWalk.has_identity),
+    are asked for a run now, not at their next interval. On the walk's own
+    channel, so that whichever process runs it hears — this one's on a Docker
+    node, the launcher's in launcher mode; the walk's end asks the cycles
+    (_after_walk, P2PManager._after_walk)."""
+    from db_pool import db_execute
+    await asyncio.to_thread(db_execute, "NOTIFY sautium_sync_request")
+
+
+# What the start decided on the identity it had then, decided again when the
+# identity appears or changes (p2p_identity.on_change; registered at start)
+_IDENTITY_FOLLOWERS = (_peer_surface_follows_identity, _announce_user, _gate_follows_identity,
+                       _requesters_follow_identity)
+
+
 def _upnp_heuristic():
     from desktop.p2p.chat_client import upnp_heuristic
     return upnp_heuristic(_upnp, _dht_service)
@@ -583,13 +602,32 @@ async def _serve_p2p(port: int) -> None:
         logger.error(f"P2P sync server on :{port} stopped: {e}")
 
 
+def _publish_load(snap: dict) -> None:
+    """A band change of the load meter, for the Web UI: the snapshot kept
+    (user_settings['p2p.load'] — a support bundle and the Sync screen's first
+    paint read it) and said on the load's own channel, which reaches only
+    the screen that shows it (routers/settings.py, the Library stream's
+    `load` event)."""
+    try:
+        from desktop.p2p import load_meter, pricing
+        from routers.settings import _write
+        from db_pool import db_execute as _dbx
+        pricer = pricing.current()
+        _write("p2p.load", snap)
+        _dbx("SELECT pg_notify(%s, %s)",
+             (load_meter.CHANNEL,
+              load_meter.message(snap, pricer.snapshot() if pricer else None)))
+    except Exception as e:
+        logger.debug(f"load publish failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
     # Before anything starts a child
     from serving import hold_secrets
     hold_secrets()
-    logger.info(f"Starting {settings.app_name} v{settings.app_version}")
+    logger.info(f"Starting {running_line()}")
 
     # The database is a precondition, not a step to log around: the process
     # that launched uvicorn waited for postgres first (Docker: entrypoint.py;
@@ -837,8 +875,9 @@ async def lifespan(app: FastAPI):
 
     # Load meter: this process tree's CPU against the profile ceiling +
     # playback as a priority signal — headroom/dormancy for everything
-    # discretionary (miner hold, DHT pacing, later the gate). Published to
-    # user_settings['p2p.load'] on band changes for the Web UI.
+    # discretionary (miner hold, DHT pacing, later the gate). Published on
+    # band changes for the Web UI: user_settings['p2p.load'] and the
+    # snapshot on the load's own channel (load_meter.CHANNEL).
     global _load_meter, _playback_signal
     try:
         from desktop.p2p import load_meter as _lm
@@ -852,15 +891,6 @@ async def lifespan(app: FastAPI):
                     or _pm.held is not None)
 
         _load_meter = _lm.install(_lm.LoadMeter(_hp.resolve().name, playback_probe=_playing))
-
-        def _publish_load(snap: dict) -> None:
-            try:
-                from routers.settings import _write
-                from db_pool import db_execute as _dbx
-                _write("p2p.load", snap)
-                _dbx("NOTIFY sautium_identity")
-            except Exception as e:
-                logger.debug(f"load publish failed: {e}")
         _load_meter.subscribe(_publish_load)
         # Playback also becomes a session advisory lock in PostgreSQL — the
         # signal a backup running in another process (python -m backup)
@@ -927,7 +957,7 @@ async def lifespan(app: FastAPI):
     announce_port = _peer_port()
     _peer_ready = asyncio.Event()
     import p2p_identity
-    for follower in (_peer_surface_follows_identity, _announce_user, _gate_follows_identity):
+    for follower in _IDENTITY_FOLLOWERS:
         p2p_identity.on_change(follower)
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
         _start_host_network()
@@ -1392,7 +1422,7 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app
 app = FastAPI(
     title=settings.app_name,
-    version=settings.app_version,
+    version=running_version(),
     description="Self-hosted music companion — library, playback, assistant and the collectors' network",
     lifespan=lifespan,
     # No interactive docs: their pages load their scripts from a CDN, and
@@ -1571,13 +1601,20 @@ async def dht_reannounce() -> Dict[str, Any]:
     }
 
 
+def _config_identity() -> Dict[str, Any]:
+    """What this node runs, for /config: `app_version` is the release the
+    checkout is on, None off one (a support bundle carries it beside the
+    commit — desktop/diag_bundle)."""
+    identity = build_identity()
+    return {"app_version": identity["release"][1:] if identity["release"] else None, **identity}
+
+
 @app.get("/config")
 async def get_config() -> Dict[str, Any]:
     """Get current configuration (excluding sensitive data)."""
     return {
         "app_name": settings.app_name,
-        "app_version": settings.app_version,
-        **build_identity(),
+        **_config_identity(),
         "music_library_path": settings.music_library_path,
         "music_library_exists": settings.music_library_exists,
         "embedding_model": settings.embedding_model,

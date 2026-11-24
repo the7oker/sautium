@@ -150,6 +150,11 @@
           // album page update their rows in place, never a repaint
           window.streamSlots = msg.d;
           window.dispatchEvent(new CustomEvent('sautium:slots', { detail: msg.d }));
+        } else if (msg.t === 'reach') {
+          // What is reachable on the node now (the music folder's recorded
+          // answer, as a key): a screen that shows the owner's files reads
+          // its payload again when the key is another
+          window.dispatchEvent(new CustomEvent('sautium:reach', { detail: msg.d }));
         } else if (msg.t === 'research') {
           window.dispatchEvent(new CustomEvent('sautium:research-changed'));
         } else if (msg.t === 'chat') {

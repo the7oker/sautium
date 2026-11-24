@@ -70,6 +70,12 @@ DO $$ BEGIN
     CREATE TYPE track_credit_source AS ENUM ('tag', 'mb');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Who wrote a tracklist slot (album_tracks.source): MusicBrainz, or this
+-- node's own files' tags.
+DO $$ BEGIN
+    CREATE TYPE tracklist_source AS ENUM ('mb', 'tag');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE musical_key AS ENUM ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -772,12 +778,24 @@ CREATE TABLE IF NOT EXISTS album_variants (
     -- variants outrank the local ones (sql_queries.owned_rank).
     location variant_location NOT NULL DEFAULT 'local',
     hqp_endpoint_id INTEGER REFERENCES hqp_endpoints(id) ON DELETE CASCADE,
-    -- When the copy came into the library: the earliest arrival of its files
-    -- (media_files.arrived_at, kept by FOR EACH STATEMENT triggers), so the
-    -- Home "New in my collection" feed sorts by an indexed column instead of a
-    -- runtime GROUP BY across 30k media_files on every request. A copy at an
-    -- HQPlayer takes the moment the node first saw it (hqp_library.sync).
+    -- When the copy's files came onto the disk: the earliest arrival of its
+    -- files (media_files.arrived_at, kept by FOR EACH STATEMENT triggers). A
+    -- copy at an HQPlayer takes the moment the node first saw it
+    -- (hqp_library.sync). The order of the copies ONE round made, on Home's
+    -- "New in my collection" — between rounds entered_at decides — and the
+    -- date on the album page's copy.
     arrived_at TIMESTAMPTZ,
+    -- When the copy entered this library: the start of the scan round (one
+    -- run of the scan queue's worker over one merged request) or of the
+    -- HQPlayer library's sync that made the row — one instant for every copy
+    -- a round makes, written at the INSERT and never after (a re-read in
+    -- place, a canon move, files joining later do not make a copy new; a copy
+    -- split off by a re-tag takes its source's). What was scanned later is
+    -- newer, whatever its files say of themselves: a file system that keeps
+    -- the day a stick was filled sorted that stick two days before one
+    -- scanned sixteen minutes earlier (PI-NODE-2D, 2026-11-24). Not
+    -- created_at: inside a long scan that runs in walk order.
+    entered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     -- A local copy whose files a Rescan found none of (a folder moved out, a
     -- drive or a nested mount gone): set at that Rescan, NULL again when any
     -- walk sees one of its files. Its media_files rows stay — the tracklist,
@@ -831,6 +849,17 @@ CREATE TABLE IF NOT EXISTS album_tracks (
                                            -- optional, refreshable layer that may be reloaded
                                            -- or removed after a phantom was minted. From the
                                            -- canonical release's mb_track.length.
+    -- Who wrote the slot: 'mb' — MusicBrainz's tracklist (the phantom mint;
+    -- the seed's rows and a peer's records are catalogue rows too and keep
+    -- the default), or 'tag' — this node's own files' tags
+    -- (sign_audio._materialize_owned_tracklists, the only writer of it). A
+    -- slot the mint confirms is 'mb' from then on. The removal of a copy
+    -- takes the 'tag' slots its files alone held, so the album and its
+    -- tracks go with it instead of staying as a phantom built from the
+    -- person's tags (PI-NODE-2D, 2026-11-24) — but for an album the seed
+    -- picked (seed_picks), whose slots stay and hold it. Local: no payload
+    -- column (seal_guard_album_tracks), never exported.
+    source tracklist_source NOT NULL DEFAULT 'mb',
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (album_id, disc, position)
@@ -996,7 +1025,8 @@ CREATE TABLE IF NOT EXISTS media_files (
     -- When the file came into the library: its birth on this disk where the
     -- file system keeps one (a copy keeps its source's mtime, its birth is the
     -- copy's own), else the moment the scan first read it. Never the mtime.
-    -- Home's "New in my collection" orders by it (album_variants.arrived_at).
+    -- It orders the copies one scan round made on Home's "New in my
+    -- collection" (album_variants.arrived_at, after entered_at).
     arrived_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     -- When the file's content last changed what the canon reads: its import,
     -- and a read again that moved it to another track or album. The canon's
@@ -2146,8 +2176,10 @@ CREATE INDEX IF NOT EXISTS idx_album_genres_genre_id ON album_genres(genre_id);
 
 -- Physical entity indexes
 CREATE INDEX IF NOT EXISTS idx_album_variants_album_id ON album_variants(album_id);
-CREATE INDEX IF NOT EXISTS idx_album_variants_arrived_at_desc
-    ON album_variants(arrived_at DESC NULLS LAST);
+-- Home's "New in my collection" key, as the query orders by it: a page of
+-- the shelf reads a page of this index.
+CREATE INDEX IF NOT EXISTS idx_album_variants_entered_desc
+    ON album_variants (entered_at DESC, (COALESCE(arrived_at, entered_at)) DESC, album_id DESC);
 CREATE INDEX IF NOT EXISTS idx_media_files_track_id ON media_files(track_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_album_variant_id ON media_files(album_variant_id);
 CREATE INDEX IF NOT EXISTS idx_media_files_play_count ON media_files(play_count);

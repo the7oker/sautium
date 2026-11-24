@@ -68,6 +68,7 @@
     'its file left the library': 'Its file left the library',
     'this HQPlayer did not open it': 'This HQPlayer could not open it',
     'streaming is off on this node': 'Streaming is off on this node',
+    'its file is not here now': 'Its file is not here now',
     'nothing to stream it from': 'Nothing to stream it from',
     'no provider has it': 'No provider has it',
     'the stream could not be fetched': 'The stream could not be fetched',
@@ -90,6 +91,7 @@
     excerpt_only: 'only a 30-second excerpt streams here',
     unknown: "couldn't be fetched",
     off: 'streaming is off on this node',
+    not_here: 'its file is not here now',
   };
   function streamReason(code) {
     return STREAM_REASONS[code] || STREAM_REASONS.unknown;
@@ -100,9 +102,108 @@
     if (st.state === 'buffering') {
       return st.progress != null ? `Buffering ${Math.round(st.progress * 100)} %` : 'Buffering…';
     }
+    // a station's own file, not here now: no stream was asked for it
+    // (playback.substitute._stream_play) — it is passed until its file is back
+    if (st.state === 'failed' && st.reason === 'not_here') return 'Its file is not here now';
     if (st.state === 'failed') return `Doesn't stream here — ${streamReason(st.reason)}`;
     return '';
   }
+  // The owner's own music with no file that opens here now — its disk out
+  // (`why` 'disk': its folder does not answer) or its copy away (a Rescan
+  // found none of its files): what the album says of it, and what a refused
+  // tap says as a toast (a route's 409 `not_here`); `mark` is a tile's
+  // one-word mark for such an album. Drafts for the words sitting
+  // (PI-NODE-2D-DESIGN §9.1).
+  const NOT_HERE = {
+    disk: {
+      title: 'On a disk that is not connected',
+      streams: 'Playing it now streams it: each track once in full, then 30-second excerpts — until the disk is back.',
+      waits: 'It cannot play until the disk is connected.',
+      part: 'Some tracks are on a disk that is not connected',
+      partStreams: 'Playing them now streams them: each track once in full, then 30-second excerpts — until the disk is back.',
+      partWaits: 'They cannot play until the disk is connected.',
+      button: 'Its disk is not connected',
+      mark: 'not connected',
+    },
+    away: {
+      title: 'Your copy is away',
+      streams: 'Playing it now streams it: each track once in full, then 30-second excerpts — until its files are back.',
+      waits: 'It cannot play until its files are back.',
+      part: 'Your copy of some tracks is away',
+      partStreams: 'Playing them now streams them: each track once in full, then 30-second excerpts — until their files are back.',
+      partWaits: 'They cannot play until their files are back.',
+      button: 'Your copy is away',
+      mark: 'away',
+    },
+  };
+  function notHereWords(why) {
+    return NOT_HERE[why] || NOT_HERE.disk;
+  }
+  // What an owned album's page shows of files that do not open here now
+  // (albums.py: `away` when none of its picked files does, `away_part` when
+  // some do not; each with `why` and whether this node `streams`): null when
+  // every file is here — the page as it always was — else the header's two
+  // lines, whether the rows out stream (by track uuid, as a not-owned
+  // track's) or wait, and whether Play and Queue are refused on the page
+  // itself: an album all out on a node that streams nothing.
+  function albumOut(d) {
+    const out = (d.is_owned !== false && (d.away || d.away_part)) || null;
+    if (!out) return null;
+    const words = notHereWords(out.why);
+    const all = !!d.away;
+    const streams = !!out.streams;
+    return {
+      all, streams,
+      title: all ? words.title : words.part,
+      text: all ? (streams ? words.streams : words.waits)
+                : (streams ? words.partStreams : words.partWaits),
+      noPlay: all && !streams,
+      button: words.button,
+    };
+  }
+  // The row of one track of it: 'file' (as always), 'stream' or 'waits'
+  function albumRowKind(t, out) {
+    if (t.here !== false || !out) return 'file';
+    return out.streams ? 'stream' : 'waits';
+  }
+  // That row, for a track with no file here now (null for any other, which
+  // the album screen draws as always). 'stream': it streams as a not-owned
+  // track's row does — by track uuid, under this album's id — and is the
+  // local copy again when its file is back. 'waits': nothing streams here,
+  // so the row waits for its file — dimmed, no tap. `lines`: the track's
+  // own lines under its title, drawn by the screen.
+  function albumOutRow(t, rowKind, albumId, lines) {
+    if (rowKind === 'stream') {
+      return `
+            <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}"
+                 data-album-id="${escapeHtml(albumId)}">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${lines}
+                <div class="track-buffering" hidden></div>
+              </div>
+              <span class="track-dur"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
+              <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+            </div>
+          `;
+    }
+    if (rowKind === 'waits') {
+      return `
+            <div class="track-row is-out-track">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${lines}
+              </div>
+              <span class="track-dur">${fmtDuration(t.duration)}</span>
+              <span class="track-add" aria-hidden="true"></span>
+            </div>
+          `;
+    }
+    return null;
+  }
+
   // The states of the slots `msg` names, keyed `${index}|${track_id}`
   function streamStates(msg) {
     const out = new Map();
@@ -850,19 +951,80 @@
      which would have made a fourth connection to a single endpoint
      against the browser's six-per-origin budget. Subscribers get the
      same abort() shape sseStream returns, so leaving a screen still
-     reads the same at the call site. */
+     reads the same at the call site.
+
+     Two kinds of word come down it. A wake (`on`) says "something a screen
+     here shows moved" and carries nothing: the screen reads its own state
+     again. A named event (`onEvent`) carries its payload — `guidance`, the
+     trail; `load`, the node's load — and is no wake: only who asked for it
+     by name hears it, and nobody fetches anything.
+
+     The node sends `load` only to a connection whose page shows it: the
+     stream names its connection at connect (`stream`), and this side says
+     "this connection shows the load" while something here listens for it,
+     and takes it back when nothing does (_sayLoad). A connection that drops
+     takes its interest with it; the next one's name has it said again. */
   const libraryWake = {
     subs: new Set(),
+    named: new Map(),
     ctrl: null,
     timer: null,
+    id: null,                               // this connection's name
+    _loadSaid: { id: null, on: false },     // the last word sent about the load, and for which connection
+    _loadSeq: 0,
+    _open() {
+      if (this.ctrl) return;
+      this.ctrl = window.sseStream('/api/settings/library/stream',
+        (event) => this._heard(event),
+        (_err) => { /* sseStream auto-reconnects with backoff */ });
+    },
     on(fn) {
       this.subs.add(fn);
-      if (!this.ctrl) {
-        this.ctrl = window.sseStream('/api/settings/library/stream',
-          () => this._fanOut(),
-          (_err) => { /* sseStream auto-reconnects with backoff */ });
-      }
+      this._open();
       return { abort: () => this.subs.delete(fn) };
+    },
+    onEvent(name, fn) {
+      if (!this.named.has(name)) this.named.set(name, new Set());
+      this.named.get(name).add(fn);
+      this._open();
+      if (name === 'load') this._sayLoad();
+      return {
+        abort: () => {
+          this.named.get(name).delete(fn);
+          if (name === 'load') this._sayLoad();
+        },
+      };
+    },
+    /* Whether this connection shows the load, said to the node when it
+       changes — and once to each new connection that does (one that does
+       not has nothing to say: a connection starts with no interest). Each
+       word carries this page's count, so two in flight apply in order. One
+       that does not arrive needs no retry: the connection it named is gone
+       or going, and the next one's `stream` has it said again. */
+    _sayLoad() {
+      const subs = this.named.get('load');
+      const on = !!subs && subs.size > 0;
+      if (!this.id) return;
+      if (this._loadSaid.id === this.id ? this._loadSaid.on === on : !on) return;
+      this._loadSaid = { id: this.id, on };
+      this._loadSeq += 1;
+      fetch('/api/settings/library/stream/load', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stream: this.id, on, seq: this._loadSeq }),
+      }).catch(err => console.debug('load interest not delivered; the next connection says it again:', err));
+    },
+    _heard(event) {
+      if (event.type === 'message') { this._fanOut(); return; }
+      if (event.type === 'stream') {
+        this.id = JSON.parse(event.data).id;
+        this._sayLoad();
+        return;
+      }
+      const subs = this.named.get(event.type);
+      if (!subs || !subs.size) return;
+      const payload = JSON.parse(event.data);
+      subs.forEach(f => f(payload));
     },
     // A single enrichment run hits the server's progress callback a dozen
     // times in the first second (GPU init, text embeddings, lyrics
@@ -880,8 +1042,12 @@
   };
 
   /* ---------- Guidance trail ----------
-     The node knows what still needs a human (GET /api/settings/guidance);
-     this side knows where that thing lives. A task id is painted on every
+     The node knows what still needs a human; this side knows where that
+     thing lives. The node says the trail on the Library stream (`guidance`:
+     at connect, and whenever its set of tasks changes), so the page asks for
+     it once, for the first paint, and never at a wake — until 2026-11-24 it
+     asked GET /api/settings/guidance at every wake of the stream, which
+     under any activity was every two seconds. A task id is painted on every
      element carrying `data-guide="<id>"` — the More tab, the drawer row,
      the control itself — so the user follows one mark down to the button
      instead of hunting for it. `data-guide="*"` stands for any open task,
@@ -892,6 +1058,12 @@
      below: the mark is useless on a control that sits past the fold. */
   const guide = {
     tasks: new Set(),
+    // The answer applied last: the node numbers them (`seq`, within one run
+    // of the node), so an answer computed earlier that arrives later — the
+    // first read after the stream's first word, a "seen" behind a change —
+    // paints nothing
+    run: null,
+    seq: 0,
 
     has(id) { return id === '*' ? this.tasks.size > 0 : this.tasks.has(id); },
 
@@ -910,12 +1082,27 @@
       this.paint();
     },
 
-    async refresh() {
+    /* One of the node's answers — { tasks, seq, run } — applied unless a
+       later computation's was already. */
+    _take(answer) {
+      if (answer.run === this.run && answer.seq <= this.seq) return;
+      this.run = answer.run;
+      this.seq = answer.seq;
+      this._apply(answer.tasks);
+    },
+
+    /* The first paint, then the stream's word for every change after it. */
+    start() {
+      libraryWake.onEvent('guidance', answer => this._take(answer));
+      this._read();
+    },
+
+    async _read() {
       try {
         const r = await fetch('/api/settings/guidance');
-        if (!r.ok) return;             // keep the last painted trail
-        this._apply((await r.json()).tasks);
-      } catch (_) { /* offline: the next wake repaints */ }
+        if (!r.ok) return;             // the stream's first word paints it
+        this._take(await r.json());
+      } catch (_) { /* offline: the stream's first word paints it */ }
     },
 
     /* Retire a task whose completion is a judgement, not a state we can
@@ -924,8 +1111,8 @@
       if (!this.tasks.has(id)) return;
       try {
         const r = await fetch(`/api/settings/guidance/${id}/seen`, { method: 'POST' });
-        if (r.ok) this._apply((await r.json()).tasks);
-      } catch (_) { /* the wake from the write repaints */ }
+        if (r.ok) this._take(await r.json());
+      } catch (_) { /* the stream's word from the write repaints */ }
     },
   };
 
@@ -3393,9 +3580,16 @@
     // The album's files live only in the HQPlayer's library (no bytes here).
     const held = item.location === 'hqplayer'
       ? '<span class="album-tile-feat album-tile-held">HQPlayer</span>' : '';
+    // His album, none of whose files opens here now (`not_here`: its disk
+    // out, or its copy away): it keeps its place, dimmed, with the one word;
+    // the tap opens its page, which says the rest
+    const out = item.not_here
+      ? `<span class="album-tile-feat album-tile-out">${escapeHtml(notHereWords(item.not_here).mark)}</span>` : '';
+    if (out) tile.classList.add('is-not-here');
+    if (id) tile.dataset.albumId = id;
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
-        ${cover}${held}
+        ${cover}${held}${out}
       </div>
       <div class="album-title">${escapeHtml(title || '')}</div>
       <div class="album-artist">${escapeHtml(artist || '')}</div>
@@ -3405,6 +3599,25 @@
       tile.addEventListener('click', () => navigateToEntity('album', id));
     }
     return tile;
+  }
+
+  // An album tile's mark set in place (`why`: its disk out, its copy away;
+  // null: a file of it opens here) — what renderAlbumTile draws for
+  // `not_here`, for a tile already on the page (homeShelf).
+  function markAlbumTile(tile, why) {
+    tile.classList.toggle('is-not-here', !!why);
+    const cover = tile.querySelector('.album-cover');
+    let mark = cover.querySelector('.album-tile-out');
+    if (!why) {
+      if (mark) mark.remove();
+      return;
+    }
+    if (!mark) {
+      mark = document.createElement('span');
+      mark.className = 'album-tile-feat album-tile-out';
+      cover.appendChild(mark);
+    }
+    mark.textContent = notHereWords(why).mark;
   }
 
   // A listening-history tile. Reuses the album-tile visual (cover + two
@@ -3502,7 +3715,7 @@
   // One implementation so the two affordances can't drift on what a page is.
   //
   // `initialCursor` is an opaque object echoed verbatim back into the next
-  // request as query params — `{before, before_id}` for Home's new-in-library,
+  // request as query params — `{before, before_arrived, before_id}` for Home's new-in-library,
   // `{seed, offset}` for Discovery shuffle, `{offset}` for a Discovery result
   // block. The server decides the cursor shape; the utility just plumbs it
   // through. `opts.baseParams` is a URLSearchParams the cursor rides on top of:
@@ -3670,25 +3883,53 @@
       .then(data => fillHomeRow(favSec.row, data.artists, 'artist'))
       .catch(sectionFailure(favSec, 'favourite-artists')),
 
-    fetch('/api/home/new-in-library?limit=20')
-      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(data => {
-        if (!data.albums.length) {
-          newSec.section.remove();
-          return;
-        }
-        newSec.section.hidden = false;
-        fillHomeRow(newSec.row, data.albums, 'album');
-        attachInfiniteScroll(newSec.row, '/api/home/new-in-library',
-          data.next_cursor, 'album');
-      })
-      .catch(sectionFailure(newSec, 'new-in-library')),
+    homeShelf(newSec, '/api/home/new-in-library?limit=20', data => {
+      if (!data.albums.length) {
+        newSec.section.remove();
+        return null;
+      }
+      newSec.section.hidden = false;
+      fillHomeRow(newSec.row, data.albums, 'album');
+      return attachInfiniteScroll(newSec.row, '/api/home/new-in-library',
+        data.next_cursor, 'album');
+    }).catch(sectionFailure(newSec, 'new-in-library')),
 
-    fetch('/api/home/recommendations?limit=20')
-      .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-      .then(data => fillHomeRow(recSec.row, data.albums, 'album'))
-      .catch(sectionFailure(recSec, 'recommendations')),
+    homeShelf(recSec, '/api/home/recommendations?limit=20', data => {
+      fillHomeRow(recSec.row, data.albums, 'album');
+      return null;
+    }).catch(sectionFailure(recSec, 'recommendations')),
     ]);
+  }
+
+  // A Home shelf of albums: its first page drawn by `fill(data)`, which
+  // also starts its paging. When what opens here changes (followReach) the
+  // marks of the tiles it SHOWS — every page scrolled in — are asked again
+  // by their album ids and set in place (markAlbumTile): no tile is drawn
+  // again, so nothing flickers and a random shelf keeps its albums, and
+  // paging goes on untouched — a page that lands meanwhile brings its own
+  // marks, and only the tiles asked about are set.
+  async function homeShelf(sec, url, fill) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    fill(await r.json());
+    const row = sec.row;
+    const tiles = () => [...row.querySelectorAll('.album-tile[data-album-id]')];
+    const ask = async () => {
+      const ids = [...new Set(tiles().map(t => t.dataset.albumId))];
+      if (!ids.length) return null;
+      const resp = await fetch('/api/home/albums-away', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }) });
+      if (!resp.ok) return null;
+      return JSON.stringify({ ids, not_here: (await resp.json()).not_here });
+    };
+    followReach(row, ask, null, text => {
+      const said = JSON.parse(text);
+      const asked = new Set(said.ids);
+      tiles().forEach(t => {
+        if (asked.has(t.dataset.albumId)) markAlbumTile(t, said.not_here[t.dataset.albumId] || null);
+      });
+    });
   }
 
   /* ---------- Discovery screen (Step 1.5b) ----------
@@ -5296,6 +5537,62 @@
     return 'release_year';
   }
 
+  /* What opens here changes under an open page: the music folder's disk
+     pulled or put back. The node says what is reachable now as a key on
+     the stream every page holds (`reach`: the folder's recorded answer —
+     what the payloads themselves read; never the notice, whose readers may
+     say "unreachable" before a slow look has). A screen that shows the
+     owner's files names its payload here (followReach); when the key is
+     another, the payload is asked again and the screen repainted only if it says
+     otherwise — the same answer touches no DOM. Any element may follow (an
+     album's screen, a shelf's row of tiles): it names the URL its payload
+     came from — or how it is asked (a function giving its text, null for
+     nothing to ask) — that payload's text and how it is drawn again, handed
+     the new text, for one that draws from it. The followers are held weakly:
+     a screen the person left is the collector's, whatever the node says
+     later. */
+  const _reachScreens = new Set();
+  function followReach(screen, ask, text, rerender) {
+    if (!screen._reach) _reachScreens.add(new WeakRef(screen));
+    screen._reach = { ask, text, rerender };
+  }
+  async function refreshReach(screen) {
+    const reach = screen._reach;
+    if (!reach) return false;
+    let text;
+    try {
+      if (typeof reach.ask === 'function') {
+        text = await reach.ask();
+      } else {
+        const resp = await fetch(reach.ask);
+        if (!resp.ok) return false;
+        text = await resp.text();
+      }
+    } catch (_) { return false; }      // the node is away: the page's own reconnect repaints
+    if (text == null || !screen.isConnected || screen._reach !== reach || text === reach.text) return false;
+    reach.text = text;
+    reach.rerender(text);
+    return true;
+  }
+  // The key the node last said (the `reach` message of the page's stream:
+  // at every connect, and when the recorded answer changes). The first one
+  // a page hears is the state it loaded in; a later, other one — a change,
+  // or what moved while the page slept — asks the followers again.
+  let _reachKey = null;
+  function reachChanged(said) {
+    const key = (said && said.key) || '';
+    const first = _reachKey === null;
+    if (key === _reachKey) return;
+    _reachKey = key;
+    if (first) return;
+    _reachScreens.forEach(ref => {
+      const screen = ref.deref();
+      if (!screen) _reachScreens.delete(ref);        // collected: it follows nothing
+      else if (screen.isConnected) refreshReach(screen);
+    });
+  }
+  window.addEventListener('sautium:reach', e => reachChanged(e.detail));
+
   async function renderArtist(root, artistId, selectedMbid) {
     const screen = document.createElement('div');
     screen.className = 'detail-screen';
@@ -5309,7 +5606,9 @@
                   + (selectedMbid ? '&mbid=' + encodeURIComponent(selectedMbid) : '');
       const resp = await fetch(url);
       if (!resp.ok) throw httpError(resp);
-      d = await resp.json();
+      const text = await resp.text();
+      d = JSON.parse(text);
+      followReach(screen, url, text, () => renderArtist(root, artistId, selectedMbid));
     } catch (err) {
       screen.innerHTML = `<div class="placeholder-screen">
         <p class="placeholder-body">${unreachableCopy(err, 'Artist not found.')}</p>
@@ -5859,8 +6158,12 @@
           + (selectedVariantId != null ? '?variant_id=' + selectedVariantId : '');
         const resp = await fetch(url);
         if (!resp.ok) throw httpError(resp);
-        d = await resp.json();
+        const text = await resp.text();
+        d = JSON.parse(text);
         if (mySeq !== loadSeq) return;    // a later variant pick owns the screen
+        // What opens here may change under the open page (its disk pulled or
+        // put back): asked again then, repainted only when it says otherwise
+        followReach(screen, url, text, loadAndRender);
       } catch (err) {
         if (mySeq !== loadSeq) return;
         screen.innerHTML = `<div class="placeholder-screen">
@@ -5871,10 +6174,20 @@
       }
 
       const isPhantom = d.is_owned === false;
+      // The owner's album with no file that opens here now (albums.py: `away`
+      // when none does, `away_part` when some do not): its rows stream where
+      // this node streams, by the phantom row's machinery; where it does not,
+      // they wait, and Play says so on the page.
+      const out = albumOut(d);
+      const streamsOut = !!(out && out.streams);
       // Tag the screen so the global preview-events listener can find the open
-      // phantom album by id and re-fetch it (no per-render listener to tear down).
-      if (isPhantom) screen.dataset.phantomAlbumId = albumId;
+      // phantom album by id and re-fetch it (no per-render listener to tear
+      // down) — and an owned album whose rows stream, for the same rows' lines.
+      if (isPhantom || streamsOut) screen.dataset.phantomAlbumId = albumId;
       else delete screen.dataset.phantomAlbumId;
+      // his copy's quality badge is never a stream's (updateStreamQualityBadge)
+      if (isPhantom) delete screen.dataset.ownCopy;
+      else screen.dataset.ownCopy = '1';
       // The Buy CTA — the backend resolves it from the local MusicBrainz facts
       // (`buy.state`: the album's page, the artist's page, absent, unknown).
       // A known absence disables the button; only an unknown falls back to a
@@ -5959,6 +6272,13 @@
         const composers = (t.composers || []).map(c => c.name).join(' · ');
         const composersLine = composers
           ? `<div class="track-artist-line track-composers">${escapeHtml(composers)}</div>` : '';
+        // his own track with no file of it here now: its row streams, or waits
+        const outRow = albumOutRow(t, albumRowKind(t, out), albumId,
+          `${composersLine}${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}`);
+        if (outRow) {
+          trackParts.push(outRow);
+          continue;
+        }
         if (t.location === 'hqplayer') {
           // Held in the HQPlayer's own library, no file here: the row plays
           // by track uuid (play-entities) — natively when that HQPlayer is
@@ -6031,6 +6351,16 @@
         `;
       }
 
+      // The line that says where the copy is and what a tap does now; on an
+      // album all of which is out, Play and Queue are disabled where nothing
+      // streams — the sentence is on the page, never a silent tap.
+      const outHtml = !out ? '' : `
+        <div class="album-out-line" data-album-out>
+          <span class="aol-title">${escapeHtml(out.title)}</span>
+          <span class="aol-text">${escapeHtml(out.text)}</span>
+        </div>`;
+      const noPlayAttr = out && out.noPlay ? ` disabled title="${escapeHtml(out.button)}"` : '';
+
       screen.innerHTML = `
         <div class="album-side">
         <div class="album-hero">
@@ -6055,8 +6385,11 @@
                 + (streamQual ? `<span class="am-hires ${streamQualClass}">${streamQualLabel}</span>` : '')
               : heldOnly
                 ? `<span class="am-demo am-held">HQPlayer</span><span class="am-hires ${qualClass}">${qualLabel}</span>`
-                : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
+                : d.away
+                  ? `<span class="am-demo am-yours">Your copy</span><span class="am-hires ${qualClass}">${qualLabel}</span>`
+                  : `<span class="am-hires ${qualClass}" style="margin-left: auto;">${qualLabel}</span>`}
           </div>
+          ${outHtml}
           ${genresHtml ? `<div class="tag-row" style="padding: calc(12 * var(--px)) 0 0;">${genresHtml}</div>` : ''}
         </div>
         ${descHtml}
@@ -6075,8 +6408,8 @@
               <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
           ` : `
-            <button class="btn-primary" type="button" data-action="play-all">${SVG_PLAY} Play all</button>
-            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album">
+            <button class="btn-primary" type="button" data-action="play-all"${noPlayAttr}>${SVG_PLAY} Play all</button>
+            <button class="btn-secondary album-queue-btn" type="button" data-action="queue-album"${noPlayAttr}>
               <span class="btn-icon">${SVG_PLUS}</span><span class="btn-label">Queue</span>
             </button>
           `}
@@ -6106,8 +6439,26 @@
         albumId, tracks: d.tracks,
         playOrigin: 'album', originAlbumId: albumId,
         phantomAlbumId: isPhantom ? albumId : null,
+        // some of its tracks have no file here now: Play and Queue go by the
+        // album's uuid — each track its best copy that opens, else its stream
+        byAlbum: !!out,
       });
       updatePlayingHighlight();
+
+      if (streamsOut) {
+        // The rows that stream: dimmed where no source has the track, [30s]
+        // where it plays as an excerpt — the phantom rows' own readings. The
+        // quality badge stays his copy's.
+        fetch('/api/player/phantom-availability/' + encodeURIComponent(albumId))
+          .then(r => r.ok ? r.json() : null)
+          .then(body => {
+            if (body && screen.isConnected) {
+              applyPhantomMissing(screen, body.unavailable);
+              applyPhantomExcerpts(screen, body.excerpt);
+            }
+          })
+          .catch(err => console.warn('what streams of the album could not be read', err));
+      }
 
       if (isPhantom) {
         // Dim + disable tracks the provider can't stream — up front, no need to
@@ -6903,6 +7254,14 @@
                         text: escapeProfileHtml(msg || 'Streaming is not available on this node.') });
         return false;
       }
+      // The owner's own music with no file here now, on a node that streams
+      // nothing (409 `not_here`): the output is fine — said where the tap was
+      if (detail.reason === 'not_here') {
+        notices.toast({ kind: 'warning', key: 'player.not_here',
+                        title: notHereWords(detail.why).title,
+                        text: escapeProfileHtml(msg || notHereWords(detail.why).waits) });
+        return false;
+      }
       detail = msg;
     }
     if (resp && resp.status === 503) {
@@ -7052,7 +7411,7 @@
   // YouTube). Initial render shows the best case; this corrects it to Lossy /
   // Mostly lossy / Mostly lossless so the badge can't overstate the quality.
   function updateStreamQualityBadge(screen, quality) {
-    if (!screen || !quality) return;
+    if (!screen || !quality || screen.dataset.ownCopy) return;
     const MAP = {
       lossless:        ['Lossless',        'is-lossless'],
       lossy:           ['Lossy',           'is-lossy'],
@@ -7347,11 +7706,13 @@
         window.maybeClaimRenderer();
         try {
           let resp;
-          if (ctx.albumId && ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')) {
-            // A pick that lives in the HQPlayer's own library has no file id:
-            // the album plays by uuid, the backend picking each track's copy
-            // for the output — natively on that HQPlayer, a stream elsewhere
-            // (the Queue button beside it goes the same way).
+          if (ctx.albumId && (ctx.byAlbum
+              || (ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')))) {
+            // A pick that lives in the HQPlayer's own library has no file id,
+            // and one whose file is not here now names a file that does not
+            // open: the album plays by uuid, the backend picking each track's
+            // copy for the output — natively on that HQPlayer, a stream
+            // elsewhere (the Queue button beside it goes the same way).
             resp = await fetch('/api/player/play-entities', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -7457,15 +7818,16 @@
     // so the bar can stretch into its column.
     screen.querySelectorAll('[data-action="queue-album"]').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        if (e.detail > 1 || !ctx.tracks || !ctx.tracks.length) return;
+        if (e.detail > 1 || btn.disabled || !ctx.tracks || !ctx.tracks.length) return;
         const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
         const wrap = btn.closest('.album-actions');
         if (!wrap) return;
         if (wrap.classList.contains('is-confirming')) { closeAlbumQueueConfirm(wrap); return; }
-        if (ids.length) { openAlbumQueueConfirm(wrap, ids); return; }
-        // Every picked file lives in the HQPlayer's own library: queue the
-        // album by uuid, the backend picking the copies for the output.
-        if (ctx.albumId && ctx.tracks.some(t => t.location === 'hqplayer')) {
+        if (ids.length && !ctx.byAlbum) { openAlbumQueueConfirm(wrap, ids); return; }
+        // Every picked file lives in the HQPlayer's own library, or some have
+        // no file here now: queue the album by uuid, the backend picking the
+        // copies for the output.
+        if (ctx.albumId && (ctx.byAlbum || ctx.tracks.some(t => t.location === 'hqplayer'))) {
           openAlbumQueueBar(wrap, async (position) => {
             const resp = await fetch('/api/player/queue-entities', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -13475,7 +13837,7 @@
   };
   NOTICE_COPY['library.mount_missing'] = n => ({
     title: 'Music folder unreachable',
-    text: `<span class="num">${escapeHtml(fmtPathForDisplay((n.data && n.data.path) || ''))}</span> is empty or not mounted — your own tracks cannot play until it is back.`,
+    text: `<span class="num">${escapeHtml(fmtPathForDisplay((n.data && n.data.path) || ''))}</span> is empty or not mounted — your own tracks stream or wait until it is back.`,
   });
   // The same failure on three plays in a row (playback/hqp_diagnostics.py):
   // the output, not a track. The facts come from the server; the words here.
@@ -13835,8 +14197,8 @@
       this.list().forEach(n => { n.seen = true; });
       try {
         const r = await fetch('/api/settings/guidance/notices/seen', { method: 'POST' });
-        if (r.ok) guide._apply((await r.json()).tasks);
-      } catch (_) { /* the next wake repaints the trail */ }
+        if (r.ok) guide._take(await r.json());
+      } catch (_) { /* the stream's word from the write repaints the trail */ }
     },
 
     /* kind: info | warning | error | success. At most two buttons, in one
@@ -16341,11 +16703,11 @@
         </div>
         <div class="form-row">
           <span class="form-label">Headroom</span>
-          <span class="form-value mono" title="${escapeProfileHtml(loadDetail(sync.load))}">${escapeProfileHtml(loadLabel(sync.load))}</span>
+          <span class="form-value mono" data-sync-load title="${escapeProfileHtml(loadDetail(sync.load))}">${escapeProfileHtml(loadLabel(sync.load))}</span>
         </div>
         <div class="form-row">
           <span class="form-label">Market</span>
-          <span class="form-value mono" title="${escapeProfileHtml(gateDetail(sync.gate))}">${escapeProfileHtml(gateLabel(sync.gate))}</span>
+          <span class="form-value mono" data-sync-gate title="${escapeProfileHtml(gateDetail(sync.gate))}">${escapeProfileHtml(gateLabel(sync.gate))}</span>
         </div>
         ${supportRow}
       </div>
@@ -18322,29 +18684,71 @@
   // Draft words for the owner's words review.
   const SAFE_TO_PULL = 'Sautium only reads this disk and writes nothing to it. '
     + 'You can unplug it at any time: its albums are away until it is back.';
+  // While the folder does not answer its albums stream where this node
+  // streams (kept on the row, musicStreams), and wait where it does not:
+  // the row says which. Drafts for the words sitting (PI-NODE-2D-DESIGN §9.1).
   function paintMusicPathRow(row, missing) {
     row.classList.toggle('notice-row', missing);
     row.classList.toggle('kind-error', missing);
     const sub = row.querySelector('.row-stack-sub');
     const line = missing
-      ? 'Empty or not mounted — your own tracks cannot play or be scanned until it is back.'
+      ? (row.dataset.musicStreams
+        ? 'Not connected — your own tracks stream or wait, and nothing can be scanned, until it is back.'
+        : 'Not connected — your own tracks cannot play or be scanned until it is back.')
       : row.dataset.musicPullable ? SAFE_TO_PULL
       : MUSIC_FOLDER_LINES[row.dataset.musicFolder] || '';
     if (sub.textContent !== line) sub.textContent = line;
     sub.hidden = !line;
   }
+  // The Library screen under the notice library.mount_missing (`missing`):
+  // the Music path row's sentence, and — a scan of a folder that does not
+  // answer is refused by the node — "Scan for new" and "Rescan" waiting for
+  // the folder under it; both come back with the notice's end. Whether this
+  // node streams meanwhile is asked once a stretch (GET /api/player/reach).
+  let _nodeStreams = null;        // null: not known for this stretch
+  let _nodeStreamsAsked = false;
+  function paintMusicFolder(missing) {
+    if (!missing) { _nodeStreams = null; _nodeStreamsAsked = false; }
+    const row = document.querySelector('[data-music-path-row]');
+    if (row) {
+      row.dataset.musicStreams = _nodeStreams ? '1' : '';
+      paintMusicPathRow(row, missing);
+    }
+    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"]').forEach(btn => {
+      if (btn.disabled !== missing) btn.disabled = missing;
+    });
+    if (missing && row && !_nodeStreamsAsked) {
+      _nodeStreamsAsked = true;
+      fetch('/api/player/reach').then(r => (r.ok ? r.json() : null)).then(body => {
+        if (!body || !_nodeStreamsAsked) return;
+        _nodeStreams = !!body.streams;
+        if (notices.get('library.mount_missing')) paintMusicFolder(true);
+      }).catch(() => { _nodeStreamsAsked = false; });    // asked again at the next paint
+    }
+  }
 
   // A volume plugged into the machine that nothing mounted (backend
-  // library_root.unread: `d` is {label, format, mounts, driver}): the toast's
-  // words and the folder sheet's row, from one place. `mounts` — the format
-  // is one the machine mounts, so this mount failed; otherwise the format is
-  // one Sautium does not read. NTFS tried with the kernel's driver (`ntfs3`)
-  // is a machine without ntfs-3g, which opens what Windows formats: the
-  // setup shows how to add it. The label is a stranger's text: escaped, as
-  // every string returned is HTML.
+  // library_root.unread: `d` is {label, format, mounts, driver, unclear}):
+  // the toast's words and the folder sheet's row, from one place. `mounts` —
+  // the format is one the machine mounts, so this mount failed; otherwise the
+  // format is one Sautium does not read. NTFS tried with the kernel's driver
+  // (`ntfs3`) is a machine without ntfs-3g, which opens what Windows formats:
+  // the setup shows how to add it. `unclear` — the machine found no one
+  // filesystem on the volume: the marks of two (`ambivalent`), or none
+  // (`unknown`); such a volume gave no label, and `named` is what the row
+  // calls it. The label is a stranger's text: escaped, as every string
+  // returned is HTML.
   // Draft words for the owner's words review.
   function unreadDiskCopy(d) {
     const title = 'A disk could not be read';
+    if (d.unclear) {
+      const row = 'Sautium cannot tell what is on it.';
+      const sub = d.unclear === 'ambivalent'
+        ? 'It carries the marks of two formats (a quick format over an older one); '
+          + 'formatting it again in full on your computer clears them.'
+        : 'It may be empty, or in a format this machine does not know.';
+      return { title, text: `A disk — ${row} ${sub}`, named: 'A disk', row, sub };
+    }
     const name = d.label ? escapeHtml(d.label) : 'This disk';
     const format = d.format ? escapeHtml(d.format) : null;
     if (!d.mounts) {
@@ -18374,20 +18778,39 @@
       const c = unreadDiskCopy(p);
       return `
       <div class="manage-tokens-row" data-unread style="cursor:default;">
-        <span style="text-align:left;">${escapeHtml(p.label || 'Disk')} ${dim(`— ${c.row}`)}${under(c.sub)}</span>
+        <span style="text-align:left;">${c.named || escapeHtml(p.label || 'Disk')} ${dim(`— ${c.row}`)}${under(c.sub)}</span>
       </div>`;
     }
     const disk = p.kind === 'disk';
-    // a disk no automount named (a root that is a disk itself) goes by its
-    // label, else by its path
-    const label = disk ? (p.label || (p.name === p.path ? fmtPathForDisplay(p.path) : 'Disk')) : p.name;
-    const size = disk && p.size_bytes ? ` ${dim(`— ${escapeHtml(fmtBytes(p.size_bytes))}`)}` : '';
+    const size = disk && p.size_bytes ? escapeHtml(fmtBytes(p.size_bytes)) : '';
+    // A disk goes by its label. One with none, mounted in the disks' folder,
+    // is named by what it is and its size — its mount point's name is its
+    // UUID, which is nothing to a person; a root that is a disk itself, as a
+    // folder, goes by its path.
+    const head = disk && !p.label && p.name !== p.path
+      ? `USB disk${size ? ` · ${size}` : ''}`
+      : `${escapeHtml(disk ? (p.label || fmtPathForDisplay(p.path)) : p.name)}${size ? ` ${dim(`— ${size}`)}` : ''}`;
+    // An empty folder the library holds copies from lost them (`held`); one
+    // it never read is new
     const line = disk && p.read_only ? SAFE_TO_PULL
-      : p.empty ? 'Empty — its disk is not mounted, or the folder was removed.' : '';
+      : !p.empty ? ''
+      : p.held ? 'Empty — its disk is not mounted, or the folder was removed.'
+      : 'Empty — nothing is in it yet.';
     return `
       <button class="manage-tokens-row" type="button" data-path="${escapeHtml(p.path)}">
-        <span style="text-align:left;">${escapeHtml(label)}${size}${line ? under(line) : ''}</span><span class="chev">›</span>
+        <span style="text-align:left;">${head}${line ? under(line) : ''}</span><span class="chev">›</span>
       </button>`;
+  }
+
+  // Where the folder sheet stands, as a person names the place: on a disk,
+  // the disk (its label, or "USB disk") and the folders down from it — never
+  // the mount point's path, whose last part is the disk's UUID. `disk`: the
+  // disk the folder lies on (backend library_root.folders), null under a
+  // folder named at setup; a root that is a disk itself and has no label
+  // goes by its path, as in the list.
+  function _folderCrumb(at, disk) {
+    if (!disk || !(disk.label || disk.name)) return fmtPathForDisplay(at);
+    return [disk.label || 'USB disk', ...at.slice(disk.path.length).split('/').filter(Boolean)].join(' › ');
   }
 
   /* The folder sheet of a node that reads its music under roots (backend
@@ -18417,7 +18840,7 @@
           <button class="profile-btn primary" data-use hidden>Use this folder</button>
           <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">
-            Sautium can read every disk plugged into this machine. It writes to none of them.
+            Sautium reads the disks listed here and writes to none of them.
           </p>
         </div>
       </div>`;
@@ -18466,7 +18889,7 @@
       }
       const count = `${fmtNum(data.folders.length)} folder${data.folders.length === 1 ? '' : 's'} · `
         + `${fmtNum(data.audio_files)}${data.capped ? '+' : ''} audio file${data.audio_files === 1 ? '' : 's'}`;
-      crumb.textContent = `${fmtPathForDisplay(at)} — ${count}`;
+      crumb.textContent = `${_folderCrumb(at, data.disk)} — ${count}`;
       drawnPlaces = null;
       list.innerHTML = `
         <button class="manage-tokens-row" type="button" data-up><span>‹ Back</span><span></span></button>`
@@ -18711,7 +19134,7 @@
         ${actions}
       </section>
     `;
-    paintMusicPathRow(root.querySelector('[data-music-path-row]'), !!notices.get('library.mount_missing'));
+    paintMusicFolder(!!notices.get('library.mount_missing'));
     _wireBack(root);
     const chooseFolder = root.querySelector('[data-action="choose-folder"]');
     if (chooseFolder) chooseFolder.addEventListener('click', () => openMusicFolderSheet(() => renderLibrary(root)));
@@ -18885,7 +19308,7 @@
       const pathRow = root.querySelector('[data-music-path-row]');
       if (pathRow && pathRow.dataset.musicPullable !== (lib.music_folder_pullable ? '1' : '')) {
         pathRow.dataset.musicPullable = lib.music_folder_pullable ? '1' : '';
-        paintMusicPathRow(pathRow, !!notices.get('library.mount_missing'));
+        paintMusicFolder(!!notices.get('library.mount_missing'));
       }
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
@@ -19337,18 +19760,31 @@
   /* SSE-driven refresh — re-renders ONLY the [data-sync-content] block
      and re-wires its actions. Does NOT touch the SSE subscription, so
      the server's initial-ping → renderSync → re-subscribe loop is
-     impossible. Mirrors Library's refresh() / sseStream pattern. */
+     impossible. Mirrors Library's refresh() / sseStream pattern.
+
+     The screen shows more than the Library's state, and hears each part
+     where its change is said: a Library wake (a sync's end, the background
+     pass); the node's identity state on the page's event stream — the
+     Identity and Reachable rows, the Support row's moments; the notices on
+     the same stream — a support request that waits or was withdrawn; the
+     chat's events there — a friend came online; and the node's load as the
+     Library stream's `load` event, which carries the Headroom and Market
+     rows' values and is painted in place, nothing fetched. Until 2026-11-24
+     the identity's state and the notices arrived as Library wakes, the load
+     as one of them every two seconds, and the friends online were read at
+     whichever of those came next. */
   function _subscribeSyncStream(root) {
     if (_syncStreamCtrl) { _syncStreamCtrl.abort(); _syncStreamCtrl = null; }
+    const here = () => parseHash().startsWith('more/sync');
+    const stop = () => { if (_syncStreamCtrl) { _syncStreamCtrl.abort(); _syncStreamCtrl = null; } };
 
     async function refresh() {
-      if (!parseHash().startsWith('more/sync')) {
-        _syncStreamCtrl && _syncStreamCtrl.abort();
-        _syncStreamCtrl = null;
-        return;
-      }
+      if (!here()) { stop(); return; }
+      // Three sources may say "read again" within one moment (a page back
+      // from sleep hears all of them): the newest read paints
+      const fresh = claimFresh('sync.state');
       const sync = await _fetchSyncState();
-      if (!sync) return;
+      if (!sync || !fresh()) return;
 
       const contentDiv = root.querySelector('[data-sync-content]');
       if (!contentDiv) return;
@@ -19357,7 +19793,36 @@
       _wireSyncActions(root, sync);
     }
 
-    _syncStreamCtrl = libraryWake.on(refresh);
+    function paintLoad(said) {
+      if (!here()) { stop(); return; }
+      _paintSyncLoad(root, said);
+    }
+
+    const wake = libraryWake.on(refresh);
+    const load = libraryWake.onEvent('load', paintLoad);
+    const said = ['sautium:identity', 'sautium:notice', 'sautium:chat-changed'];
+    said.forEach(name => window.addEventListener(name, refresh));
+    _syncStreamCtrl = {
+      abort() {
+        wake.abort();
+        load.abort();
+        said.forEach(name => window.removeEventListener(name, refresh));
+      },
+    };
+  }
+
+  /* The node-load rows from a `load` event: { load, gate } — `gate` null
+     where the process that measured runs no pricer (its row stays). */
+  function _paintSyncLoad(root, said) {
+    const set = (el, label, detail) => {
+      if (!el) return;
+      if (el.textContent !== label) el.textContent = label;
+      if (el.title !== detail) el.title = detail;
+    };
+    set(root.querySelector('[data-sync-load]'), loadLabel(said.load), loadDetail(said.load));
+    if (said.gate) {
+      set(root.querySelector('[data-sync-gate]'), gateLabel(said.gate), gateDetail(said.gate));
+    }
   }
 
   /* ---------- Wire it up ---------- */
@@ -19414,8 +19879,7 @@
     queue.init();
     moreDrawer.init();
     refreshAiAvailability();
-    guide.refresh();
-    libraryWake.on(() => guide.refresh());
+    guide.start();
     // Notices ride /api/events (player.js re-dispatches the snapshot); the
     // link state comes from the same stream's transport.
     window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));
@@ -19442,8 +19906,9 @@
       // Targeted updates only — the open screen keeps its DOM.
       const note = document.querySelector('[data-discography-pending]');
       if (note) note.innerHTML = discographyPendingText();
-      const pathRow = document.querySelector('[data-music-path-row]');
-      if (pathRow) paintMusicPathRow(pathRow, !!notices.get('library.mount_missing'));
+      if (document.querySelector('[data-music-path-row]')) {
+        paintMusicFolder(!!notices.get('library.mount_missing'));
+      }
       if (parseHash().startsWith('more/sync')) {
         const content = screenRoot() && screenRoot().querySelector('[data-sync-content]');
         if (content) {

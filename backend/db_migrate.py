@@ -114,7 +114,19 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      without the dump; a generational suffix joins its name) reads no file
      differently, so it is a derive, not a re-read: `composer_commas_v1`
      derives once the comma tracks it would now credit otherwise
-     (credits.rederive_commas).
+     (credits.rederive_commas). The leftovers step (`tracklist_leftovers_v1`,
+     2026-11-24, PI-NODE-2D) removes once the albums a removed copy left
+     behind while no tracklist slot said who wrote it: those with no copy, no
+     release group, not imported and with no imported slot — their slots,
+     then those slots' tracks that nothing else refers to, then the albums,
+     and nothing else (an artist left credited by nothing stays, as a minted
+     similar does). Rows the owner sees, so it is
+     his yes for this one named step (the same day), not a rule: from then on
+     a removal takes the slots its files' tags wrote itself
+     (album_tracks.source, scanner.drop_tag_slots). It needs no column of
+     that delta — a leftover's slots have no file, so the delta's backfill
+     leaves every one 'mb', and the step takes them whatever they say — and
+     runs after the schema deltas like every data step, before the seed.
 
 Right after the schema deltas, once per database, the birth preset
 (`birth_preset_v1`, _apply_birth_preset): the switches a node's setup chose
@@ -280,6 +292,57 @@ def _cut_over_bindings(conn) -> dict:
         shed = cur.rowcount
     conn.commit()
     return {"imported_deleted": deleted, "own_seals_shed": shed}
+
+
+# The albums a removed copy left behind while no tracklist slot said who
+# wrote it (album_tracks.source, 2026-11-24): no copy, no release group, not
+# a peer's or the seed's row, none of its slots a peer's. The mint always
+# writes a release group, the seed and a share write `imported`, and a scan
+# makes an album and its copy in one transaction — so only a copy that went
+# (removed, or moved to the album its files were re-tagged to) leaves this
+# shape. A leftover that has a release group cannot be told from a phantom
+# and is not in it; neither is an album the seed picked (owned before the
+# seed and never bound, then removed, it would have the shape): the mint and
+# the album merges spare a seed's pick everywhere, and so does this.
+_TRACKLIST_LEFTOVERS = """
+    al.musicbrainz_id IS NULL AND NOT al.imported
+    AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
+    AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id AND at.imported)
+    AND NOT EXISTS (SELECT 1 FROM seed_picks sp WHERE sp.album_id = al.id)"""
+
+
+def _remove_tracklist_leftovers(conn) -> dict:
+    """The owner's yes of 2026-11-24 for this one step (PI-NODE-2D §6.6):
+    the completion of removals he had confirmed. In one transaction, scoped
+    to the albums of _TRACKLIST_LEFTOVERS and nothing else — never a
+    predicate over the whole of `album_tracks` or `tracks` — their slots,
+    then THEIR tracks that nothing else refers to (ORPHAN_TRACK_SQL: one
+    owned on another album, with analysis, a listen or lyrics stays), then
+    the albums. That is all the yes named: an artist those rows credited and
+    nothing credits any more stays — a row of the shape a minted similar has,
+    with its bio, tags and similars — until a removal of the owner's own
+    takes it; the links and credits of a row that goes cascade with it
+    (track_credits by its track; its RESTRICT is on the artist). Returns the
+    counts."""
+    from canon.identity import ORPHAN_TRACK_SQL
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT al.id::text FROM albums al WHERE {_TRACKLIST_LEFTOVERS}")
+        albums = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT DISTINCT track_id::text FROM album_tracks WHERE album_id = ANY(%s::uuid[])",
+                    (albums,))
+        tracks = [r[0] for r in cur.fetchall()]
+        counts = {}
+        cur.execute("DELETE FROM album_tracks WHERE album_id = ANY(%s::uuid[])", (albums,))
+        counts["slots"] = cur.rowcount
+        cur.execute(f"""DELETE FROM tracks t WHERE t.id = ANY(%s::uuid[])
+                          AND {ORPHAN_TRACK_SQL.format(t='t')}""", (tracks,))
+        counts["tracks"] = cur.rowcount
+        cur.execute(f"""DELETE FROM albums al WHERE al.id = ANY(%s::uuid[]) AND {_TRACKLIST_LEFTOVERS}
+                          AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id)""",
+                    (albums,))
+        counts["albums"] = cur.rowcount
+    conn.commit()
+    return {k: counts[k] for k in ("albums", "slots", "tracks")}
 
 
 def _repair_naive_listen_times(conn) -> int:
@@ -891,6 +954,14 @@ def apply_pending() -> dict:
                 out["composer_commas"] = rederive_commas(db)
                 db.commit()
             _mark(conn, "composer_commas_v1")
+
+        # Before the seed, whose album of the same id would otherwise land
+        # on a leftover's row and slots.
+        if not _marked(conn, "tracklist_leftovers_v1"):
+            out["tracklist_leftovers"] = _remove_tracklist_leftovers(conn)
+            logger.info("tracklist leftovers (albums with no copy, no release group and no "
+                        "imported slot) removed, once: %s", out["tracklist_leftovers"])
+            _mark(conn, "tracklist_leftovers_v1")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

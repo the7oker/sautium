@@ -280,6 +280,16 @@ def _update_track_uuid(db: Session, old_id, new_id) -> str:
     if old_str == new_str:
         return new_str
 
+    # The queue holds track uuids of its own, and so does the listen in
+    # progress (play tracking keys on them): told at this transaction's
+    # commit, on the channel of the file layer's other changes, in the
+    # canon's own word — "this track is now that one" — which every slot
+    # bound to a file of the old uuid, and the open listen of such a slot,
+    # follow in one step (PlaybackManager.rebind_files,
+    # playback.tracker.follow). A streamed slot keeps its uuid.
+    db.execute(text("SELECT pg_notify('sautium_files_removed', :word)"),
+               {"word": f"track {old_str} {new_str}"})
+
     exists = db.execute(
         text("SELECT 1 FROM tracks WHERE id = :id"), {"id": new_str}
     ).fetchone()

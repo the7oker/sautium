@@ -16,6 +16,7 @@ the version (playback.substitute.Lane.slots).
 """
 
 import logging
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -23,9 +24,21 @@ from typing import Optional
 
 from db_pool import db_query as _db_query
 from hqplayer_client import file_path_to_uri
-from sql_queries import best_rip_order
+from sql_queries import HERE, best_rip_order
 
 logger = logging.getLogger(__name__)
+
+def gone_prefixes() -> list:
+    """scanner.gone_prefixes() — the stored-path prefixes of the folders
+    that do not answer now — as the play path reads it: the list is that
+    module's recorded observation, so a process that never loaded the
+    scanner has looked at no folder and holds none (the backend looks at
+    its start, PlaybackManager.init_from_settings). Never an import here:
+    the first one reads the catalogue, and this runs under the queue's
+    lock."""
+    scanner = sys.modules.get("scanner")
+    return scanner.gone_prefixes() if scanner is not None else []
+
 
 # Provider-resolved track durations for phantom tracks MusicBrainz has NO length
 # for — DISPLAY ONLY, deliberately never written to album_tracks.length_ms. That
@@ -79,10 +92,21 @@ class QueueItem:
     # A 30 s excerpt, not the recording: shown as [30s], never a listen, and
     # `duration_seconds` is the clip's own length.
     excerpt: bool = False
-    # Played whole or not at all: a radio slot (radio.streamed) streams only
-    # from a full-length link — the excerpt is never in its chain, so a slot
-    # no full link serves fails and is walked past, never a 30 s clip.
+    # A slot an automatic fill queued (radio, Play similar) — nobody tapped
+    # it — played whole or not at all: it streams only from a full-length
+    # link (the excerpt is never in its chain, so a slot no full link serves
+    # fails and is walked past, never a 30 s clip), and one queued as a file
+    # of the owner's streams at all only while his switch lets radio stream
+    # (radio.streamed) — with its file not here it is otherwise a gap, its
+    # file again when that opens (playback.substitute._stream_play). A fill
+    # never spends a demo listen of his own album behind his back.
     whole: bool = False
+    # That fill queued it AS a copy of the owner's own (never as a stream
+    # his switch allowed): said here, apart from its origin — which a
+    # re-bind turns into the track itself when the file leaves the library —
+    # so the rule above holds through a re-bind, a persisted queue's restore
+    # and an output switch.
+    own_fill: bool = False
     # How the ACTIVE output opens this slot when that differs from `source`
     # (playback.substitute, recomputed on every output switch): a `file` /
     # `hqp` copy the new output opens itself, a `proxy` stream that stands
@@ -91,7 +115,9 @@ class QueueItem:
     # says. `source` is the enqueue-time origin, which no output switch
     # touches, so the way back to the output that opened it natively is
     # free; it changes only when the file it names leaves the library
-    # (CanonicalQueue.rebind).
+    # (CanonicalQueue.rebind). A file that does not open here now — its
+    # copy away, its folder not answering — is never a way in: the slot's
+    # `play` is a stream until it does (CanonicalQueue.reread).
     play: Optional[dict] = None
 
     def opener(self) -> dict:
@@ -218,44 +244,100 @@ class CanonicalQueue:
                 self._version += 1
             return changed
 
-    def reresolve(self, resolve) -> int:
+    def reresolve(self, resolve, hold: Optional[QueueItem] = None) -> int:
         """Recompute how the ACTIVE output opens every slot (`QueueItem.play`)
         — an output switch keeps the queue, and each output opens its own
         copy of a track (playback.substitute.native_plays). `resolve` maps
         the items, in order, to their `play` (None = as `source` says).
-        Returns the number of slots left `pending` a stream."""
+        `hold` — a slot the output plays on through this re-read (HQPlayer
+        rebuilt around its position) — keeps its way in whatever was read,
+        as in reread. Returns the number of slots left `pending` a stream."""
         with self._lock:
-            plays = list(resolve(list(self._items)))
+            plays = [it.play if it is hold else play
+                     for it, play in zip(self._items, resolve(list(self._items)))]
             for it, play in zip(self._items, plays):
                 _set_play(it, play)
             self._version += 1
             return sum(1 for p in plays if p and p.get("kind") == "pending")
 
-    def rebind(self, origins, plays) -> list[QueueItem]:
+    def rebind(self, origins, plays, retracked=(), follow=None) -> list[QueueItem]:
         """The file layer changed under the queue (PlaybackManager.
-        rebind_files). `origins` maps the items, in order, to what each must
-        change (rebind_origins): None where nothing does, else the fields to
-        set — none when only its way in named a gone file. Every item that
-        changed has its `play` re-read through `plays` (the active output's
-        native_plays), or cleared with no output attached: the attach
-        re-reads every slot. Items change in place, so the playing one stays
-        the object the backends and the tracker hold. Returns the items that
-        changed; the version is bumped when any did."""
+        rebind_files). `retracked` — the canon's own words, in order: (old,
+        new) track uuids, "this track is now that one" — moves every slot
+        bound to a file that carries an old uuid to the new one first (a
+        streamed slot keeps the uuid it was queued with); then `origins`
+        maps the items, in
+        order, to what each must change (rebind_origins): None where nothing
+        does, else the fields to set — none when only its way in named a
+        gone file. A slot's track uuid is set through `follow(item, uuid)`
+        (playback.tracker.follow: in one step with the listen in progress of
+        that item). Every item that changed has its `play` re-read through
+        `plays` (the active output's native_plays), or cleared with no
+        output attached: the attach re-reads every slot. Items change in
+        place, so the playing one stays the object the backends and the
+        tracker hold. Returns the items that changed; the version is bumped
+        when any did."""
+        follow = follow or (lambda it, track_id: setattr(it, "track_id", track_id))
+        # Where each rewritten uuid ended, the words read once from the last
+        # to the first (A→B then B→C: A is C)
+        now: dict = {}
+        for old, new in reversed(retracked):
+            now[old] = now.get(new, new)
         with self._lock:
             items = list(self._items)
-            moved = []
+            moved, seen = [], set()
+            for it in items:
+                # A streamed slot is left: its stream is known to the
+                # outputs by the uuid it was queued with (the media
+                # proxy's token, HQPlayer's hand-over ledger), and a slot
+                # re-keyed under them is an entry no slot reads
+                if it.track_id in now and it.source.get("kind") == "file":
+                    follow(it, now[it.track_id])
+                    seen.add(id(it))
+                    moved.append(it)
             for it, change in zip(items, origins(items)):
                 if change is None:
                     continue
                 for name, value in change.items():
-                    setattr(it, name, value)
-                moved.append(it)
+                    if name == "track_id" and value is not None:
+                        follow(it, value)
+                    else:
+                        setattr(it, name, value)
+                if id(it) not in seen:
+                    moved.append(it)
             if moved:
                 new_plays = plays(moved) if plays is not None else [None] * len(moved)
                 for it, play in zip(moved, new_plays):
                     _set_play(it, play)
                 self._version += 1
             return moved
+
+    def reread(self, pick, plays, hold: Optional[QueueItem] = None) -> tuple[list[QueueItem], bool]:
+        """What opens here changed under the queue (PlaybackManager.
+        reach_changed): the way in of every slot `pick` names is read again
+        through `plays` (the active output's native_plays), the origin
+        untouched. A slot whose way in is a file again keeps nothing the
+        stream told of its length (an excerpt's 30 s). `hold` — the slot the
+        output sounds — keeps its way in whatever was read. Returns the
+        items whose way in changed, and whether `hold`'s would have; the
+        version is bumped when any did."""
+        with self._lock:
+            chosen = [it for it in self._items if pick(it)]
+            if not chosen:
+                return [], False
+            changed, owed = [], False
+            for it, play in zip(chosen, plays(chosen)):
+                if play == it.play:
+                    continue
+                if it is hold:
+                    owed = True
+                    continue
+                _set_play(it, play)
+                changed.append(it)
+            if changed:
+                _file_lengths(changed)
+                self._version += 1
+            return changed, owed
 
     def swap_play(self, item: "QueueItem", expected: Optional[dict], play: Optional[dict], *,
                   bump: bool = True, before=None) -> bool:
@@ -409,6 +491,25 @@ def _set_play(item: QueueItem, play: Optional[dict]) -> None:
         item.provider, item.excerpt = None, False
 
 
+def _file_lengths(items: list[QueueItem]) -> None:
+    """Each of `items` whose way in is a file of this node shows that file's
+    length — a stream's landing wrote its own (CanonicalQueue.
+    refresh_proxy_items). Caller holds the queue's lock."""
+    by_file = {}
+    for it in items:
+        src = it.opener()
+        if src.get("kind") == "file":
+            by_file.setdefault(src.get("media_file_id") or it.media_file_id, []).append(it)
+    by_file.pop(None, None)
+    if not by_file:
+        return
+    for r in _db_query("SELECT id, duration_seconds FROM media_files "
+                       "WHERE id = ANY(%(ids)s) AND duration_seconds IS NOT NULL",
+                       {"ids": list(by_file)}):
+        for it in by_file[r["id"]]:
+            it.duration_seconds = float(r["duration_seconds"])
+
+
 # -- item constructors -----------------------------------------------------
 
 _MEDIA_ITEM_SQL = """
@@ -466,14 +567,25 @@ def _item_from_media_row(r: dict) -> QueueItem:
 # (one on the album the slot was queued from first) and whether the track
 # itself is still in the catalogue. A file of a copy that is away
 # (album_variants.absent_since) counts as gone while a present copy of the
-# track is here: the slot moves to it; with none, it keeps its file, which
-# opens to a missing file as an unreachable root's do.
+# track is here: the slot moves to it — a copy that opens now first
+# (sql_queries.HERE); with none, it keeps its file as its origin, and its
+# way in is read as any slot's whose file does not open here now
+# (playback.substitute.native_plays: a stream).
+#
+# The track asked about is the one the slot's FILE belongs to now (`track`),
+# the slot's own `track_id` only where that file's row is gone: the canon
+# rewrites a track's uuid under the queue (canon.identity._update_track_uuid
+# — a rename, a merge, a split) with no event of the queue's, and a slot
+# read by the uuid its enqueue saw would find no copy and no track. A slot
+# whose file's track is another now takes that uuid (`track_moved`): play
+# tracking keys on it, and a listen against a uuid that is gone is no row —
+# the rewrite wakes this pass itself, at its commit.
 _AWAY_FILE = """EXISTS (SELECT 1 FROM media_files af
                      JOIN album_variants av ON av.id = af.album_variant_id
                      WHERE af.id = {m} AND av.absent_since IS NOT NULL)
             AND EXISTS (SELECT 1 FROM media_files pf
                         JOIN album_variants pv ON pv.id = pf.album_variant_id
-                        WHERE pf.track_id = s.track_id AND pv.absent_since IS NULL)"""
+                        WHERE pf.track_id = s.track AND pv.absent_since IS NULL)"""
 
 _REBIND_SQL = f"""
     WITH q AS (
@@ -484,11 +596,14 @@ _REBIND_SQL = f"""
                s.pmid IS NOT NULL AND (NOT EXISTS (
                    SELECT 1 FROM media_files mf WHERE mf.id = s.pmid)
                    OR {_AWAY_FILE.format(m='s.pmid')}) AS play_gone
-        FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[])
-             WITH ORDINALITY AS s(mid, pmid, track_id, album_id, slot)
+        FROM (SELECT u.*, COALESCE((SELECT mf.track_id FROM media_files mf WHERE mf.id = u.mid),
+                                   u.track_id) AS track
+              FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[])
+                   WITH ORDINALITY AS u(mid, pmid, track_id, album_id, slot)) s
     )
-    SELECT q.slot, q.origin_gone,
-           EXISTS (SELECT 1 FROM tracks t WHERE t.id = q.track_id) AS track_kept,
+    SELECT q.slot, q.origin_gone, q.track::text AS track,
+           q.track IS DISTINCT FROM q.track_id AS track_moved,
+           EXISTS (SELECT 1 FROM tracks t WHERE t.id = q.track) AS track_kept,
            c.id, c.file_path, c.file_format, c.duration_seconds,
            c.cue_start_seconds, c.cue_end_seconds
     FROM q
@@ -497,12 +612,12 @@ _REBIND_SQL = f"""
                mf.duration_seconds, mf.cue_start_seconds, mf.cue_end_seconds
         FROM media_files mf
         JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE q.origin_gone AND mf.track_id = q.track_id
-        ORDER BY (av.absent_since IS NOT NULL), (av.album_id = q.album_id) DESC NULLS LAST,
+        WHERE q.origin_gone AND mf.track_id = q.track
+        ORDER BY (NOT {HERE}), (av.album_id = q.album_id) DESC NULLS LAST,
                  {best_rip_order('mf')}
         LIMIT 1
     ) c ON true
-    WHERE q.origin_gone OR q.play_gone
+    WHERE q.origin_gone OR q.play_gone OR q.track IS DISTINCT FROM q.track_id
 """
 
 
@@ -515,7 +630,9 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
     phantom); a track that went with its file has left the catalogue, and
     the slot stays under its old name as an inert foreign entry. A slot whose
     way in (`play`) named a gone file changes nothing else — `{}`, its play
-    is re-read. None for every other slot."""
+    is re-read. A slot whose file belongs to another track now (the canon
+    rewrote the uuid) takes that track's uuid, with whatever else it
+    changes. None for every other slot."""
     out: list[Optional[dict]] = [None] * len(items)
     bound = [(i, it) for i, it in enumerate(items)
              if (it.source.get("kind") == "file" and it.media_file_id is not None)
@@ -523,6 +640,7 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
     if not bound:
         return out
     rows = _db_query(_REBIND_SQL, {
+        "gone": gone_prefixes(),
         "mids": [it.media_file_id if it.source.get("kind") == "file" else None
                  for _, it in bound],
         "pmids": [(it.play or {}).get("media_file_id") for _, it in bound],
@@ -531,15 +649,16 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
     })
     for r in rows:
         i, it = bound[r["slot"] - 1]
+        moved = {"track_id": r["track"]} if r["track_moved"] else {}
         if not r["origin_gone"]:
-            out[i] = {}
+            out[i] = moved
         elif r["id"] is not None:
-            change = {"media_file_id": r["id"], "source": file_source(r)}
+            change = {**moved, "media_file_id": r["id"], "source": file_source(r)}
             if r["duration_seconds"] is not None:
                 change["duration_seconds"] = float(r["duration_seconds"])
             out[i] = change
         elif r["track_kept"]:
-            out[i] = {"media_file_id": None, "source": {"kind": "track"}}
+            out[i] = {**moved, "media_file_id": None, "source": {"kind": "track"}}
         else:
             out[i] = {"track_id": None, "media_file_id": None,
                       "source": {"kind": "uri", "uri": file_path_to_uri(it.source["path"])}}

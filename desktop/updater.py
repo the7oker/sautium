@@ -26,13 +26,17 @@ After update: run pending DB migrations, restart backend+tracker. Dependency
 installs are not done here — see perform_update.
 """
 
+import hashlib
+import itertools
 import logging
 import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, Tuple, List
@@ -626,13 +630,54 @@ def installed_build() -> Optional[str]:
     desktop/windows/bootstrap.py), or None for a git checkout. A packaged
     tree has no remote to compare against; it stays as it is until another
     installer runs, whose bootstrap tries the clone again."""
-    stamp = get_project_root() / ".sautium_build"
-    if not stamp.exists():
-        return None
-    return stamp.read_text(encoding="utf-8").strip() or None
+    return _small(get_project_root() / ".sautium_build") or None
 
 
 _HEX40 = re.compile(r"[0-9a-f]{40}")
+
+# What a node reads of its checkout by hand, to say what it runs. The folder
+# is not this process's to trust — a Docker node's is the host's, mounted
+# beside its code, and a card rots — and it is read where the backend is
+# imported (the API's version): every read is bounded, and whatever is not
+# there as git writes it is "not known", said once at warning and never
+# raised. A label must not cost a start.
+_SMALL_FILE = 4096                  # HEAD, a ref, a `.git` pointer, commondir, the build stamp
+_PACKED_REFS_LIMIT = 16 * 2 ** 20   # some 200 000 refs
+_PACK_INDEXES = 256                 # packs looked into for one tag object
+_INDEX_HEAD = 8 + 256 * 4           # a version-2 pack index's magic and fanout
+_INDEX_TAIL = 2 * 20                # ... and its two trailing checksums
+_DELTA_DEPTH = 8                    # a tag stored as a delta of a delta of …: followed this far
+_unreadable_said = False
+
+
+def _unreadable(what, why) -> None:
+    global _unreadable_said
+    if _unreadable_said:
+        return
+    _unreadable_said = True
+    logger.warning(f"the checkout is not readable as git writes it ({what}: {why}) — this node "
+                   "says no release or commit it cannot read there")
+
+
+def _small(path: Path) -> Optional[str]:
+    """The text of a file git keeps one line in — None where there is none,
+    and (said) where it is longer than any git writes, or no text."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(_SMALL_FILE + 1)
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        return None
+    except OSError as exc:
+        _unreadable(path, exc)
+        return None
+    if len(raw) > _SMALL_FILE:
+        _unreadable(path, f"over {_SMALL_FILE} bytes")
+        return None
+    try:
+        return raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        _unreadable(path, exc)
+        return None
 
 
 def current_commit() -> Optional[str]:
@@ -645,45 +690,307 @@ def current_commit() -> Optional[str]:
     return head_commit(get_project_root())
 
 
+def _git_dirs(root: Path) -> Optional[Tuple[Path, Path]]:
+    """(`root`'s git dir, the repository's common dir): a linked worktree's
+    `.git` file and `commondir` are followed."""
+    git_dir = root / ".git"
+    if git_dir.is_file():
+        text = _small(git_dir)
+        if text is None or not text.startswith("gitdir:"):
+            return None
+        git_dir = Path(text[len("gitdir:"):].strip())
+        if not git_dir.is_absolute():
+            git_dir = (root / git_dir).resolve()
+    common = _small(git_dir / "commondir")
+    return git_dir, (git_dir / common).resolve() if common else git_dir
+
+
+def _packed_ref(common: Path, ref: str) -> Tuple[Optional[str], Optional[str]]:
+    """`ref`'s line in packed-refs, and the peeled line under it — read as
+    bytes, line by line, up to _PACKED_REFS_LIMIT."""
+    want = ref.encode("utf-8")
+    try:
+        f = open(common / "packed-refs", "rb")
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        return None, None
+    with f:
+        read, found = 0, None
+        while True:
+            line = f.readline(_SMALL_FILE)
+            read += len(line)
+            if found is not None:
+                peeled = line[1:].strip().decode("ascii", "replace") if line.startswith(b"^") else ""
+                return found, peeled if _HEX40.fullmatch(peeled) else None
+            if not line:
+                return None, None
+            if read > _PACKED_REFS_LIMIT:
+                _unreadable(common / "packed-refs", f"over {_PACKED_REFS_LIMIT} bytes")
+                return None, None
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == want:
+                oid = parts[0].decode("ascii", "replace")
+                if _HEX40.fullmatch(oid):
+                    found = oid
+
+
+def _ref_oid(git_dir: Path, common: Path, ref: str) -> Tuple[Optional[str], Optional[str]]:
+    """(the object `ref` names, the commit a packed ref's annotated tag peels
+    to) from a loose ref or packed-refs — (None, None) where there is none,
+    and for a name that is no ref's: HEAD may say anything, and only a path
+    under `refs/` is read."""
+    if not ref.startswith("refs/") or ".." in ref.split("/") or "\0" in ref:
+        _unreadable("HEAD", f"it names {ref[:80]!r}, which is no ref")
+        return None, None
+    for candidate in (git_dir / ref, common / ref):
+        value = _small(candidate)
+        if value is not None and _HEX40.fullmatch(value):
+            return value, None
+    return _packed_ref(common, ref)
+
+
+def _head_oid(root: Path) -> Optional[str]:
+    dirs = _git_dirs(root)
+    if dirs is None:
+        return None
+    git_dir, common = dirs
+    head = _small(git_dir / "HEAD")
+    if head is None:
+        return None
+    if not head.startswith("ref:"):
+        return head if _HEX40.fullmatch(head) else None
+    return _ref_oid(git_dir, common, head[len("ref:"):].strip())[0]
+
+
 def head_commit(root: Path) -> Optional[str]:
     """The first 12 hex digits of HEAD under `root`, from the files git keeps
     them in: a detached HEAD, a loose ref, a packed ref; a linked worktree's
-    `.git` file and `commondir` are followed."""
-    git_dir = root / ".git"
+    `.git` file and `commondir` are followed. None where there is no
+    checkout, and where it cannot be read (_unreadable): never an error."""
     try:
-        if git_dir.is_file():
-            text = git_dir.read_text(encoding="utf-8").strip()
-            if not text.startswith("gitdir:"):
-                return None
-            git_dir = Path(text[len("gitdir:"):].strip())
-            if not git_dir.is_absolute():
-                git_dir = (root / git_dir).resolve()
-        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
-    except OSError:
+        head = _head_oid(root)
+    except Exception as exc:
+        _unreadable("HEAD", repr(exc))
         return None
-    if not head.startswith("ref:"):
-        return head[:12] if _HEX40.fullmatch(head) else None
-    ref = head[len("ref:"):].strip()
-    common = git_dir
+    return head[:12] if head else None
+
+
+def _pack_offset(index: Path, oid: bytes) -> Optional[int]:
+    """Where a pack holds the object `oid`, from its version-2 index: a
+    binary search of the names its fanout brackets, as git's own — and only
+    in an index as long as its own count of objects says it is."""
+    with open(index, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        head = f.read(_INDEX_HEAD)
+        if len(head) != _INDEX_HEAD or head[:8] != b"\377tOc\0\0\0\2":
+            return None
+        fanout = struct.unpack(">256I", head[8:])
+        low, high, total = (fanout[oid[0] - 1] if oid[0] else 0), fanout[oid[0]], fanout[255]
+        if not low <= high <= total or _INDEX_HEAD + 28 * total + _INDEX_TAIL > size:
+            _unreadable(index, "its fanout does not fit its length")
+            return None
+        at = None
+        while low < high:
+            middle = (low + high) // 2
+            f.seek(_INDEX_HEAD + 20 * middle)
+            name = f.read(20)
+            if name == oid:
+                at = middle
+                break
+            if name < oid:
+                low = middle + 1
+            else:
+                high = middle
+        if at is None:
+            return None
+        f.seek(_INDEX_HEAD + 24 * total + 4 * at)
+        (offset,) = struct.unpack(">I", f.read(4))
+        if offset & 0x80000000:
+            large = _INDEX_HEAD + 28 * total + 8 * (offset & 0x7FFFFFFF)
+            if large + 8 > size - _INDEX_TAIL:
+                _unreadable(index, "an offset past its end")
+                return None
+            f.seek(large)
+            (offset,) = struct.unpack(">Q", f.read(8))
+        return offset
+
+
+def _varint(data: bytes, at: int) -> Tuple[Optional[int], int]:
+    """A little-endian base-128 number of a pack (an entry's or a delta's
+    size) from `data[at:]`: (it, where the next field starts) — (None, at)
+    where the data ends inside it."""
+    value = shift = 0
+    while at < len(data) and shift <= 63:
+        byte = data[at]
+        at += 1
+        value |= (byte & 0x7F) << shift
+        shift += 7
+        if not byte & 0x80:
+            return value, at
+    return None, at
+
+
+def _delta_applied(base: bytes, delta: bytes) -> Optional[bytes]:
+    """`delta` over `base` (git's copy/insert instructions), or None where it
+    is not one that makes an object of at most _TAG_OBJECT_LIMIT bytes."""
+    source, at = _varint(delta, 0)
+    target, at = _varint(delta, at)
+    if source != len(base) or target is None or target > _TAG_OBJECT_LIMIT:
+        return None
+    out = bytearray()
+    while at < len(delta) and len(out) <= target:
+        op = delta[at]
+        at += 1
+        if op & 0x80:                                       # copy from the base
+            offset = size = 0
+            for bit in range(7):
+                if op & (1 << bit):
+                    if at >= len(delta):
+                        return None
+                    if bit < 4:
+                        offset |= delta[at] << (8 * bit)
+                    else:
+                        size |= delta[at] << (8 * (bit - 4))
+                    at += 1
+            size = size or 0x10000
+            if offset + size > len(base):
+                return None
+            out += base[offset:offset + size]
+        elif op:                                            # insert what follows
+            if at + op > len(delta):
+                return None
+            out += delta[at:at + op]
+            at += op
+        else:
+            return None
+    return bytes(out) if len(out) == target else None
+
+
+def _pack_entry(pack, index: Path, offset: int, depth: int = 0) -> Optional[bytes]:
+    """The tag object a pack holds at `offset` — whole, or as a delta over
+    another of its entries (two signed tags share little; two plain ones
+    much), followed _DELTA_DEPTH deep. Unchecked: its reader hashes it."""
+    if offset < 0 or depth > _DELTA_DEPTH:
+        return None
+    pack.seek(offset)
+    entry = pack.read(_TAG_OBJECT_LIMIT + 4096)
+    if not entry:
+        return None
+    kind = (entry[0] >> 4) & 7
+    size, at = _varint(bytes([entry[0] & 0x8F]) + entry[1:], 0)   # the first byte carries four bits of it
+    if size is None:
+        return None
+    size = (size & 0x0F) | ((size >> 7) << 4)
+    if size > _TAG_OBJECT_LIMIT:
+        return None
+    if kind == 4:                                           # a tag, whole
+        return zlib.decompressobj().decompress(entry[at:], size)
+    if kind == 6:                                           # a delta over the entry `back` bytes before
+        if at >= len(entry):
+            return None
+        byte = entry[at]
+        at += 1
+        back = byte & 0x7F
+        while byte & 0x80:
+            if at >= len(entry) or back > 2 ** 56:
+                return None
+            byte = entry[at]
+            at += 1
+            back = ((back + 1) << 7) | (byte & 0x7F)
+        base_at = offset - back
+    elif kind == 7:                                         # a delta over the object named
+        base_at = _pack_offset(index, entry[at:at + 20]) if len(entry) >= at + 20 else None
+        at += 20
+        if base_at is None:
+            return None
+    else:
+        return None
+    delta = zlib.decompressobj().decompress(entry[at:], size)
+    base = _pack_entry(pack, index, base_at, depth + 1)
+    return None if base is None else _delta_applied(base, delta)
+
+
+def _packed_object(common: Path, oid: str) -> Optional[bytes]:
+    """The tag object `oid` from the pack that holds it, unchecked."""
     try:
-        common = (git_dir / (git_dir / "commondir").read_text(encoding="utf-8").strip()).resolve()
-    except OSError:
-        pass
-    for candidate in (git_dir / ref, common / ref):
-        try:
-            value = candidate.read_text(encoding="utf-8").strip()
-        except OSError:
+        names = os.scandir(common / "objects" / "pack")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    with names:
+        indexes = sorted(itertools.islice(
+            (entry.path for entry in names if entry.name.endswith(".idx")), _PACK_INDEXES))
+    for index in indexes:
+        offset = _pack_offset(Path(index), bytes.fromhex(oid))
+        if offset is None:
             continue
-        if _HEX40.fullmatch(value):
-            return value[:12]
-    try:
-        for line in (common / "packed-refs").read_text(encoding="utf-8").splitlines():
-            parts = line.split()
-            if len(parts) == 2 and parts[1] == ref and _HEX40.fullmatch(parts[0]):
-                return parts[0][:12]
-    except OSError:
-        pass
+        with open(index[:-len(".idx")] + ".pack", "rb") as pack:
+            return _pack_entry(pack, Path(index), offset)
     return None
+
+
+def _tag_object(common: Path, oid: str) -> Optional[bytes]:
+    """The tag object `oid`, read from the object store by hand — loose, or
+    whole in a pack — and only as what hashes to its name. None for any
+    other object or one past _TAG_OBJECT_LIMIT."""
+    try:
+        with open(common / "objects" / oid[:2] / oid[2:], "rb") as f:
+            loose = f.read(_TAG_OBJECT_LIMIT + 4096)
+    except (FileNotFoundError, NotADirectoryError):
+        body = _packed_object(common, oid)
+    else:
+        header, _, body = zlib.decompressobj().decompress(loose, _TAG_OBJECT_LIMIT + 32).partition(b"\0")
+        if not header.startswith(b"tag "):
+            return None
+    if body is None or hashlib.sha1(b"tag %d\0" % len(body) + body).hexdigest() != oid:
+        return None
+    return body
+
+
+def _head_release(root: Path) -> Optional[str]:
+    version = installer_version()
+    dirs = _git_dirs(root)
+    head = _head_oid(root)
+    if version == (0, 0, 0) or dirs is None or head is None:
+        return None
+    git_dir, common = dirs
+    name = "v%d.%d.%d" % version
+    for ref in (RELEASE_REFS + name, "refs/tags/" + name):
+        oid, peeled = _ref_oid(git_dir, common, ref)
+        # packed-refs' peeled line spares the read of a tag that names another commit
+        if oid is None or (peeled is not None and peeled != head):
+            continue
+        raw = _tag_object(common, oid)
+        if raw is None:
+            continue
+        try:
+            headers = release_verify.tag_headers(raw)
+        except release_verify.VerifyError:
+            continue
+        if (headers["object"], headers["type"], headers["tag"]) == (head, "commit", name):
+            return name
+    return None
+
+
+def head_release(root: Path) -> Optional[str]:
+    """The release the checkout under `root` is ON — `v0.2.13` — or None:
+    the tag of the version this tree states (a release's tree states its
+    own, scripts/release.py refuses any other), where a ref of that name —
+    one this updater fetched (RELEASE_REFS) or the tree's own (refs/tags) —
+    names an annotated tag that carries that name and names HEAD's commit.
+    The tag object itself is read, whether its ref is loose or packed.
+
+    What a node says it runs (its start line, /config), never a judgement
+    of a release: no signature is checked here — `survey` judges, with git
+    and the signers' list, before a checkout is ever moved. Read from `.git`
+    by hand like head_commit, so it answers None where the tag cannot be
+    read that way (a repository that is not SHA-1, a folder that is not as
+    git writes it — _unreadable): a commit
+    past the release, and a tree with no tag of it, say their commit alone.
+    Never an error."""
+    try:
+        return _head_release(root)
+    except Exception as exc:
+        _unreadable("the release's tag", repr(exc))
+        return None
 
 
 def _update_failed(config: dict, step: str, error: str) -> None:

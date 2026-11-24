@@ -284,9 +284,11 @@ notes or commits that say `app.js` mean "now `app-shell.js` +
 
 ### Guidance trail — pointing at a pending action
 
-A node knows what still needs a human (`GET /api/settings/guidance`
-returns a list of task ids); the view layer knows where each one
-lives. `guide` in `app-shell.js` paints an active task on **every**
+A node knows what still needs a human — a list of task ids, which it
+says on the Library stream (`event: guidance`: at connect, and whenever
+the set changes; since 2026-11-24) — and the view layer knows where each
+one lives. The page asks `GET /api/settings/guidance` once, for its first
+paint, and never at a wake. `guide` in `app-shell.js` paints an active task on **every**
 element carrying `data-guide="<task-id>"`, so the user follows one
 amber dot down the hierarchy — More tab → drawer row → the control
 itself — instead of hunting for it. `data-guide="*"` marks a step
@@ -299,7 +301,11 @@ To point at something new:
    `backend/routers/settings.py`, with the rule for when it is done.
    The rule belongs there, next to the workers that satisfy it —
    three surfaces re-deriving it from raw counters would drift, and
-   a trail whose steps disagree points nowhere.
+   a trail whose steps disagree points nowhere. Whatever the rule reads
+   must say when it changes — a Library wake
+   (`notify_library_subscribers()`), `NOTIFY sautium_identity` or
+   `NOTIFY sautium_notices`: the trail is computed again at those, and
+   at nothing else.
 2. Put `data-guide="<id>"` on each element along the path.
 3. Call `guide.paint()` after that markup is built (renderers do
    this at the end; the drawer does it on open).
@@ -591,7 +597,10 @@ never wakes the channel itself (on a flapping share it would wake itself
 without end; a change only a request's derivation saw reaches the open
 tabs with the next wake). Its producers do, when their answer differs from
 what the notices show: a scan's refusal, the prune, Library opened, a
-library file served or found missing — never a transcode-cache file — and
+library file served or found missing — by the browser's route or, since
+2026-11-24, by the media proxy's `/file/{token}`; never a transcode-cache
+file, nor a row of a folder the library has left — the folder watcher's loss and the file a start would open found
+missing (since 2026-11-24), and
 so does a look the readers gave up on if the folder answered after all (a
 disk spinning up). The client diffs snapshots: a key
 that appears or re-arms toasts once — so `since` is the condition's

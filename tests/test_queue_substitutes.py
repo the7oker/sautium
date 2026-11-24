@@ -118,6 +118,7 @@ def lane(monkeypatch):
     proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k")
     monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
     monkeypatch.setattr(streaming_service, "providers_preferred", lambda: [prov])
+    monkeypatch.setattr(streaming_service, "providers_registered", lambda: True)
     monkeypatch.setattr(streaming_service, "get_proxy", lambda: proxy)
     monkeypatch.setattr(player, "_phantom_track_query", lambda tid, album_id=None: TrackQuery(
         artist="A", title=tid, album="Alb", duration=100.0, track_id=tid, album_id=album_id))

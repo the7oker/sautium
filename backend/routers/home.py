@@ -16,7 +16,7 @@ Recommendations are CLAP-similarity-driven from recent listening
 phantom albums — a node can live entirely on streamed phantoms. The
 ranking is rebuilt when the listening history changes, not per visit
 (see _Ranking). Cold start (no listened track with CLAP analysis to seed
-from) leads with the seed-pick rotation, then newest-by-arrival.
+from) leads with the seed-pick rotation, then the newest in the collection.
 """
 
 import logging
@@ -24,10 +24,14 @@ import threading
 import time
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from db_pool import Listener, db_query, db_query_one, db_query_with_ef_search
+from playback.queue import gone_prefixes
+from sql_queries import album_away
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +97,15 @@ FAVOURITE_WINDOW_DAYS = 730
 
 
 # Subqueries shared by the album shelves to fetch the album-tile-row
-# contract: {artist, cover_url, cover_id, media_file_id}. A phantom album
-# has no files, so the artist falls back to the album credit and its art
-# is the CAA cover_url (the frontend's coverUrl() prefers it).
-_ALBUM_TILE_SUBQUERIES = """
+# contract: {artist, cover_url, cover_id, media_file_id, not_here}. A phantom
+# album has no files, so the artist falls back to the album credit and its
+# art is the CAA cover_url (the frontend's coverUrl() prefers it).
+# `not_here`: why none of the owner's files of the album opens here now —
+# 'disk' | 'away', the album payload's own definition (sql_queries.
+# album_away; param `gone`) — NULL while one does, and for an album not
+# owned: such an album stays on its shelf, marked.
+_ALBUM_TILE_SUBQUERIES = f"""
+    {album_away('al.id')} AS not_here,
     COALESCE(
         (SELECT a.name
          FROM artists a
@@ -216,58 +225,84 @@ def get_favourite_artists(
     return {"artists": artists}
 
 
+# An album is as new as its newest copy: among its copies here, else among
+# those in an HQPlayer's library (a copy of an album on disk is not news to
+# the collection), the one that entered last — entered_at, the start of the
+# scan round or sync that made it — and within one round the one whose files
+# came onto the disk last (arrived_at; the round's start where it has none).
+# Correlated against an `album_variants` row aliased av: true for that copy
+# alone. Ordered by NEWEST_ORDER, which is idx_album_variants_entered_desc's
+# own key, so a page reads a page of the index.
+NEWEST_COPY = """NOT EXISTS (
+            SELECT 1 FROM album_variants o
+             WHERE o.album_id = av.album_id AND o.id <> av.id
+               AND ((o.location = 'local'), o.entered_at, COALESCE(o.arrived_at, o.entered_at), o.id)
+                 > ((av.location = 'local'), av.entered_at, COALESCE(av.arrived_at, av.entered_at), av.id))"""
+NEWEST_ORDER = "av.entered_at DESC, COALESCE(av.arrived_at, av.entered_at) DESC, av.album_id DESC"
+
+
 @router.get("/new-in-library")
 def get_new_in_library(
     limit: int = Query(20, ge=1, le=50),
     before: str | None = None,
+    before_arrived: str | None = None,
     before_id: str | None = None,
 ) -> dict[str, Any]:
-    """Albums by recency of latest file mtime, cursor-paginated. An album
-    is as new as its newest file HERE; only an album with no file here is
-    dated by its copy in the HQPlayer's library (the copy's first sighting) —
-    a copy of an album on disk is not news to the collection."""
+    """Albums by when they entered the library, newest first, cursor-paginated
+    (NEWEST_COPY): what was scanned later is newer, whatever its files say of
+    themselves; the files' birth time orders the copies one scan made. Until
+    2026-11-24 the birth time alone ordered the shelf, and a stick whose file
+    system keeps the day it was filled sorted two days before one scanned
+    sixteen minutes earlier."""
 
-    if (before is None) != (before_id is None):
+    cursor = (before, before_arrived, before_id)
+    if any(v is None for v in cursor) and any(v is not None for v in cursor):
         raise HTTPException(
             status_code=400,
-            detail="before and before_id must be provided together",
+            detail="before, before_arrived and before_id must be provided together",
         )
 
-    cursor_ts: datetime | None = None
-    if before is not None:
-        try:
-            cursor_ts = datetime.fromisoformat(before)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail=f"invalid before timestamp: {exc}"
-            )
+    cursor_ts: list[datetime | None] = [None, None]
+    for i, (name, value) in enumerate((("before", before), ("before_arrived", before_arrived))):
+        if value is not None:
+            try:
+                cursor_ts[i] = datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"invalid {name} timestamp: {exc}"
+                )
 
-    # album_variants.arrived_at (when a copy came into the library: its
-    # files' birth on this disk, else their first read — never the mtime a
-    # copy keeps from its source) is denormalised from media_files via FOR
-    # EACH STATEMENT triggers, so GROUP BY here scans ~3.7k variants against
-    # an index on (arrived_at DESC) instead of 30k+ media_files rows. Cursor comparison uses (newest_added, album_id) as a composite
-    # key so ties on identical timestamps still paginate without dupes.
-    rows = db_query("""
+    # The cursor is the last row's whole key (entered, arrived, album_id), so
+    # the many copies one round made — one entered instant, and one arrival
+    # where the file system keeps no birth time — page without a duplicate
+    # or a gap.
+    rows = db_query(f"""
         WITH album_keys AS (
-            SELECT al.id AS album_id,
-                   al.title,
-                   al.release_year AS year,
-                   al.cover_url,
-                   COALESCE(MAX(av.arrived_at) FILTER (WHERE av.location = 'local'),
-                            MAX(av.arrived_at)) AS newest_added,
+            SELECT av.album_id,
+                   av.entered_at AS entered,
+                   COALESCE(av.arrived_at, av.entered_at) AS arrived,
                    -- where the album's files are: a copy that only the
                    -- HQPlayer's library holds wears a badge on its tile
-                   CASE WHEN bool_or(av.location = 'local') THEN 'local' ELSE 'hqplayer' END AS location
-            FROM albums al
-            JOIN album_variants av ON av.album_id = al.id
-            GROUP BY al.id, al.title, al.release_year, al.cover_url
+                   av.location::text AS location,
+                   -- why none of its files opens here now (NULL: one does).
+                   -- Of the album, never of this key copy: the newest copy
+                   -- may be out while an older one plays
+                   {album_away('av.album_id')} AS not_here
+            FROM album_variants av
+            WHERE {NEWEST_COPY}
+              AND (%(before)s::timestamptz IS NULL
+                   OR (av.entered_at, COALESCE(av.arrived_at, av.entered_at), av.album_id)
+                      < (%(before)s::timestamptz, %(before_arrived)s::timestamptz, %(before_id)s::uuid))
+            ORDER BY {NEWEST_ORDER}
+            LIMIT %(limit)s
         )
         SELECT ak.album_id::text AS id,
-               ak.title,
-               ak.year,
-               ak.newest_added,
+               al.title,
+               al.release_year AS year,
+               ak.entered,
+               ak.arrived,
                ak.location,
+               ak.not_here,
                ak.album_id AS _album_uuid,
                COALESCE(
                 (SELECT a.name
@@ -290,7 +325,7 @@ def get_new_in_library(
                (SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM media_files mfc
                                              JOIN album_variants avc ON avc.id = mfc.album_variant_id
                                              WHERE avc.album_id = ak.album_id AND mfc.cover_id IS NOT NULL)
-                            THEN ak.cover_url END) AS cover_url,
+                            THEN al.cover_url END) AS cover_url,
                (SELECT mf3.cover_id::text
                 FROM media_files mf3
                 JOIN album_variants av3 ON av3.id = mf3.album_variant_id
@@ -303,26 +338,27 @@ def get_new_in_library(
                 ORDER BY mf4.disc_number, mf4.track_number
                 LIMIT 1) AS media_file_id
         FROM album_keys ak
-        WHERE %(before)s::timestamptz IS NULL
-           OR (ak.newest_added, ak.album_id) < (%(before)s::timestamptz, %(before_id)s::uuid)
-        ORDER BY ak.newest_added DESC NULLS LAST, ak.album_id DESC
-        LIMIT %(limit)s
+        JOIN albums al ON al.id = ak.album_id
+        ORDER BY ak.entered DESC, ak.arrived DESC, ak.album_id DESC
     """, {
         "limit": limit,
-        "before": cursor_ts,
+        "before": cursor_ts[0],
+        "before_arrived": cursor_ts[1],
         "before_id": before_id,
+        "gone": gone_prefixes(),
     })
 
     next_cursor: dict[str, str] | None = None
     if len(rows) == limit:
         last = rows[-1]
         next_cursor = {
-            "before": last["newest_added"].isoformat(),
+            "before": last["entered"].isoformat(),
+            "before_arrived": last["arrived"].isoformat(),
             "before_id": str(last["_album_uuid"]),
         }
 
     albums = [
-        {k: v for k, v in row.items() if k not in {"newest_added", "_album_uuid"}}
+        {k: v for k, v in row.items() if k not in {"entered", "arrived", "_album_uuid"}}
         for row in rows
     ]
 
@@ -335,7 +371,7 @@ def get_recommendations(
 ) -> dict[str, list[dict[str, Any]]]:
     """The stored ranking's first `limit` albums, the shortfall filled with
     unplayed seed picks, then random owned albums. A cold start leads with
-    the seed-pick rotation, then newest-by-arrival.
+    the seed-pick rotation, then the newest in the collection.
 
     The tiles are read now, not stored with the ranking: names and covers
     stay current, and an album that left the catalog since the rebuild
@@ -357,7 +393,7 @@ def get_recommendations(
         JOIN albums al ON al.id = r.album_id
         ORDER BY r.pos
         LIMIT %(limit)s
-    """, {"ranking": ranking, "limit": limit})
+    """, {"ranking": ranking, "limit": limit, "gone": gone_prefixes()})
 
     if len(albums) < limit:
         existing = {a["id"] for a in albums}
@@ -402,11 +438,17 @@ class _Ranking:
     def _build(self) -> None:
         started = time.monotonic()
         album_ids = _rank_recommendations()
+        took = time.monotonic() - started
+        # Every listen rebuilds it, and a listen is any write of the history
+        # (a two-second tone is one): news is the first build, the ranking
+        # leaving or reaching a cold start, and a build that took over a second
+        news = (not self._built or (album_ids is None) != (self._album_ids is None)
+                or took > 1.0)
         self._album_ids = album_ids
         self._built = True
-        logger.info("Recommendations ranking rebuilt in %.0f ms: %s",
-                    (time.monotonic() - started) * 1000,
-                    "cold start" if album_ids is None else f"{len(album_ids)} albums")
+        logger.log(logging.INFO if news else logging.DEBUG,
+                   "Recommendations ranking rebuilt in %.0f ms: %s", took * 1000,
+                   "cold start" if album_ids is None else f"{len(album_ids)} albums")
 
 
 _ranking = _Ranking()
@@ -874,7 +916,7 @@ def _seed_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
         ORDER BY (r.rn > r.cap), r.tier, r.shuffle
         LIMIT %(needed)s
         """,
-        {"exclude": list(exclude), "needed": needed},
+        {"exclude": list(exclude), "needed": needed, "gone": gone_prefixes()},
     )
 
 
@@ -898,23 +940,26 @@ def _random_fill(needed: int, exclude: set[str]) -> list[dict[str, Any]]:
         ORDER BY RANDOM()
         LIMIT %(needed)s
         """,
-        {"exclude": list(exclude), "needed": needed},
+        {"exclude": list(exclude), "needed": needed, "gone": gone_prefixes()},
     )
 
 
 def _cold_start_albums(limit: int, exclude: set[str] = frozenset()) -> list[dict[str, Any]]:
-    """No listening history yet — newest imports first, after the seed
-    rotation (exclude covers owned pick albums already emitted by it)."""
+    """No listening history yet — newest imports first, in the order of
+    "New in my collection" (NEWEST_COPY), after the seed rotation (exclude
+    covers owned pick albums already emitted by it)."""
 
     return db_query(
         f"""
         WITH album_keys AS (
-            SELECT al.id AS album_id,
-                   MAX(av.arrived_at) AS newest_added
-            FROM albums al
-            JOIN album_variants av ON av.album_id = al.id
-            WHERE al.id::text != ALL(%(exclude)s::text[])
-            GROUP BY al.id
+            SELECT av.album_id,
+                   av.entered_at AS entered,
+                   COALESCE(av.arrived_at, av.entered_at) AS arrived
+            FROM album_variants av
+            WHERE {NEWEST_COPY}
+              AND av.album_id::text != ALL(%(exclude)s::text[])
+            ORDER BY {NEWEST_ORDER}
+            LIMIT %(limit)s
         )
         SELECT al.id::text AS id,
                al.title,
@@ -922,8 +967,24 @@ def _cold_start_albums(limit: int, exclude: set[str] = frozenset()) -> list[dict
                {_ALBUM_TILE_SUBQUERIES}
         FROM album_keys ak
         JOIN albums al ON al.id = ak.album_id
-        ORDER BY ak.newest_added DESC NULLS LAST, RANDOM()
-        LIMIT %(limit)s
+        ORDER BY ak.entered DESC, ak.arrived DESC, ak.album_id DESC
         """,
-        {"limit": limit, "exclude": list(exclude)},
+        {"limit": limit, "exclude": list(exclude), "gone": gone_prefixes()},
     )
+
+
+class AlbumsShown(BaseModel):
+    ids: list[UUID] = Field(..., max_length=1000)
+
+
+@router.post("/albums-away")
+def albums_away(req: AlbumsShown) -> dict:
+    """Which of the albums a shelf shows has no file that opens here now,
+    and why — the tiles' mark, by its one definition (album_away), for the
+    tiles on the page whatever page brought them: asked when what is
+    reachable changes, and set in place."""
+    rows = db_query(
+        f"SELECT a.id::text AS id, {album_away('a.id')} AS why "
+        "FROM unnest(%(ids)s::uuid[]) AS a(id)",
+        {"ids": [str(i) for i in req.ids], "gone": gone_prefixes()})
+    return {"not_here": {r["id"]: r["why"] for r in rows if r["why"]}}

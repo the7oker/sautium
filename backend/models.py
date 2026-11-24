@@ -74,6 +74,11 @@ CreditRoleEnum = ENUM(
     name="credit_role",
     create_type=False,
 )
+TracklistSourceEnum = ENUM(
+    "mb", "tag",
+    name="tracklist_source",
+    create_type=False,
+)
 MusicalKeyEnum = ENUM(
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     name="musical_key",
@@ -484,6 +489,9 @@ class AlbumVariant(Base):
     is_lossless = Column(Boolean, default=True)
     absent_since = Column(DateTime(timezone=True))   # a local copy away (001_initial.sql)
     arrived_at = Column(DateTime(timezone=True))     # its files' earliest arrival (triggers)
+    # the start of the scan round (or HQPlayer sync) that made the row: written
+    # at its insert, never after — what "New in my collection" orders by
+    entered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     raw_artist = Column(Text)  # the album credit the scan minted it under, beside raw_title (the folder rule)
     positional_asked = Column(Text)  # the positional pass's last abstention, as its candidates (canon.positional)
     positional_bound = Column(Boolean, nullable=False, server_default="false")  # the positional pass bound this copy
@@ -522,6 +530,9 @@ class AlbumTrack(Base):
     disc = Column(Integer, primary_key=True, default=1)
     position = Column(Integer, primary_key=True)
     recording_mbid = Column(UUID(as_uuid=False))  # MB recording gid (dedup / future preview)
+    # who wrote the slot: MusicBrainz's tracklist, or this node's files' tags
+    # (001_initial.sql) — a removed copy takes its 'tag' slots with it
+    source = Column(TracklistSourceEnum, nullable=False, server_default="mb")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

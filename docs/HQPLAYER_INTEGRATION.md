@@ -789,14 +789,41 @@ comes after the control port answers again — so neither can end the wait.
   (a take-back that waits for its stream says "loading") — or HQPlayer rests
   on its playlist with nothing of ours read (drifted to an entry the node
   never gave: Roon's stream before its Play, since 2026-11-09 — or Roon's
-  refused stream under the takeover's spot, Roon's Play sent again), an append (the
+  refused stream under the takeover's spot, Roon's Play sent again; read off
+  the poller's own reading too since 2026-11-24 — until then a start that
+  waited for its stream there, its status naming the slot it waits on, made
+  that playlist read as the node's), an append (the
   radio's, a person's), the radio's own clear and a new queue
   put together without playing it are the queue's alone: nothing goes into
   that controller's playlist; the press that takes HQPlayer back hands the
   queue over, and a new queue that takes it back owns it from its own
   hand-over — the clear ends the hold read before it, so what follows it (the
   radio's batch) goes to HQPlayer. The radio refills nothing from the spot
-  a takeover left.
+  a takeover left. A Play there sends nothing — no Stop, no clear, no add —
+  until the slot it would start is known to open (since 2026-11-24; before,
+  a Play on a node whose queue held eight files of a disk long gone sent
+  the Stop, the clear and eight adds that failed: the other node's music
+  gone, nothing played). A new queue played whose first slot is a stream
+  still to come is the queue's alone, as one put together without playing
+  it, and its start waits on that slot in the node — Now Playing "loading"
+  it while the other controller plays on; the play press of the queue the
+  node holds waits the same way on the first slot from its target on that
+  may open (`HqpBackend._press`). The landing hands HQPlayer the queue
+  afresh — the takeover, at that moment; a stream that fails is walked
+  past, onto the next slot that may open; where none does, HQPlayer was
+  sent nothing — a Play is refused in words ("nothing from slot 1 on is on
+  this HQPlayer"), and a new queue's rows say each stream failed. A slot
+  that is a file of this node is the playback manager's to look at, never
+  the output's — before a new queue's start and, since 2026-11-24, before a
+  Play or a row's tap on the queue the node holds
+  (`PlaybackManager.before_start`): a folder that went with no event is
+  recorded there and the slots' ways in read at once, so the press finds a
+  stream to wait for, or, where this node streams nothing, the Play is
+  refused in words (409 `not_here`) with HQPlayer sent nothing; one
+  in that HQPlayer's own library goes at once. Not covered: a file the node
+  can read and HQPlayer refuses still answers after the Stop, and so does a
+  stream that landed once whose refetch fails. With no other controller a
+  streamed album empties the playlist at the tap, as before.
 - **The mirror's state** (`HqpBackend._mirror`): in step; a tail mirror;
   lost; drifted.
   - **Lost** when a build ran out or HQPlayer went away under a queue edit,
@@ -842,6 +869,27 @@ comes after the control port answers again — so neither can end the wait.
     HQPlayer's own advance) goes to HQPlayer as on a mirror, the entry it
     reads naming the slot — a "play next" run piece by piece behind the
     piece before it; what touches the part before it is the queue's alone.
+    The entry it reads is its slot's by what it names, whatever way in that
+    slot has by now (since 2026-11-24; until then the entry had to be what
+    the slot opens, and a slot re-bound under it read as drift). So it is
+    after a re-bind, or a change of what opens here (the music folder went,
+    or came back: `PlaybackManager.reach_changed`), while HQPlayer plays or
+    pauses an entry of the queue's (`_converge_mirror`, since 2026-11-24):
+    only what lies behind that entry follows — replaced by remove-after /
+    re-append, ending before the first slot whose stream is still to come —
+    the entry itself never stopped, restarted or handed again, and what
+    lies before it left as the past. Until then a changed entry at or
+    before the one it read had a playing HQPlayer rebuilt around its
+    position and a paused one taken afresh, stopped: the folder going or
+    coming back cut the track that sounded, and with every slot a stream to
+    come the node stopped the music and started nothing. The slot HQPlayer
+    sounds keeps its way in until HQPlayer leaves it — through a new order's
+    rebuild around it too — and is read then (a status that says a start
+    under way, HQPlayer between two entries, is no leaving yet). Stopped,
+    HQPlayer takes the queue afresh as before — unless a start waits for
+    its stream (the playlist is marked no mirror, and that start hands the
+    queue over as a play press) or is under way (the playlist follows once
+    it is over); on an HQPlayer another controller holds nothing is sent.
     An edit behind it while HQPlayer reads no slot of the queue's, or a file
     queued at more than one slot it holds, lands on no entry by a guess: it
     is the queue's, the mirror lost. A play next whose anchor HQPlayer
@@ -894,7 +942,8 @@ comes after the control port answers again — so neither can end the wait.
     plays — and a Play or a tap while another controller holds HQPlayer,
     its entry playing or paused at the last tick, whatever the canary last
     said (since 2026-11-01: never HQPlayer's own Play, nor a resume of that
-    entry) — hand HQPlayer
+    entry; since 2026-11-24 only once the slot the press would start is
+    known to open, above) — hand HQPlayer
     the queue afresh — once — and start a track, in the background: the
     route answers at once, naming the track it will start (`starts`), and
     the status says "HQPlayer is taking the queue again". The queue lock is

@@ -40,11 +40,12 @@ same way, and the lane prepares it in the same order.
 
 import logging
 import threading
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from db_pool import db_query
-from playback.queue import file_source
-from sql_queries import best_rip_order, owned_rank
+from playback.queue import file_source, gone_prefixes
+from sql_queries import HERE, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
 
@@ -70,23 +71,34 @@ REASONS = {
     "excerpt_only": "only a 30-second excerpt streams here",
     "unknown": "couldn't be fetched",
     "off": "streaming is off on this node",
+    "not_here": "its file is not here now",
 }
 
+# Every copy of the tracks asked about: the tracks named (`ids`) and the ones
+# the files named (`mids`) belong to NOW — a file slot is read by what it is,
+# its media_files row: the canon rewrites a track's uuid under a queue that
+# still holds the old one (canon.identity._update_track_uuid).
 _COPIES_SQL = f"""
+    WITH t AS (
+        SELECT unnest(%(ids)s::uuid[]) AS id
+        UNION
+        SELECT o.track_id FROM media_files o WHERE o.id = ANY(%(mids)s::int[])
+    )
     SELECT f.track_id::text AS track_id, f.id, f.location::text AS location, f.hqp_endpoint_id,
+           f.here,
            mf.file_path, mf.file_format::text AS file_format,
            mf.cue_start_seconds, mf.cue_end_seconds,
            hf.hqp_path, hf.file_format::text AS hqp_format
     FROM (
-        SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id, av.absent_since,
+        SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id, {HERE} AS here,
                mf.is_lossless, mf.sample_rate, mf.bit_depth
         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE mf.track_id = ANY(%(ids)s::uuid[])
+        WHERE mf.track_id = ANY(ARRAY(SELECT id FROM t))
         UNION ALL
-        SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id, av.absent_since,
+        SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id, true,
                hf.is_lossless, hf.sample_rate, hf.bit_depth
         FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
-        WHERE hf.track_id = ANY(%(ids)s::uuid[])
+        WHERE hf.track_id = ANY(ARRAY(SELECT id FROM t))
     ) f
     LEFT JOIN media_files mf ON f.location = 'local' AND mf.id = f.id
     LEFT JOIN hqp_library_files hf ON f.location = 'hqplayer' AND hf.id = f.id
@@ -94,18 +106,100 @@ _COPIES_SQL = f"""
 """
 
 
+# What the play path's own look found of single files (PlaybackManager.
+# _first_opens): stored paths whose file did not open while its folder
+# answered — deleted or moved outside Sautium, the row kept until a Rescan's
+# yes. An observation of one moment about the slot a start would open, never
+# a recorded fact: it is the latest look's alone (the next look, at any
+# start, makes its own from nothing, so a file put back is its slot's way in
+# again at the next start), it is dropped when the folder's recorded answer
+# moves, and it is read here only, beside the copies' query — never a
+# second definition of "here" in SQL: an album's page and its tiles say what
+# the database knows.
+_unopened: frozenset = frozenset()
+# A look in progress, on its own thread: what it has observed so far, read by
+# that thread alone until the look ends and its observation replaces the
+# last one in one step (PlaybackManager._first_opens)
+_look = threading.local()
+
+
+def unopened() -> frozenset:
+    """The files no way in may name: on a thread whose look is in progress,
+    that look's own so far; on every other, the latest finished look's."""
+    return getattr(_look, "paths", _unopened)
+
+
+@contextmanager
+def looking(paths: set):
+    """A look in progress on this thread: its reads of the slot it looks at
+    see `paths` — what it has found missing so far — and nobody else's do."""
+    _look.paths = paths
+    try:
+        yield
+    finally:
+        del _look.paths
+
+
+def observe(paths) -> bool:
+    """The latest look's observation is `paths` (stored paths) now; whether
+    that is another one than before."""
+    global _unopened
+    new = frozenset(paths)
+    moved = new != _unopened
+    _unopened = new
+    return moved
+
+
+def by_copies(item) -> bool:
+    """A slot whose way in is read against its track's copies
+    (native_plays)."""
+    return bool(item.track_id) and item.source.get("kind") in _BY_TRACK
+
+
+def streams() -> bool:
+    """Whether this node streams at all — a slot with no file here is then
+    a stream to come: streaming is up (the owner's switch, a profile with
+    it) and a provider is registered. One that has stepped aside or is
+    cooling down is "no provider answers right now": the play routes' own
+    words for it at a tap (routers.player._ensure_streaming_ready) and the
+    lane's wait for a queued slot — never "this node streams nothing",
+    which is what an album whose disk is out says of itself for as long as
+    it is true."""
+    from streaming import service as streaming_service
+    return streaming_service.is_enabled() and streaming_service.providers_registered()
+
+
 def _file_play(r: dict) -> dict:
     return {**file_source(r), "media_file_id": r["id"]}
 
 
-def _stream_play(item) -> dict:
+def _fill_streams() -> bool:
+    """Whether an automatic fill's slot may stream: the owner's switch
+    (radio.streamed), while streaming is up — radio's own rule, read where
+    radio reads it."""
+    from routers.player import _radio_streams
+    return _radio_streams()
+
+
+def _stream_play(item, fill_streams: Callable[[], bool] = _fill_streams) -> dict:
     """A slot that only a stream serves: the stream the lane brings it — on
     its way, landed, or found it could not — kept across every re-read of
     the way in (a mirroring, an output switch: a stream is every output's),
-    else a stream to come."""
+    else a stream to come.
+
+    THE one place a slot becomes a stream by a read of its way in, so the
+    one place that asks who queued it: a slot an automatic fill queued as
+    the owner's own copy (`own_fill`, whatever its origin is by now) is
+    no stream for want of that copy unless radio may stream
+    (`fill_streams`: his switch) — and then whole or not at all, the lane's
+    rule for every `whole` slot. Otherwise it is a gap of its slot — not
+    here, said on its row, walked past — until a read finds its copy."""
     play = item.play or {}
-    if play.get("code") == "off":
-        return {"kind": "pending"}      # streaming was off: a re-read asks again
+    if item.own_fill and not fill_streams():
+        return {"kind": "unplayable", "reason": REASONS["not_here"], "code": "not_here",
+                "lane": True}
+    if play.get("code") in ("off", "not_here"):
+        return {"kind": "pending"}      # streaming was off, or not a fill's to use: a re-read asks again
     if play.get("lane") or (play.get("kind") == "pending" and not play.get("prepare")):
         return play
     return {"kind": "pending"}
@@ -162,23 +256,53 @@ def native_plays(items: list, output_id: Optional[str],
     lane brought it once it has) — or None to open `source` as is. Streams
     and foreign uris are as they are on every output; owned items are
     looked up once for the whole queue, every copy of every track in one
-    query."""
-    owned = [it for it in items
-             if it.track_id and it.source.get("kind") in _BY_TRACK]
+    query.
+
+    A copy that is not here now (sql_queries.HERE: away, or under a folder
+    that does not answer — or a file the play path's latest look did not
+    find, `observe`) is never a way in: a slot whose own file is one
+    takes the best copy that is here, else streams — its origin (`source`)
+    untouched, so the same read gives None again once the file opens.
+
+    A slot that is a file is read by its file (`media_file_id`), and its
+    other copies are those of the track that file belongs to now: the
+    slot's `track_id` is what the enqueue read, and the canon may have
+    rewritten the track's uuid since."""
+    owned = [it for it in items if by_copies(it)]
     by_track: dict = {}
+    track_of: dict = {}             # a slot's own file -> the track it belongs to now
+    unseen = unopened()             # files the latest look did not find (observe)
     if owned:
-        for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}),
-                                        "hqp_id": endpoint_id}):
-            by_track.setdefault(r["track_id"], []).append(r)
+        mids = sorted({it.media_file_id for it in owned
+                       if it.source.get("kind") == "file" and it.media_file_id is not None})
+        for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}), "mids": mids,
+                                        "hqp_id": endpoint_id, "gone": gone_prefixes()}):
+            if r["location"] == "local":
+                track_of[r["id"]] = r["track_id"]
+            if r["here"] and r["file_path"] not in unseen:
+                by_track.setdefault(r["track_id"], []).append(r)
+    fills: list = []
+
+    def fill_streams() -> bool:
+        """The owner's switch, read once for the queue and only when a
+        fill's slot asks."""
+        if not fills:
+            fills.append(_fill_streams())
+        return fills[0]
+
     out = []
     for it in items:
         src = it.source
         kind = src.get("kind")
-        if kind not in _BY_TRACK or not it.track_id:
+        if not by_copies(it):
             out.append(None)
             continue
-        rows = by_track.get(it.track_id, [])
+        track = (track_of.get(it.media_file_id) if kind == "file" else None) or it.track_id
+        rows = by_track.get(track, [])
         local = next((r for r in rows if r["location"] == "local"), None)
+        # the slot's own file, where that opens now
+        own_file = kind == "file" and any(
+            r["location"] == "local" and r["id"] == it.media_file_id for r in rows)
         if output_id == "hqplayer":
             own = next((r for r in rows if r["location"] == "hqplayer"
                         and r["hqp_endpoint_id"] == endpoint_id), None)
@@ -188,30 +312,29 @@ def native_plays(items: list, output_id: Optional[str],
                 # this HQPlayer's copy outranks a rip here, as on the album page
                 out.append({"kind": "hqp", "path": own["hqp_path"], "format": own["hqp_format"],
                             "endpoint": endpoint_id})
-            elif kind == "file":
+            elif own_file:
                 out.append(_prepared(it, None))
             elif local is not None:
                 out.append(_prepared(it, _file_play(local)))
             else:
-                # held at another HQPlayer, its file gone, or never one here:
-                # streamed on this HQPlayer too, its playlist ending before it
-                # until it lands (hqp_backend's horizon)
-                out.append(_stream_play(it))
+                # held at another HQPlayer, no file of it here now, or never
+                # one here: streamed on this HQPlayer too, its playlist
+                # ending before it until it lands (hqp_backend's horizon)
+                out.append(_stream_play(it, fill_streams))
         else:
-            if kind == "file":
+            if own_file:
                 out.append(None)
             elif local is not None:
                 out.append(_file_play(local))
             else:
-                out.append(_stream_play(it))
+                out.append(_stream_play(it, fill_streams))
     return out
 
 
 def streamed(item) -> bool:
-    """A slot whose row shows a stream's state: a not-owned track the lane
-    brings it (an owned file's preparation shows none)."""
-    if item.media_file_id is not None or item.source.get("kind") == "file":
-        return False
+    """A slot whose row shows a stream's state: its way in is a stream the
+    lane brings it — a not-owned track, or an owned one with no file here
+    now (an owned file's preparation for HQPlayer shows none)."""
     play = item.opener()
     if play.get("prepare") or play.get("transcode") or play.get("cut") or play.get("kind") == "file":
         return False                # a copy here, prepared for HQPlayer: no stream
