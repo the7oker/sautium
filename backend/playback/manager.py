@@ -1859,7 +1859,7 @@ manager = PlaybackManager()
 
 # Re-binds the queue on sautium_files_removed (the media_files delete
 # trigger, a Rescan that sets a copy aside as away, an import while copies
-# are away) and on every (re)connect. A burst — a CUE reconcile commits per
+# are away, the canon's rewrite of a track's uuid) and on every (re)connect. A burst — a CUE reconcile commits per
 # image — folds into few passes. The manager is looked up at each call.
 _files_listener = Listener("queue-files-listener", ("sautium_files_removed",),
                            on_notify=lambda notifies: manager.rebind_files(),

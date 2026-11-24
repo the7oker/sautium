@@ -543,7 +543,8 @@ def _item_from_media_row(r: dict) -> QueueItem:
 # — a rename, a merge, a split) with no event of the queue's, and a slot
 # read by the uuid its enqueue saw would find no copy and no track. A slot
 # whose file's track is another now takes that uuid (`track_moved`): play
-# tracking keys on it, and a listen against a uuid that is gone is no row.
+# tracking keys on it, and a listen against a uuid that is gone is no row —
+# the rewrite wakes this pass itself, at its commit.
 _AWAY_FILE = """EXISTS (SELECT 1 FROM media_files af
                      JOIN album_variants av ON av.id = af.album_variant_id
                      WHERE af.id = {m} AND av.absent_since IS NOT NULL)

@@ -319,12 +319,18 @@ def test_a_queued_file_whose_tracks_uuid_the_canon_rewrote_still_opens_as_its_fi
 
 def test_a_slot_takes_its_files_track_when_the_canon_rewrote_it(node, scratch_dsn):
     """Play tracking keys on the slot's track uuid, and a listen against a
-    uuid that is gone is no row: at the queue's next read of the file layer
-    (rebind_files — a file event, the restore of a persisted queue) a slot
-    whose file belongs to another track now takes that track's uuid."""
+    uuid that is gone is no row: the canon's rewrite wakes the queue's read
+    of the file layer at its commit (the files listener's channel), and
+    there a slot whose file belongs to another track now takes that
+    track's uuid."""
     items = _queue(node)
     it, old, new = items[0], items[0].track_id, str(uuid.uuid4())
+    heard = psycopg2.connect(scratch_dsn)
+    heard.autocommit = True
+    heard.cursor().execute("LISTEN sautium_files_removed")
     _canon_rewrites(node, scratch_dsn, old, new)
+    assert _wait(lambda: (heard.poll(), bool(heard.notifies))[1])   # the rewrite's own wake
+    heard.close()
     node["out"].changed.clear()
     node["mgr"].rebind_files()
     assert it.track_id == new and it.media_file_id == node["files"][0] and it.play is None
