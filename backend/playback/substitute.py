@@ -70,6 +70,7 @@ REASONS = {
     "excerpt_only": "only a 30-second excerpt streams here",
     "unknown": "couldn't be fetched",
     "off": "streaming is off on this node",
+    "not_here": "its file is not here now",
 }
 
 # Every copy of the tracks asked about: the tracks named (`ids`) and the ones
@@ -122,14 +123,33 @@ def _file_play(r: dict) -> dict:
     return {**file_source(r), "media_file_id": r["id"]}
 
 
-def _stream_play(item) -> dict:
+def _fill_streams() -> bool:
+    """Whether an automatic fill's slot may stream: the owner's switch
+    (radio.streamed), while streaming is up — radio's own rule, read where
+    radio reads it."""
+    from routers.player import _radio_streams
+    return _radio_streams()
+
+
+def _stream_play(item, fill_streams: Callable[[], bool] = _fill_streams) -> dict:
     """A slot that only a stream serves: the stream the lane brings it — on
     its way, landed, or found it could not — kept across every re-read of
     the way in (a mirroring, an output switch: a stream is every output's),
-    else a stream to come."""
+    else a stream to come.
+
+    THE one place a slot becomes a stream by a read of its way in, so the
+    one place that asks who queued it: a slot an automatic fill queued as
+    the owner's own copy (`whole`, its origin a file or an HQPlayer's) is
+    no stream for want of that copy unless radio may stream
+    (`fill_streams`: his switch) — and then whole or not at all, the lane's
+    rule for every `whole` slot. Otherwise it is a gap of its slot — not
+    here, said on its row, walked past — until a read finds its copy."""
     play = item.play or {}
-    if play.get("code") == "off":
-        return {"kind": "pending"}      # streaming was off: a re-read asks again
+    if item.whole and item.source.get("kind") != "track" and not fill_streams():
+        return {"kind": "unplayable", "reason": REASONS["not_here"], "code": "not_here",
+                "lane": True}
+    if play.get("code") in ("off", "not_here"):
+        return {"kind": "pending"}      # streaming was off, or not a fill's to use: a re-read asks again
     if play.get("lane") or (play.get("kind") == "pending" and not play.get("prepare")):
         return play
     return {"kind": "pending"}
@@ -209,6 +229,15 @@ def native_plays(items: list, output_id: Optional[str],
                 track_of[r["id"]] = r["track_id"]
             if r["here"]:
                 by_track.setdefault(r["track_id"], []).append(r)
+    fills: list = []
+
+    def fill_streams() -> bool:
+        """The owner's switch, read once for the queue and only when a
+        fill's slot asks."""
+        if not fills:
+            fills.append(_fill_streams())
+        return fills[0]
+
     out = []
     for it in items:
         src = it.source
@@ -239,14 +268,14 @@ def native_plays(items: list, output_id: Optional[str],
                 # held at another HQPlayer, no file of it here now, or never
                 # one here: streamed on this HQPlayer too, its playlist
                 # ending before it until it lands (hqp_backend's horizon)
-                out.append(_stream_play(it))
+                out.append(_stream_play(it, fill_streams))
         else:
             if own_file:
                 out.append(None)
             elif local is not None:
                 out.append(_file_play(local))
             else:
-                out.append(_stream_play(it))
+                out.append(_stream_play(it, fill_streams))
     return out
 
 

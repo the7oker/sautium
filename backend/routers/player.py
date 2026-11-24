@@ -3297,7 +3297,8 @@ def _entity_segments(refs: list) -> tuple[list, list, list]:
     return segments, missing, left
 
 
-def _segment_items(segments: list, left: Optional[list] = None) -> tuple[list, list]:
+def _segment_items(segments: list, left: Optional[list] = None, *,
+                   fill: bool = False) -> tuple[list, list]:
     """One list of slots for ('owned', [file rows]) / ('phantom' | 'whole',
     [TrackQuery]) segments, in the caller's order — owned files as files,
     streamed tracks as the tracks themselves (their streams the lane's;
@@ -3305,11 +3306,13 @@ def _segment_items(segments: list, left: Optional[list] = None) -> tuple[list, l
     what of the streamed ones the node already knows does not stream here,
     left out with why, after what the split already left (`left`).
     Committed in ONE mutation by the caller: nothing tapped meanwhile lands
-    between two segments."""
+    between two segments. `fill`: an automatic fill's slots (Play similar),
+    the owned ones marked as such (_fills)."""
     items, left = [], list(left or [])
     for kind, payload in segments:
         if kind == "owned":
-            items.extend(queue_mod.items_for_owned_rows(payload))
+            owned = queue_mod.items_for_owned_rows(payload)
+            items.extend(_fills(owned) if fill else owned)
         else:
             streamed, out = _streamed_items(payload, whole=kind == "whole")
             items.extend(streamed)
@@ -3317,7 +3320,8 @@ def _segment_items(segments: list, left: Optional[list] = None) -> tuple[list, l
     return items, left
 
 
-def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = True) -> list:
+def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = True,
+                   fill: bool = False) -> list:
     """Replace the queue with these segments, every slot at once (and start
     it, once the queue lock is let go). `archive`, the caller's session
     rotation, runs once the output has taken the queue, before the commit
@@ -3326,8 +3330,9 @@ def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = 
 
     `play=False` assembles the queue without starting it: "put together a
     playlist" is a curation act, not a play command, and the canonical queue is
-    independent of the output, so it works with nothing attached."""
-    items, left = _segment_items(segments)
+    independent of the output, so it works with nothing attached. `fill`: an
+    automatic fill's slots (_segment_items)."""
+    items, left = _segment_items(segments, fill=fill)
     if not items:
         raise HTTPException(status_code=404, detail="Nothing in that list streams here")
     added, _gen = manager.replace_queue(items, play=play, archive=archive)
@@ -3604,7 +3609,7 @@ def play_similar(req: PlaySimilarRequest):
         ORDER BY {best_rip_order('mf')} LIMIT 1
     """, {"tid": req.track_id})
     try:
-        left = _play_segments(segments, archive=lambda: sessions.rotate_session(
+        left = _play_segments(segments, fill=True, archive=lambda: sessions.rotate_session(
             manager.queue, 'radio', seed_track_id=req.track_id,
             seed_media_file_id=(seed_mf or {}).get("id")))
     except HTTPException:
@@ -3767,6 +3772,16 @@ _radio_last_artist: Optional[str] = None   # artist of the last queued track —
 _radio_dry_seed: Optional[str] = None      # the seed whose fill gave nothing
 
 
+def _fills(items: list) -> list:
+    """`items`, the owner's own copies an automatic fill queues (a radio
+    batch, Play similar), marked as nobody's tap (QueueItem.whole): with
+    its copy not here such a slot never streams behind his back — only
+    while his switch lets radio stream, and then whole."""
+    for it in items:
+        it.whole = True
+    return items
+
+
 def _radio_streams() -> bool:
     """Whether radio (and Play similar) mixes in tracks the owner does not
     own: his switch, while streaming is up — the streaming library on."""
@@ -3880,8 +3895,8 @@ def _radio_build_batch(seed_uuid: str, played: set,
     batch = []
     for r in _radio_interleave(owned, phantom, prev_artist):
         if r["is_owned"]:
-            item = next(iter(queue_mod.items_for_owned_rows(
-                [{"id": r["file_id"], "location": r["location"]}])), None)
+            item = next(iter(_fills(queue_mod.items_for_owned_rows(
+                [{"id": r["file_id"], "location": r["location"]}]))), None)
         else:
             item = queue_mod.items_for_streamed([queries[r["track_id"]]], whole=True)[0]
         if item is not None:

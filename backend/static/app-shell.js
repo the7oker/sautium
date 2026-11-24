@@ -68,6 +68,7 @@
     'its file left the library': 'Its file left the library',
     'this HQPlayer did not open it': 'This HQPlayer could not open it',
     'streaming is off on this node': 'Streaming is off on this node',
+    'its file is not here now': 'Its file is not here now',
     'nothing to stream it from': 'Nothing to stream it from',
     'no provider has it': 'No provider has it',
     'the stream could not be fetched': 'The stream could not be fetched',
@@ -90,6 +91,7 @@
     excerpt_only: 'only a 30-second excerpt streams here',
     unknown: "couldn't be fetched",
     off: 'streaming is off on this node',
+    not_here: 'its file is not here now',
   };
   function streamReason(code) {
     return STREAM_REASONS[code] || STREAM_REASONS.unknown;
@@ -100,6 +102,9 @@
     if (st.state === 'buffering') {
       return st.progress != null ? `Buffering ${Math.round(st.progress * 100)} %` : 'Buffering…';
     }
+    // a station's own file, not here now: no stream was asked for it
+    // (playback.substitute._stream_play) — it is passed until its file is back
+    if (st.state === 'failed' && st.reason === 'not_here') return 'Its file is not here now';
     if (st.state === 'failed') return `Doesn't stream here — ${streamReason(st.reason)}`;
     return '';
   }

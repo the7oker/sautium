@@ -92,9 +92,14 @@ class QueueItem:
     # A 30 s excerpt, not the recording: shown as [30s], never a listen, and
     # `duration_seconds` is the clip's own length.
     excerpt: bool = False
-    # Played whole or not at all: a radio slot (radio.streamed) streams only
-    # from a full-length link — the excerpt is never in its chain, so a slot
-    # no full link serves fails and is walked past, never a 30 s clip.
+    # A slot an automatic fill queued (radio, Play similar) — nobody tapped
+    # it — played whole or not at all: it streams only from a full-length
+    # link (the excerpt is never in its chain, so a slot no full link serves
+    # fails and is walked past, never a 30 s clip), and one queued as a file
+    # of the owner's streams at all only while his switch lets radio stream
+    # (radio.streamed) — with its file not here it is otherwise a gap, its
+    # file again when that opens (playback.substitute._stream_play). A fill
+    # never spends a demo listen of his own album behind his back.
     whole: bool = False
     # How the ACTIVE output opens this slot when that differs from `source`
     # (playback.substitute, recomputed on every output switch): a `file` /

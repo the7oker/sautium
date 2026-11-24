@@ -1298,7 +1298,8 @@ class PlaybackManager:
         plays = ([it.play for it in items] if backend.id != "hqplayer" else
                  substitute.native_plays(items, backend.id, getattr(backend, "endpoint_id", None)))
         if all(p is not None and ((p.get("kind") == "pending" and not p.get("prepare"))
-                                  or (p.get("kind") == "unplayable" and p.get("code") == "off"))
+                                  or (p.get("kind") == "unplayable"
+                                      and p.get("code") in ("off", "not_here")))
                for p in plays):
             albums = {it.album for it in items}
             raise NotHere("disk", albums.pop() if len(albums) == 1 else None)
