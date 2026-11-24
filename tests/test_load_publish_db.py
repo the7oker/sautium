@@ -97,9 +97,11 @@ def test_the_launchers_meter_says_it_the_same_way(db, heard, scratch_dsn, monkey
     assert _stored(db, "p2p.load") == SNAP and _stored(db, "p2p.gate") == {"mode": "shadow"}
 
 
-def test_what_the_channel_carries_reaches_the_stream_as_the_load_event(db, heard, monkeypatch):
+def test_what_the_channel_carries_reaches_the_stream_that_shows_the_load(db, heard, monkeypatch):
     """The notify as PostgreSQL delivers it, through the listener's handler,
-    to a page's Library stream: the snapshot, and no wake."""
+    to the Library stream whose page said it shows the load — which is sent
+    what the meter stored at once, before any band change is heard — and to
+    no other; no wake of either."""
     monkeypatch.chdir(BACKEND)
     import main
     from desktop.p2p import pricing
@@ -108,16 +110,36 @@ def test_what_the_channel_carries_reaches_the_stream_as_the_load_event(db, heard
     monkeypatch.setattr(settings_router, "_guidance", settings_router._GuidanceTrail())
     monkeypatch.setattr(settings_router, "_guidance_state", lambda: {"tasks": []})
     monkeypatch.setattr(settings_router, "_library_streams", [])
+    monkeypatch.setattr(settings_router, "_load_said", None)
+    stored = dict(SNAP, headroom=0.9)
+    main._publish_load(stored)                               # a band change before any page was open
+    heard()
 
-    async def scenario():
+    async def connected():
         events = (await settings_router.library_stream()).body_iterator
         assert await asyncio.wait_for(events.__anext__(), 5) == "data: {}\n\n"
+        named = await asyncio.wait_for(events.__anext__(), 5)
+        assert named.startswith("event: stream\ndata: ")
         assert (await asyncio.wait_for(events.__anext__(), 5)).startswith("event: guidance\n")
+        return events, json.loads(named.split("data: ", 1)[1])["id"]
+
+    def load(said: str) -> dict:
+        assert said.startswith("event: load\ndata: "), said
+        return json.loads(said.split("data: ", 1)[1])
+
+    async def scenario():
+        shown, elsewhere = await connected(), await connected()
+        word = settings_router.StreamLoad(stream=shown[1], on=True, seq=1)
+        assert await asyncio.to_thread(settings_router.put_stream_load, word) == {"on": True}
+        assert load(await asyncio.wait_for(shown[0].__anext__(), 5))["load"] == stored
         main._publish_load(SNAP)
         settings_router._on_sync_notify(heard())
-        said = await asyncio.wait_for(events.__anext__(), 5)
-        assert said == "event: load\ndata: " + json.dumps({"load": SNAP, "gate": None}) + "\n\n"
-        await events.aclose()
+        assert load(await asyncio.wait_for(shown[0].__anext__(), 5)) == {"load": SNAP, "gate": None}
+        # the page beside it: the next thing its stream says is a wake sent now
+        settings_router._tell_library_streams("wake")
+        assert await asyncio.wait_for(elsewhere[0].__anext__(), 5) == "data: {}\n\n"
+        for events, _name in (shown, elsewhere):
+            await events.aclose()
     asyncio.run(scenario())
 
 

@@ -42,18 +42,32 @@ const node = { tasks: ['audio_output'], seq: 0, run: 'r1', holdRead: scenario ==
 const answer = () => ({ tasks: [...node.tasks], seq: ++node.seq, run: node.run });
 const live = new Set();
 const enc = new TextEncoder();
+// As the node's stream: each connection is named at connect, and `load` goes to the ones whose page asked
+let connections = 0;
+const shows = new Map();              // a connection's name → { on, seq }
+node.load = { load: { headroom: 1 }, gate: null };
 function stream(signal) {
   let conn;
   const body = new ReadableStream({ start(c) { conn = c; } });
+  conn.name = (++connections).toString(16).padStart(16, '0');
   live.add(conn);
   conn.enqueue(enc.encode('data: {}\n\n'));
+  say('stream', { id: conn.name }, conn);
   if (!node.holdRead) say('guidance', answer(), conn);
-  signal && signal.addEventListener('abort', () => live.delete(conn));
+  signal && signal.addEventListener('abort', () => { live.delete(conn); shows.delete(conn.name); });
   return body;
 }
 function say(event, payload, only) {
   const text = (event ? `event: ${event}\n` : '') + `data: ${JSON.stringify(payload)}\n\n`;
   for (const conn of only ? [only] : live) conn.enqueue(enc.encode(text));
+}
+function band(load) {                 // the meter's band change
+  node.load = load;
+  for (const conn of live) if ((shows.get(conn.name) || {}).on) say('load', load, conn);
+}
+function drop() {                     // the node ends every connection: its interest goes with it
+  for (const conn of live) { shows.delete(conn.name); conn.close(); }
+  live.clear();
 }
 const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 function network(input, init = {}) {
@@ -62,6 +76,17 @@ function network(input, init = {}) {
   log.push(`${method} ${url.pathname}`);
   if (url.pathname === '/api/settings/library/stream') {
     return Promise.resolve(new Response(stream(init.signal), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }));
+  }
+  if (url.pathname === '/api/settings/library/stream/load') {
+    const word = JSON.parse(init.body);
+    log.push(`load ${word.stream.slice(-2)} ${word.on ? 'on' : 'off'} #${word.seq}`);
+    const conn = [...live].find(c => c.name === word.stream);
+    if (!conn) return Promise.resolve(new Response('{}', { status: 404 }));
+    if (word.seq > ((shows.get(conn.name) || {}).seq || 0)) {
+      shows.set(conn.name, { on: word.on, seq: word.seq });
+      if (word.on) say('load', node.load, conn);          // the snapshot at once
+    }
+    return Promise.resolve(json({ on: shows.get(conn.name).on }));
   }
   if (url.pathname === '/api/settings/guidance') {
     const computed = answer();        // computed now, answered when the network lets it
@@ -113,6 +138,41 @@ vm.runInContext(%(objects)s.replace('}, 200);', '}, 20);') + '\nthis.libraryWake
 (async () => {
   const heard = { wakes: 0, loads: [] };
   g.libraryWake.on(() => { heard.wakes += 1; });
+  const words = () => log.filter(l => l.startsWith('load '));
+  if (scenario === 'interest') {
+    // A page on any screen but the one that shows the load: it says nothing, and is sent nothing
+    g.guide.start();
+    await sleep(120);
+    band({ load: { headroom: 0.9 }, gate: null });
+    band({ load: { headroom: 0.8 }, gate: null });
+    await sleep(60);
+    const out = { elsewhere: { words: words(), wakes: heard.wakes } };
+    // the Sync screen is drawn: the snapshot at once, then each change
+    const screen = g.libraryWake.onEvent('load', (d) => heard.loads.push(d.load.headroom));
+    await sleep(60);
+    band({ load: { headroom: 0.7 }, gate: null });
+    await sleep(60);
+    out.shown = { words: words(), loads: [...heard.loads], wakes: heard.wakes };
+    // the screen leaves: the word is taken back, and nothing more comes
+    screen.abort();
+    await sleep(60);
+    band({ load: { headroom: 0.6 }, gate: null });
+    await sleep(60);
+    out.left = { words: words(), loads: [...heard.loads] };
+    // back on it, and the connection drops: the next connection is told what this page shows
+    g.libraryWake.onEvent('load', (d) => heard.loads.push(d.load.headroom));
+    await sleep(60);
+    drop();
+    await sleep(1400);                // the stream's reconnect after a close: one second
+    band({ load: { headroom: 0.5 }, gate: null });
+    await sleep(60);
+    out.again = { words: words(), loads: [...heard.loads] };
+    out.streams = log.filter(l => l === 'GET /api/settings/library/stream').length;
+    out.fetched = log.filter(l => l.startsWith('GET ') && l !== 'GET /api/settings/library/stream');
+    out.said = log.filter(l => l.startsWith('PUT ')).length;
+    process.stdout.write(JSON.stringify(out));
+    process.exit(0);
+  }
   g.libraryWake.onEvent('load', (d) => heard.loads.push(d));
   g.guide.start();
   await sleep(120);
@@ -127,7 +187,7 @@ vm.runInContext(%(objects)s.replace('}, 200);', '}, 20);') + '\nthis.libraryWake
     out.appeared = [...g.guide.tasks];
     // the load: its own subscriber, no wake of anyone
     const wakes = heard.wakes;
-    say('load', { load: { headroom: 0.7 }, gate: null });
+    band({ load: { headroom: 0.7 }, gate: null });
     await sleep(60);
     out.load = { heard: heard.loads, wakes: heard.wakes - wakes };
     // a visit retires a task: the route's answer and the stream's word say the same computation
@@ -170,10 +230,27 @@ def test_the_page_asks_for_the_trail_once_and_never_at_a_wake():
     # ten wakes after the connect's own: every one reached the screens, none asked for the trail
     assert out["afterWakes"] == {"gets": 1, "wakes": 11}
     assert out["appeared"] == ["audio_output", "notices"]
-    assert out["load"] == {"heard": [{"load": {"headroom": 0.7}, "gate": None}], "wakes": 0}
+    # the page said its interest once the stream named its connection, and was sent the snapshot at once
+    assert out["load"] == {"heard": [{"load": {"headroom": 1}, "gate": None},
+                                     {"load": {"headroom": 0.7}, "gate": None}], "wakes": 0}
     assert out["seen"] == ["notices"]
     assert out["log"].count("GET /api/settings/guidance") == 1
     assert out["log"].count("GET /api/settings/library/stream") == 1
+
+
+def test_the_page_says_which_connection_shows_the_load_and_no_other_is_sent_it():
+    """The node sends `load` to the connection whose page shows it: the page
+    says so when something on it listens for the load, takes it back when
+    nothing does, and says it again to a connection that replaced a dropped
+    one. No timer, and nothing fetched per event."""
+    out = _run("interest")
+    assert out["elsewhere"] == {"words": [], "wakes": 1}            # the connect's own wake alone
+    assert out["shown"] == {"words": ["load 01 on #1"], "loads": [0.8, 0.7], "wakes": 1}
+    assert out["left"] == {"words": ["load 01 on #1", "load 01 off #2"], "loads": [0.8, 0.7]}
+    assert out["again"]["words"] == ["load 01 on #1", "load 01 off #2", "load 01 on #3", "load 02 on #4"]
+    assert out["again"]["loads"] == [0.8, 0.7, 0.6, 0.6, 0.5]       # each connection's snapshot, then the change
+    # four words in all, and nothing read: the trail's first paint is the one GET
+    assert out["streams"] == 2 and out["said"] == 4 and out["fetched"] == ["GET /api/settings/guidance"]
 
 
 def test_an_answer_computed_earlier_never_paints_over_a_later_one():

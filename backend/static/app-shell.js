@@ -915,12 +915,21 @@
      here shows moved" and carries nothing: the screen reads its own state
      again. A named event (`onEvent`) carries its payload — `guidance`, the
      trail; `load`, the node's load — and is no wake: only who asked for it
-     by name hears it, and nobody fetches anything. */
+     by name hears it, and nobody fetches anything.
+
+     The node sends `load` only to a connection whose page shows it: the
+     stream names its connection at connect (`stream`), and this side says
+     "this connection shows the load" while something here listens for it,
+     and takes it back when nothing does (_sayLoad). A connection that drops
+     takes its interest with it; the next one's name has it said again. */
   const libraryWake = {
     subs: new Set(),
     named: new Map(),
     ctrl: null,
     timer: null,
+    id: null,                               // this connection's name
+    _loadSaid: { id: null, on: false },     // the last word sent about the load, and for which connection
+    _loadSeq: 0,
     _open() {
       if (this.ctrl) return;
       this.ctrl = window.sseStream('/api/settings/library/stream',
@@ -936,10 +945,40 @@
       if (!this.named.has(name)) this.named.set(name, new Set());
       this.named.get(name).add(fn);
       this._open();
-      return { abort: () => this.named.get(name).delete(fn) };
+      if (name === 'load') this._sayLoad();
+      return {
+        abort: () => {
+          this.named.get(name).delete(fn);
+          if (name === 'load') this._sayLoad();
+        },
+      };
+    },
+    /* Whether this connection shows the load, said to the node when it
+       changes — and once to each new connection that does (one that does
+       not has nothing to say: a connection starts with no interest). Each
+       word carries this page's count, so two in flight apply in order. One
+       that does not arrive needs no retry: the connection it named is gone
+       or going, and the next one's `stream` has it said again. */
+    _sayLoad() {
+      const subs = this.named.get('load');
+      const on = !!subs && subs.size > 0;
+      if (!this.id) return;
+      if (this._loadSaid.id === this.id ? this._loadSaid.on === on : !on) return;
+      this._loadSaid = { id: this.id, on };
+      this._loadSeq += 1;
+      fetch('/api/settings/library/stream/load', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stream: this.id, on, seq: this._loadSeq }),
+      }).catch(err => console.debug('load interest not delivered; the next connection says it again:', err));
     },
     _heard(event) {
       if (event.type === 'message') { this._fanOut(); return; }
+      if (event.type === 'stream') {
+        this.id = JSON.parse(event.data).id;
+        this._sayLoad();
+        return;
+      }
       const subs = this.named.get(event.type);
       if (!subs || !subs.size) return;
       const payload = JSON.parse(event.data);

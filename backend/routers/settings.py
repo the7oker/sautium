@@ -59,7 +59,10 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 #   `event: guidance` — the guidance trail, at connect and whenever its set
 #     of tasks changes (_GuidanceTrail).
 #   `event: load` — the node's load as its meter published it (NOTIFY
-#     sautium_load), for the one screen that shows it.
+#     sautium_load), sent only to a connection whose page said it shows the
+#     load (PUT …/library/stream/load, by the name `event: stream` gave the
+#     connection): the Sync screen, while it is open. A connection that
+#     drops takes its interest with it.
 #
 # A named event is no wake: a page acts on one only where it subscribed to
 # it by name. Until 2026-11-24 every NOTIFY on sautium_identity and
@@ -76,6 +79,9 @@ class _LibraryStream:
         self.loop = loop
         self.evt = asyncio.Event()
         self._owed: set = set()         # the loop's alone
+        self.id = secrets.token_hex(8)  # the connection's name, said to its page at connect
+        self.shows_load = False         # its page's word (put_stream_load), under _library_sse_lock
+        self.load_seq = 0               # ... and the number of that word: two in flight apply in order
 
     def owe(self, kind: str) -> None:
         self.loop.call_soon_threadsafe(self._owe, kind)
@@ -96,7 +102,8 @@ _library_sse_lock = threading.Lock()
 
 def _tell_library_streams(kind: str) -> None:
     with _library_sse_lock:
-        streams = list(_library_streams)
+        # the load is sent to the connections that asked for it, no others
+        streams = [s for s in _library_streams if kind != "load" or s.shows_load]
     for stream in streams:
         try:
             stream.owe(kind)
@@ -414,13 +421,25 @@ codex_cli.auth.on_change(_codex_signin_changed)
 #   sautium_notices — a condition began or ended: the notices subscribers
 #     of /api/events.
 #   sautium_load — the load meter's band change, with its snapshot
-#     (desktop/p2p/load_meter.message): the Library streams' `load` event.
+#     (desktop/p2p/load_meter.message): the `load` event of the Library
+#     streams whose page shows the load.
 #
 # The guidance trail reads the identity state and the notices, so those two
 # also have it computed again; a page hears of it only when its set changed.
 # Same NOTIFY pattern used by chat (routers/p2p.py); no polling.
 
-_load_said: Optional[Dict[str, Any]] = None
+_load_said: Optional[Dict[str, Any]] = None     # the snapshot last heard (or read, _load_now)
+_load_lock = threading.Lock()
+
+
+def _load_now() -> Dict[str, Any]:
+    """The node's load as last said — and, while no band change was heard
+    yet (a node at rest since this start), as its meter stored it."""
+    global _load_said
+    with _load_lock:
+        if _load_said is None:
+            _load_said = {"load": _read("p2p.load"), "gate": _gate_snapshot()}
+        return _load_said
 
 
 def _on_sync_notify(notifies: list) -> None:
@@ -436,7 +455,9 @@ def _on_sync_notify(notifies: list) -> None:
         _guidance.moved()
     loads = [note.payload for note in notifies if note.channel == load_meter.CHANNEL]
     if loads:
-        _load_said = json.loads(loads[-1])
+        said = json.loads(loads[-1])
+        with _load_lock:
+            _load_said = said
         _tell_library_streams("load")
 
 
@@ -1837,10 +1858,12 @@ async def library_stream() -> EventStream:
     "data: {}" — whenever scan / enrich workers transition state: the client
     pulls fresh state via GET /api/settings/library. Replaces 1.5s polling.
 
+    `event: stream` names the connection, {"id"}, once, at connect: what
+    the page quotes to say what this connection shows (put_stream_load).
     `event: guidance` carries the trail, {"tasks", "seq", "run"}: at
     connect and whenever the set differs from the last one this connection
-    sent. `event: load` carries the load meter's band change, {"load",
-    "gate"}."""
+    sent. `event: load` carries the node's load, {"load", "gate"} — to a
+    connection that asked: at once, and at each band change of the meter."""
     stream = _LibraryStream(asyncio.get_event_loop())
 
     def named(event: str, payload: Dict[str, Any]) -> str:
@@ -1863,6 +1886,7 @@ async def library_stream() -> EventStream:
 
             # Initial ping so the client knows the channel is live.
             yield "data: {}\n\n"
+            yield named("stream", {"id": stream.id})
             try:
                 await asyncio.to_thread(_guidance.compute)
             except Exception:
@@ -1885,7 +1909,7 @@ async def library_stream() -> EventStream:
                     message = guidance()
                     if message:
                         yield message
-                if "load" in owed:
+                if "load" in owed and stream.shows_load:    # not one owed before its page took it back
                     yield named("load", _load_said)
         except asyncio.CancelledError:
             pass
@@ -1894,6 +1918,36 @@ async def library_stream() -> EventStream:
                 _library_streams[:] = [s for s in _library_streams if s is not stream]
 
     return EventStream(event_generator())
+
+
+class StreamLoad(BaseModel):
+    stream: str = Field(..., pattern=r"^[0-9a-f]{16}$")
+    on: bool
+    seq: int = Field(..., ge=1)
+
+
+@router.put("/library/stream/load")
+def put_stream_load(req: StreamLoad) -> Dict[str, Any]:
+    """The page's word that its connection of the Library stream shows the
+    node's load — the Sync screen's Headroom and Market rows, drawn — or no
+    longer does. A connection that asks is sent the snapshot at once (a
+    screen opened between two band changes shows the load, not nothing) and
+    every band change after it; no other connection is sent any. `seq` is
+    the page's count of its words: one that arrives after a later one
+    changes nothing. 404 for a connection that is gone — its interest went
+    with it, and the page's next connection says its own."""
+    with _library_sse_lock:
+        stream = next((s for s in _library_streams if s.id == req.stream), None)
+        if stream is not None and req.seq > stream.load_seq:
+            stream.load_seq, stream.shows_load, said = req.seq, req.on, True
+        else:
+            said = False
+    if stream is None:
+        raise HTTPException(status_code=404, detail="No such connection of the Library stream")
+    if said and req.on:
+        _load_now()
+        stream.owe("load")
+    return {"on": stream.shows_load}
 
 
 @router.get("/ai")
