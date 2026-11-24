@@ -1199,31 +1199,62 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   every kind of difference was heard as none. A filter that stopped HQPlayer
   here within a minute (`slow_start`) is left out as that.
 - **The fragment** is a FLAC cut of the track's own file — the passage the
-  person chose on the sheet, 20 ms fades, after a lead of digital silence
-  (`transcode.flac_fragment_path_for_file`) — handed to HQPlayer through
-  the media proxy. Owned PCM files here only: a track at the HQPlayer's own
+  person chose on the sheet, 20 ms fades, after a lead that carries a mark
+  (since 2026-11-23, AB-2: the 24-bit pattern 0, +4, 0, −4, a tone at
+  −126 dBFS under every DAC's own noise; the cut is 24-bit whatever the
+  source; `transcode.flac_fragment_path_for_file`) — handed to HQPlayer
+  through the media proxy. Owned PCM files here only: a track at the HQPlayer's own
   library, a stream or a DSD file is refused in words.
 - **The start is a resume.** The lab run of 2026-11-17 on Legion's HQPlayer
   (engine 6.3.3, through the capture stand) found Play's own start
   unstable — Play to the sound at the output moved by up to 0.94 s in PCM
   (once 3.77 s) and 1.4 s in SDM, its median with the filter — and a resume
   from a pause stable (69 ms of spread in PCM, 154 ms in SDM). So each
-  fragment is played into its lead, paused at the meter's first frame of it
-  (all-zero: nothing is heard), and resumed so its sound leaves the output
-  the sitting's silence after the sound before it, or after the person's
-  tap. The meter's onset is a frame's own time (`hqp_meter`'s run `onset`:
-  the read's arrival less the hops after it) plus Status's `output_delay`
-  for the filter — to σ 12–23 ms in PCM, ~0.1 s in SDM.
+  fragment is played into its lead, paused at once (nothing is heard), and
+  resumed so its sound leaves the output its step's silence after the
+  sound before it, or after the person's tap.
+- **The pause holds at the lead's start** (since 2026-11-24, AB-2, F12 of
+  HQP-BENCH-63): the Pause goes out at Play's answer, not at the meter's
+  first frame, and HQPlayer 6.3.3 carries it out before the source reaches
+  its meter — 32 of 32 pauses sent so in PCM and SDM on Legion's HQPlayer
+  (2026-11-23; the 32 sent at the first frame on an idle host held there
+  too), its answer up to 4.2 s late when a build held the port, so the
+  sitting waits for that answer as long as for a build.
+  That is HQPlayer's measured behaviour, not a promise, so the lead's mark
+  checks it: the meter's frames are the source's spectra, HQPlayer's own
+  frames before the source and through a pause exactly zero — a marked
+  frame before the pause's zeros is a pause that took hold inside the lead,
+  a slip; a HQPlayer on which it never holds ends the sitting in words.
+  The meter's reader is out of the pause: under load it once read the
+  position up to 0.18 s short when the pause followed its first frame.
+  HQPlayer's Status position is no substitute: on 6.3.3 it moves in 0.04 s
+  steps and read 0.0 at every pause of the lab run. The resume waits for
+  the meter's first frame (the build's end). The onset and the end are a
+  frame's own time in its read plus Status's `output_delay` for the
+  filter — to σ 12–23 ms in PCM, ~0.1 s in SDM; a read the reader came to
+  late reads late (a check long, a replay), and each slip in the record
+  (`hqp_ab_slips`) says what read it.
 - **The warm-up** — at the bottom of HQPlayer's volume range, read back,
   before the sheet — plays every filter the sitting may play once and
-  measures its delay, its start, its resume's way to the output, its
-  pause's position and how long after its sound its end shows (HQPlayer
+  measures its delay, its start, its resume's way to the output and how
+  long after its sound its end shows (HQPlayer
   sends all-zero frames through its output delay after an entry's end, and
-  sinc-M's ran 2 s longer in PCM). The silence is one value a sitting: the
-  slowest end, start and resume plus 0.5 s; the lead the latest pause plus
-  0.3 s, never under 1 s. Every silence played is checked from the same
-  events (0.15 s in PCM, 0.3 s in SDM); a step that missed is played again
-  with the silence grown, never stored as an answer.
+  sinc-M's ran 2 s longer in PCM). The silence is per step (since
+  2026-11-23, AB-2, B-131): what plays between two taps — a pair's round,
+  the chain's first step, or one fragment with the one heard before it —
+  waits for its own slowest end, start and resume plus 0.5 s, so a slow
+  filter lengthens only the steps it is in (in the chain, whose sides are
+  named, that says the next one starts slowly; the owner's price). A
+  candidate whose start — Play to its first frame, the build in it — is
+  over 10 s is left out ("Takes too long to start here to compare it");
+  the person's own filter is excepted, measured again after another
+  filter when its first start was (the first play may pay a build across
+  rate families), and the sheet says its pauses are long. The lead is
+  1 s, one a sitting. Every silence
+  played is checked from the same events (0.15 s in PCM, 0.3 s in SDM); a
+  step that missed is played again, the timings of the filters it played
+  grown, never stored as an answer; each duel keeps the silence it was
+  played at.
 - **The hold.** A sitting holds the output as the benchmark does
   (`PlaybackManager.hold`, label "Comparing filters"): nothing else drives
   HQPlayer, no surface names the filter, no listen is recorded. It drives
@@ -1236,7 +1267,7 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   change from elsewhere, or another controller playing while it sits, ends
   it as left, nothing put back; a put-back HQPlayer refuses twice alike is
   left to the person, the filter and the volume named in a notice.
-- **What is kept**: `hqp_ab_sittings` and `hqp_ab_duels`, the person's own
+- **What is kept**: `hqp_ab_sittings`, `hqp_ab_duels` and `hqp_ab_slips`, the person's own
   record under the track's context (mode, slot, a conversion across rate
   families) — in the node backup and its life-data merge, never in the
   sync, carry, the share export, the seed or a support bundle; "Forget

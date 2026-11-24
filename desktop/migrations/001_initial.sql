@@ -689,8 +689,8 @@ CREATE TABLE IF NOT EXISTS hqp_ab_sittings (
     track_id UUID REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE SET NULL,
     from_s NUMERIC(9,3) NOT NULL,           -- the passage, in the track
     length_s NUMERIC(5,2) NOT NULL,
-    lead_s NUMERIC(4,2),                    -- the cut's digital silence before it; NULL: ended before its warm-up
-    silence_s NUMERIC(5,2),                 -- P, as finally played; NULL: ended before its warm-up
+    lead_s NUMERIC(4,2),                    -- the cut's lead before it (its mark since AB-2); NULL: ended before its cut
+    silence_s NUMERIC(5,2),                 -- the longest P it played (P is per step since AB-2); NULL: none
     tolerance_s NUMERIC(3,2) NOT NULL,      -- how far a silence may miss P (0.15 s PCM, 0.3 s SDM)
     slipped SMALLINT NOT NULL DEFAULT 0,    -- steps played again for a silence that missed
     learn_plays SMALLINT NOT NULL DEFAULT 0,  -- "Play" of the passage before the test: no duels, no listens
@@ -730,7 +730,28 @@ CREATE TABLE IF NOT EXISTS hqp_ab_duels (
     check_step BOOLEAN NOT NULL DEFAULT FALSE,   -- the champion's replay after "worse"
     counted BOOLEAN NOT NULL DEFAULT TRUE,       -- FALSE: set aside by a failed focus check
     swapped BOOLEAN,                        -- the chain: the answer made it champion (FALSE: kept theirs)
+    silence_s NUMERIC(5,2),                 -- the P its second fragment was played at; NULL: before AB-2 (2026-11-23)
     answered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (sitting_id, n)
+);
+
+-- What read each slip (AB-2 §13 Q9, since 2026-11-24): 'late' the resume was
+-- due before the pause answered or the build was over, 'check' the realised
+-- silence off by more than the tolerance, 'mark' a marked frame of the lead
+-- before the pause's zeros (the pause took hold inside the lead), 'music' the
+-- music before the resume — so a sitting tells whether the meter reader's lag
+-- makes slips at all
+DO $$ BEGIN
+    CREATE TYPE hqp_ab_slip_cause AS ENUM ('late', 'check', 'mark', 'music');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS hqp_ab_slips (
+    sitting_id BIGINT NOT NULL REFERENCES hqp_ab_sittings(id) ON DELETE CASCADE,
+    n SMALLINT NOT NULL,
+    filter TEXT NOT NULL,                   -- the fragment's filter
+    cause hqp_ab_slip_cause NOT NULL,
+    warm BOOLEAN NOT NULL,                  -- a warm-up play tried again, not a step of the test
+    slipped_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (sitting_id, n)
 );
 

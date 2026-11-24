@@ -222,27 +222,39 @@ def flac_slice_path_for_file(source_path: str, start: float,
                     out_args=out_args, stdin_bytes=None, family="cut")
 
 
+# A comparison's lead is not digital silence: it carries this mark, the
+# 24-bit pattern 0, +4, 0, -4 (a tone at fs/4, -126 dBFS) — under every DAC's
+# own noise, and on HQPlayer's meter (the source's spectra) every frame of it
+# differs from the exact zeros HQPlayer sends while paused, so the pause's
+# position is an event on the stream (AB-2 F12; the lab run of 2026-11-23)
+FRAGMENT_MARK_LSB24 = 4
+
+
 def flac_fragment_path_for_file(source_path: str, start: float, length: float, *,
-                                lead: float, fade: float, bits: Optional[int]) -> str:
+                                lead: float, fade: float) -> str:
     """A comparison's fragment (playback.hqp_ab): `length` seconds of the file
     from `start`, faded in and out over `fade` seconds — a hard edge in
     mid-music is a transient a linear-phase filter pre-rings before and a
     minimum-phase one does not, a tell the test itself would make
-    (AB-1-DESIGN Q3) — after `lead` seconds of digital silence, in which
-    HQPlayer is paused and resumed. Keyed as the CUE cuts are: path, mtime
-    and the bounds. Kept at the source's depth (`bits`; 16 and under as
-    16): the fades would otherwise leave the encoder free to take another
-    sample format."""
+    (AB-1-DESIGN Q3) — after `lead` seconds of the mark (FRAGMENT_MARK_LSB24),
+    in which HQPlayer is paused and resumed. Keyed as the CUE cuts are: path,
+    mtime and the bounds. Always 24-bit: the mark needs 24 bits to stay
+    under every DAC's noise (at 16 its smallest is -96 dBFS), and a 16-bit
+    source's samples are carried exactly. The mark is written over the
+    delayed passage's own lead (`aeval`, `c=same`), so the source's channel
+    layout is kept as it is."""
     mtime = int(os.path.getmtime(source_path))
     span = f"{start:.6f}|{length:.6f}|{lead:.3f}|{fade:.3f}"
-    key = hashlib.sha1(f"{source_path}|{mtime}|fragment|{span}".encode()).hexdigest()
-    depth = (["-sample_fmt", "s16"] if (bits or 16) <= 16
-             else ["-sample_fmt", "s32", "-bits_per_raw_sample", str(min(bits, 24))])
+    key = hashlib.sha1(f"{source_path}|{mtime}|fragment-mark2|{span}".encode()).hexdigest()
+    k = FRAGMENT_MARK_LSB24 / 2 ** 23
+    mark = (f"if(lt(t\\,{lead:.3f})\\,if(eq(mod(n\\,4)\\,1)\\,{k!r}\\,"
+            f"if(eq(mod(n\\,4)\\,3)\\,{-k!r}\\,0))\\,val(ch))")
     chain = (f"afade=t=in:st=0:d={fade:.3f},afade=t=out:st={length - fade:.6f}:d={fade:.3f},"
-             f"adelay=delays={round(lead * 1000)}:all=1")
+             f"adelay=delays={round(lead * 1000)}:all=1,aeval=exprs={mark}:c=same")
     return _produce(key, suffix=".flac", label="comparison fragment",
                     args_in=["-ss", f"{start:.6f}", "-t", f"{length:.6f}", "-i", source_path],
-                    out_args=["-map", "0:a:0", "-map_metadata", "-1", "-af", chain, *depth,
+                    out_args=["-map", "0:a:0", "-map_metadata", "-1", "-af", chain,
+                              "-sample_fmt", "s32", "-bits_per_raw_sample", "24",
                               "-c:a", "flac", "-f", "flac"],
                     stdin_bytes=None, family="cut")
 

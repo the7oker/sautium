@@ -8,8 +8,9 @@ and keeps the person's answers.
 
 - The fragment is a FLAC cut of the track's own file
   (transcode.flac_fragment_path_for_file): the passage, faded in and out
-  over 20 ms, after `lead` seconds of digital silence. Both sides play the
-  very same samples, to the file's end.
+  over 20 ms, after `lead` seconds of a mark — a tone at −126 dBFS, under
+  every DAC's own noise, 24-bit always. Both sides play the very same
+  samples, to the file's end.
 - The sitting holds the output (PlaybackManager.hold, as the benchmark
   does): nothing else of Sautium's drives HQPlayer, no listen is recorded,
   and every surface that names the filter shows the hold's label instead.
@@ -21,23 +22,42 @@ and keeps the person's answers.
   0.94 s in PCM and 1.4 s in SDM on Legion's HQPlayer, its median with the
   filter (the lab run of 2026-11-17, AB-1-PROPOSAL) — and a resume from a
   pause is: 69 ms of spread in PCM, 154 ms in SDM. So a fragment is played
-  into its lead, paused at the meter's first frame of it (every frame of
-  the lead is all-zero: nothing is heard; the build and the unstable start
-  fall here), and resumed at the moment that gives the silence its length.
-- **The silence P** is the same before every fragment of a sitting. The
+  into its lead and paused at once, at Play's answer (AB-2 §13 Q7):
+  HQPlayer carries that Pause out before the source reaches its meter —
+  32 of 32 pauses on 6.3.3 in PCM and SDM, the lab run of 2026-11-23, its
+  measured behaviour, not a promise — so the pause holds at the lead's
+  start whatever the meter's reader does; the build and the unstable start
+  fall in the pause, unheard. It is resumed, never before the meter's
+  first frame says the build is over, at the moment that gives the
+  silence its length.
+- **The lead's mark checks that premise** (AB-2 §13 Q8): the meter's frames
+  are the source's spectra, so the lead's frames carry the mark and
+  HQPlayer's own frames before the source and through a pause are exactly
+  zero. A marked frame before the pause's zeros is a pause that took hold
+  inside the lead: that fragment is a slip, never a duel; a HQPlayer on
+  which it never takes hold before the source (every try of the test's
+  first step) ends the sitting in words. The check reads what arrived
+  before the resume — the silence itself ends at the first such frame. The onset and the end are each
+  frame's own time in its read (§13 Q9 (a): a read the reader came to late
+  reads late — a check long, a false slip; an end late, the next silence
+  long by that much; each slip's cause is recorded, BACKLOG B-140).
+- **The silence P is per step** (AB-2, B-131): what plays between two taps,
+  every fragment of it at one P, from the filters it plays and, in a
+  one-fragment step of the chain, the fragment it is compared with. The
   warm-up (muted: HQPlayer's volume at the bottom of its range, read back)
   plays each filter the sitting may play once and measures (search.Timing)
-  its output delay `d`, from the end of the fragment before to its first
-  frame `start`, the meter's position when its pause landed `p`, from its
-  resume to its sound at the output beyond the lead that pause left `r`
-  (each fragment's resume is timed from its own `p`: a pause landing late
-  moves the resume, never the sound), and how long after its last sound
-  left the output its end showed (`tail`). The lead is the latest pause
-  seen plus 0.3 s, never under 1 s (§16): no frame of music passes the
-  meter before the resume. P is the slowest end, start and resume plus
+  its output delay `d`, from the end of the fragment before to the moment
+  it may resume `start` (its pause answered and its first frame shown —
+  the build in it), from its resume to its sound at the output beyond the
+  lead `r`, and how long after its last sound left the output its end
+  showed (`tail`). A candidate whose start is over 10 s (START_MAX_S) is
+  left out; their own filter is excepted, measured again after another
+  filter when its first start was (the first play may pay a build across
+  rate families), and its long pauses said. The lead is LEAD_MIN_S, one
+  for the sitting. A step's P is its slowest end, start and resume plus
   0.5 s (search.silence) — measured from where the sound before left the
-  output, its meter's last sounding frame plus its `d`, or from the
-  person's tap when that came later.
+  output, its last sounding frame plus its `d`, or from the person's tap
+  when that came later.
 - **What wakes each step** is an event: the end of the fragment before
   (Status stopped and the meter quiet — HQPlayer sends all-zero frames
   through its output delay after the music's end, then none; the lab saw
@@ -48,9 +68,11 @@ and keeps the person's answers.
 - **Every silence played is checked** from the same events: the realised
   silence (the sound's onset at the output less the anchor) within 0.15 s
   in PCM and 0.3 s in SDM (Q10, Q18: the meter reads an SDM start to
-  ~0.1 s at best), the pause landed before its resume and inside the lead.
-  A step that missed is played again, P grown to cover what was seen, the
-  slip counted on the sitting and never stored as a duel.
+  ~0.1 s at best), the pause ready before its resume and held before the
+  source.
+  A step that missed is played again, the timings of the filters it played
+  grown to cover what was seen (its P with them), the slip counted on the
+  sitting and never stored as a duel.
 
 **Who is compared, the order and the stops** are hqp_ab_search's. A swap
 writes the context's slot only (§14.5: HQPlayer holds one filter per slot,
@@ -64,7 +86,7 @@ back the next time HQPlayer answers (recover), from its row. A DSP change
 in HQPlayer's own window, or another controller playing, ends a sitting as
 left: nothing more is put back.
 
-**What is kept** — hqp_ab_sittings and hqp_ab_duels — is the person's own
+**What is kept** — hqp_ab_sittings, hqp_ab_duels and hqp_ab_slips — is the person's own
 record on this node: in the node backup (life data, life_merge), never in
 the sync, carry, the share export, the seed or a support bundle. No log
 line at info names a filter heard or a pick.
@@ -76,7 +98,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import psycopg2
@@ -107,22 +129,40 @@ END_S = 90.0
 DELAY_S = 15.0
 STATUS_TICK_S = 0.25
 # How long the sitting's own link waits on one answer before it asks again on
-# a new connection: its builds are paid in the paused lead, bounded by
-# FIRST_FRAME_S, never by the benchmark's one-minute test
+# a new connection — but for the Pause sent at Play's answer, which HQPlayer
+# answers only once the build is over: that one waits FIRST_FRAME_S, the
+# bound of a build here (AB-2 §13 Q7; never the benchmark's one-minute test)
 ANSWER_S = 45.0
 # A step whose silence missed this often in a row is not played again: the
 # sitting ends (what grows P after a miss converges in a step or two)
 SLIPS_A_STEP = 3
-# A warm-up play whose pause landed in the music is tried again on a longer
-# lead this often
+# A warm-up play whose pause did not take hold before the source is tried
+# again this often
 WARM_TRIES = 3
+# What a pause that landed after its resume was due adds to its filter's
+# start, beside what the landing took (_slipped): a repeat of the same
+# lateness is covered rather than slipping at the same edge
+SLIP_STEP_S = 0.1
 # A sitting waiting this long for the person (a tab closed, a phone asleep)
 # gives the output back: it never holds listening hostage
 IDLE_S = 20 * 60
 _DB_EPS = 0.05
+# A HQPlayer whose pause never takes hold before the music — the first filter's
+# every warm-up try, or every try of the test's first step, by the mark: the
+# cause is HQPlayer's, not a filter's (AB-2 §13 Q8)
+NEVER_HOLDS = ("This HQPlayer starts the music before its pause takes hold, so the timing cannot "
+               "be kept — the comparison stops.")                                     # C4's kind, a draft
+# A frame of the meter whose largest bin is above this sounds; at or below it,
+# not zero, it is the lead's mark (transcode.FRAGMENT_MARK_LSB24: 2.38e-7 on
+# the meter, the lab's frames and a straddling one under it) — twice the
+# mark, so a 16-bit dither (bins ~1.3e-6) or a tone at -100 dBFS (5e-6) is
+# sound; 0.0 exactly is HQPlayer's own all-zero frame — before the source, a
+# pause, a tail — or the source's own digital silence
+MARK_MAX = 5e-7
 
 WORDS = {
-    "late": "HQPlayer starts it too late here to compare it",
+    "late": "HQPlayer's timing missed it three times here, so it is left out",       # C2, the words sitting's
+    "long_start": "Takes too long to start here to compare it",                      # C2: the owner's (B-131)
     "not_measured_here": "Speed not tested on this computer · The Benchmark tests them",   # W16
     "too_slow": "Too slow here: {speed}×",
     "too_slow_implied": "Too slow here: slower than at {from_rate}",
@@ -149,7 +189,8 @@ EMPTY = {
     "unstarted": "HQPlayer never got the other filters going on this computer.",
     "identical": "Every other filter gives the same output as yours here.",
     "other_rate": "Every other filter plays at another rate here, and your DAC's display would show it.",
-    "late": "HQPlayer starts every other filter too late here to compare them.",
+    "long_start": "Every other filter takes too long to start here to compare it.",
+    "late": "HQPlayer's timing missed every other filter here, so none is left to compare.",
     "listed": "HQPlayer lists no other filter now.",
 }
 EMPTY_WAY = {"not_measured_here": "benchmark"}
@@ -174,16 +215,21 @@ class _Left(Exception):
 
 
 class _Slip(Exception):
-    """A fragment missed its silence (§2.5 step 5)."""
+    """A fragment missed its silence (§2.5 step 5); `cause` what read it."""
+
+    def __init__(self, cause: str):
+        super().__init__(cause)
+        self.cause = cause
 
 
 class _WarmLate(Exception):
-    """A warm-up play's pause landed with the music near or past (§16):
-    played again on a longer lead."""
+    """A warm-up play whose pause did not take hold before the source (its
+    `cause`: 'mark' — a marked frame before the pause's zeros — or 'music',
+    the music before its resume): played again."""
 
-    def __init__(self, p: float):
-        super().__init__(p)
-        self.p = p
+    def __init__(self, cause: str):
+        super().__init__(cause)
+        self.cause = cause
 
 
 @dataclass
@@ -337,7 +383,7 @@ class Sitting:
         self._asks: deque = deque()
         self._stopping = False
         self._halting = False
-        self._reads: List[Tuple[float, float, Tuple[bool, ...]]] = []
+        self._reads: List[Tuple[float, float, Tuple[float, ...]]] = []
         self.seq = 0
         self.phase = "warming"
         self.row: Optional[int] = None
@@ -346,15 +392,21 @@ class Sitting:
         self.say: Optional[Dict[str, Any]] = None
         self.sounding: Optional[Dict[str, Any]] = None
         # Each fragment as the sitting timed it, once its sound showed
-        # (_fragment): the anchor its silence is measured from, the meter's
-        # position when its pause landed, the resume, its sound at the
-        # output, the P it was played at, and whether its silence missed — a
-        # silence is checked against the sitting's own events (B-119)
+        # (_fragment): the anchor its silence is measured from, the resume,
+        # its sound at the output, the P it was played at, and whether its
+        # silence missed — a silence is checked against the sitting's own
+        # events (B-119)
         self.fragments: List[Dict[str, float]] = []
         self.result: Optional[Dict[str, Any]] = None
         self.timings: Dict[str, search.Timing] = {}
         self.lead_s = search.LEAD_MIN_S
+        # The P of the step playing or last played (AB-2: per step), None
+        # before the first; the longest one played, for the row
         self.silence_s: Optional[float] = None
+        self.longest: Optional[float] = None
+        # Their filter's first warm-up start was over the cap with no other
+        # filter played after it: measured again after the next one (§3.2)
+        self._own_again = False
         self.slipped = 0
         self.learned = 0              # plays of the passage since it or the form changed
         self.learn_total = 0
@@ -371,8 +423,12 @@ class Sitting:
         # What the sitting waits for an answer to: one answer (or cost
         # sheet's decision) a window, taken under the condition (ask)
         self._open_for: Optional[str] = None
-        # The warm-up's cut's lead; one whose pause landed late grows it
-        self.warm_lead = search.LEAD_MIN_S
+        # A fragment's pause took hold before the source at least once (§13 Q8);
+        # one of the test's: only there is the source due before the resume,
+        # so only there can the check see a pause that did not
+        self._held = False
+        self._held_test = False
+        self._slip_n = 0
         self.left_rates: Dict[str, int] = {}
 
     # -- reading the door -------------------------------------------------------------
@@ -530,7 +586,9 @@ class Sitting:
         # A Stop never interrupts the link: a command it cut would have gone
         # out unanswered (a Play HQPlayer carries out, unpaused, while the
         # put-back reconnects), and every wait of the sitting wakes on it
-        # anyway. Only the app's stop (halt) interrupts.
+        # anyway. Only the app's stop (halt) interrupts. A Stop during a
+        # build waits for its end: the Pause's answer holds the link until
+        # then, and HQPlayer answers no put-back sooner (review round 2, L2).
 
     def halt(self) -> None:
         self._halt.set()
@@ -552,6 +610,7 @@ class Sitting:
             with manager.hold("ab", LABEL, spot=self.spot):
                 self._publish()
                 link = _Link(self._halt.wait, answer_s=ANSWER_S)
+                link.c.waits["Pause"] = FIRST_FRAME_S
                 if not link.connect():
                     self._finish("failed", "HQPlayer is not answering")
                     return
@@ -635,9 +694,9 @@ class Sitting:
         att = hqp_meter.meter.attach(link.c.host, link.c.port + 1)
         hqp_meter.meter.tap(self, att, self._on_read)
 
-    def _on_read(self, at: float, hop: float, sounds: Tuple[bool, ...]) -> None:
+    def _on_read(self, at: float, hop: float, levels: Tuple[float, ...]) -> None:
         with self._cv:
-            self._reads.append((at, hop, sounds))
+            self._reads.append((at, hop, levels))
             self._cv.notify_all()
 
     # -- what the person asked ------------------------------------------------------------
@@ -676,6 +735,7 @@ class Sitting:
         link = self.link
         link("stop")
         self._cut()
+        self._note_row(lead_s=self.lead_s)
         # What the person was listening to plays out its tail first: its
         # all-zero frames would be taken for the first warm-up play's own
         self._end(theirs=True)
@@ -715,10 +775,9 @@ class Sitting:
         t = self.track
         at = t["offset"] + self.from_s
         self.cut = _signal_uri(_path(transcode.flac_fragment_path_for_file(
-            t["path"], at, self.length_s, lead=self.lead_s, fade=FADE_S, bits=t["bits"])))
+            t["path"], at, self.length_s, lead=self.lead_s, fade=FADE_S)))
         self.warm_cut = _signal_uri(_path(transcode.flac_fragment_path_for_file(
-            t["path"], at, min(WARM_S, self.length_s), lead=self.warm_lead, fade=FADE_S,
-            bits=t["bits"])))
+            t["path"], at, min(WARM_S, self.length_s), lead=self.lead_s, fade=FADE_S)))
         # How HQPlayer's Status names them: by the proxy token, the URL's last part
         self._tokens = tuple(u.rsplit("/", 1)[-1] for u in (self.cut, self.warm_cut))
 
@@ -762,14 +821,23 @@ class Sitting:
 
     def _warm(self, names: List[str]) -> None:
         """Each filter played once, muted, its timing measured; one at
-        another output rate than their own is left out (Q8). P and the lead
-        are set from every timing so far."""
+        another output rate than their own is left out (Q8), and a candidate
+        whose start is over START_MAX_S (B-131) — their own is excepted: it
+        defines the sitting. A play after one at another rate would pay the
+        switch back in its start: their own plays once between, unmeasured."""
         if not names:
             return
         # In a drawn order, theirs first: the order of the candidates is the
         # search's, and with a fixed volume the person hears the warm-up
         others = [n for n in names if n != self.yours]
         names = [n for n in names if n == self.yours] + random.sample(others, len(others))
+        # Their first start may pay a build across rate families that no
+        # fragment pays (the warm-up's first play follows whatever HQPlayer
+        # held): over the cap, it is measured again after another filter —
+        # at this warm-up's end, or after the next one's first play
+        if self._own_again and others:
+            names.append(self.yours)
+        others_now = bool(others)
         phase, self.phase = self.phase, "warming"
         self.warmed = (0, len(names))
         self._publish()
@@ -778,23 +846,50 @@ class Sitting:
         done = left = False
         try:
             ended = time.time()
-            for i, name in enumerate(names):
+            i = 0
+            while i < len(names):
+                name = names[i]
+                i += 1
                 for _ in range(WARM_TRIES):
                     try:
                         played = self._fragment(name, None, warm=True, since=ended)
                         break
-                    except _WarmLate as e:
-                        self.warm_lead = max(self.warm_lead + 0.5, e.p + search.LEAD_ABOVE_S)
-                        self._cut()
-                        ended = time.time()     # the recut is no part of the next try's start
+                    except _WarmLate:
+                        ended = time.time()
                 else:
+                    if not self._held:
+                        raise Refused(NEVER_HOLDS)
+                    if name == self.yours and name in self.timings:
+                        self._own_again = False     # its re-measure: the first timing stands
+                        self.warmed = (i, len(names))
+                        continue
                     if name == self.yours:
-                        raise Refused("HQPlayer starts your filter too late here to compare it")
+                        raise Refused("HQPlayer's timing kept missing your filter here, so it cannot "
+                                      "be compared")
                     self._leave("late", name)
+                    ended = self._settle_on_own(ended)   # its rate unknown: the next pays no switch
                     continue
                 ended = played.ended
-                self.timings[name] = played.timing
-                self.warmed = (i + 1, len(names))
+                own_rate = (self.timings[self.yours].rate if self.yours in self.timings
+                            else played.timing.rate)
+                if played.timing.rate != own_rate:
+                    self.left_rates[name] = played.timing.rate
+                    self._leave("other_rate", name, rate=played.timing.rate)
+                    ended = self._settle_on_own(ended)
+                    continue
+                if name != self.yours and played.timing.start > search.START_MAX_S:
+                    self._leave("long_start", name)
+                elif name == self.yours and name in self.timings:
+                    # its start again, after another filter's play: the rest stands
+                    self.timings[name] = replace(self.timings[name], start=played.timing.start)
+                    self._own_again = False
+                else:
+                    self.timings[name] = played.timing
+                    if name == self.yours:
+                        self._own_again = played.timing.start > search.START_MAX_S
+                        if self._own_again and others_now:
+                            names.append(self.yours)
+                self.warmed = (i, len(names))
                 self._publish()
             done = True
         except _Left:
@@ -806,13 +901,15 @@ class Sitting:
                 self.link("stop")
             self._unmute()
             self.phase = phase if phase != "warming" else "ready"
-        own = self.timings[self.yours].rate
-        for name in names:
-            if name in self.timings and self.timings[name].rate != own:
-                rate = self.timings.pop(name).rate
-                self.left_rates[name] = rate
-                self._leave("other_rate", name, rate=rate)
-        self._settle()
+
+    def _settle_on_own(self, since: float) -> float:
+        """Their filter played once, unmeasured: after a filter at another
+        rate (or of a rate unknown) the next play would pay the switch back
+        in its start (review round 1, M4)."""
+        try:
+            return self._fragment(self.yours, None, warm=True, since=since).ended
+        except _WarmLate:
+            return time.time()
 
     def _leave(self, reason: str, name: str, **kw) -> None:
         """Out of the sitting, whichever form asked for it, said with its reason."""
@@ -826,17 +923,6 @@ class Sitting:
         if self.second == name:
             self.second = None
             self.say = {"line": self._reason_words(reason, name, **kw)}
-
-    def _settle(self) -> None:
-        """The lead and P from the timings measured so far; a longer lead
-        cuts the passage again."""
-        lead = search.lead(self.timings.values())
-        if lead > self.lead_s:
-            self.lead_s = lead
-            self._cut()
-        self.silence_s = max(self.silence_s or 0.0,
-                             search.silence(list(self.timings.values()), self.lead_s))
-        self._note_row(lead_s=self.lead_s, silence_s=self.silence_s)
 
     def _unmute(self) -> None:
         """Their volume back — only while it still reads the warm-up's: one
@@ -856,99 +942,137 @@ class Sitting:
 
     # -- one fragment (§15.1) -----------------------------------------------------------
 
-    def _fragment(self, name: str, anchor: Optional[float], *, warm: bool = False,
-                  since: Optional[float] = None, label: Optional[str] = None) -> Played:
-        """Play `name`'s fragment: into its lead, paused at the meter's first
-        frame, resumed so its sound leaves the output P after `anchor`
-        (the warm-up: at once), and waited out to its end. Raises _Slip
-        when its silence missed — the fragment is stopped and waited out."""
+    def _fragment(self, name: str, anchor: Optional[float], silence_s: Optional[float] = None, *,
+                  warm: bool = False, since: Optional[float] = None, label: Optional[str] = None,
+                  before: Optional[Tuple[str, "Played"]] = None) -> Played:
+        """Play `name`'s fragment: Play, and Pause at Play's answer — HQPlayer
+        carries the Pause out before the source reaches its meter (6.3.3, the
+        lab run of 2026-11-23: 32 of 32 in PCM and SDM), so the pause holds at
+        the lead's start whatever the meter's reader does (AB-2 F12, §13 Q7);
+        resumed, never before the meter's first frame says the build is over,
+        so its sound leaves the output `silence_s` after `anchor` (the
+        warm-up: at once), and waited out to its end. The lead's mark checks
+        that premise after the fact (Q8). Raises _Slip when its silence
+        missed — the fragment is stopped and waited out; `before`, the
+        fragment played before it in its step, is the end a late landing may
+        have waited for."""
         link = self.link
         timing = None if warm else self.timings[name]
         began = time.time() if since is None else since
         self._set(name)
         with self._cv:
             self._reads = []
-        lead = self.warm_lead if warm else self.lead_s
+        lead = self.lead_s
         link("playlist_add", self.warm_cut if warm else self.cut, clear=True)
         played_at = time.time()
         if not link("play"):
             raise Refused(f"HQPlayer did not play the passage ({link.refusal()})")
-        self._wait(lambda: self._first_frame(played_at), FIRST_FRAME_S, "frame of the passage")
-        link("pause")
-        landed = time.time()
-        p = self._frames_until(landed)
-        h = landed - began
+        if not link("pause"):
+            raise Refused(f"HQPlayer did not pause the passage ({link.refusal()})")
+        paused = time.time()
+        first = self._wait(lambda: self._first_frame(played_at), FIRST_FRAME_S, "frame of the passage")
+        # Ready to resume: the pause answered (a build may hold its answer)
+        # and the build over, whichever came last
+        start = max(paused, first) - began
         if warm:
-            if p > lead - search.LEAD_SLIP_S:
-                self._stop_out()
-                raise _WarmLate(p)
             d, rate = self._delay()
             resume = time.time()
         else:
             d, rate = timing.d, timing.rate
-            # the lead this pause left, not the warm-up's: a pause landing
-            # late moves the resume, never the sound
-            resume = anchor + self.silence_s - (lead - p + timing.r)
-            if landed > resume:
-                self._slipped(name, start=h - p, late=landed - resume)
-            if p > lead - search.LEAD_SLIP_S:
-                self._slipped(name, p=p)
-            self._sleep_until(resume, label)
+            resume = anchor + silence_s - (lead + timing.r)
+            if began + start > resume:
+                self._slipped(name, "late", start=start, before=before)
+            seen = self._sleep_until(resume, silence_s)
+            if seen is not None:
+                # the source moved while it should be held: stopped now, not
+                # heard through the silence (review round 2, M1)
+                self._not_held(name, seen, warm, anchor, resume, silence_s)
         resumed = time.time()
         link("play")
-        if self._sounded_before(resumed):
-            if warm:
-                self._stop_out()
-                raise _WarmLate(lead)
-            # sounded before its resume: missed, its sound out all the same
-            self.fragments.append({"anchor": anchor, "p": p, "resume": resume, "out_onset": None,
-                                   "silence_s": self.silence_s, "slipped": True})
-            self._slipped(name, p=lead)
-        onset = self._wait(lambda: self._onset(resumed), SOUND_S + self.lead_s, "sound of the passage")
+        # A pause held before the source shows nothing but HQPlayer's zeros
+        # before the resume: a marked frame there is one that took hold inside
+        # the lead, a sounding one in the music (§13 Q8)
+        before = self._source_before(resumed)
+        if before is not None:
+            self._not_held(name, before, warm, anchor, resume, silence_s)
+        self._held = True
+        self._held_test = self._held_test or not warm
+        onset = self._wait(lambda: self._onset(resumed), SOUND_S + lead, "sound of the passage")
         out_onset = onset + d
         if not warm:
-            self.fragments.append({"anchor": anchor, "p": p, "resume": resume,
-                                   "out_onset": out_onset, "silence_s": self.silence_s})
+            self.fragments.append({"anchor": anchor, "resume": resume,
+                                   "out_onset": out_onset, "silence_s": silence_s})
             self.sounding = {"which": label, "in_s": round(max(out_onset - time.time(), 0.0), 3),
                              "length_s": self.length_s}
             self._publish()
             realised = out_onset - anchor
-            self.fragments[-1]["slipped"] = abs(realised - self.silence_s) > self.tolerance
+            self.fragments[-1]["slipped"] = abs(realised - silence_s) > self.tolerance
             if self.fragments[-1]["slipped"]:
-                self._slipped(name, r=out_onset - resumed - (lead - p))
+                self._slipped(name, "check", r=out_onset - resumed - lead)
         last, ended = self._end()
         end_out = last + d
         self.sounding = None
-        t = search.Timing(d=d, start=h - p, r=out_onset - resumed - (lead - p), p=p,
+        t = search.Timing(d=d, start=start, r=out_onset - resumed - lead,
                           tail=max(ended - end_out, 0.0), rate=rate)
         return Played(out_onset, end_out, ended, t)
+
+    def _not_held(self, name: str, cause: str, warm: bool, anchor: Optional[float],
+                  resume: float, silence_s: Optional[float]) -> None:
+        """The pause took hold inside the lead or the music, not before the
+        source (§13 Q8): the warm-up plays it again; a fragment of the test
+        is a slip — stopped at once, so one held in the lead never reaches
+        its music, one in the music is out all the same (kept as played)."""
+        if warm:
+            self._stop_out()
+            self._record_slip(name, cause, warm=True)
+            raise _WarmLate(cause)
+        if cause == "music":
+            self.fragments.append({"anchor": anchor, "resume": resume, "out_onset": None,
+                                   "silence_s": silence_s, "slipped": True})
+        self._slipped(name, cause)
 
     def _stop_out(self) -> None:
         self.link("stop")
         self._end()
         self.sounding = None
 
-    def _slipped(self, name: str, *, start: float = 0.0, p: float = 0.0, r: Optional[float] = None,
-                 late: float = 0.0) -> None:
-        """A silence missed: stopped, waited out, and what was seen taken in —
-        a pause that landed `late` after its resume was due grows P by that
-        (the end before it, or its start, took longer than the warm-up
-        saw); one too near the music grows the lead; a sound that left the
-        output early or late replaces the resume's way there `r`. P never
-        shrinks."""
+    def _slipped(self, name: str, cause: str, *, start: float = 0.0, r: Optional[float] = None,
+                 before: Optional[Tuple[str, "Played"]] = None) -> None:
+        """A silence missed, `cause` what read it (§13 Q9: recorded, so a
+        sitting tells whether the reader's lag makes slips at all): stopped,
+        waited out, and what was seen taken in by the filters it played
+        (AB-2 §2.3, never a sitting-wide P) — 'late', the resume due before
+        the pause answered or the build was over: its start grows to what it
+        took, by a slip's step (`grown`), and the tail of the fragment before
+        it in the step to what that one's end took; 'check', its sound out
+        early or late: the resume's way there `r` replaced; 'mark' or
+        'music', the pause not before the source: played again as it was.
+        No filter's need ever shrinks within a sitting."""
         self._stop_out()
         old = self.timings[name]
-        self.timings[name] = search.Timing(
-            d=old.d, start=max(old.start, start), p=max(old.p, p),
-            r=old.r if r is None else r, tail=old.tail, rate=old.rate)
-        if late:
-            self.silence_s += late + 0.1
+        late = cause == "late"
+        self.timings[name] = replace(
+            old, start=max(old.start, start), r=old.r if r is None else r,
+            grown=old.grown + (SLIP_STEP_S if late else 0.0))
+        if late and before is not None and before[0] in self.timings:
+            prev, played = before
+            was = self.timings[prev]
+            self.timings[prev] = replace(was, tail=max(was.tail, played.timing.tail))
         self.slipped += 1
-        self._settle()
+        self._record_slip(name, cause, warm=False)
         self._note_row(slipped=self.slipped)
         self.say = {"line": "The timing slipped — once more.", "slip": True}      # W14
         self._publish()
-        raise _Slip()
+        raise _Slip(cause)
+
+    def _record_slip(self, name: str, cause: str, *, warm: bool) -> None:
+        if self.row is None:
+            return
+        self._slip_n += 1
+        db_execute("""
+            INSERT INTO hqp_ab_slips (sitting_id, n, filter, cause, warm)
+            VALUES (%(s)s, %(n)s, %(f)s, %(c)s::hqp_ab_slip_cause, %(w)s)
+        """, {"s": self.row, "n": self._slip_n, "f": name, "c": cause, "w": warm})
 
     def _set(self, name: str) -> None:
         """The context's slot to `name` (§14.5), the other as they had it; a
@@ -1044,31 +1168,35 @@ class Sitting:
     def _first_frame(self, after: float) -> Optional[float]:
         return next((at for at, _, _ in self._reads if at > after), None)
 
-    def _frames_until(self, t: float) -> float:
-        """The meter's position when the pause landed: the frames shown by
-        then, a hop each — and the time since the last read, up to a read's
-        length: frames come in bursts, the stream moved on between them."""
-        shown = [(at, hop, s) for at, hop, s in self._reads if at <= t]
-        if not shown:
-            return 0.0
-        at, hop, s = shown[-1]
-        return sum(len(s) * hop for _, hop, s in shown) + min(t - at, len(s) * hop)
-
-    def _sounded_before(self, t: float) -> bool:
+    def _source_before(self, t: float) -> Optional[str]:
+        """What of the source the meter showed in the reads that arrived by
+        `t`: 'music' (a sounding frame), 'mark' (the lead's), or None — all
+        HQPlayer's zeros. Read when the resume goes out, so the passage's own
+        digital silence after the lead is never taken for a pause; a reader
+        starved through the landing reads such frames after it, and the
+        check of the silence is what then sees a pause held late."""
         with self._cv:
-            return any(any(s) for at, _, s in self._reads if at <= t)
+            levels = [lv for at, _, read in self._reads if at <= t for lv in read]
+        if any(lv > MARK_MAX for lv in levels):
+            return "music"
+        return "mark" if any(lv > 0.0 for lv in levels) else None
 
     def _onset(self, after: float) -> Optional[float]:
-        for at, hop, s in self._reads:
-            if at > after and any(s):
-                return at - (len(s) - 1 - s.index(True)) * hop
+        """The first sounding frame's own time: its read's arrival less the
+        hops after it in the read — read-local (§13 Q9 (a): a reader that
+        came to it late reads it late, a check long; BACKLOG B-140)."""
+        for at, hop, levels in self._reads:
+            if at > after:
+                for k, lv in enumerate(levels):
+                    if lv > MARK_MAX:
+                        return at - (len(levels) - 1 - k) * hop
         return None
 
     def _last_sound(self) -> Optional[float]:
-        for at, hop, s in reversed(self._reads):
-            if any(s):
-                last = len(s) - 1 - s[::-1].index(True)
-                return at - (len(s) - 1 - last) * hop
+        for at, hop, levels in reversed(self._reads):
+            for k in range(len(levels) - 1, -1, -1):
+                if levels[k] > MARK_MAX:
+                    return at - (len(levels) - 1 - k) * hop
         return None
 
     def _wait(self, pred: Callable[[], Optional[float]], limit: float, what: str) -> float:
@@ -1085,17 +1213,23 @@ class Sitting:
                     raise Refused(f"HQPlayer's meter showed no {what}")
                 self._cv.wait(left)
 
-    def _sleep_until(self, t: float, label: Optional[str]) -> None:
-        """The silence: the one timed wait, ended by the resume."""
-        self.sounding = {"which": None, "silence_s": round(self.silence_s, 2)}
+    def _sleep_until(self, t: float, silence_s: float) -> Optional[str]:
+        """The silence: the one timed wait, ended by the resume — or by a
+        frame of the source the meter shows meanwhile (a pause that did not
+        hold, §13 Q8): its cause, at once."""
+        self.sounding = {"which": None, "silence_s": round(silence_s, 2)}
         self._publish()
         with self._cv:
             while (left := t - time.time()) > 0:
                 if self._stopping:
                     raise _Stopped()
+                seen = self._source_before(time.time())
+                if seen is not None:
+                    return seen
                 self._cv.wait(left)
             if self._stopping:
                 raise _Stopped()
+        return None
 
     def _pause(self, seconds: float) -> None:
         with self._cv:
@@ -1122,18 +1256,32 @@ class Sitting:
         self.learn_total += 1
         self._note_row(learn_plays=self.learn_total)
 
-    def _step(self, plays: List[str], anchor: float, labels: List[str]) -> float:
-        """One step's fragments in order, each P after the one before; a
-        slip plays the whole step again. Returns where its last sound ended."""
+    def _step(self, plays: List[str], anchor: float, labels: List[str],
+              ref: Optional[str] = None) -> float:
+        """One step's fragments in order, each the step's P after the one
+        before (AB-2: P per step, from the filters it plays and `ref`, the
+        fragment heard last that a one-fragment step is compared with); a
+        slip plays the whole step again, its P from what the slip grew.
+        Returns the P it was played at."""
+        causes = []
         for _ in range(SLIPS_A_STEP):
-            at = anchor
+            p = search.silence([self.timings[n] for n in plays], self.lead_s,
+                               self.timings.get(ref) if ref is not None else None)
+            self.silence_s = p
+            self.longest = max(self.longest or 0.0, p)
+            self._note_row(silence_s=self.longest)
+            self._publish()
+            at, before = anchor, None
             try:
                 for name, label in zip(plays, labels):
-                    played = self._fragment(name, at, label=label)
-                    at = played.end_out
-                return at
-            except _Slip:
+                    played = self._fragment(name, at, p, label=label, before=before)
+                    at, before = played.end_out, (name, played)
+                return p
+            except _Slip as e:
+                causes.append(e.cause)
                 anchor = time.time()
+        if not self._held_test and all(c in ("mark", "music") for c in causes):
+            raise Refused(NEVER_HOLDS)          # the cause is HQPlayer's, not a filter's (§13 Q8)
         raise Refused("The timing kept slipping, so the comparison stops here.")
 
     def _test_chain(self) -> Tuple[str, Optional[str]]:
@@ -1146,10 +1294,15 @@ class Sitting:
                 break
             labels = (["yours", "next"] if step.kind == "first"
                       else ["yours"] if step.kind == "check" else ["next"])
+            # Whether their filter plays in the step or is what it is compared
+            # with — its slow start, if it has one, is in the step's P
+            yours = self.yours in step.plays or (len(step.plays) == 1 and chain.last == self.yours)
             self.step_view = {"kind": step.kind, "n": search.CHAIN_STEPS - chain.steps_left + 1,
-                              "of": min(search.CHAIN_STEPS, len(self.pool)), "answerable": False}
+                              "of": min(search.CHAIN_STEPS, len(self.pool)), "answerable": False,
+                              "yours": yours}
             self._publish()
-            self._step(step.plays, anchor, labels)
+            p = self._step(step.plays, anchor, labels,
+                           ref=chain.last if len(step.plays) == 1 else None)
             self._open("answer")
             self.step_view["answerable"] = True
             self._publish()
@@ -1157,7 +1310,7 @@ class Sitting:
             anchor = time.time()
             self.step_view["answerable"] = False
             duel = chain.answer(args["answer"])
-            self._duel(duel)
+            self._duel(duel, p)
             if chain.deciding is not None:
                 self.say = {"cost": chain.note}
                 self._open("decide")
@@ -1189,7 +1342,7 @@ class Sitting:
             self.step_view = {"kind": "round", "n": len(pair.duels) + 1, "of": search.PAIR_CAP,
                               "answerable": False}
             self._publish()
-            self._step(list(order), anchor, ["1", "2"])
+            p = self._step(list(order), anchor, ["1", "2"])
             self.say = None             # a slip's line ends with the step it replayed
             self._open("answer")
             self.step_view["answerable"] = True
@@ -1198,7 +1351,7 @@ class Sitting:
             anchor = time.time()
             self.step_view["answerable"] = False
             answer = {"1": "first", "2": "second", "same": "same"}[args["answer"]]
-            self._duel(pair.answer(answer))
+            self._duel(pair.answer(answer), p)
         self.result = self._pair_result(pair)
         self.phase = "result"
         self._note_row(picked=pair.winner())
@@ -1309,14 +1462,16 @@ class Sitting:
         """, {"put": put or ended == "left", "ended": ended, "picked": picked,
               "champ": self.chain.champion if self.chain is not None else None, "id": self.row})
 
-    def _duel(self, d: search.Duel) -> None:
+    def _duel(self, d: search.Duel, silence_s: float) -> None:
+        """`silence_s`: the P its second fragment was played at — the duel's."""
         db_execute("""
             INSERT INTO hqp_ab_duels (sitting_id, n, first_name, second_name, answer, axis,
-                                      check_step, counted, swapped)
+                                      check_step, counted, swapped, silence_s)
             VALUES (%(s)s, %(n)s, %(a)s, %(b)s, %(ans)s::hqp_ab_answer, %(axis)s::hqp_ab_axis,
-                    %(check)s, %(counted)s, %(swapped)s)
+                    %(check)s, %(counted)s, %(swapped)s, %(p)s)
         """, {"s": self.row, "n": d.n, "a": d.first, "b": d.second, "ans": d.answer,
-              "axis": d.axis, "check": d.check, "counted": d.counted, "swapped": d.swapped})
+              "axis": d.axis, "check": d.check, "counted": d.counted, "swapped": d.swapped,
+              "p": round(silence_s, 2)})
 
     def _duel_swapped(self, d: search.Duel) -> None:
         db_execute("UPDATE hqp_ab_duels SET swapped = %(w)s WHERE sitting_id = %(s)s AND n = %(n)s",
@@ -1360,6 +1515,8 @@ class Sitting:
             "context": {**self.ctx, "words": context_words(self.ctx)},
             "silence_s": None if self.silence_s is None else round(self.silence_s, 2),
             "long_silence": bool(self.silence_s and self.silence_s > search.LONG_SILENCE_S),
+            # Their filter over the cap: kept, and its pauses said long (B-131)
+            "own_slow": self._own_slow(),
             "sdm": self.ctx["mode"] == "sdm",
             "warm": {"done": self.warmed[0], "of": self.warmed[1]},
             "learned": self.learned, "slipped": self.slipped,
@@ -1384,6 +1541,10 @@ class Sitting:
             "fixed": self.vr is None or not self.vr["enabled"],
         }
         return out
+
+    def _own_slow(self) -> Optional[float]:
+        t = self.timings.get(self.yours)
+        return round(t.start, 1) if t is not None and t.start > search.START_MAX_S else None
 
     def _chain_result(self, chain: search.Chain) -> Dict[str, Any]:
         speeds = {f.name: f.speed for f in self.all_filters}
@@ -1445,7 +1606,7 @@ def _path(p: str):
 def _track(manager) -> Dict[str, Any]:
     """The queue's current entry as a sitting cuts it: an owned PCM file
     here (Q4) — its path, the image's offset for a CUE slice, its length,
-    rate and depth."""
+    rate and channels (the speeds the screen reads are by them)."""
     from pathlib import Path
     from config import settings
     here = manager.spot()
@@ -1459,7 +1620,7 @@ def _track(manager) -> Dict[str, Any]:
         raise Refused(f"Comparing plays a cut of a file on this computer; this track plays "
                       f"from {where}.")                                             # W17
     row = db_query_one("""
-        SELECT file_path, file_format::text AS format, sample_rate, bit_depth, channels,
+        SELECT file_path, file_format::text AS format, sample_rate, channels,
                duration_seconds, cue_start_seconds, cue_end_seconds
           FROM media_files WHERE id = %(id)s
     """, {"id": item.media_file_id})
@@ -1480,7 +1641,7 @@ def _track(manager) -> Dict[str, Any]:
         raise Refused("This track is too short to compare a passage of it")
     return {"track_id": item.track_id, "title": item.title, "artist": item.artist, "path": path,
             "offset": start, "length": length, "rate": int(row["sample_rate"]),
-            "bits": row["bit_depth"], "channels": row["channels"] or 2}
+            "channels": row["channels"] or 2}
 
 
 def _screen(s: Sitting, filters: List[dict], own: str, shaper: str, mode_name: str):

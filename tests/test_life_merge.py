@@ -607,15 +607,20 @@ def test_comparisons_by_ear_merge_by_their_hqplayer_and_start_once(clones, tmp_p
               (sitting, ("Studio PC", T0, T0 + timedelta(minutes=3), "done", True)),
               (sitting, ("Studio PC", T0 + timedelta(hours=1), None, None, False)),        # still going
               (sitting, ("Elsewhere", T0 + timedelta(hours=2), T0 + timedelta(hours=2), "done", False)),
-              ("""INSERT INTO hqp_ab_duels (sitting_id, n, first_name, second_name, answer, axis)
-                  SELECT id, n, 'xla', 'ext2', 'same', 'phase' FROM hqp_ab_sittings, generate_series(1, 2) n
-                   WHERE started_at = %s""", (T0,))])
+              ("""INSERT INTO hqp_ab_duels (sitting_id, n, first_name, second_name, answer, axis, silence_s)
+                  SELECT id, n, 'xla', 'ext2', 'same', 'phase', 2.5 FROM hqp_ab_sittings, generate_series(1, 2) n
+                   WHERE started_at = %s""", (T0,)),
+              ("""INSERT INTO hqp_ab_slips (sitting_id, n, filter, cause, warm)
+                  SELECT id, 1, 'ext2', 'check', FALSE FROM hqp_ab_sittings WHERE started_at = %s""", (T0,))])
     got = _merge(_backup(b, tmp_path / "b"), a)
-    assert got["merged"]["comparisons"] == 1 and got["merged"]["duels"] == 2
+    assert got["merged"]["comparisons"] == 1 and got["merged"]["duels"] == 2 and got["merged"]["slips"] == 1
+    # AB-2: each duel's silence and each slip's cause come with it
+    assert _rows(a, "SELECT DISTINCT silence_s::float FROM hqp_ab_duels") == [(2.5,)]
+    assert _rows(a, "SELECT filter, cause::text, warm FROM hqp_ab_slips") == [("ext2", "check", False)]
     assert got["waiting"]["comparisons"] == 1
     assert _rows(a, """SELECT e.name, s.ended::text, s.owed, s.picked, count(d.n)
                          FROM hqp_ab_sittings s JOIN hqp_endpoints e ON e.id = s.hqp_endpoint_id
                          LEFT JOIN hqp_ab_duels d ON d.sitting_id = s.id
                         GROUP BY 1, 2, 3, 4""") == [("Desk", "done", False, "xla", 2)]
     again = _merge(_backup(b, tmp_path / "b2"), a)
-    assert again["merged"]["comparisons"] == 0 and again["merged"]["duels"] == 0
+    assert again["merged"]["comparisons"] == 0 and again["merged"]["duels"] == 0 and again["merged"]["slips"] == 0

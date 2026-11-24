@@ -2,8 +2,9 @@
 HQPlayer that keeps time: each filter builds after a Play, plays its entry
 at the wall clock's pace, pauses and resumes with a latency of its own, and
 its sound leaves the "output" its output delay after the meter shows it —
-the meter a port of its own sending frames a hop apart in 160 ms bursts,
-all-zero through the lead, a pause and the tail. The tests read the
+the meter a port of its own sending frames a hop apart in 160 ms bursts:
+the lead's mark (a frame far below any sound, not zero), the music, and
+all-zero frames through a pause and the tail (AB-2 F12). The tests read the
 silences off the fake's own output clock, never off Sautium's estimate
 (AB-1-DESIGN §9: tests 1, 3, 11, 13–17; the logic's own in
 test_hqp_ab_search.py).
@@ -43,23 +44,37 @@ from test_hqp_backend import FakeHqp, _fresh_links, _item, _wait  # noqa: E402
 from test_hqp_load import PG, _make_db  # noqa: E402
 
 DBNAME = "sautium_pytest_hqp_ab"
+# The product's own read of the queue's entry, before the fixture stands a
+# stub in for it (its own test reads the database)
+_REAL_TRACK = hqp_ab._track
 
 BINS = 129
 FRAME_RATE = 5512.5
 HOP = (BINS - 1) / FRAME_RATE          # 23.2 ms, HQPlayer's at 44.1 kHz
 BURST = 0.16
 METER_LAG = 0.02
+# HQPlayer's own zeros on its meter before the source reaches it, from the
+# build's end: a Pause sent at Play's answer, or at the first frame on an
+# idle host, took hold there, before position 0 (the lab run of 2026-11-23,
+# 32 of 32 pauses each way; AB-2 §12) — after a resume a few come again (the hold)
+PRE_S = 0.25
+# Through a pause HQPlayer sends its zeros at a cadence of their own: 61-80 a
+# second against 41-46 while it plays (the same run)
+PAUSE_HOP = 1 / 70
 
 
-def _frame(sound: bool) -> bytes:
+def _frame(level: float) -> bytes:
     re = np.zeros(BINS, "<f4")
-    if sound:
-        re[3] = 0.1
+    re[3] = level
     return (struct.pack("<IIIiffff", 1, 1, BINS, 16, FRAME_RATE / 2, HOP, 2.0, 0.0)
             + struct.pack("<ffff", 0.0, 0.0, -3.0, -3.0) + re.tobytes() + np.zeros(BINS, "<f4").tobytes())
 
 
-ZERO, SOUND = _frame(False), _frame(True)
+# The mark's frame: a lead's tone at -126 dBFS is ~2.4e-7 on the meter
+ZERO, MARK, SOUND = _frame(0.0), _frame(2.4e-7), _frame(0.1)
+# A 16-bit TPDF dither's frame (its bins peak ~1.3e-6): sound, not the mark
+QUIET = _frame(1.3e-6)
+FRAMES = {"z": ZERO, "m": MARK, "s": SOUND, "q": QUIET}
 
 
 @dataclass
@@ -69,17 +84,22 @@ class Params:
     rl: float = 0.03           # a resume's latency
     rate: int = 705600
     extra: float = 0.0         # frames past the delay after the end (sinc-M's 2 s in the lab)
+    hold_pause: bool = False   # a Pause during the build answered only at its end (the port busy)
+    # A HQPlayer on which a Pause sent before the source takes hold this far
+    # into it — inside the lead (the premise of AB-2 §13 Q7 not holding)
+    pause_late: float = 0.0
 
 
 class TimedHqp(FakeHqp):
     """FakeHqp taught time (the module docstring). Segments of what its
     engine does, by wall time: (t0, kind, position at t0, the filter's
-    params, the entry: (uri, lead, total)) — kind 'build', 'play', 'pause',
-    'hold' (a resume's latency), 'tail' (all-zero frames after the end or a
-    Stop), 'off'. Kept whole: the output is read off them after the test."""
+    params, the entry: (uri, lead, total)) — kind 'build', 'preroll' (its
+    zeros before the source), 'play', 'pause', 'hold' (a resume's latency),
+    'tail' (all-zero frames after the end or a Stop), 'off'. Kept whole: the
+    output is read off them after the test."""
 
     FILTERS = ["xla", "sinc-M", "ext2", "hires", "long-lp", "mp", "ringy"]
-    STREAMING = ("play", "pause", "hold", "tail")
+    STREAMING = ("preroll", "play", "pause", "hold", "tail")
 
     def __init__(self):
         super().__init__()
@@ -95,8 +115,12 @@ class TimedHqp(FakeHqp):
         self.refuse = set()            # filters SetFilter refuses in the 1x slot
         self.refused = []              # the names of each SetFilter it refused
         self.refuse_volume = False     # Volume refused (a fixed volume)
+        self.refuse_pause = False      # Pause refused
         self.adds = []                 # times of each cut's PlaylistAdd
         self.stream0 = None            # when the meter's stream of the entry began
+        # The passage's own head: ('z', s) seconds of digital silence or
+        # ('q', s) of dither at its start, after the lead (review round 1)
+        self.quiet_head = None
         try:
             self.meter = _MeterPort(self)
         except OSError:
@@ -131,16 +155,46 @@ class TimedHqp(FakeHqp):
             self._future_cut(now)
             start = now + f.b
             self.stream0 = start
-            self.seg += [(now, "build", 0.0, f, self.entry), (start, "play", 0.0, f, self.entry)]
-            self._ends(start, 0.0, f)
+            self.seg += [(now, "build", 0.0, f, self.entry), (start, "preroll", 0.0, f, self.entry),
+                         (start + PRE_S, "play", 0.0, f, self.entry)]
+            self._ends(start + PRE_S, 0.0, f)
         elif kind == "pause":
             self._future_cut(now)
             self.seg += [(now, "hold", pos, f, self.entry), (now + f.rl, "play", pos, f, self.entry)]
             self._ends(now + f.rl, pos, f)
+        else:
+            # A resume before a pause that takes hold later (pause_late): the
+            # pause comes first, as HQPlayer takes its commands in order, and
+            # the resume after its first zeros
+            late = next((x for x in self.seg if x[1] == "pause" and x[0] > now), None)
+            if late is not None:
+                t0, _, pos, f, entry = late
+                self._future_cut(t0)
+                back = t0 + 2 * PAUSE_HOP
+                self.seg += [(back, "hold", pos, f, entry), (back + f.rl, "play", pos, f, entry)]
+                self._ends(back + f.rl, pos, f)
+
+    def _source_at(self, now):
+        """When the source reaches the meter in the play under way."""
+        return next(t0 for t0, kind, *_ in self.seg if kind == "play" and t0 >= now)
+
+    def build_end(self, now):
+        _, kind, _, f, _ = self._now_seg(now)
+        return self._source_at(now) - PRE_S if kind == "build" else None
 
     def _pause(self, now):
         _, kind, _, f, _ = self._now_seg(now)
-        if kind == "play":
+        if kind in ("build", "preroll"):
+            if f.pause_late:
+                at = self._source_at(now) + f.pause_late
+                self._future_cut(at)
+                self.seg.append((at, "pause", f.pause_late, f, self.entry))
+                return
+            # before the source: it holds at position 0, from the build's end
+            at = max(now, self._source_at(now) - PRE_S)
+            self._future_cut(at)
+            self.seg.append((at, "pause", 0.0, f, self.entry))
+        elif kind == "play":
             pos = self.pos_at(now)
             self._future_cut(now)
             self.seg.append((now, "pause", pos, f, self.entry))
@@ -154,11 +208,19 @@ class TimedHqp(FakeHqp):
         self.seg += [(now, "tail", pos, f, self.entry), (now + f.d, "off", pos, f, self.entry)]
 
     def frame_at(self, t):
-        """None (no frame), or whether the frame at `t` sounds. Under the lock."""
+        """None (no frame), or the frame at `t`: 's' the music, 'm' the lead's
+        mark, 'z' all-zero (a pause, a resume's latency, the tail). Under the
+        lock."""
         _, kind, _, _, entry = self._now_seg(t)
         if entry is None or kind not in self.STREAMING:
             return None
-        return kind == "play" and entry[1] <= self.pos_at(t) < entry[2]
+        if kind != "play" or self.pos_at(t) >= entry[2]:
+            return "z"                  # HQPlayer's own zeros: before the source, a pause, the tail
+        if self.pos_at(t) < entry[1]:
+            return "m"
+        if self.quiet_head is not None and self.pos_at(t) < entry[1] + self.quiet_head[1]:
+            return self.quiet_head[0]
+        return "s"
 
     def output(self, after=0.0):
         """[(on, off, filter params)]: the sound as it left the output, every
@@ -170,7 +232,9 @@ class TimedHqp(FakeHqp):
             if kind != "play" or entry is None or t0 < after:
                 continue
             t1 = seg[i + 1][0] if i + 1 < len(seg) else float("inf")
-            on = t0 + max(0.0, entry[1] - pos0)
+            # the first sound: after the lead, and after a silent head of the passage
+            head = self.quiet_head[1] if self.quiet_head is not None and self.quiet_head[0] == "z" else 0.0
+            on = t0 + max(0.0, entry[1] + head - pos0)
             off = min(t1, t0 + (entry[2] - pos0))
             if on < off:
                 out.append((on + f.d, off + f.d, f))
@@ -185,6 +249,13 @@ class TimedHqp(FakeHqp):
         if cmd not in self.MINE:
             return super()._dispatch(cmd, attrs)
         now = time.time()
+        if cmd == "Pause":
+            with self._lock:
+                _, kind, _, f, _ = self._now_seg(now)
+                held = self.build_end(now) if f is not None and f.hold_pause else None
+            if held is not None:
+                time.sleep(max(0.0, held - now))       # the port answers once the build is over
+                now = time.time()
         if cmd == "PlaylistAdd":
             token = attrs["uri"].rsplit("/", 1)[-1]
             with self._lock:
@@ -239,13 +310,15 @@ class TimedHqp(FakeHqp):
                 self._play(now)
                 return '<Play result="OK"/>'
             if cmd == "Pause":
+                if self.refuse_pause:
+                    return '<Pause result="Error">not now</Pause>'
                 self._pause(now)
                 return '<Pause result="OK"/>'
             if cmd == "Stop":
                 self._stop(now)
                 return '<Stop result="OK"/>'
             _, kind, _, f, entry = self._now_seg(now)
-            state = {"build": 2, "play": 2, "hold": 2, "pause": 1}.get(kind, 0)
+            state = {"build": 2, "preroll": 2, "play": 2, "hold": 2, "pause": 1}.get(kind, 0)
             uri = entry[0] if entry is not None and kind != "off" else ""
             delay = f' output_delay="{int(f.d * 1e6)}"' if f is not None and kind != "off" else ""
             rate = f.rate if f is not None else 705600
@@ -294,25 +367,25 @@ class _MeterPort:
                 self._conns.append(c)
 
     def _send(self):
-        s0, j, over = None, 1, None
+        s0, t, over = None, None, None
         while not self._done.wait(self.TICK):
             now = time.time()
             data = []
             with self.fake._lock:
                 if self.fake.stream0 not in (s0, over):
-                    s0, j = self.fake.stream0, 1
+                    s0 = self.fake.stream0
+                    t = None if s0 is None else s0 + HOP
                 while s0 is not None:
-                    t = s0 + j * HOP
-                    due = s0 + math.ceil(j * HOP / BURST) * BURST + METER_LAG
+                    due = s0 + math.ceil((t - s0) / BURST - 1e-9) * BURST + METER_LAG
                     if due > now:
                         break
-                    sound = self.fake.frame_at(t)
-                    if sound is None:
+                    frame = self.fake.frame_at(t)
+                    if frame is None:
                         if self.fake._now_seg(t)[1] == "off":
                             s0, over = None, s0     # the stream is over: its frames stop
                         break
-                    data.append(SOUND if sound else ZERO)
-                    j += 1
+                    data.append(FRAMES[frame])
+                    t += PAUSE_HOP if self.fake._now_seg(t)[1] == "pause" else HOP
             if not data:
                 continue
             blob = b"".join(data)
@@ -463,9 +536,9 @@ def ab(dsn, tmp_path, monkeypatch):
     # The track: an owned file here (its own test reads the database)
     monkeypatch.setattr(hqp_ab, "_track", lambda mgr: {
         "track_id": None, "title": "Song 1", "artist": "Artist", "path": str(tmp_path / "song.flac"),
-        "offset": 0.0, "length": 120.0, "rate": 44100, "bits": 24, "channels": 2})
+        "offset": 0.0, "length": 120.0, "rate": 44100, "channels": 2})
 
-    def cut(path, start, length, *, lead, fade, bits):
+    def cut(path, start, length, *, lead, fade):
         out = tmp_path / f"cut-{start:.3f}-{length:.3f}-{lead:.3f}.flac"
         out.write_bytes(b"fLaC")
         fake.cuts[proxy.file_token(str(out))] = (lead, length)
@@ -518,9 +591,17 @@ def _said(gaps):
     return ", ".join(f"{g:.3f} (P {p:.2f})" for g, p in gaps)
 
 
+def _p(*names, ref=None):
+    """The P a step playing `names` (compared with `ref`) gets from the
+    sitting's timings now."""
+    s = hqp_ab._sitting
+    return S.silence([s.timings[n] for n in names], s.lead_s,
+                     s.timings[ref] if ref is not None else None)
+
+
 # -- the warm-up and the silence (tests 1, 11) ------------------------------------------------
 
-def test_a_chain_plays_every_fragment_after_the_same_silence(ab):
+def test_a_chain_plays_every_fragment_after_its_steps_silence(ab):
     fake = ab.fake
     fake.params["xla"] = Params(b=0.05, d=0.3, rl=0.02)
     fake.params["sinc-M"] = Params(b=0.25, d=0.9, rl=0.05, extra=0.3)
@@ -531,7 +612,7 @@ def test_a_chain_plays_every_fragment_after_the_same_silence(ab):
     # the warm-up ran at the bottom of the range, their volume read back after it
     vols = [a["value"] for c, a in fake.commands if c == "Volume"]
     assert vols == ["-60.0", str(before)] and fake.volume == before
-    p = v["silence_s"]
+    assert v["silence_s"] is None             # no step yet: P is a step's (AB-2)
     t0 = time.time()
     ab.begin()
     for a in ("same", "same", "same", "same", "same", "same"):
@@ -546,18 +627,19 @@ def test_a_chain_plays_every_fragment_after_the_same_silence(ab):
     assert [a["value"] for c, a in fake.commands if c == "Volume"] == vols
     row = ab.q("SELECT ended::text, slipped, silence_s::float, lead_s::float FROM hqp_ab_sittings")
     # a slip the sitting caught (the lab's load can make one) is played
-    # again and counted, P grown for it; none was heard
+    # again and counted; none was heard
     assert row[0][0] == "done"
-    # P grows with a slip that landed late, not with one whose sound came
-    # early or late (`r` replaced): never shrinks
-    assert row[0][2] == pytest.approx(p, abs=0.01) if row[0][1] == 0 else row[0][2] >= p
+    # each duel keeps the P it was played at; the sitting the longest
+    duels = [r[0] for r in ab.q("SELECT silence_s::float FROM hqp_ab_duels ORDER BY n")]
+    assert duels and None not in duels
+    assert row[0][2] >= max(duels) - 0.01
 
 
 def test_a_build_slower_than_its_warm_up_is_played_again_with_the_silence_grown(ab):
     fake = ab.fake
     hqp_ab.open_sitting("pair", "sinc-M")
-    v = ab.wait_phase("ready")
-    p = v["silence_s"]
+    ab.wait_phase("ready")
+    p = _p(hqp_ab._sitting.yours, "sinc-M")
     fake.params["sinc-M"] = Params(b=p + 0.5)          # its pause lands after its resume was due
     ab.begin()
     ab.answer("1")
@@ -571,8 +653,10 @@ def test_a_build_slower_than_its_warm_up_is_played_again_with_the_silence_grown(
 
 
 def test_a_pause_landing_late_moves_the_resume_and_never_the_sound(ab, monkeypatch):
-    """The sitting's thread woken late on a fragment's first frame: its pause
-    lands further into the lead, and its resume is timed from there."""
+    """The sitting's thread woken late on a fragment's first frame: its pause,
+    sent at Play's answer, held before the source all the same (§13 Q7), and
+    the resume, timed from the later of that and the first frame, keeps the
+    silence."""
     real = hqp_ab.Sitting._wait
     late = []
 
@@ -621,6 +705,390 @@ def test_a_slow_build_falls_inside_the_silence_and_the_pair_hears_it_equal(ab):
     assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
 
 
+# -- AB-2: the silence per step, the 10 s cap, the pause's true position -------------------
+
+def _run_pair(ab, answers=("1", "2")):
+    t0 = time.time()
+    ab.begin()
+    for a in answers:
+        if ab.phase() != "testing":
+            break
+        ab.answer(a)
+    hqp_ab.command("stop")
+    ab.wait_phase("result", "ended")
+    return t0
+
+
+def test_a_second_tried_and_changed_stretches_no_round(ab):
+    """B-131: P per step from its own filters — a slow second the person
+    tried and then changed keeps no round waiting (one P a sitting took
+    every filter warmed)."""
+    ab.fake.params["sinc-M"] = Params(b=1.5)
+    hqp_ab.open_sitting("pair", "sinc-M")
+    ab.wait_phase("ready")
+    hqp_ab.command("form", form="pair", second="ext2")
+    assert _wait(lambda: hqp_ab.view()["second"] == "ext2" and hqp_ab.view()["phase"] == "ready", 60)
+    s = hqp_ab._sitting
+    slow = _p(s.yours, "sinc-M")
+    gaps = _silences(ab, _run_pair(ab))
+    assert gaps, _said(gaps)
+    assert all(at < slow - 1.0 for _, at in gaps), _said(gaps)
+    assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
+    assert all(p < slow - 1.0 for (p,) in ab.q("SELECT silence_s::float FROM hqp_ab_duels"))
+
+
+def test_a_slow_probe_stretches_only_the_steps_it_is_in(ab):
+    """B-131 in the chain (Q1 (a)): a candidate that builds 0.8 s against
+    0.05 s waits in the steps that play it or are compared with it, and in
+    no other; every silence its own step's."""
+    ab.fake.params["hires"] = Params(b=0.8)
+    hqp_ab.open_sitting("chain")
+    ab.wait_phase("ready")
+    assert "hires" in hqp_ab._sitting.pool
+    t0 = time.time()
+    ab.begin()
+    for _ in range(S.CHAIN_STEPS):
+        if ab.phase() != "testing":
+            break
+        ab.answer("same")
+    ab.wait_phase("result", "ended")
+    gaps = _silences(ab, t0)
+    assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
+    # like against like: the one-fragment steps after the first (the first
+    # plays two, so its P holds a tail the others have not)
+    rows = ab.q("SELECT first_name, second_name, silence_s::float FROM hqp_ab_duels WHERE n > 1 ORDER BY n")
+    with_slow = [p for a, b, p in rows if "hires" in (a, b)]
+    without = [p for a, b, p in rows if "hires" not in (a, b)]
+    assert with_slow and without, rows          # the search's order is its own: the same each run
+    assert max(without) < min(with_slow) - 0.5, rows
+
+
+def test_a_candidate_over_the_start_cap_leaves_with_its_reason(ab, monkeypatch):
+    """B-131: a probe whose start (Play to its first frame, the build in it)
+    is over START_MAX_S leaves the sitting with its reason; the rest goes on."""
+    monkeypatch.setattr(S, "START_MAX_S", 0.8)
+    ab.fake.params["hires"] = Params(b=1.0)
+    hqp_ab.open_sitting("chain")
+    v = ab.wait_phase("ready")
+    s = hqp_ab._sitting
+    assert "hires" not in s.pool and "hires" not in s.search.pool and "hires" not in s.timings
+    why = {r["name"]: r["why"] for r in v["chain"]["left_out"]}
+    assert why["hires"] == "Takes too long to start here to compare it"
+    assert v["own_slow"] is None
+
+
+def test_the_pairs_second_over_the_cap_is_cleared_with_its_reason(ab, monkeypatch):
+    monkeypatch.setattr(S, "START_MAX_S", 0.8)
+    ab.fake.params["sinc-M"] = Params(b=1.0)
+    hqp_ab.open_sitting("pair", "sinc-M")
+    v = ab.wait_phase("ready")
+    assert v["second"] is None and v["say"]["line"] == "Takes too long to start here to compare it"
+    assert "sinc-M" in {r["name"] for r in v["seconds"]["left_out"]}
+
+
+def test_their_own_filter_over_the_cap_keeps_the_sitting_and_says_its_pauses_are_long(ab, monkeypatch):
+    monkeypatch.setattr(S, "START_MAX_S", 0.8)
+    ab.fake.params["xla"] = Params(b=1.0)          # theirs: slot 0
+    hqp_ab.open_sitting("pair", "ext2")
+    v = ab.wait_phase("ready")
+    s = hqp_ab._sitting
+    assert v["ended"] is None and v["second"] == "ext2"
+    assert v["own_slow"] is not None and v["own_slow"] >= 0.9
+    gaps = _silences(ab, _run_pair(ab))
+    assert gaps and all(at > 1.0 + S.LEAD_MIN_S for _, at in gaps), _said(gaps)
+    assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
+
+
+def test_their_filters_slow_first_play_is_measured_again_after_another(ab, monkeypatch):
+    """§3.2, Q2: the warm-up's first play follows whatever HQPlayer held —
+    a build across rate families no fragment pays. Over the cap, their
+    start is taken again after another filter's play."""
+    monkeypatch.setattr(S, "START_MAX_S", 0.8)
+    fake = ab.fake
+    real = fake._play
+    first = []
+
+    def slow_first(now):
+        _, kind, _, _, _ = fake._now_seg(now)
+        if kind in ("off", "tail") and not first:
+            first.append(now)
+            fake.params["xla"] = Params(b=1.2)
+            real(now)
+            fake.params["xla"] = Params()
+            return
+        real(now)
+    fake._play = slow_first
+    hqp_ab.open_sitting("pair", "ext2")
+    v = ab.wait_phase("ready")
+    s = hqp_ab._sitting
+    assert first and v["own_slow"] is None, s.timings
+    assert s.timings[s.yours].start < 0.8
+    # played again: theirs, ext2, theirs
+    assert v["warm"]["of"] == 3
+
+
+def _held_at_the_first_frame(monkeypatch, times=2, hold=0.15):
+    """F12 as HQP-BENCH-63 §14.5 saw it under load, made exact (B-119's
+    method): the sitting's thread woken late on a test fragment's first frame
+    AND the meter's reader held there — the frames wait in the kernel's
+    buffer, then come in one late read. The first `times` test fragments."""
+    held = []
+    real_wait = hqp_ab.Sitting._wait
+
+    def late_wait(self, pred, limit, what):
+        got = real_wait(self, pred, limit, what)
+        if what == "frame of the passage" and self.phase == "testing" and len(held) < times:
+            held.append(time.time())
+            time.sleep(hold)
+        return got
+    monkeypatch.setattr(hqp_ab.Sitting, "_wait", late_wait)
+    real_read = hqp_ab.Sitting._on_read
+
+    def held_read(self, at, hop, levels):
+        first = not self._reads
+        real_read(self, at, hop, levels)
+        if first and self.phase == "testing" and len(held) < times:
+            time.sleep(hold)                  # on the meter's thread: the reads behind it wait
+    monkeypatch.setattr(hqp_ab.Sitting, "_on_read", held_read)
+    return held
+
+
+def test_a_sitting_and_reader_held_at_the_first_frame_move_no_silence(ab, monkeypatch):
+    """F12 (§13 Q7): the Pause goes out at Play's answer, so it takes hold
+    before the source whatever the sitting's thread and the meter's reader
+    then do — no silence short or long, no slip. At the first frame (the
+    trigger before) a pause sent that late takes hold inside the lead."""
+    held = _held_at_the_first_frame(monkeypatch)
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    gaps = _silences(ab, _run_pair(ab))
+    assert len(held) == 2
+    assert hqp_ab._sitting.slipped == 0, _said(gaps)
+    assert all(abs(g - at) <= 0.08 for g, at in gaps), _said(gaps)
+    # the pause took hold at the lead's start: every pause segment at position 0
+    assert {round(pos, 6) for _, kind, pos, _, _ in ab.fake.seg if kind == "pause"} == {0.0}
+
+
+def test_a_pause_whose_answer_a_build_holds_still_holds_before_the_source(ab):
+    """The lab saw HQPlayer's answer to a Pause sent during a build come up
+    to 4.2 s later (7 of 32): the pause still held at position 0, and the
+    resume waits for both the answer and the build's end."""
+    ab.fake.params["ext2"] = Params(b=0.6, hold_pause=True)
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    gaps = _silences(ab, _run_pair(ab))
+    assert gaps and all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
+
+
+def test_a_pause_taking_hold_inside_the_lead_is_a_slip_said_by_the_mark(ab):
+    """§13 Q8: a marked frame before the resume — the pause took hold inside
+    the lead — is a slip, played again, counted with its cause."""
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    once = _late_pause_once(ab, 0.1)
+    gaps = _silences(ab, _run_pair(ab))
+    # one slip by the mark; a check the lab's load makes (B-119) may add its own
+    causes = [c for (c,) in ab.q("SELECT cause::text FROM hqp_ab_slips WHERE NOT warm ORDER BY n")]
+    assert once and causes.count("mark") == 1 and set(causes) <= {"mark", "check"}, causes
+    assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
+    assert ab.q("SELECT count(*) FROM hqp_ab_duels")[0][0] == 2
+
+
+def test_a_hqplayer_whose_pause_never_holds_before_the_source_stops_in_words(ab):
+    """§13 Q8's addition: on a HQPlayer where every pause takes hold inside
+    the lead, the test's first step slips by the mark at every try and the
+    sitting stops in words blaming HQPlayer — no filter left out as late. (The
+    warm-up resumes at once, before the source is due: only the test's
+    fragments can see it.)"""
+    for n in TimedHqp.FILTERS:
+        ab.fake.params[n] = Params(pause_late=0.1)
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    ab.begin()
+    v = ab.wait_phase("ended", timeout=90)
+    assert v["ended"] == "failed" and v["note"] == hqp_ab.NEVER_HOLDS
+    assert "late" not in hqp_ab._sitting.screened.left_out
+    assert ab.q("SELECT count(*), bool_and(NOT warm), min(cause::text), max(cause::text) FROM hqp_ab_slips") == [
+        (hqp_ab.SLIPS_A_STEP, True, "mark", "mark")]
+    assert ab.q("SELECT count(*) FROM hqp_ab_duels")[0][0] == 0
+
+
+def test_a_passage_that_starts_in_digital_silence_or_dither_holds_and_sounds(ab):
+    """Review round 1, H1 and M3: the passage's own digital silence after the
+    lead is never taken for a pause held inside it, and a dithered quiet
+    start (16-bit TPDF, bins ~1.3e-6) is sound, not the mark."""
+    for head in ("z", "q"):
+        ab.fake.quiet_head = (head, 0.2)
+        hqp_ab.open_sitting("pair", "ext2")
+        ab.wait_phase("ready")
+        gaps = _silences(ab, _run_pair(ab))
+        assert hqp_ab.view()["phase"] == "result" and gaps, (head, hqp_ab.view()["note"])
+        # never a pause held in the lead, nor the music before the resume: a
+        # check the lab's load makes (B-119) is all a slip may be
+        causes = {c for (c,) in ab.q("SELECT cause::text FROM hqp_ab_slips WHERE sitting_id = %s",
+                                       hqp_ab._sitting.row)}
+        assert causes <= {"check"}, (head, causes)
+        assert all(abs(g - at) <= 0.15 for g, at in gaps), (head, _said(gaps))
+        hqp_ab.close()
+
+
+def test_a_warm_up_after_a_filter_at_another_rate_settles_on_theirs_first(ab, monkeypatch):
+    """Review round 1, M4: a play after one at another output rate would pay
+    the switch back in its start — their filter plays once between,
+    unmeasured, so nothing after is left out as slow or measured long."""
+    monkeypatch.setattr(S, "START_MAX_S", 0.8)
+    fake = ab.fake
+    fake.params["ringy"] = Params(rate=768000)
+    real = fake._play
+    last = []
+
+    def switch_back(now):
+        _, kind, _, _, _ = fake._now_seg(now)
+        if kind in ("off", "tail"):
+            f = fake._running()
+            back = bool(last) and last[-1] != f.rate
+            last.append(f.rate)
+            if back:                              # a rate change paid at this Play
+                fake.params[fake.FILTERS[fake.slots["x1"]]] = Params(**{**f.__dict__, "b": 1.0})
+                real(now)
+                fake.params[fake.FILTERS[fake.slots["x1"]]] = f
+                return
+        real(now)
+    fake._play = switch_back
+    hqp_ab.open_sitting("chain")
+    v = ab.wait_phase("ready")
+    s = hqp_ab._sitting
+    assert "ringy" not in s.pool and s.left_rates.get("ringy") == 768000
+    assert "long_start" not in s.screened.left_out, s.screened.left_out
+    assert all(t.start < 0.8 for t in s.timings.values()), s.timings
+    assert v["own_slow"] is None
+
+
+def _late_pause_once(ab, late):
+    """The next test fragment's pause takes hold `late` s into the source."""
+    fake = ab.fake
+    once = []
+    real = fake._pause
+
+    def late_once(now):
+        _, kind, _, f, _ = fake._now_seg(now)
+        if kind in ("build", "preroll") and not once and hqp_ab._sitting.phase == "testing":
+            once.append(now)
+            f2 = Params(**{**f.__dict__, "pause_late": late})
+            fake.seg = [x if x[3] is not f else (x[0], x[1], x[2], f2, x[4]) for x in fake.seg]
+        real(now)
+    fake._pause = late_once
+    return once
+
+
+def test_a_pause_that_does_not_hold_is_stopped_at_its_first_frame_not_heard_through(ab, monkeypatch):
+    """Review round 2, M1: a pause that did not hold before the source — here
+    it would take hold only in the music — is seen at the first frame of the
+    source the meter shows during the silence (the lead's mark), and the
+    fragment is stopped then: its music never reaches the output, nor plays
+    through the silence to its resume."""
+    monkeypatch.setattr(S, "MARGIN_S", 1.5)               # a silence long enough to tell
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    fake = ab.fake
+    stops = []
+    real_stop = fake._stop
+    fake._stop = lambda now: (stops.append(now), real_stop(now))[1]
+    t0 = time.time()
+    once = _late_pause_once(ab, S.LEAD_MIN_S + 0.1)       # past the lead: in the music
+    _run_pair(ab)
+    assert once and ab.q("SELECT cause::text FROM hqp_ab_slips WHERE NOT warm") == [("mark",)]
+    source = once[0] + Params().b + PRE_S                  # when that fragment's source began
+    # stopped before the music would have left HQPlayer, and before anything
+    # of that fragment was heard
+    assert any(once[0] < t < source + S.LEAD_MIN_S for t in stops), (once, stops, source)
+    heard = [(on, off) for on, off, _ in fake.output(t0) if once[0] < on < source + S.LEAD_MIN_S + 1.0]
+    assert heard == [], heard
+
+
+def test_the_track_s_own_channels_are_what_the_screen_reads_speeds_by(ab, monkeypatch, tmp_path):
+    """Review round 3: the speeds measured here are by source channels — the
+    queue's entry read from the database carries a 5.1 file's six, and the
+    screen asks for the speeds of six."""
+    from playback.queue import QueueItem
+    from playback import hqp_load
+    song = tmp_path / "six.flac"
+    song.write_bytes(b"fLaC")
+    with ab.conn.cursor() as cur:
+        cur.execute("INSERT INTO tracks (id, title) VALUES (gen_random_uuid(), 'Six') RETURNING id")
+        track = cur.fetchone()[0]
+        cur.execute("INSERT INTO albums (id, title) VALUES (gen_random_uuid(), 'Six') RETURNING id")
+        album = cur.fetchone()[0]
+        cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
+                    (album, str(tmp_path)))
+        cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path, file_format, sample_rate, "
+                    "bit_depth, channels, duration_seconds) VALUES (%s, %s, %s, 'FLAC', 44100, 24, 6, 120) "
+                    "RETURNING id", (track, cur.fetchone()[0], str(song)))
+        mf = cur.fetchone()[0]
+    ab.conn.commit()
+
+    class M:
+        latest_status = {"track_index": 1}
+        spot = staticmethod(lambda: None)
+
+        class queue:
+            @staticmethod
+            def item_at(i):
+                return QueueItem(track_id=str(track), media_file_id=mf,
+                                 source={"kind": "file", "path": str(song), "format": "FLAC"})
+    got = _REAL_TRACK(M)
+    assert got["channels"] == 6 and got["rate"] == 44100
+    asked = []
+    real = hqp_load.headroom
+    monkeypatch.setattr(hqp_load, "headroom", lambda ctx, **kw: (asked.append(kw), real(ctx, **kw))[1])
+    monkeypatch.setattr(hqp_ab, "_track", lambda mgr: {**got, "title": "Six", "artist": "A"})
+    hqp_ab.open_sitting("pair", "ext2")
+    ab.wait_phase("ready")
+    assert asked and all(kw.get("src_channels") == 6 for kw in asked), asked
+
+
+def test_a_pause_hqplayer_refuses_ends_the_sitting_in_words(ab):
+    ab.fake.refuse_pause = True
+    hqp_ab.open_sitting("pair", "ext2")
+    v = ab.wait_phase("ended", timeout=60)
+    assert v["ended"] == "failed" and v["note"] == "HQPlayer did not pause the passage (not now)", v["note"]
+
+
+def test_the_chain_s_step_says_whether_their_filter_is_in_it(ab):
+    """Review round 2, L4: their filter is in the first step, in a check while
+    it is the champion, and in the next step after such a check (the fragment
+    it is compared with) — never in a next step after another's."""
+    hqp_ab.open_sitting("chain")
+    ab.wait_phase("ready")
+    ab.begin()
+    seen = []
+    for a in ("same", "worse", "better", "same"):                 # the check passed: theirs stays
+        if ab.phase() != "testing":
+            break
+        assert _wait(lambda: (hqp_ab.view().get("step") or {}).get("answerable"), 60)
+        st = hqp_ab.view()["step"]
+        seen.append((st["kind"], st["yours"]))
+        ab.answer(a)
+    hqp_ab.command("stop")
+    ab.wait_phase("result", "ended")
+    # first (theirs + a probe), next (a probe after a probe), check after
+    # "worse" (theirs again), next (a probe against theirs)
+    assert seen == [("first", True), ("next", False), ("check", True), ("next", True)], seen
+
+
+def test_a_slow_build_s_slip_is_recorded_as_late_and_a_resume_that_moved_as_the_check(ab):
+    """§13 Q9: each slip says what read it — a build slower than its warm-up
+    ('late'), a resume's way to the output that changed ('check')."""
+    hqp_ab.open_sitting("pair", "sinc-M")
+    ab.wait_phase("ready")
+    s = hqp_ab._sitting
+    ab.fake.params["sinc-M"] = Params(b=_p(s.yours, "sinc-M") + 0.5)
+    ab.fake.params[s.yours] = Params(rl=0.4)
+    _run_pair(ab, ("1", "same", "same"))
+    causes = {c for (c,) in ab.q("SELECT cause::text FROM hqp_ab_slips WHERE NOT warm")}
+    assert {"late", "check"} <= causes, causes
+
+
 def test_the_app_stopping_mid_sitting_puts_hqplayer_back(ab):
     fake = ab.fake
     before = fake.volume
@@ -650,18 +1118,6 @@ def test_the_track_the_person_was_hearing_tails_out_before_the_warm_up(ab):
     ab.wait_phase("ready")
     s = hqp_ab._sitting
     assert s.slipped == 0 and s.lead_s < 0.8, (s.lead_s, s.timings)
-
-
-def test_a_warm_up_pause_in_the_music_plays_it_again_on_a_longer_lead(ab, monkeypatch):
-    """Review round 1, M1 (§16): the warm-up's pause landing too near the
-    music lengthens the lead and plays that filter again — never a slip,
-    never the sitting's end."""
-    monkeypatch.setattr(S, "LEAD_MIN_S", 0.2)
-    hqp_ab.open_sitting("pair", "ext2")
-    v = ab.wait_phase("ready")
-    s = hqp_ab._sitting
-    assert v["ended"] is None and s.warm_lead > 0.2
-    assert s.lead_s >= max(t.p for t in s.timings.values()) + S.LEAD_ABOVE_S - 1e-9
 
 
 def test_a_pair_switched_to_find_my_filter_leaves_out_one_at_another_rate(ab):
@@ -1043,31 +1499,46 @@ def test_no_path_that_leaves_the_node_names_the_record():
         assert "hqp_ab_" not in (root / rel).read_text(encoding="utf-8"), rel
 
 
-def test_the_fragment_is_the_passage_faded_after_its_lead_of_digital_silence(tmp_path):
+@pytest.mark.parametrize("bits,layout,ch", [(16, "stereo", 2), (24, "stereo", 2), (16, "mono", 1), (24, "5.1", 6)])
+def test_the_fragment_is_the_passage_faded_after_its_lead_of_the_mark(tmp_path, bits, layout, ch):
+    """AB-2 F12: the lead is the 24-bit pattern 0, +4, 0, -4 exactly (no
+    dither) on every channel, the cut 24-bit whatever the source, its channel
+    layout the source's (review round 1, L7), the music its samples."""
     import shutil
     import subprocess
     if shutil.which("ffmpeg") is None:
         pytest.skip("no ffmpeg")
     from streaming import transcode
     src = tmp_path / "tone.flac"
+    fmt = ["-sample_fmt", "s16"] if bits == 16 else ["-sample_fmt", "s32", "-bits_per_raw_sample", "24"]
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-                    "sine=frequency=1000:sample_rate=44100:duration=5", "-ac", "2", "-sample_fmt", "s32",
-                    "-bits_per_raw_sample", "24", str(src)], check=True)
+                    "sine=frequency=1000:sample_rate=44100:duration=5", "-af", f"aformat=channel_layouts={layout}",
+                    *fmt, str(src)], check=True)
     old = transcode._CACHE_DIR
     transcode._CACHE_DIR = tmp_path / "cache"
     try:
-        out = transcode.flac_fragment_path_for_file(str(src), 1.0, 2.0, lead=1.0, fade=0.02, bits=24)
+        out = transcode.flac_fragment_path_for_file(str(src), 1.0, 2.0, lead=1.0, fade=0.02)
     finally:
         transcode._CACHE_DIR = old
-    raw = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", out, "-f", "s32le",
-                          "-ac", "1", "-"], check=True, capture_output=True).stdout
-    x = np.frombuffer(raw, "<i4").astype(float) / 2 ** 31
-    assert len(x) == pytest.approx(3 * 44100, abs=64)
-    assert not x[:44100].any()                                  # the lead: digital silence
-    assert abs(x[44100 + 10]) < 0.05 and np.abs(x[44100 + 2000:44100 + 4000]).max() > 0.05   # faded in (the sine at 1/8)
-    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=bits_per_raw_sample",
+
+    def pcm(path, *args):
+        raw = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", *args, "-i", path, "-f", "s32le", "-"],
+                             check=True, capture_output=True).stdout
+        return np.frombuffer(raw, "<i4").reshape(-1, ch).astype(np.int64)
+    x = pcm(out)
+    assert len(x) == 3 * 44100
+    lead = x[:44100] // 256
+    assert (x[:44100] % 256 == 0).all()
+    assert (lead == np.tile([0, 4, 0, -4], 44100 // 4 + 1)[:44100, None]).all()
+    music = x[44100:]
+    source = pcm(str(src), "-ss", "1.0", "-t", "2.0")
+    fade = int(0.02 * 44100) + 2
+    assert np.array_equal(music[fade:-fade], source[fade:len(music) - fade])
+    c = int(np.abs(music).max(axis=0).argmax())                           # a channel the tone is in
+    assert abs(music[10, c]) < abs(music[2000:4000, c]).max() / 8          # faded in
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=bits_per_raw_sample,channel_layout",
                             "-of", "csv=p=0", out], capture_output=True, text=True).stdout.strip()
-    assert probe == "24"
+    assert probe.split(",") == ["24", layout] or sorted(probe.split(",")) == sorted(["24", layout])
 
 
 # -- an empty pool says why (HQP-BENCH-63 §6, B-120) ------------------------------------
