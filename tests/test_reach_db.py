@@ -297,6 +297,7 @@ def test_a_queued_file_whose_tracks_uuid_the_canon_rewrote_still_opens_as_its_fi
     its other copies are those of the track the file belongs to now."""
     from playback.queue import items_for_media_ids
     from playback.substitute import native_plays
+    twin = node["copy"](0, "twin/01.flac")          # a second copy, the canon's to move too
     items = _queue(node)
     it, old = items[0], items[0].track_id
     new = str(uuid.uuid4()) if how == "rename" else node["phantoms"][0]
@@ -314,8 +315,6 @@ def test_a_queued_file_whose_tracks_uuid_the_canon_rewrote_still_opens_as_its_fi
     # a second copy of the track the file belongs to now stands in for it
     node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
                         (node["variant"],))
-    twin = node["copy"](0, "twin/01.flac")
-    node["cur"].execute("UPDATE media_files SET track_id = %s WHERE id = %s", (new, twin))
     assert native_plays([it], "browser", None)[0]["media_file_id"] == twin
     assert items_for_media_ids(node["files"][:1])[0].track_id == new
 
@@ -391,7 +390,7 @@ def test_with_no_folder_gone_a_copy_query_plans_as_it_did(node):
 
     def nodes(sql: str) -> list:
         cur.execute("EXPLAIN (COSTS OFF) " + sql,
-                    {"ids": [node["tracks"][0]], "hqp_id": None, "gone": []})
+                    {"ids": [node["tracks"][0]], "mids": [], "hqp_id": None, "gone": []})
         kept, under = [], None
         for line in (r[0] for r in cur.fetchall()):
             indent = len(line) - len(line.lstrip())
