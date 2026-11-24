@@ -72,6 +72,8 @@ def test_an_album_all_out_on_a_node_that_streams_says_so_and_its_rows_stream():
         "text": "Playing it now streams it: each track once in full, then 30-second excerpts — "
                 "until the disk is back.",
         "button": "Its disk is not connected"}
+    assert _node(WORDS + "console.log(JSON.stringify([notHereWords('disk').mark, "
+                 "notHereWords('away').mark]));") == ["not connected", "away"]
 
 
 def test_an_album_all_out_where_nothing_streams_refuses_play_on_the_page_with_the_sentence():
@@ -185,6 +187,7 @@ def test_the_scan_buttons_wait_for_the_folder_under_the_rows_sentence(streams, s
 
 
 REACH = "\n".join([
+    "const _reachScreens = new Set();",
     _block("function followReach(screen, url, text, rerender) {"),
     _block("async function refreshReach(screen) {"),
     "let _reachStood = false;",
@@ -197,8 +200,8 @@ const fetched = [];
 const notices = { get: key => (key === 'library.mount_missing' ? notice : null) };
 const fetch = url => { fetched.push(url); return Promise.resolve({ ok: true, text: () => Promise.resolve(served) }); };
 const screen = { isConnected: true };
-const other = { isConnected: true };                 // a screen that follows nothing
-const document = { querySelectorAll: () => [screen, other] };
+const left = { isConnected: false };                 // a screen the person left
+followReach(left, '/api/albums/left', 'x', () => { throw new Error('a screen that left was drawn'); });
 let painted = 0;
 const paint = () => { painted += 1; followReach(screen, '/api/albums/a', served, paint); };
 followReach(screen, '/api/albums/a', served, paint);
@@ -217,7 +220,7 @@ const settle = async () => { for (let i = 0; i < 4; i++) await new Promise(r => 
 
 
 def test_a_flip_of_the_notice_asks_the_open_screens_payload_again_and_repaints_only_a_change():
-    assert _node(REACH_DRIVER) == [[0, 0], [1, 0], [1, 0], [2, 1], [3, 2]]
+    assert _node(REACH_DRIVER) == [[0, 0], [1, 0], [1, 0], [2, 1], [3, 2]]     # [asked, drawn]
     # the album and the artist screens name their payload
     assert "followReach(screen, url, text, loadAndRender);" in SOURCE
     assert "followReach(screen, url, text, () => renderArtist(root, artistId, selectedMbid));" in SOURCE

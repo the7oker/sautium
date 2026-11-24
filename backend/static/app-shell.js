@@ -106,8 +106,9 @@
   // The owner's own music with no file that opens here now — its disk out
   // (`why` 'disk': its folder does not answer) or its copy away (a Rescan
   // found none of its files): what the album says of it, and what a refused
-  // tap says as a toast (a route's 409 `not_here`). Drafts for the words
-  // sitting (PI-NODE-2D-DESIGN §9.1).
+  // tap says as a toast (a route's 409 `not_here`); `mark` is a tile's
+  // one-word mark for such an album. Drafts for the words sitting
+  // (PI-NODE-2D-DESIGN §9.1).
   const NOT_HERE = {
     disk: {
       title: 'On a disk that is not connected',
@@ -117,6 +118,7 @@
       partStreams: 'Playing them now streams them: each track once in full, then 30-second excerpts — until the disk is back.',
       partWaits: 'They cannot play until the disk is connected.',
       button: 'Its disk is not connected',
+      mark: 'not connected',
     },
     away: {
       title: 'Your copy is away',
@@ -126,6 +128,7 @@
       partStreams: 'Playing them now streams them: each track once in full, then 30-second excerpts — until their files are back.',
       partWaits: 'They cannot play until their files are back.',
       button: 'Your copy is away',
+      mark: 'away',
     },
   };
   function notHereWords(why) {
@@ -5357,10 +5360,13 @@
      the notices stream every page holds). A screen that shows the owner's
      files names its payload here (followReach); when the notice flips, the
      payload is asked again and the screen repainted only if it says
-     otherwise — the same answer touches no DOM. A tile needs the same two
-     things to follow: the URL its payload came from and that payload's text. */
+     otherwise — the same answer touches no DOM. Any screen may follow (a
+     shelf of tiles as well): it names the URL its payload came from, that
+     payload's text and how it is drawn again. */
+  const _reachScreens = new Set();
   function followReach(screen, url, text, rerender) {
     screen._reach = { url, text, rerender };
+    _reachScreens.add(screen);
   }
   async function refreshReach(screen) {
     const reach = screen._reach;
@@ -5380,7 +5386,10 @@
     const stands = !!notices.get('library.mount_missing');
     if (stands === _reachStood) return;
     _reachStood = stands;
-    document.querySelectorAll('.detail-screen').forEach(screen => { refreshReach(screen); });
+    _reachScreens.forEach(screen => {
+      if (screen.isConnected) refreshReach(screen);
+      else _reachScreens.delete(screen);     // a screen left: it follows nothing
+    });
   }
   window.addEventListener('sautium:notices-changed', reachNoticeChanged);
 
