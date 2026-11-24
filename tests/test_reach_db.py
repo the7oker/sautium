@@ -192,6 +192,7 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     monkeypatch.setattr(streaming_service, "_proxy", proxy)
     monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
     monkeypatch.setattr(streaming_service, "providers_preferred", lambda: [prov])
+    monkeypatch.setattr(streaming_service, "providers_registered", lambda: True)
     monkeypatch.setattr(streaming_service, "note_provider_health", lambda silent, answered: False)
     monkeypatch.setattr(player, "_chain_cache", {})
     monkeypatch.setattr(player, "_refusals", {})
@@ -305,17 +306,14 @@ def test_a_queued_file_whose_tracks_uuid_the_canon_rewrote_still_opens_as_its_fi
     assert it.track_id == old                       # nothing told the queue
     assert native_plays([it], "browser", None) == [None]
     assert native_plays([it], "hqplayer", 7) == [None]
-    # the folder gone and back: a stream, then its own file again — as any slot's
+    # the folder gone: the other copy of the track the file belongs to now
+    # stands in for it; back, its own file again — as any slot's
     node["gone"](True)
     node["mgr"].reach_changed()
-    assert _streams(it)
+    assert it.play["media_file_id"] == twin
     node["gone"](False)
     node["mgr"].reach_changed()
     assert it.play is None and it.opener()["path"].endswith("/NW/01.flac")
-    # a second copy of the track the file belongs to now stands in for it
-    node["cur"].execute("UPDATE album_variants SET absent_since = now() WHERE id = %s",
-                        (node["variant"],))
-    assert native_plays([it], "browser", None)[0]["media_file_id"] == twin
     assert items_for_media_ids(node["files"][:1])[0].track_id == new
 
 
@@ -618,6 +616,178 @@ def test_a_play_of_which_nothing_opens_where_nothing_streams_is_refused_before_t
     assert out.replaced == [] and mgr.queue.snapshot() == old       # the old queue intact
 
 
+def _unopened_is_over():
+    from playback import substitute
+    substitute.observe(())
+
+
+@pytest.fixture
+def look(node):
+    """The play path's look as it runs — the real stat, the real look at
+    the folder — with what one test's look observed over when it ends."""
+    yield node
+    _unopened_is_over()
+
+
+def test_a_file_gone_from_a_folder_that_answers_is_no_way_in_of_its_slot(look):
+    """A file deleted or moved outside Sautium keeps its row until a
+    Rescan's yes, and its folder answers: the look before a start finds the
+    file missing, the folder there — and that slot alone goes out as a
+    stream, never as the path that does not open. An observation of one
+    moment: the file put back, the next start's look finds it and the slot
+    is its file again."""
+    import scanner
+    from playback import substitute
+    node = look
+    mgr, out = node["mgr"], node["out"]
+    first = node["root"] / "NW" / "01.flac"
+    first.unlink()
+    items = _queue(node, play=True)
+    assert scanner.gone_prefixes() == []                    # the folder answers
+    assert out.replaced == [["pending", "file"]]            # that slot alone
+    assert [it.source["kind"] for it in items] == ["file", "file"]
+    assert substitute.unopened() == {node["db_root"] + "/NW/01.flac"}
+    # Play pressed on the queue held, the file still gone: still no way in
+    out.changed.clear()
+    mgr.before_start(out)
+    assert _streams(items[0]) and out.changed == []
+    first.write_bytes(b"fLaC")                              # put back
+    mgr.before_start(out)
+    assert items[0].play is None and out.changed == ["rebind"]
+    assert substitute.unopened() == frozenset()
+
+
+def test_a_file_the_look_did_not_find_gives_way_to_another_copy_that_is_here(look):
+    node = look
+    twin = node["copy"](0, "twin/01.flac")
+    (node["root"] / "NW" / "01.flac").unlink()
+    items = _queue(node, play=True)
+    assert items[0].play["media_file_id"] == twin and items[1].play is None
+    assert node["out"].replaced == [["file", "file"]]
+
+
+def test_a_play_of_a_file_the_look_did_not_find_where_nothing_streams_is_refused_in_words(look):
+    """Its true why: the folder answers, so it is not its disk — the file
+    is not there."""
+    from playback.manager import NotHere
+    from playback.queue import items_for_media_ids
+    node = look
+    mgr, out, player = node["mgr"], node["out"], node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    (node["root"] / "NW" / "01.flac").unlink()
+    with pytest.raises(NotHere) as refused:
+        mgr.replace_queue(items_for_media_ids(node["files"][:1]), play=True)
+    assert player._output_error(refused.value).detail == {
+        "reason": "not_here", "why": "away",
+        "message": "Night Walks cannot play until its files are back."}
+    assert out.replaced == [] and len(mgr.queue) == 0
+    # with a slot beside it that opens the queue plays, and the slot is passed
+    items = _queue(node, play=True)
+    assert out.replaced == [["unplayable", "file"]] and items[0].play["code"] == "off"
+
+
+def test_next_and_previous_take_the_look_at_the_slot_they_would_start(look):
+    """Next and Previous hand the output a start as a tap on that row does:
+    the same one look at the file it would open, before the output is
+    asked."""
+    node = look
+    mgr, out, player = node["mgr"], node["out"], node["player"]
+    items = _queue(node)
+    node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "playing", "track_index": 1})
+    second = node["root"] / "NW" / "02.flac"
+    second.unlink()
+    assert player.next_track()["ok"]
+    assert _streams(items[1]) and items[0].play is None
+    second.write_bytes(b"fLaC")
+    node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "playing", "track_index": 2})
+    (node["root"] / "NW" / "01.flac").unlink()
+    assert player.previous_track()["ok"]
+    assert _streams(items[0])
+    assert not _wait(lambda: items[1].play is None, timeout=0.3)    # the sounding slot: owed
+    assert mgr._reach_owed is items[1]
+
+
+def test_a_refusal_names_no_disk_for_slots_that_were_never_files(node):
+    """A held queue of streamed tracks, streaming off, the folder gone: none
+    of it is "on a disk that is not connected" — the manager refuses nothing
+    in those words, and the rows say what streaming says."""
+    mgr, out, player = node["mgr"], node["out"], node["player"]
+    queries = player._phantom_track_queries(node["phantoms"][:2])
+    mgr.replace_queue(player.queue_mod.items_for_streamed(
+        [queries[t] for t in node["phantoms"][:2]]), play=False)
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    node["gone"](True)
+    mgr.reach_changed()
+    mgr.before_start(out)                                   # no NotHere
+
+
+def test_no_provider_answering_right_now_is_not_a_node_that_streams_nothing(node):
+    """Every provider aside or cooling down is "no provider answers right
+    now" — the play routes' own words at a tap — never "cannot play until
+    its disk is connected": this node streams."""
+    from fastapi import HTTPException
+    from playback import substitute
+    player = node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    assert substitute.streams()
+    node["gone"](True)
+    with pytest.raises(HTTPException) as refused:
+        player.play_album(player.PlayAlbumRequest(album_id=node["owned"]))
+    assert refused.value.status_code == 503
+    assert "No streaming provider is available right now" in refused.value.detail
+    node["monkeypatch"].setattr(node["streaming"], "providers_registered", lambda: False)
+    assert not substitute.streams()
+
+
+def test_a_start_that_only_waits_for_a_stream_goes_on_its_file_when_the_folder_is_back(node):
+    """A slot nothing sounds yet is not held: the folder back, the slot the
+    start waits on is its file at once, and the waiting start is told as a
+    landing tells it."""
+    mgr, out = node["mgr"], node["out"]
+    items = _queue(node)
+    node["gone"](True)
+    mgr.reach_changed()
+    assert _streams(items[0])
+    node["monkeypatch"].setattr(mgr, "_latest_status", {"state": "loading", "track_index": 1})
+    told = []
+    node["monkeypatch"].setattr(out, "slot_ready", lambda index, item=None: told.append((index, item)))
+    node["gone"](False)
+    mgr.reach_changed()
+    assert items[0].play is None and mgr._reach_owed is None
+    assert told == [(1, items[0])]
+
+
+def test_an_expected_refusal_of_play_tracks_is_no_error_in_the_log(node, caplog):
+    import logging
+    from fastapi import HTTPException
+    player = node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    _pull_the_disk(node)
+    with caplog.at_level(logging.ERROR), pytest.raises(HTTPException) as refused:
+        player.play_tracks(player.PlayTracksRequest(track_ids=node["files"]))
+    assert refused.value.status_code == 409 and refused.value.detail["reason"] == "not_here"
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+
+def test_the_look_waits_for_a_stat_no_longer_than_its_patience(node, monkeypatch):
+    """A dead network mount answers a stat never: the Play's worker waits
+    for it no longer than the look's patience, and a file that did not
+    answer does not open now."""
+    import os
+    from playback import manager as manager_mod
+    hang, real = threading.Event(), os.stat
+    monkeypatch.setattr(manager_mod, "_STAT_PATIENCE_S", 0.2)
+    monkeypatch.setattr(os, "stat", lambda p, *a, **kw: (hang.wait(10), real(p, *a, **kw))[1]
+                        if str(p).endswith("01.flac") else real(p, *a, **kw))
+    try:
+        t0 = time.monotonic()
+        assert manager_mod._opens(str(node["root"] / "NW" / "01.flac")) is False
+        assert time.monotonic() - t0 < 2
+        assert manager_mod._opens(str(node["root"] / "NW" / "02.flac")) is True
+    finally:
+        hang.set()
+
+
 def test_a_first_file_that_is_there_asks_the_folder_nothing(node, monkeypatch):
     import scanner
     monkeypatch.setattr(scanner, "check_folder", lambda wait=False: pytest.fail("the folder was looked at"))
@@ -861,9 +1031,9 @@ def test_where_nothing_streams_the_routes_refuse_before_the_queue_or_the_output(
             "message": "Night Walks cannot play until its files are back."}
     assert _refusals(node, _every_route(node)) == [(409, away)] * 6
     assert mgr.queue.snapshot() == old and out.replaced == []
-    # a provider gone is the same as the library off
+    # no provider registered is the same as the library off
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: True)
-    node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    node["monkeypatch"].setattr(node["streaming"], "providers_registered", lambda: False)
     assert _refusals(node, _every_route(node)[:1]) == [(409, away)]
 
 
@@ -953,6 +1123,8 @@ def test_the_pages_ask_whether_this_node_streams(node):
     player = node["player"]
     assert player.reach() == {"streams": True}
     node["monkeypatch"].setattr(node["streaming"], "providers_preferred", lambda: [])
+    assert player.reach() == {"streams": True}       # none answers right now: it streams all the same
+    node["monkeypatch"].setattr(node["streaming"], "providers_registered", lambda: False)
     assert player.reach() == {"streams": False}
 
 

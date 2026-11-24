@@ -1740,6 +1740,8 @@ def _transport(intent: bool, command: str, *args) -> dict:
             # the file that Play would start, looked at before the output
             # is asked; nothing of the queue opening here is said in words
             manager.before_start(b)
+        elif command in ("next", "previous"):
+            manager.before_step(b, 1 if command == "next" else -1)
         ok = getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
@@ -3681,6 +3683,8 @@ def play_tracks(req: PlayTracksRequest):
         }
     except HTTPException:
         raise
+    except NotHere as e:
+        raise _output_error(e)          # an expected refusal, said in words: no error of the node's
     except Exception as e:
         logger.error(f"play-tracks failed: {e}")
         raise _output_error(e)

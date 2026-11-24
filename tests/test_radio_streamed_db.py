@@ -153,6 +153,7 @@ def node(scratch_dsn, monkeypatch):
     monkeypatch.setattr(streaming_service, "_proxy", proxy)
     monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
     monkeypatch.setattr(streaming_service, "providers_preferred", lambda: list(provs))
+    monkeypatch.setattr(streaming_service, "providers_registered", lambda: bool(provs))
     monkeypatch.setattr(streaming_service, "note_provider_health", lambda silent, answered: False)
     monkeypatch.setattr(player, "_chain_cache", {})
     monkeypatch.setattr(player, "_refusals", {})

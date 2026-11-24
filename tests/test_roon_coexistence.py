@@ -6354,6 +6354,99 @@ def test_a_play_of_the_queue_held_whose_folder_went_unseen_sends_a_shared_hqplay
         other.close()
 
 
+def _a_music_folder_that_answers(monkeypatch, tmp_path, missing: tuple) -> list:
+    """The music folder (E:/Music here) as a real one that answers — every
+    file of these tests there but `missing`, deleted outside Sautium with
+    its row kept — and the play path's look as it runs: the real stat of
+    the file a start would open, the real look at the folder
+    (scanner._look, taken where it is asked: this file's fixture closes the
+    worker's door; "the catalog knows owned files" answered for it — there
+    is no database here). The ways in follow the recorded answer AND the
+    look's own observation of one file, as native_plays reads them beside
+    the copies' query (tests/test_reach_db.py has the query itself).
+    Returns the looks asked for (each: whether it was waited for)."""
+    import scanner
+    from config import settings
+    from playback import substitute
+    root = tmp_path / "music"
+    for name in ("A/01.flac", "A/02.flac", "Gone/01.flac", "Gone/02.flac"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        if name not in missing:
+            (root / name).write_bytes(b"fLaC")
+    monkeypatch.setattr(settings, "music_library_path", str(root))
+    for name, value in (("_folder_unreachable", False), ("_recorded", 0), ("_shown", False)):
+        monkeypatch.setattr(scanner, name, value)
+    monkeypatch.setattr(scanner, "db_query_one", lambda *a, **kw: {"x": 1})
+    monkeypatch.setattr(substitute, "_unopened", frozenset())
+    looks: list = []
+
+    def look(wait=False):
+        looks.append(wait)
+        scanner._look(scanner._next_ticket(), wake=False)
+
+    def not_here(it) -> bool:
+        path = it.source.get("path") if it.source.get("kind") == "file" else None
+        return path is not None and (path in substitute.unopened() or any(
+            path.startswith(g) for g in scanner.gone_prefixes()))
+    monkeypatch.setattr(scanner, "check_folder", look)
+    monkeypatch.setattr(substitute, "native_plays", lambda items, output_id, endpoint_id: [
+        substitute._stream_play(it) if it.source.get("kind") == "track" or not_here(it) else None
+        for it in items])
+    return looks
+
+
+@pytest.mark.parametrize("how", ["a new queue", "Play of the queue held", "a tap on its row"])
+def test_a_file_gone_from_a_folder_that_answers_sends_a_shared_hqplayer_nothing(fake, lane, listens, monkeypatch,
+                                                                              tmp_path, how):
+    """PI-NODE-2D §3.6, the miss its folder does not explain: another
+    controller plays, and the node is about to start a slot whose file was
+    deleted outside Sautium — its row there, its folder answering. The look
+    before the start finds the file missing and the folder there: that slot
+    is no file from then on, it waits for its stream, and HQPlayer receives
+    nothing from the node — no Stop, no clear, no add of a path that does
+    not open — until the stream landed. Before, the look only asked about
+    the folder, the folder answered, and the path went out."""
+    import scanner
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, "plays")
+    player_router = _routes_on(monkeypatch, mgr)
+    try:
+        if how == "a new queue":
+            looks = _a_music_folder_that_answers(monkeypatch, tmp_path, missing=("Gone/01.flac",))
+            n = len(fake.received)
+            added, _gen = mgr.replace_queue(
+                [_item("E:/Music/Gone/01.flac", 31), _item("E:/Music/Gone/02.flac", 32)], play=True)
+            assert added == 2
+            slot, track = 1, "track-31"
+        elif how == "Play of the queue held":
+            mgr.replace_queue([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)], play=False)
+            looks = _a_music_folder_that_answers(monkeypatch, tmp_path, missing=("A/01.flac",))
+            n = len(fake.received)
+            assert player_router.play()["ok"]
+            slot, track = 1, "track-1"
+        else:
+            mgr.replace_queue([_item("E:/Music/A/01.flac", 1), _item("E:/Music/A/02.flac", 2)], play=False)
+            looks = _a_music_folder_that_answers(monkeypatch, tmp_path, missing=("A/02.flac",))
+            n = len(fake.received)
+            player_router.jump(player_router.JumpRequest(index=2, track_id="track-2"))
+            slot, track = 2, "track-2"
+        assert _wait(lambda: _loading(mgr, slot)), mgr._latest_status
+        _settled(fake)
+        sent = _from_node(fake, n, other)
+        _observed("F20-one-file", how=how, looks=looks, sent=sent, hqplayer=(fake.state, fake.track))
+        assert looks == [True] and scanner.gone_prefixes() == []    # one look: the folder answers
+        assert sent == [] and (fake.state, fake.track, fake.playlist) == left
+        item = mgr.queue.item_at(slot)
+        assert item.source["kind"] == "file" and item.opener()["kind"] == "pending"
+        assert [it.opener()["kind"] for it in mgr.queue.snapshot() if it is not item] == ["file"]
+        prov.land(track)
+        assert _wait(lambda: fake.state == PLAYING and any("/preview/" in u for u in fake.playlist),
+                     timeout=15), (fake.state, fake.track, fake.playlist)
+    finally:
+        prov.land("track-1", "track-2", "track-31", "track-32")
+        b.shutdown()
+        other.close()
+
+
 def _queued_under_another(fake, lane, monkeypatch):
     """Another controller plays; the node's queue, put together without
     playing it, is two streams still to come (the queue's alone)."""

@@ -105,6 +105,33 @@ _COPIES_SQL = f"""
 """
 
 
+# What the play path's own look found of single files (PlaybackManager.
+# _first_opens): stored paths whose file did not open while its folder
+# answered — deleted or moved outside Sautium, the row kept until a Rescan's
+# yes. An observation of one moment about the slot a start would open, never
+# a recorded fact: it is the latest look's alone (the next look, at any
+# start, makes its own from nothing, so a file put back is its slot's way in
+# again at the next start), it is dropped when the folder's recorded answer
+# moves, and it is read here only, beside the copies' query — never a
+# second definition of "here" in SQL: an album's page and its tiles say what
+# the database knows.
+_unopened: frozenset = frozenset()
+
+
+def unopened() -> frozenset:
+    return _unopened
+
+
+def observe(paths) -> bool:
+    """The latest look's observation is `paths` (stored paths) now; whether
+    that is another one than before."""
+    global _unopened
+    new = frozenset(paths)
+    moved = new != _unopened
+    _unopened = new
+    return moved
+
+
 def by_copies(item) -> bool:
     """A slot whose way in is read against its track's copies
     (native_plays)."""
@@ -112,11 +139,16 @@ def by_copies(item) -> bool:
 
 
 def streams() -> bool:
-    """Whether a slot with no file here can stream on this node now:
-    streaming is up and a provider stands in its order — what a play route
-    asks before it queues a stream."""
+    """Whether this node streams at all — a slot with no file here is then
+    a stream to come: streaming is up (the owner's switch, a profile with
+    it) and a provider is registered. One that has stepped aside or is
+    cooling down is "no provider answers right now": the play routes' own
+    words for it at a tap (routers.player._ensure_streaming_ready) and the
+    lane's wait for a queued slot — never "this node streams nothing",
+    which is what an album whose disk is out says of itself for as long as
+    it is true."""
     from streaming import service as streaming_service
-    return streaming_service.is_enabled() and bool(streaming_service.providers_preferred())
+    return streaming_service.is_enabled() and streaming_service.providers_registered()
 
 
 def _file_play(r: dict) -> dict:
@@ -209,7 +241,8 @@ def native_plays(items: list, output_id: Optional[str],
     query.
 
     A copy that is not here now (sql_queries.HERE: away, or under a folder
-    that does not answer) is never a way in: a slot whose own file is one
+    that does not answer — or a file the play path's latest look did not
+    find, `observe`) is never a way in: a slot whose own file is one
     takes the best copy that is here, else streams — its origin (`source`)
     untouched, so the same read gives None again once the file opens.
 
@@ -220,6 +253,7 @@ def native_plays(items: list, output_id: Optional[str],
     owned = [it for it in items if by_copies(it)]
     by_track: dict = {}
     track_of: dict = {}             # a slot's own file -> the track it belongs to now
+    unseen = _unopened              # files the latest look did not find (observe)
     if owned:
         mids = sorted({it.media_file_id for it in owned
                        if it.source.get("kind") == "file" and it.media_file_id is not None})
@@ -227,7 +261,7 @@ def native_plays(items: list, output_id: Optional[str],
                                         "hqp_id": endpoint_id, "gone": gone_prefixes()}):
             if r["location"] == "local":
                 track_of[r["id"]] = r["track_id"]
-            if r["here"]:
+            if r["here"] and r["file_path"] not in unseen:
                 by_track.setdefault(r["track_id"], []).append(r)
     fills: list = []
 
