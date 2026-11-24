@@ -7867,8 +7867,15 @@
   // Support's line, in its row and its chat header: what becomes of a
   // message, never a presence — "offline" reads as "nobody will get this",
   // and Support answers when a person does (row.reach, the server's word:
-  // this node can deliver or deposit). Draft words for the owner's review.
+  // this node can deliver or deposit; row.support_wait, what a message waits
+  // for before either — SUPPORT-FIRST). Draft words for the owner's review.
   function supportLine(friend) {
+    if (friend.support_wait === 'handshake') {
+      return "Support isn't online yet — write now, and your message goes when it is";
+    }
+    if (friend.support_wait === 'key') {
+      return 'Support has not learned your new key yet — your message goes once it has';
+    }
     return friend.reach
       ? 'Write any time — your message is kept until Support reads it'
       : 'Your message waits on this node and is sent once it can reach Support';
@@ -7983,14 +7990,15 @@
     return null;
   }
 
-  // Stable URL handle — public_key_hex is the same on every device
-  // for the same friend, while friends.id is a per-device SERIAL.
-  // 16 hex chars = 64 bits of identity, comfortably collision-free
-  // within any realistic contact list.
+  // Stable URL handle — a key is the same on every device for the same
+  // friend, while friends.id is a per-device SERIAL. 16 hex chars = 64
+  // bits of identity, comfortably collision-free within any realistic
+  // contact list. The server names it (row.chat_key): a resolved friend's
+  // key, and the Support contact's from the node's first minute — the
+  // pinned key its fingerprint binds (B-116).
   function friendUrlKey(friend) {
-    const k = friend && friend.public_key_hex;
-    return (typeof k === 'string' && k && !k.startsWith('pending:'))
-      ? k.slice(0, 16) : '';
+    const k = friend && friend.chat_key;
+    return typeof k === 'string' ? k : '';
   }
 
   function friendRowInner(friend) {
@@ -8337,8 +8345,8 @@
         return;
       }
       const key = row.dataset.friendKey;
-      // Pending invites have no resolved public_key_hex yet — there's
-      // no chat thread to open until the handshake completes.
+      // A friend's pending invite has no thread yet — there's nothing to
+      // open until the handshake completes (Support's has one: chat_key).
       if (!key) {
         showHint(
           'Waiting for handshake — you can chat once both sides accept.',
@@ -8885,9 +8893,12 @@
   // An outgoing message's state as the server names it (row.state, B-92),
   // shown only where it says something: under every message still waiting
   // here or kept for Support, and `Delivered` under the newest delivered one.
+  // One still here for Support says what it waits for (row.support_wait).
   const MESSAGE_STATE_LINE = {waiting: 'Not sent yet', kept: 'Kept for Support'};
+  const SUPPORT_WAIT_LINE = {handshake: 'Waiting for Support',
+                             key: 'Waiting for Support to learn your new key'};
 
-  function renderThreadHTML(messages) {
+  function renderThreadHTML(messages, friend) {
     if (!messages || messages.length === 0) {
       return `<div class="thread-empty">No messages yet — say hi.</div>`;
     }
@@ -8910,25 +8921,23 @@
       out.push(`<div class="msg-row ${side}">
         <div class="bubble ${side}">${escapeHtml(m.content || '')}</div>
       </div>`);
-      const line = m === newestDelivered ? 'Delivered' : MESSAGE_STATE_LINE[m.state];
+      const line = m === newestDelivered ? 'Delivered'
+        : (m.state === 'waiting' && SUPPORT_WAIT_LINE[friend && friend.support_wait])
+          || MESSAGE_STATE_LINE[m.state];
       if (line) out.push(`<div class="msg-state">${line}</div>`);
     }
     return out.join('');
   }
 
   async function renderChatThread(root, friendKey) {
-    // friendKey is the first 16 hex chars of public_key_hex —
-    // see friendUrlKey(). Resolve to the per-device friends.id at
-    // mount time so backend API calls stay unchanged.
+    // friendKey is the row's chat_key — see friendUrlKey(). Resolve to
+    // the per-device friends.id at mount time so backend API calls stay
+    // unchanged.
     const key = String(friendKey || '').toLowerCase();
     if (!key) { navigate('friends'); return; }
     let friend = null;
     try {
-      friend = await findFriend(f => {
-        const k = f.public_key_hex || '';
-        return !k.startsWith('pending:')
-          && k.toLowerCase().startsWith(key);
-      });
+      friend = await findFriend(f => (f.chat_key || '') === key);
     } catch (_) { friend = null; }
     if (!friend) {
       // Stale bookmark / wiped DB / unresolved peer — drop back to
@@ -9032,7 +9041,7 @@
         const banner = threadEl.querySelector('.e2ee-banner');
         threadEl.innerHTML = '';
         if (banner) threadEl.appendChild(banner);
-        threadEl.insertAdjacentHTML('beforeend', renderThreadHTML(msgs));
+        threadEl.insertAdjacentHTML('beforeend', renderThreadHTML(msgs, friend));
         threadEl.scrollTop = threadEl.scrollHeight;
       } catch (err) {
         console.warn('Could not load messages', err);

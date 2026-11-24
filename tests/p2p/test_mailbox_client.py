@@ -116,14 +116,14 @@ def test_deposit_and_drain_round_trip():
         async with TestServer(fake.app) as server:
             url = str(server.make_url("")).rstrip("/")
             async with aiohttp.ClientSession() as s:
-                assert await _deposit(s, url, "u-1", "c1") == {"stored": True, "id": 1}
-                assert await _deposit(s, url, "u-1", "c1") == {"stored": False, "duplicate": True}
+                assert (await _deposit(s, url, "u-1", "c1")).answer == {"stored": True, "id": 1}
+                assert (await _deposit(s, url, "u-1", "c1")).answer == {"stored": False, "duplicate": True}
                 for i in (2, 3, 4, 5):
-                    assert (await _deposit(s, url, f"u-{i}", f"c{i}"))["stored"]
+                    assert (await _deposit(s, url, f"u-{i}", f"c{i}")).kept
                 other = Ed25519PrivateKey.generate()
-                assert await _deposit(s, url, "u-9", "x", sign=other.sign) is None          # signature ≠ sender key
-                assert await mc.deposit(s, master_pubkey="ab" * 32, sender_pubkey=SENDER_PUB, sign=SENDER.sign,
-                                        encrypted="x", timestamp_iso="t", message_uuid="u-8", worker_url=url) is None
+                assert not (await _deposit(s, url, "u-9", "x", sign=other.sign)).kept      # signature ≠ sender key
+                assert (await mc.deposit(s, master_pubkey="ab" * 32, sender_pubkey=SENDER_PUB, sign=SENDER.sign,
+                                        encrypted="x", timestamp_iso="t", message_uuid="u-8", worker_url=url)).kept is False
                 seen = []
                 box = mc.MasterMailbox(MASTER_PUB, MASTER.sign, lambda m: seen.append(m["message_uuid"]), worker_url=url)
                 assert await box.drain(s) == 5                                              # 3 pages of 2
@@ -131,7 +131,7 @@ def test_deposit_and_drain_round_trip():
                 assert fake.acks == [2, 4, 5] and box.drained_total == 5
                 # a foreign key cannot drain
                 thief = mc.MasterMailbox(SENDER_PUB, SENDER.sign, lambda m: None, worker_url=url)
-                assert (await _deposit(s, url, "u-6", "c6"))["stored"]
+                assert (await _deposit(s, url, "u-6", "c6")).kept
                 assert await thief.drain(s) == 0 and len(fake.rows) == 1
                 # a handler that raises leaves the batch unacked
                 bad = mc.MasterMailbox(MASTER_PUB, MASTER.sign, lambda m: (_ for _ in ()).throw(RuntimeError("db down")),
@@ -148,7 +148,7 @@ def test_wake_socket_drains_on_connect_and_on_mail():
         async with TestServer(fake.app) as server:
             url = str(server.make_url("")).rstrip("/")
             async with aiohttp.ClientSession() as s:
-                assert (await _deposit(s, url, "u-1", "parked while offline"))["stored"]
+                assert (await _deposit(s, url, "u-1", "parked while offline")).kept
                 seen = []
                 got = asyncio.Event()
 
@@ -162,7 +162,7 @@ def test_wake_socket_drains_on_connect_and_on_mail():
                 await asyncio.wait_for(fake.acked.wait(), 5)                # drained + acked on connect
                 assert seen == ["u-1"] and box.connected and fake.rows == []
                 got.clear(); fake.acked.clear()
-                assert (await _deposit(s, url, "u-2", "live"))["stored"]
+                assert (await _deposit(s, url, "u-2", "live")).kept
                 await asyncio.wait_for(fake.acked.wait(), 5)                # "mail" → drain → ack
                 assert seen == ["u-1", "u-2"] and fake.rows == []
                 running = False

@@ -246,6 +246,24 @@ const MAIL_PER_DAY = 5000;
 const MAIL_CAP = 20000;                  // rows kept; a full mailbox refuses, it never drops accepted mail
 const MAIL_TTL_MS = 30 * 24 * 3600 * 1000;
 const MAIL_SIG_SKEW_S = 300;
+// The master's voucher (SUPPORT-FIRST §2, B-118; desktop/p2p/chat_wire.py
+// make_mail_voucher): it signs one for a key it takes mail from — a friend
+// whose identity its gate verified, which this Worker cannot check (it never
+// sees a proof) — at every handshake and stream connect, sixty days long. A
+// drop that carries a valid one is VOUCHED: the caps above. One without, or
+// with one past its expiry, is UNVOUCHED and also takes the small share
+// below, so a flood of fresh certificates spends that share at most. An
+// invalid one is refused: no released client sends one. The keys whose
+// vouchers count: the master's; a planned rotation adds the previous key
+// here for one voucher life (a key that may be known to someone else is
+// never kept — whoever holds it would mint vouchers into the main share).
+const MASTER_VOUCHER_KEYS = [MASTER_PUBKEY];
+const MAIL_VOUCHER_CONTEXT = "sautium-mail-voucher-v1";
+const MAIL_VOUCHER_MAX_LIFE_S = 90 * 86400;
+// Unvouched drops a day: per address, and in all. Zero once no released
+// client is about that drops without a voucher (the owner's deploy).
+const MAIL_UNVOUCHED_PER_ADDR_DAY = 10;
+const MAIL_UNVOUCHED_PER_DAY = 250;
 // Capability directory (Ф16c): reachable volunteers re-register on their
 // existing periodic cycles; an entry older than the TTL is dead. K keeps
 // the answer a SAMPLE, not a map of the network.
@@ -1776,11 +1794,42 @@ async function handleMailboxPut(request, env) {
   if (!await env.RATE_LIMITS.get(`born:${sender}`, "json")) {
     return json({ error: "sender has no certificate" }, 403);
   }
+  const voucher = await mailVoucherOf(body.voucher, sender);
+  if (voucher === "invalid") return json({ error: "invalid voucher" }, 403);
   const r = await mailboxCall(env, "/put", {
     uuid: message_uuid, sender, addr: await volumeToken(env, clientIp(request)),
-    encrypted, ts: timestamp, now: Date.now(),
+    encrypted, ts: timestamp, now: Date.now(), vouched: voucher === "valid",
   });
+  if (voucher === "expired" && r.status === 200) r.body.voucher = "expired";
   return objectAnswer(r);
+}
+
+function mailVoucherPayload(pubkey, issuedAt, expiresAt) {
+  // Mirrors chat_wire.mail_voucher_payload.
+  return `${MAIL_VOUCHER_CONTEXT}:${pubkey}:${issuedAt}:${expiresAt}`;
+}
+
+async function mailVoucherOf(voucher, sender) {
+  // A drop's voucher → "valid" | "expired" | "none" | "invalid": the master's
+  // (a key of MASTER_VOUCHER_KEYS) for this sender, of a life this Worker
+  // takes, issued no later than now (MAIL_SIG_SKEW_S of clock between them).
+  if (voucher === undefined || voucher === null) return "none";
+  if (typeof voucher !== "object" || voucher.v !== 1) return "invalid";
+  const { pubkey, issued_at: issuedAt, expires_at: expiresAt, sig } = voucher;
+  if (typeof pubkey !== "string" || pubkey.toLowerCase() !== sender
+      || !Number.isSafeInteger(issuedAt) || !Number.isSafeInteger(expiresAt) || typeof sig !== "string"
+      || expiresAt - issuedAt > MAIL_VOUCHER_MAX_LIFE_S || expiresAt <= issuedAt) {
+    return "invalid";
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (issuedAt > now + MAIL_SIG_SKEW_S) return "invalid";
+  const message = mailVoucherPayload(sender, issuedAt, expiresAt);
+  let signed = false;
+  for (const key of MASTER_VOUCHER_KEYS) {
+    if (await verifySignature(message, sig, key)) { signed = true; break; }
+  }
+  if (!signed) return "invalid";
+  return expiresAt <= now ? "expired" : "valid";
 }
 
 async function verifyMasterRequest(url, label, extra) {
@@ -2164,7 +2213,7 @@ export class MasterMailbox {
     return Number(this.sql.exec("SELECT n FROM held").one().n);
   }
 
-  put({ uuid, sender, addr, encrypted, ts, now }) {
+  put({ uuid, sender, addr, encrypted, ts, now, vouched }) {
     if (![uuid, sender, addr, encrypted, ts].every((v) => typeof v === "string" && v)) {
       return { status: 503, body: { error: "temporarily unavailable" } };   // an older Worker's call
     }
@@ -2178,14 +2227,23 @@ export class MasterMailbox {
     if (this._held() >= MAIL_CAP) {
       return { status: 429, body: { error: "mailbox full" } };
     }
-    const taken = takeCounters(this.sql, now, [
+    const counters = [
       { key: `mailbox:sender:${sender}`, limit: MAIL_PER_SENDER_DAY, window: DAY_MS, amount: 1 },
       { key: `mailbox:addr:${addr}`, limit: MAIL_PER_ADDR_DAY, window: DAY_MS, amount: 1 },
       { key: "mailbox:all:", limit: MAIL_PER_DAY, window: DAY_MS, amount: 1 },
-    ]);
+    ];
+    if (vouched !== true) {
+      // the master's voucher absent (an older Worker's call counts as one without)
+      counters.push(
+        { key: `mailbox:unvouched:addr:${addr}`, limit: MAIL_UNVOUCHED_PER_ADDR_DAY, window: DAY_MS, amount: 1 },
+        { key: "mailbox:unvouched:all:", limit: MAIL_UNVOUCHED_PER_DAY, window: DAY_MS, amount: 1 });
+    }
+    const taken = takeCounters(this.sql, now, counters);
     if (!taken.ok) {
       const error = taken.refused.startsWith("mailbox:sender:") ? "sender cap reached"
-        : taken.refused.startsWith("mailbox:addr:") ? "address cap reached" : "mailbox busy";
+        : taken.refused.startsWith("mailbox:addr:") ? "address cap reached"
+        : taken.refused.startsWith("mailbox:unvouched:addr:") ? "unvouchered address cap reached"
+        : taken.refused.startsWith("mailbox:unvouched:") ? "mailbox busy for new senders" : "mailbox busy";
       return { status: 429, body: { error, retry_after: taken.retry_after } };
     }
     const id = Number(this.sql.exec(

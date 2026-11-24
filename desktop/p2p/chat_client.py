@@ -76,6 +76,13 @@ NUDGE_RETRY_S = 600
 RELAY_FRAMES_PER_WINDOW = 600
 RELAY_REFUSALS_PER_WINDOW = 5          # deliveries that did not open, or came again
 RELAY_WINDOW_S = 60
+# A relay's wake stream is dialled again after a failure on a backoff that
+# doubles up to RECONNECT_CAP_S. The master's, while a message waits kept for
+# Support (L4): nothing reaches a node behind NAT to say the master is back
+# but its own retry — the master's drain pings a stream that is not there yet
+# at its start — and the person reads "Kept for Support" until it connects.
+RECONNECT_CAP_S = 300.0
+KEPT_RECONNECT_CAP_S = 60.0
 
 
 def replied_friends(notes) -> set:
@@ -344,6 +351,13 @@ class ChatClient:
         # A peer relay's frames and refusals, kept across its reconnects.
         self._relay_windows: dict[str, tuple] = {}
         self._recheck: Optional[asyncio.Event] = None
+        # The master's first handshake with this node's key (_handshake_
+        # accepted): what the master's stream waits for. And a message just
+        # kept for Support: the stream's next dial comes sooner (L4).
+        self._master_accepted = asyncio.Event()
+        self._master_redial = asyncio.Event()
+        # The delivery path's state per friend, as last said at info (_say_path)
+        self._path_said: dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle and the runtime's events
@@ -940,8 +954,25 @@ class ChatClient:
         logger.info(f"Pending friend resolved via handshake: {invite} ({ip}:{port})")
         resolved_friend = await self._db(self.store.get_friend_by_public_key, peer_pubkey)
         await self._note_peer_alive((resolved_friend or {}).get("id"), peer_pubkey, ip, port)
+        if peer_pubkey.lower() == master_node.MASTER_PUBKEY_HEX.lower():
+            await self._keep_mail_voucher(result.get("mail_voucher"), ident.public_key_hex)
         if resolved_friend:
             await self._sync_chat_history(resolved_friend, [(ip, port)])
+            if peer_pubkey.lower() == master_node.MASTER_PUBKEY_HEX.lower():
+                # What was written to Support before it answered goes now,
+                # where it just answered — the handshake is its event (B-116)
+                await self._push_master_outbox(resolved_friend, ip, port)
+                self._master_accepted.set()
+
+    async def _keep_mail_voucher(self, voucher, own_pubkey: str) -> None:
+        """The master's voucher for its mailbox, from its handshake's answer
+        or its stream's header, kept when it is the master's for our key now
+        (SUPPORT-FIRST §2.4); anything else is no voucher."""
+        from desktop.node_identity import verify_signature
+        if voucher and chat_wire.mail_voucher_holds(
+                voucher, own_pubkey, master_node.MASTER_PUBKEY_HEX,
+                lambda pubkey, message, sig: verify_signature(message, sig, pubkey)):
+            await self._db(self.store.keep_mail_voucher, voucher)
 
     def _bind_resolved(self, peer_pubkey: str, invite: str, username: str,
                        result: dict, own_pubkey: str) -> None:
@@ -1199,7 +1230,11 @@ class ChatClient:
                     break
             except Exception as e:
                 logger.warning(f"master wake loop: {e}")
-            await asyncio.sleep(30)  # not resolved yet
+                await asyncio.sleep(30)
+                continue
+            # Not resolved yet: the master's first handshake is the event
+            await self._master_accepted.wait()
+            self._master_accepted.clear()
         if not self.running:
             return
 
@@ -1381,8 +1416,12 @@ class ChatClient:
                     v_sig = ident.sign(voucher_payload(own, relay_pubkey, until).encode("utf-8")).hex()
                     url += (f"&invite={quote(ident.invite_code)}"
                             f"&voucher_until={until}&voucher_sig={v_sig}")
+                if wants_relay or is_master:
                     # A relay that is not our friend relays for a verified
-                    # identity only: our certificate and proof ride along.
+                    # identity only, and the master vouchers for its mailbox
+                    # an identity its gate verified (a key new to it since a
+                    # rotation is checked once): our certificate and proof
+                    # ride along.
                     bundle = ident.cert_bundle()
                     if bundle:
                         from desktop.p2p.peer_auth import HDR_CERT, encode_cert_bundle
@@ -1411,6 +1450,10 @@ class ChatClient:
                         if resp.status != 200:
                             raise ConnectionError(f"wake subscribe: HTTP {resp.status}")
                         connected = True
+                        if is_master:
+                            await self._keep_mail_voucher(
+                                chat_wire.decode_mail_voucher(
+                                    resp.headers.get(chat_wire.MAIL_VOUCHER_HEADER) or ""), own)
                         logger.info("Relay wake stream connected (%s:%s)%s", ip, port,
                                     "" if is_master else " [peer relay]")
                         if relay_row:
@@ -1461,8 +1504,32 @@ class ChatClient:
                     self._master_failed[addr] = time.time() + 600
             if not self.running:
                 break
-            await asyncio.sleep(backoff + random.uniform(0, backoff / 4))
-            backoff = min(backoff * 2, 300.0)
+            cap = await self._reconnect_cap(is_master)
+            backoff = min(backoff, cap)
+            if is_master:
+                await self._rest_master(backoff + random.uniform(0, backoff / 4))
+            else:
+                await asyncio.sleep(backoff + random.uniform(0, backoff / 4))
+            backoff = min(backoff * 2, cap)
+
+    async def _reconnect_cap(self, is_master: bool) -> float:
+        """The longest wait before a relay's stream is dialled again: shorter
+        for the master's while a message waits kept for Support (L4)."""
+        if is_master and any(m.get("parked_at") and m["public_key_hex"] == master_node.MASTER_PUBKEY_HEX
+                             for m in await self._db(self.store.get_pending_messages)):
+            return KEPT_RECONNECT_CAP_S
+        return RECONNECT_CAP_S
+
+    async def _rest_master(self, seconds: float) -> None:
+        """The master stream's wait between dials — shortened to the kept
+        cap the moment a message is kept for Support, not at the next dial."""
+        deadline = time.monotonic() + seconds
+        try:
+            await asyncio.wait_for(self._master_redial.wait(), seconds)
+        except asyncio.TimeoutError:
+            return
+        self._master_redial.clear()
+        await asyncio.sleep(max(0.0, min(deadline - time.monotonic(), KEPT_RECONNECT_CAP_S)))
 
     async def _master_stream_connected(self, master: dict, ip: str, port: int) -> None:
         """The master is reachable again, at (ip, port) — the event for what
@@ -1744,6 +1811,14 @@ class ChatClient:
                 logger.debug(f"Reachability check error: {e}")
             await self._rest(RETRY_UNKNOWN if retry_soon else 6 * 3600)
 
+    def _say_path(self, friend_id: int, state: str) -> None:
+        """The delivery path's state toward a friend, at info once per change
+        (L3, as the verdict's line is): which step a message waits on reads
+        from the log, without a line per attempt."""
+        if self._path_said.get(friend_id) != state:
+            self._path_said[friend_id] = state
+            logger.info("Delivery to friend %s: %s", friend_id, state)
+
     async def _rest(self, seconds: float) -> None:
         """The verdict's cadence — cut short by recheck_reachability."""
         try:
@@ -1795,6 +1870,7 @@ class ChatClient:
                             if resp.status == 200:
                                 await self._db(self.store.mark_delivered, msg["id"])
                                 await self._note_peer_alive(friend_id, pubkey, ip, port)
+                                self._say_path(friend_id, "delivered directly")
                                 delivered = True
                                 break
                             if resp.status == 403:
@@ -1828,24 +1904,32 @@ class ChatClient:
             self._refusals_said.add(uid)
             logger.warning("Message %s kept for Support was refused by the master (403)", uid)
 
-    async def _mailbox_deposit(self, friend_id: int, messages: list[dict]) -> None:
+    async def _mailbox_deposit(self, friend_id: int, messages: list[dict]) -> str:
         """The master's off-master fallback (Ф16): what the direct path could
         not deliver is parked, still E2E-encrypted, in the Worker mailbox the
         master drains when it is back. The Worker's acceptance is "kept",
         never "delivered" (B-92): the row is marked parked, and becomes
         delivered only on a proof — a direct push answered, the history pull
         that follows the master's ping on its drain or our next connect to
-        it. Only a resolved master contact gets here (the pass never pushes
-        to a `pending:` one), so the master holds us as a friend that may
-        message it, and its drain keeps what we deposit. A message already
-        kept is not deposited again; a refusal (the mailbox full, a cap)
-        leaves the rest waiting here."""
+        it. A message already kept is not deposited again; a refusal (the
+        mailbox full, a cap) leaves the rest waiting here. → the state said.
+
+        The one place a drop is decided (SUPPORT-FIRST §1.3): only while the
+        master has accepted the key this node signs with now. A `pending:`
+        Support contact never gets here (the pass and the push skip it), and
+        a node that rotated while the master was away waits for its notice —
+        the drain keeps a message only from a key the master knows (§1.4)."""
         import aiohttp
         from desktop.p2p import mailbox_client
         ident = self._identity()
         if not ident:
-            return
+            return "waiting for this node's identity"
         master_pubkey = master_node.MASTER_PUBKEY_HEX
+        master = await self.master_contact()
+        if master is None or not chat_wire.accepts_current_key(master.get("bound_identity"),
+                                                              ident.public_key_hex):
+            return "waiting for Support to accept this node's current key"
+        outcome = "kept in the master's mailbox"
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15),
                                          headers={"Accept-Encoding": "gzip"}) as session:
             for msg in messages:
@@ -1857,16 +1941,21 @@ class ChatClient:
                         msg["content"], msg["message_uuid"], sent_at, master_pubkey)
                 except Exception as e:
                     logger.error(f"Encrypt for mailbox failed: {e}")
-                    return
+                    return "the message could not be sealed for the mailbox"
                 result = await mailbox_client.deposit(
                     session, master_pubkey=master_pubkey,
                     sender_pubkey=self.store.public_key_hex, sign=ident.sign,
                     encrypted=encrypted, timestamp_iso=sent_at,
-                    message_uuid=msg["message_uuid"], worker_url=mailbox_client.WORKER_URL)
-                if result is None:
-                    return                         # unreachable or refused: the outbox keeps the rest
+                    message_uuid=msg["message_uuid"],
+                    voucher=await self._db(self.store.mail_voucher, ident.public_key_hex),
+                    worker_url=mailbox_client.WORKER_URL)
+                if not result.kept:                # the outbox keeps the rest
+                    return (f"the master's mailbox refused it: {result.refusal}" if result.refusal
+                            else "the master's mailbox is unreachable")
                 await self._db(self.store.mark_parked, msg["id"])
+                self._master_redial.set()
                 logger.info("Message %s kept in the master mailbox", msg["message_uuid"][:8])
+        return outcome
 
     async def _relay_forward(self, friend_id: int, friend_pubkey: str,
                              messages: list[dict]) -> None:
@@ -1878,12 +1967,12 @@ class ChatClient:
         if friend_pubkey == master_node.MASTER_PUBKEY_HEX:
             # The relay is the recipient, so no relay helps — the Worker
             # mailbox is the master's fallback (Ф16).
-            await self._mailbox_deposit(friend_id, messages)
+            self._say_path(friend_id, f"no direct route; {await self._mailbox_deposit(friend_id, messages)}")
             return
 
         relays = await self._resolve_relay_for(friend_pubkey)
         if not relays:
-            logger.debug("No relay available — %d message(s) stay queued", len(messages))
+            self._say_path(friend_id, "no direct route; no relay available")
             return
         ident = self._identity()
         if not ident:
@@ -1897,11 +1986,13 @@ class ChatClient:
             for relay_pubkey, relay_peers, relay_row in relays:
                 if await self._forward_via_relay(session, relay_pubkey, relay_peers, relay_row,
                                                  friend_id, friend_pubkey, messages, ident):
+                    self._say_path(friend_id, "no direct route; delivered through a relay")
                     return
                 # 409 / no receipt from THIS relay — the friend may hold a
                 # live stream to the next one (K relays announce it in
                 # parallel), so a dead candidate is a reason to move on,
                 # not to give up the batch.
+        self._say_path(friend_id, f"no direct route; none of {len(relays)} relay(s) delivered it")
 
     async def _forward_via_relay(self, session, relay_pubkey: str, relay_peers: list,
                                  relay_row, friend_id: int, friend_pubkey: str,
@@ -2061,7 +2152,9 @@ class ChatClient:
             while self.running:
                 self._push_again.discard(fid)
                 pending = await self._pending_for(fid)
-                if pending and not pending[0]["public_key_hex"].startswith("pending:"):
+                if pending and pending[0]["public_key_hex"].startswith("pending:"):
+                    self._say_path(fid, "waiting for the contact's first handshake")
+                elif pending:
                     friend_info = {"id": fid, "invite_code": pending[0]["invite_code"],
                                    "public_key_hex": pending[0]["public_key_hex"],
                                    "username": ""}
@@ -2123,6 +2216,7 @@ class ChatClient:
             seen_friends.add(fid)
             pubkey = msg["public_key_hex"]
             if pubkey.startswith("pending:"):
+                self._say_path(fid, "waiting for the contact's first handshake")
                 continue
             friend_info = {"id": fid, "invite_code": msg["invite_code"],
                            "public_key_hex": pubkey, "username": ""}

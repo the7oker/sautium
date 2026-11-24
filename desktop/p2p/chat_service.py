@@ -387,7 +387,8 @@ class ChatService:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT id, username, public_key_hex, invite_code,
-                           display_name, is_blocked, source::text AS source
+                           display_name, is_blocked, source::text AS source,
+                           bound_identity
                     FROM friends WHERE public_key_hex = %s
                 """, (public_key_hex,))
                 row = cur.fetchone()
@@ -598,6 +599,44 @@ class ChatService:
                 """, (message_id,))
         finally:
             self._return_db(conn)
+
+    def keep_mail_voucher(self, voucher: dict) -> None:
+        """The master's voucher for its mailbox (checked by the caller,
+        chat_wire.mail_voucher_holds), kept for the key it is for — the
+        newest of them."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO mail_vouchers (public_key_hex, issued_at, expires_at, signature)
+                    VALUES (%s, to_timestamp(%s), to_timestamp(%s), %s)
+                    ON CONFLICT (public_key_hex) DO UPDATE
+                       SET issued_at = EXCLUDED.issued_at, expires_at = EXCLUDED.expires_at,
+                           signature = EXCLUDED.signature
+                     WHERE EXCLUDED.expires_at > mail_vouchers.expires_at
+                """, (voucher["pubkey"].lower(), voucher["issued_at"], voucher["expires_at"],
+                      bytes.fromhex(voucher["sig"])))
+        finally:
+            self._return_db(conn)
+
+    def mail_voucher(self, public_key_hex: str) -> Optional[dict]:
+        """The voucher kept for this key while it is alive, as a drop carries it."""
+        conn = self._get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT extract(epoch FROM issued_at)::bigint, extract(epoch FROM expires_at)::bigint,
+                           encode(signature, 'hex')
+                      FROM mail_vouchers
+                     WHERE public_key_hex = %s AND expires_at > now()
+                """, (public_key_hex.lower(),))
+                row = cur.fetchone()
+        finally:
+            self._return_db(conn)
+        if row is None:
+            return None
+        return {"v": 1, "pubkey": public_key_hex.lower(), "issued_at": row[0],
+                "expires_at": row[1], "sig": row[2]}
 
     def mark_delivered_by_uuid(self, message_uuid: str):
         """Mark an outgoing message as delivered by its UUID."""

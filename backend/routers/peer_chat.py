@@ -281,7 +281,21 @@ async def chat_handshake(request: Request):
     return await in_chat_lane(_token_accept, body)
 
 
-def _accepted(ident: dict, grant_out=None) -> JSONResponse:
+def _mail_voucher(peer_pubkey: str) -> Optional[dict]:
+    """The master's voucher for its Worker mailbox, for a key it takes mail
+    from (identity_registry.takes_mail_voucher), or None: never on another
+    node (SUPPORT-FIRST §2.3). Mirrored by desktop/p2p/sync_server."""
+    from desktop.p2p import identity_registry
+    from desktop.p2p import master_node as role
+    if not role.is_master():
+        return None
+    with get_conn() as conn:
+        if not identity_registry.takes_mail_voucher(conn, peer_pubkey):
+            return None
+    return chat_wire.make_mail_voucher(load_signing_key(settings).sign, peer_pubkey)
+
+
+def _accepted(ident: dict, peer_pubkey: str, grant_out=None) -> JSONResponse:
     payload = {
         "accepted": True,
         "public_key_hex": ident["public_key_hex"],
@@ -290,6 +304,9 @@ def _accepted(ident: dict, grant_out=None) -> JSONResponse:
     }
     if grant_out:
         payload["grant"] = grant_out
+    voucher = _mail_voucher(peer_pubkey)
+    if voucher:
+        payload["mail_voucher"] = voucher
     return JSONResponse(payload)
 
 
@@ -331,7 +348,7 @@ def _token_accept(body: dict) -> JSONResponse:
     logger.info("Token handshake accepted from %s (%s...)",
                 peer_username, peer_pubkey[:16])
     _witness_handshake(body, peer_pubkey)
-    return _accepted(ident, _minted(ident, token_id, tok["rights"], peer_pubkey))
+    return _accepted(ident, peer_pubkey, _minted(ident, token_id, tok["rights"], peer_pubkey))
 
 
 def _handshake(body: dict):
@@ -398,7 +415,7 @@ def _handshake(body: dict):
                                                        ident["public_key_hex"], peer_pubkey)
         svc.update_friend_last_seen(peer_pubkey)
         _witness_handshake(body, peer_pubkey)
-        return _accepted(ident, _minted(ident, tid, rights, peer_pubkey) if tid else None)
+        return _accepted(ident, peer_pubkey, _minted(ident, tid, rights, peer_pubkey) if tid else None)
 
     if token_id:
         with get_conn() as conn:
@@ -429,15 +446,15 @@ def _handshake(body: dict):
         logger.info("Grant recovery accepted from %s (%s...)",
                     peer_username, peer_pubkey[:16])
         _witness_handshake(body, peer_pubkey)
-        return _accepted(ident, _minted(ident, grant_in["token_id"],
-                                        grant_in.get("rights", []), peer_pubkey))
+        return _accepted(ident, peer_pubkey, _minted(ident, grant_in["token_id"],
+                                                     grant_in.get("rights", []), peer_pubkey))
 
     # -- classic path: mutual-add consent (mirror of sync_server) -----------
     # A friend held under this key: presence only — never its name or
     # invite string, which stay as the contact was made.
     if resolved is not None:
         svc.update_friend_last_seen(peer_pubkey)
-        return _accepted(ident)
+        return _accepted(ident, peer_pubkey)
     # The operator's own pending contact for this invite code, and only
     # that: a token stub resolves through our token handshake, and a
     # contact already made with another key gets no second row.
@@ -450,7 +467,7 @@ def _handshake(body: dict):
     svc.update_friend_last_seen(peer_pubkey)
     logger.info("Handshake accepted from %s (%s...)",
                 peer_username, peer_pubkey[:16])
-    return _accepted(ident)
+    return _accepted(ident, peer_pubkey)
 
 
 # ---------------------------------------------------------------------------
@@ -516,7 +533,13 @@ def mailbox_import(m: dict) -> None:
         logger.warning("mailbox: oversized message from %s dropped", sender_pubkey[:8])
         return
     if svc.friend_for_key(sender_pubkey) is None:
-        logger.info("mailbox: message from %s without can_message dropped", sender_pubkey[:8])
+        # A key this master never accepted: an honest client deposits only
+        # once the master holds its current key (chat_client._mailbox_deposit),
+        # so this is a master that forgot the node, or a foreign client. Acked
+        # all the same — the sender's outbox is the copy, delivered directly
+        # once this master knows the key (SUPPORT-FIRST §1.4).
+        logger.warning("mailbox: message %s from %s…, a key this master does not know, dropped",
+                       (m.get("message_uuid") or "")[:8], sender_pubkey[:16])
         return
     with get_conn() as conn:
         if not invite_tokens.friend_has_right(conn, sender_pubkey, "can_message"):
@@ -713,6 +736,7 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
     # A friend's voucher the switch does not honour: its chat stream, said
     # so — a client that came for a peer relay lets this one go.
     unhonoured = bool(invite and voucher_sig) and voucher is None
+    mail_voucher = await _stream_mail_voucher(request, pubkey) if friend else None
 
     ip = request.client.host if request.client else "unknown"
     sub = _wake.register(pubkey, instance, ip)
@@ -776,7 +800,31 @@ async def wake_stream(request: Request, pubkey: str = "", ts: str = "",
                     except Exception as e:
                         logger.warning("client withdraw failed: %s", e)
 
-    return EventStream(gen(), headers={RELAY_HEADER: "off"} if unhonoured else None)
+    headers = {RELAY_HEADER: "off"} if unhonoured else {}
+    if mail_voucher:
+        headers[chat_wire.MAIL_VOUCHER_HEADER] = chat_wire.encode_mail_voucher(mail_voucher)
+    return EventStream(gen(), headers=headers or None)
+
+
+async def _stream_mail_voucher(request: Request, pubkey: str) -> Optional[dict]:
+    """The master's voucher on a friend's stream connect: its identity
+    through the gate first when the gate has not verified it yet and the
+    stream carries its certificate (a key new here since a rotation) — once,
+    cached after. Mirrored by desktop/p2p/sync_server."""
+    from desktop.p2p import master_node as role
+    if not role.is_master():
+        return None
+    voucher = await in_chat_lane(_mail_voucher, pubkey)
+    if voucher is None:
+        from desktop.p2p import peer_auth
+        bundle = peer_auth.decode_cert_bundle(request.headers.get(peer_auth.HDR_CERT) or "")
+        if bundle is not None:
+            admission = await _identity_gate().admit(
+                pubkey, bundle["cert"], bundle["proof"],
+                request.client.host if request.client else None)
+            if admission.status == "verified":
+                voucher = await in_chat_lane(_mail_voucher, pubkey)
+    return voucher
 
 
 @relay_router.get("/voucher")

@@ -492,6 +492,20 @@ node's) seeds it as a pending friend when it starts; its resolver (LAN → cache
 token handshake, stores the grant and pulls the welcome message through the
 ordinary history sync. Deleting the contact sets `p2p.master_removed` — the
 auto-add never resurrects it (re-adding the code by hand clears the flag).
+**Support is written to from a node's first minute** (since 2026-11-24,
+SUPPORT-FIRST: B-116): the seeded contact stays `pending:` until the
+master's first handshake, but it is already bound to the pin's fingerprint,
+so its thread opens by that key (the friends list's `chat_key`) and what is
+written there waits on the node, said as waiting for Support. Nothing goes
+to the master's Worker mailbox before that handshake — the outbox never
+pushes to a `pending:` row — and none while the master has not accepted the
+key the node signs with now (a rotation while it was away;
+`_mailbox_deposit`, the one place that decides a drop). The handshake is the
+event that sends what waits, at the address that answered, and the master's
+wake stream follows it at once. The delivery path's state per friend is
+logged at info once per change; while a message waits kept for Support the
+master's stream is dialled again at most a minute after a failure (else
+five), since the master's drain pings a stream that is not back yet.
 
 **A master fails closed** (since 2026-11-22, B-113 — on 2026-11-19 the
 master started with a password changed by accident in its `.env`, derived

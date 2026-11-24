@@ -764,3 +764,55 @@ def test_support_and_a_key_that_held_the_name_before_keep_speaking_under_it():
     r = _run("reserved")
     assert r["master"][0] == 200
     assert r["holder"][0] == 200
+
+
+
+# --- the master's voucher on a mailbox drop (B-118) -----------------------------
+
+def test_a_drop_with_the_masters_voucher_takes_none_of_the_unvouched_share():
+    r = _run("vouchers")
+    assert r["valid"] == [200, "stored"] and r["unvouchedAfterValid"] == 0
+
+
+def test_an_expired_voucher_and_none_count_in_the_unvouched_share():
+    r = _run("vouchers")
+    assert r["expired"] == [200, "expired"] and r["unvouchedAfterExpired"] == 1
+    assert r["none"] == [200, "stored"] and r["unvouchedAfterNone"] == 2
+
+
+def test_a_voucher_that_is_not_the_masters_for_this_sender_is_refused():
+    r = _run("vouchers")
+    refused = [403, "invalid voucher"]
+    for case in ("forged", "anotherKeys", "tooLong", "future", "malformed", "previousMaster"):
+        assert r[case] == refused, case
+
+
+def test_the_unvouched_share_full_keeps_out_the_unvouched_alone():
+    r = _run("vouchers")
+    assert r["shareFull"] == [429, "mailbox busy for new senders"] and r["shareFullWrote"] is False
+    assert r["vouchedBesideIt"] == [200, "stored"]
+    assert r["addressShareFull"] == [429, "unvouchered address cap reached"]
+    assert r["vouchedFromThatAddress"] == [200, "stored"]
+
+
+def test_a_planned_rotations_worker_takes_the_previous_keys_vouchers():
+    r = _run("vouchers", "--previous-master-seed", os.urandom(32).hex())
+    assert r["previousMaster"] == [200, "stored"]
+    assert r["forged"] == [403, "invalid voucher"]
+
+
+def test_todays_worker_takes_a_drop_that_carries_a_voucher(tmp_path):
+    """The rollout's middle state (SUPPORT-FIRST §2.7): a node that attaches
+    vouchers before the Worker checks them is not refused."""
+    old = subprocess.run(["git", "-C", str(HERE.parents[1]), "show", "4d55046d:worker/verify.js"],
+                         capture_output=True, text=True)
+    if old.returncode != 0:
+        pytest.skip("the base release's Worker is not in this checkout")
+    path = tmp_path / "verify.js"
+    path.write_text(old.stdout)
+    out = subprocess.run(
+        ["node", str(HERE / "worker_harness.mjs"), os.urandom(32).hex(), "test-email-pepper",
+         "--scenario", "vouchers", "--worker", str(path)],
+        capture_output=True, text=True, timeout=120, check=True).stdout
+    r = json.loads(out)
+    assert r["valid"] == [200, "stored"] and r["forged"] == [200, "stored"]

@@ -1125,6 +1125,41 @@ class SyncServer:
             key, token_id, rights, peer_pubkey,
             self.account_info.get("public_key_hex", ""))
 
+    def _mail_voucher(self, peer_pubkey: str) -> Optional[dict]:
+        """The master's voucher for its Worker mailbox, for a key it takes
+        mail from, or None — never on another node (mirror of
+        backend/routers/peer_chat._mail_voucher)."""
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey,
+        )
+
+        from desktop.node_identity import get_private_key_raw
+        from desktop.p2p import identity_registry
+        from desktop.p2p import master_node as role
+        if not role.is_master() or not identity_registry.takes_mail_voucher(
+                self._chat_service.db_conn(), peer_pubkey):
+            return None
+        key = Ed25519PrivateKey.from_private_bytes(get_private_key_raw())
+        return chat_wire.make_mail_voucher(key.sign, peer_pubkey)
+
+    async def _stream_mail_voucher(self, request: web.Request, pubkey: str) -> Optional[dict]:
+        """The master's voucher on a friend's stream connect: its identity
+        through the gate first when the gate has not verified it yet and the
+        stream carries its certificate (a key new here since a rotation) —
+        once, cached after (mirror of backend/routers/peer_chat)."""
+        from desktop.p2p import master_node as role
+        if not role.is_master():
+            return None
+        voucher = self._mail_voucher(pubkey)
+        if voucher is None:
+            bundle = peer_auth.decode_cert_bundle(request.headers.get(peer_auth.HDR_CERT) or "")
+            if bundle is not None:
+                admission = await self._identity_gate().admit(
+                    pubkey, bundle["cert"], bundle["proof"], request.remote)
+                if admission.status == "verified":
+                    voucher = self._mail_voucher(pubkey)
+        return voucher
+
     async def _witness_handshake(self, body: dict, peer_pubkey: str) -> None:
         """An accepted token or grant handshake is a sighting of the guest
         when it carried its certificate (desktop/p2p/witness.py) — the
@@ -1234,6 +1269,9 @@ class SyncServer:
             }
             if grant_out:
                 payload["grant"] = grant_out
+            voucher = self._mail_voucher(peer_pubkey)
+            if voucher:
+                payload["mail_voucher"] = voucher
             return self._json_response(request, payload)
 
         conn = self._chat_service.db_conn()
@@ -1712,6 +1750,7 @@ class SyncServer:
         elif not friend:
             return self._json_response(
                 request, {"error": "voucher required"}, status=403)
+        mail_voucher = await self._stream_mail_voucher(request, pubkey) if friend else None
 
         sub = self._wake.register(pubkey, instance, ip)
         if sub is None:
@@ -1731,6 +1770,8 @@ class SyncServer:
             # A friend's voucher the switch does not honour: its chat stream,
             # said so — a client that came for a peer relay lets this one go.
             headers[RELAY_HEADER] = "off"
+        if mail_voucher:
+            headers[chat_wire.MAIL_VOUCHER_HEADER] = chat_wire.encode_mail_voucher(mail_voucher)
         resp = web.StreamResponse(headers=headers)
         await resp.prepare(request)
         try:

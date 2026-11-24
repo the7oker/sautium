@@ -1277,7 +1277,9 @@ achieves nothing — and it also covers master going offline on its own.
 ordinary chat wire payload — NaCl Box ciphertext to the master's chat
 key, the Worker never sees plaintext — signed by the sender
 (`mailbox:v1:{to}:{message_uuid}:{timestamp}:{sha256(encrypted)}`),
-gated by a birth certificate issued there (no free keys) and by
+gated by a birth certificate issued there (a `pow` one is free to get: the
+Worker never checks its proof — the voucher below is what sets a sender
+apart) and by
 per-sender (30/day), per-address (100/day, the IPv6 /48) and global
 (5 000/day) caps on the mail it stores — counted in the object, in the
 step that stores a drop, drained or not, so a refused drop spends none of
@@ -1308,6 +1310,32 @@ seconds, the non-friend message was dropped by the friend-right check
 and acked. Not done: a launcher-side drain (no launcher is the master)
 and mailboxes for anyone else (a general dead-drop is a different
 product with a different abuse surface).*
+
+*The master's voucher and the honest client's rule (since 2026-11-24,
+SUPPORT-FIRST: B-116, B-118).* The master signs a voucher —
+`sautium-mail-voucher-v1:{pubkey}:{issued_at}:{expires_at}`, sixty days
+(`chat_wire.make_mail_voucher`) — for a key it takes mail from (a friend,
+not blocked, with `can_message`, whose identity its gate verified, no ban:
+`identity_registry.takes_mail_voucher`), in its handshake's answer
+(`mail_voucher`) and in its wake stream's header (`X-Sautium-Mail-Voucher`)
+at every connect, on both peer surfaces; a key new to it since a rotation
+is checked by the gate once, its certificate riding the master's stream.
+The node keeps the newest for the key it signs with (`mail_vouchers`) and
+every drop carries it. The Worker checks it against `MASTER_VOUCHER_KEYS`
+(the pinned key; the previous one for one voucher life after a PLANNED
+rotation only): a drop with a valid voucher takes the caps above; one
+without, or with one past its expiry (the answer says `voucher: expired`),
+also takes the unvouched share — 10 an address and 250 a day
+(`MAIL_UNVOUCHED_*`), to 0 once no released client drops without one; an
+invalid voucher is a 403. A flood of fresh certificates spends that share at
+most. The expiry is how a ban acts: the master stops renewing. And the
+client deposits only while the master's row is bound to the key it signs
+with now (`chat_wire.accepts_current_key`, in `_mailbox_deposit` alone): a
+Support contact still `pending:` is never pushed to, and a node that rotated
+while the master was away waits for its notice. A drop from a key the
+master does not know is said at warning, acked, and never marks the
+sender's row delivered — its outbox is the copy, sent directly once the
+master knows the key.
 
 ### Similarity: a price coefficient, not a verdict
 

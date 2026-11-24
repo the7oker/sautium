@@ -2627,6 +2627,18 @@ CREATE TABLE IF NOT EXISTS friend_grant_rights (
     PRIMARY KEY (friend_id, p2p_right)
 );
 
+-- The master's voucher for its Worker mailbox, as this node keeps it
+-- (SUPPORT-FIRST §2.4, chat_wire.make_mail_voucher): one per key it is
+-- for — the key it signs with now is the one a drop carries, a retired key's
+-- never — the newest kept. The master's word, renewed at its next handshake
+-- or stream: out of the life-data merge and the share export.
+CREATE TABLE IF NOT EXISTS mail_vouchers (
+    public_key_hex VARCHAR(64) PRIMARY KEY,
+    issued_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    signature BYTEA NOT NULL
+);
+
 ALTER TABLE friends ADD COLUMN IF NOT EXISTS source friend_source NOT NULL DEFAULT 'manual';
 ALTER TABLE friends ADD COLUMN IF NOT EXISTS source_token_id UUID
     REFERENCES invite_tokens(id) ON DELETE SET NULL;
