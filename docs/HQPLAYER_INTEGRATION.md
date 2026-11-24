@@ -1210,14 +1210,16 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   unstable — Play to the sound at the output moved by up to 0.94 s in PCM
   (once 3.77 s) and 1.4 s in SDM, its median with the filter — and a resume
   from a pause stable (69 ms of spread in PCM, 154 ms in SDM). So each
-  fragment is played into its lead, paused at the meter's first frame of it
-  (nothing is heard), and resumed so its sound leaves the output its step's
-  silence after the sound before it, or after the person's tap.
+  fragment is played into its lead, paused at once (nothing is heard), and
+  resumed so its sound leaves the output its step's silence after the
+  sound before it, or after the person's tap.
 - **The pause holds at the lead's start** (since 2026-11-24, AB-2, F12 of
   HQP-BENCH-63): the Pause goes out at Play's answer, not at the meter's
   first frame, and HQPlayer 6.3.3 carries it out before the source reaches
-  its meter — 64 of 64 pauses in PCM and SDM on Legion's HQPlayer
-  (2026-11-23), its answer up to 4.2 s late when a build held the port.
+  its meter — 32 of 32 pauses sent so in PCM and SDM on Legion's HQPlayer
+  (2026-11-23; the 32 sent at the first frame on an idle host held there
+  too), its answer up to 4.2 s late when a build held the port, so the
+  sitting waits for that answer as long as for a build.
   That is HQPlayer's measured behaviour, not a promise, so the lead's mark
   checks it: the meter's frames are the source's spectra, HQPlayer's own
   frames before the source and through a pause exactly zero — a marked
@@ -1234,8 +1236,8 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   (`hqp_ab_slips`) says what read it.
 - **The warm-up** — at the bottom of HQPlayer's volume range, read back,
   before the sheet — plays every filter the sitting may play once and
-  measures its delay, its start, its resume's way to the output, its
-  pause's position and how long after its sound its end shows (HQPlayer
+  measures its delay, its start, its resume's way to the output and how
+  long after its sound its end shows (HQPlayer
   sends all-zero frames through its output delay after an entry's end, and
   sinc-M's ran 2 s longer in PCM). The silence is per step (since
   2026-11-23, AB-2, B-131): what plays between two taps — a pair's round,
@@ -1265,7 +1267,7 @@ ATLAS-INTEGRATION-DESIGN §13 (private); this is its minimal version.
   change from elsewhere, or another controller playing while it sits, ends
   it as left, nothing put back; a put-back HQPlayer refuses twice alike is
   left to the person, the filter and the volume named in a notice.
-- **What is kept**: `hqp_ab_sittings` and `hqp_ab_duels`, the person's own
+- **What is kept**: `hqp_ab_sittings`, `hqp_ab_duels` and `hqp_ab_slips`, the person's own
   record under the track's context (mode, slot, a conversion across rate
   families) — in the node backup and its life-data merge, never in the
   sync, carry, the share export, the seed or a support bundle; "Forget

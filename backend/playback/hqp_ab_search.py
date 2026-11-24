@@ -628,8 +628,10 @@ def silence(plays: Sequence[Timing], lead_s: float, ref: Optional[Timing] = None
     followed by another), its own start to its first frame, the lead of
     `lead_s` and its resume's way to the output — plus MARGIN_S. `ref`, the
     fragment heard last that a one-fragment step is compared with, counts
-    as one of its plays: the two silences are equal whenever it needed at
-    least as long."""
+    as one of its plays: the two silences are equal whenever the reference's
+    own step needed no more — the end before it in a two-fragment step (a
+    tail) is a part of that step's P that a one-fragment step, after a tap,
+    has not, so a chain's next step after its first can be shorter by it."""
     needs = list(plays) + ([ref] if ref is not None else [])
     return (max([t.tail for t in plays[:-1]], default=0.0)
             + max(t.start + t.grown + lead_s + t.r for t in needs) + MARGIN_S)

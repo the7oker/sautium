@@ -11398,8 +11398,10 @@
       ? `<p class="ab-warn">Your filter takes ${abNum(`${v.own_slow} s`)} to start here, so the pause before it is long.</p>` : '';
   }
 
-  function abWarnings(v) {
-    return abOwnSlow(v)
+  // `own`: the step plays their filter — the pair's every round, the chain's
+  // first step; its slow start is said there, never under another's
+  function abWarnings(v, own = false) {
+    return (own ? abOwnSlow(v) : '')
       + (v.long_silence ? '<p class="ab-warn">Long pauses make small differences harder to hear.</p>' : '')
       + (v.sdm ? '<p class="ab-warn">Your DAC may click between fragments in DSD — the same for every filter.</p>' : '');
   }
@@ -11557,7 +11559,7 @@
             ${abSay(ab)}
             ${v.silence_s != null ? `<p class="ab-warn">Silence before ${st.kind === 'first' ? 'each' : 'this one'}: ${
               abNum(`${v.silence_s} s`)} · fragment ${abNum(`${v.passage.length_s} s`)}</p>` : ''}
-            ${abWarnings(v)}
+            ${abWarnings(v, st.kind === 'first')}
           </div>
         </div>`;
     },
@@ -11576,7 +11578,7 @@
           <div class="ab-pad ab-after">
             ${abSay(ab)}
             <p class="ab-warn">Each filter plays first in half the rounds. Up to ${abNum(st.of || 0)} rounds; it stops earlier when your answers settle.</p>
-            ${abWarnings(v)}
+            ${abWarnings(v, true)}
           </div>
         </div>`;
     },

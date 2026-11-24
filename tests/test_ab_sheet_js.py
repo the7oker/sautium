@@ -27,7 +27,7 @@ const escapeHtml = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)}
 const line = shell.split('\n').find(l => l.includes('const abNum = '));
 eval(line + cut('function abOwnSlow', 'function abAnswers'));
 const views = JSON.parse(process.argv[process.argv.length - 1]);
-console.log(JSON.stringify(views.map(v => abWarnings(v))));
+console.log(JSON.stringify(views.map(v => abWarnings(v, v.own))));
 """
 
 
@@ -38,13 +38,16 @@ def _warnings(*views):
 
 
 def test_their_slow_filter_and_a_steps_long_silence_are_said_on_their_own():
-    plain, slow, long_step, both = _warnings(
-        {"own_slow": None, "long_silence": False, "sdm": False},
-        {"own_slow": 12.3, "long_silence": False, "sdm": False},
-        {"own_slow": None, "long_silence": True, "sdm": False},
-        {"own_slow": 12.3, "long_silence": True, "sdm": True})
+    plain, slow, long_step, both, not_theirs = _warnings(
+        {"own_slow": None, "long_silence": False, "sdm": False, "own": True},
+        {"own_slow": 12.3, "long_silence": False, "sdm": False, "own": True},
+        {"own_slow": None, "long_silence": True, "sdm": False, "own": True},
+        {"own_slow": 12.3, "long_silence": True, "sdm": True, "own": True},
+        {"own_slow": 12.3, "long_silence": False, "sdm": False, "own": False})
     assert plain == ""
     assert slow == ('<p class="ab-warn">Your filter takes <span class="ab-num">12.3 s</span> to start here, '
                     'so the pause before it is long.</p>')
     assert long_step == '<p class="ab-warn">Long pauses make small differences harder to hear.</p>'
     assert both.startswith(slow) and "Long pauses" in both and "click between fragments" in both
+    # a step that plays another's filter (the chain's next one) says nothing of theirs
+    assert not_theirs == ""

@@ -689,7 +689,7 @@ CREATE TABLE IF NOT EXISTS hqp_ab_sittings (
     track_id UUID REFERENCES tracks(id) ON UPDATE CASCADE ON DELETE SET NULL,
     from_s NUMERIC(9,3) NOT NULL,           -- the passage, in the track
     length_s NUMERIC(5,2) NOT NULL,
-    lead_s NUMERIC(4,2),                    -- the cut's digital silence before it; NULL: ended before its warm-up
+    lead_s NUMERIC(4,2),                    -- the cut's lead before it (its mark since AB-2); NULL: ended before its cut
     silence_s NUMERIC(5,2),                 -- the longest P it played (P is per step since AB-2); NULL: none
     tolerance_s NUMERIC(3,2) NOT NULL,      -- how far a silence may miss P (0.15 s PCM, 0.3 s SDM)
     slipped SMALLINT NOT NULL DEFAULT 0,    -- steps played again for a silence that missed
