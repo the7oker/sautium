@@ -54,6 +54,7 @@ from playback import hqp_link as hl  # noqa: E402
 from playback import hqp_diagnostics as diag  # noqa: E402
 from playback import tracker  # noqa: E402
 from playback.queue import CanonicalQueue, QueueItem  # noqa: E402
+from streaming import service as streaming_service  # noqa: E402
 from streaming import transcode  # noqa: E402
 
 
@@ -6232,32 +6233,80 @@ def test_with_no_other_controller_a_played_streamed_queue_empties_the_playlist_a
         b.shutdown()
 
 
-@pytest.mark.skip(reason="waits for PlaybackManager.replace_queue(play=True) to look at the first slot's file before "
-                         "any output is handed a new queue for a start (PI-NODE-2D §3.3, the stat in "
-                         "playback/manager.py — not this slice's part): until it does, a file that is not there "
-                         "reaches HqpBackend.queue_replace as a file, and HQPlayer's answer to it comes after the "
-                         "Stop")
-def test_a_played_queue_whose_first_file_is_not_there_sends_a_shared_hqplayer_nothing(fake, listens, monkeypatch):
+def _the_folder_went_unseen(monkeypatch) -> list:
+    """The music folder (E:/Music here) gone with no event: the node has
+    recorded nothing yet, and the look the play path asks for when a file it
+    would start is not there (scanner.check_folder) finds the folder gone
+    and records it. The ways in then follow the record as the database's
+    query does — a file under a folder that does not answer is a stream to
+    come (playback.substitute.native_plays; the query itself is
+    tests/test_reach_db.py's). Returns the looks asked for (each: whether it
+    was waited for)."""
+    import scanner
+    from playback import substitute
+    for name, value in (("_folder_unreachable", False), ("_recorded", 0), ("_shown", False)):
+        monkeypatch.setattr(scanner, name, value)
+    looks: list = []
+
+    def look(wait=False):
+        looks.append(wait)
+        scanner._record(True, scanner._next_ticket(), wake=False)
+
+    def under_it(it) -> bool:
+        return it.source.get("kind") == "file" and any(
+            it.source["path"].startswith(g) for g in scanner.gone_prefixes())
+    monkeypatch.setattr(scanner, "check_folder", look)
+    monkeypatch.setattr(substitute, "native_plays", lambda items, output_id, endpoint_id: [
+        substitute._stream_play(it) if it.source.get("kind") == "track" or under_it(it) else None
+        for it in items])
+    return looks
+
+
+_NOT_HERE = {"reason": "not_here", "why": "disk",
+             "message": "Album cannot play until its disk is connected."}
+
+
+@pytest.mark.parametrize("streams", [True, False])
+def test_a_played_queue_whose_first_file_is_not_there_sends_a_shared_hqplayer_nothing(fake, lane, listens,
+                                                                                    monkeypatch, streams):
     """PI-NODE-2D §3.6, the table's first row: another controller plays, and
     the node plays a new queue whose first slot is a file of its own that is
     not there. The playback manager's look misses before HQPlayer is handed
-    anything: the way in is read again — a stream to wait for, or, where
-    nothing streams, the refusal — and HQPlayer received nothing from the
-    node. How the file is made to miss here, and what the manager raises, are
-    that stat's: the assertion is HQPlayer's own log."""
-    mgr, b, roon = _roon_holds_an_idle_hqplayer(fake, monkeypatch)
+    anything, and the ways in are read after it. Where this node streams
+    the slot is a stream to come: the queue is the queue's alone, the start
+    waits on it, and only its landing takes HQPlayer. Where nothing streams
+    the Play is refused with the words, the queue as it was. HQPlayer
+    received nothing from the node either way."""
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, "plays")
+    looks = _the_folder_went_unseen(monkeypatch)
+    new = [_item("E:/Music/Gone/01.flac", 31), _item("E:/Music/Gone/02.flac", 32)]
     try:
-        left = (fake.state, fake.track, list(fake.playlist))
         n = len(fake.received)
-        try:
-            mgr.replace_queue([_item("E:/Music/Gone/01.flac", 31), _item("E:/Music/Gone/02.flac", 32)], play=True)
-        except Exception as refused:        # where nothing streams: refused before the queue is touched
-            _observed("F20-file", refused=str(refused))
+        if streams:
+            added, _gen = mgr.replace_queue(new, play=True)
+            assert added == 2 and _wait(lambda: _loading(mgr, 1)), mgr._latest_status
+        else:
+            from playback.manager import NotHere
+            from routers import player as player_router
+            monkeypatch.setattr(streaming_service, "is_enabled", lambda: False)
+            with pytest.raises(NotHere) as refused:
+                mgr.replace_queue(new, play=True)
+            assert player_router._output_error(refused.value).detail == _NOT_HERE
+            assert [it.track_id for it in mgr.queue.snapshot()] == ["track-1"]
         _settled(fake)
-        assert _from_node(fake, n, roon) == [] and (fake.state, fake.track, fake.playlist) == left
+        sent = _from_node(fake, n, other)
+        _observed("F20-file", streams=streams, looks=looks, sent=sent, hqplayer=(fake.state, fake.track))
+        assert looks == [True]                  # one look, at the file about to be opened, waited for
+        assert sent == [] and (fake.state, fake.track, fake.playlist) == left
+        if streams:
+            assert [it.source["kind"] for it in mgr.queue.snapshot()] == ["file", "file"]
+            prov.land("track-31")
+            assert _wait(lambda: fake.state == PLAYING and fake.track == 1 and len(fake.playlist) == 1
+                         and "/preview/" in fake.playlist[0], timeout=15), (fake.state, fake.track, fake.playlist)
     finally:
+        prov.land("track-1", "track-31", "track-32")
         b.shutdown()
-        roon.close()
+        other.close()
 
 
 def _queued_under_another(fake, lane, monkeypatch):
