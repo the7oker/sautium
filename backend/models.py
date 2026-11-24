@@ -74,6 +74,11 @@ CreditRoleEnum = ENUM(
     name="credit_role",
     create_type=False,
 )
+TracklistSourceEnum = ENUM(
+    "mb", "tag",
+    name="tracklist_source",
+    create_type=False,
+)
 MusicalKeyEnum = ENUM(
     "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
     name="musical_key",
@@ -522,6 +527,9 @@ class AlbumTrack(Base):
     disc = Column(Integer, primary_key=True, default=1)
     position = Column(Integer, primary_key=True)
     recording_mbid = Column(UUID(as_uuid=False))  # MB recording gid (dedup / future preview)
+    # who wrote the slot: MusicBrainz's tracklist, or this node's files' tags
+    # (001_initial.sql) — a removed copy takes its 'tag' slots with it
+    source = Column(TracklistSourceEnum, nullable=False, server_default="mb")
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -53,7 +53,8 @@ from credits import derive_composers, lock_credits, split_names
 from database import get_db_context
 from db_pool import db_execute, db_query
 from hqplayer_client import connect_address
-from scanner import AUDIO_EXTENSIONS, FileSink, import_metadata, without_rights_societies
+from scanner import (AUDIO_EXTENSIONS, FileSink, drop_tag_slots, import_metadata,
+                     without_rights_societies)
 from sql_queries import ARTIST_UNCREDITED
 from uuid_utils import is_lossless
 
@@ -666,10 +667,12 @@ def sync(host: str, port: int, *, force: bool = False,
 
 def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, int]:
     """Remove hqp_library_files rows ``gone`` and what they alone justified:
-    the endpoint's variants left without files, albums left with neither a
-    variant nor a phantom tracklist, tracks nothing refers to
-    (ORPHAN_TRACK_SQL — a track with analysis or a listen stays, as it does
-    for a vanished local rip) and, when ``since`` is given, artists minted
+    the endpoint's variants left without files, the tracklist slots a local
+    copy's tags once wrote that this library's copy was the last to hold
+    (scanner.drop_tag_slots: an HQPlayer's files write no slot, they keep
+    one), albums left with neither a variant nor a tracklist, tracks nothing
+    refers to (ORPHAN_TRACK_SQL — a track with analysis or a listen stays, as
+    it does for a vanished local rip) and, when ``since`` is given, artists minted
     after it that no credit names any more (a cancelled import's raw
     credits; an artist that existed before keeps its bio and similars)."""
     stats = {"forgotten": 0, "orphan_variants": 0, "orphan_albums": 0,
@@ -689,6 +692,9 @@ def _forget(db, gone: List[int], since: Optional[datetime] = None) -> Dict[str, 
         UNION
         SELECT artist_id FROM track_credits WHERE track_id = ANY(CAST(:tids AS uuid[]))
     """), {"tids": track_ids}).fetchall()]
+    drop_tag_slots(db, list(db.execute(text(
+        "SELECT DISTINCT album_id FROM album_variants WHERE id = ANY(CAST(:vids AS int[]))"),
+        {"vids": variant_ids}).scalars()), track_ids)
     album_ids = [str(r[0]) for r in db.execute(text("""
         DELETE FROM album_variants
         WHERE id = ANY(CAST(:vids AS int[])) AND location = 'hqplayer'

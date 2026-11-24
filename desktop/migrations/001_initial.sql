@@ -70,6 +70,12 @@ DO $$ BEGIN
     CREATE TYPE track_credit_source AS ENUM ('tag', 'mb');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Who wrote a tracklist slot (album_tracks.source): MusicBrainz, or this
+-- node's own files' tags.
+DO $$ BEGIN
+    CREATE TYPE tracklist_source AS ENUM ('mb', 'tag');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE musical_key AS ENUM ('C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -810,6 +816,16 @@ CREATE TABLE IF NOT EXISTS album_tracks (
                                            -- optional, refreshable layer that may be reloaded
                                            -- or removed after a phantom was minted. From the
                                            -- canonical release's mb_track.length.
+    -- Who wrote the slot: 'mb' — MusicBrainz's tracklist (the phantom mint;
+    -- the seed's rows and a peer's records are catalogue rows too and keep
+    -- the default), or 'tag' — this node's own files' tags
+    -- (sign_audio._materialize_owned_tracklists, the only writer of it). A
+    -- slot the mint confirms is 'mb' from then on. The removal of a copy
+    -- takes the 'tag' slots its files alone held, so the album and its
+    -- tracks go with it instead of staying as a phantom built from the
+    -- person's tags (PI-NODE-2D, 2026-11-24). Local: no payload column
+    -- (seal_guard_album_tracks), never exported.
+    source tracklist_source NOT NULL DEFAULT 'mb',
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (album_id, disc, position)

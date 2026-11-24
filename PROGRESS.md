@@ -4579,6 +4579,39 @@ QUEUE-STREAM-DESIGN (private) holds the reading and the answers.
   a slot was queued: a demo-channel listen through a slot that streams for a
   copy this output cannot reach was never spent before (since 2026-11-01).
 
+### A tracklist slot says who wrote it (2026-11-24)
+
+After "Remove albums that are away" a box held 18 copies, 436 albums and
+4 161 tracks with no file (PI-NODE-2D, F21): `album_tracks` has three
+writers — the MusicBrainz mint, the materialiser that writes an owned
+album's tracklist from its files' tags for the seal, and the seed's and a
+share's rows — and no column said which wrote a row. The removal keeps an
+album while a slot holds it, so a removed copy left its album and tracks
+behind as a phantom built from the person's own tags, which nothing would
+ever fill on a node with the streaming library off.
+
+- **`album_tracks.source`** (`tracklist_source`: `mb` | `tag`, default
+  `mb`). The materialiser is the only writer of `tag`; the mint's upsert
+  sets `mb` — a slot MusicBrainz confirms is MusicBrainz's from then on; the
+  seed's and a share's rows keep the default (`imported` tells them apart).
+  Local: no payload column of the seal, never exported.
+- **A removal of files takes the `tag` slots they alone held** — of the
+  albums and tracks of the files it took, where no file here or at an
+  HQPlayer is left of that album for that track (`scanner.drop_tag_slots`) —
+  then the tracks, the copies and the album by the rules that stood. Three
+  removals do: the scanner's (a Rescan's yes, the Away row), the CUE
+  supersede, and an HQPlayer library's forget — whose files write no slot
+  but may be the last to hold one a removed local copy wrote. The plan is
+  the removal rolled back, so the question's counts name what goes.
+- **The backfill is conservative** (in the column's delta): `tag` where the
+  slot is the node's own, a file of the album names it whole — track, disc,
+  position, length — and it is no older than the album's first copy. In
+  doubt a slot is MusicBrainz's and stays: a wrong `mb` costs what F21
+  cost, a wrong `tag` would cost a phantom its slot until the artist's next
+  reconcile. On the reference library the design's SELECT classed about
+  40 200 of 41 700 owned slots as the files'; the backfill itself was run
+  on seeded rows only.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

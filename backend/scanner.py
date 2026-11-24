@@ -2075,6 +2075,14 @@ class LibraryScanner:
                           AND NOT EXISTS (SELECT 1 FROM media_files mf
                                           WHERE mf.track_id = x.track_id)
                     """), {"tids": tids})
+                vids = list(superseded_variants)
+                affected_albums = list(db.execute(text("""
+                    SELECT DISTINCT album_id FROM album_variants
+                    WHERE id = ANY(:vids)
+                """), {"vids": vids}).scalars())
+                # the slot a superseded row's tags wrote would hold its track —
+                # and its position, against the slice that takes it
+                drop_tag_slots(db, affected_albums, tids)
                 r = db.execute(text(f"""
                     DELETE FROM tracks t WHERE t.id = ANY(CAST(:tids AS uuid[]))
                       AND {ORPHAN_TRACK_SQL.format(t='t')}
@@ -2089,11 +2097,6 @@ class LibraryScanner:
                 # from what is left; one left with no file keeps them
                 derive_composers(db, tids)
 
-                vids = list(superseded_variants)
-                affected_albums = list(db.execute(text("""
-                    SELECT DISTINCT album_id FROM album_variants
-                    WHERE id = ANY(:vids)
-                """), {"vids": vids}).scalars())
                 db.execute(text("""
                     DELETE FROM album_variants WHERE id = ANY(:vids)
                       AND NOT EXISTS (SELECT 1 FROM media_files mf
@@ -2513,6 +2516,27 @@ def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
     return missing
 
 
+def drop_tag_slots(db: Session, album_ids: Sequence[Any], track_ids: Sequence[Any]) -> int:
+    """The tracklist slots this node's own files wrote
+    (album_tracks.source = 'tag', sign_audio._materialize_owned_tracklists)
+    for `track_ids` in `album_ids`, where no file is left — here or at an
+    HQPlayer — of a copy of that album for that track. Called by a removal
+    of files, after their delete and before the tracks': a slot whose one
+    author was a removed file goes with it, so the track and the album go by
+    the rules that stand instead of staying as a phantom built from the
+    person's tags. A slot MusicBrainz wrote ('mb') and a peer's (`imported`)
+    are never its to take. Returns how many went."""
+    return db.execute(text("""
+        DELETE FROM album_tracks at
+         WHERE at.source = 'tag' AND NOT at.imported
+           AND at.album_id = ANY(CAST(:albums AS uuid[]))
+           AND at.track_id = ANY(CAST(:tracks AS uuid[]))
+           AND NOT EXISTS (SELECT 1 FROM owned_files f
+                             JOIN album_variants av ON av.id = f.album_variant_id
+                            WHERE av.album_id = at.album_id AND f.track_id = at.track_id)
+    """), {"albums": [str(a) for a in album_ids], "tracks": [str(t) for t in track_ids]}).rowcount
+
+
 def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool,
                  progress_cb: Optional[callable], cancel_check: Optional[callable],
                  bound: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
@@ -2566,6 +2590,11 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         """), {"t": [str(t) for t in track_ids], "a": [str(a) for a in album_ids]})]
 
         db.query(MediaFile).filter(MediaFile.id.in_(missing_ids)).delete(synchronize_session=False)
+
+        # The same scope, a second time: the slots these files' tags wrote, in
+        # these albums, for these tracks — never "every slot no file backs",
+        # which is the whole phantom layer's tracklists.
+        drop_tag_slots(db, album_ids, track_ids)
 
         # Only true orphans go (canon.identity.ORPHAN_TRACK_SQL): embeddings +
         # analysis_sources cascade with the track, and neither the node's own

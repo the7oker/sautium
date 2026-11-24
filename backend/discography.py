@@ -732,6 +732,9 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
             """, {"tids": [t for t, _, _ in track_rows],
                   "ftids": [t for t, _ in featured_rows],
                   "fids": [a for _, a in featured_rows]})
+            # A slot MusicBrainz confirms is MusicBrainz's from then on: one
+            # a removed copy's tags had left (album_tracks.source) is no
+            # longer the files' to take along.
             execute_values(cur, """
                 INSERT INTO album_tracks
                     (album_id, track_id, disc, position, recording_mbid, length_ms)
@@ -740,6 +743,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                 DO UPDATE SET track_id = EXCLUDED.track_id,
                               recording_mbid = EXCLUDED.recording_mbid,
                               length_ms = EXCLUDED.length_ms,
+                              source = 'mb',
                               updated_at = now()
             """, [row for row, _ in slot_rows],
                 template="(%s::uuid, %s::uuid, %s, %s, %s::uuid, %s)")

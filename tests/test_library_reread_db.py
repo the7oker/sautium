@@ -404,3 +404,36 @@ def test_a_rip_replaced_in_place_with_the_same_tags_is_read_again_by_the_canon(c
     assert _scan()["reread"] == 1
     cur.execute("SELECT content_at > '2026-01-02' FROM media_files")
     assert cur.fetchone() == (True,)
+
+
+def test_a_sheet_that_goes_takes_its_slices_tracklist_with_it(cur, library, template):
+    """The CUE supersede removes the slices' rows, and with them the slots
+    their tags wrote (scanner.drop_tag_slots): they held the slices' tracks
+    as an album's with no file — and the first position against the whole
+    image that takes it (PI-NODE-2D item 5)."""
+    import psycopg2.extras
+    import sign_audio
+    _clean(cur)
+    d = library / "A" / "Live"
+    _flac(template, d / "image.flac", "Live (whole)", "Aurora", "Live", track=1)
+    sheet = d / "image.cue"
+    sheet.write_text('PERFORMER "Aurora"\nTITLE "Live"\nFILE "image.flac" WAVE\n'
+                     '  TRACK 01 AUDIO\n    TITLE "Open"\n    INDEX 01 00:00:00\n'
+                     '  TRACK 02 AUDIO\n    TITLE "Two"\n    INDEX 01 00:01:00\n')
+    _scan()
+
+    def materialise():
+        with cur.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as c:
+            sign_audio._materialize_owned_tracklists(c)
+        cur.execute("""SELECT t.title, at.position FROM album_tracks at
+                         JOIN tracks t ON t.id = at.track_id ORDER BY at.position""")
+        return cur.fetchall()
+    assert materialise() == [("Open", 1), ("Two", 2)]
+
+    sheet.unlink()
+    assert _scan()["superseded"] == 2
+    cur.execute("SELECT title FROM tracks ORDER BY 1")
+    assert cur.fetchall() == [("Live (whole)",)]
+    assert materialise() == [("Live (whole)", 1)]
+    cur.execute("SELECT DISTINCT source::text FROM album_tracks")
+    assert cur.fetchall() == [("tag",)]
