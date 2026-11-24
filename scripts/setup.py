@@ -363,8 +363,9 @@ ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}==
 # A volume the system names no filesystem on at all (none found, or the marks
 # of two: a quick format over an older one) is the script's to say; one that
 # is named and is no filesystem of files (swap, an encrypted volume) is not.
-# No size: a card reader's empty slot.
-ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
+# No size: a card reader's empty slot. Never an optical drive: an empty tray
+# and an audio CD are no volume a format was lost on.
+ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", KERNEL!="sr[0-9]*", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
 ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}!="?*", ATTR{size}!="0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"
 """
 
@@ -2098,6 +2099,14 @@ def cmd_remove(args) -> int:
     for point in boot_mounts(out(run(["findmnt", "--fstab", "-n", "-o", "TARGET"]))):
         for line in boot_mount_undo(point):
             say("    " + line)
+    if os.path.isdir(AUTOMOUNT_BASE):
+        # The folder disks were mounted in, which the automount's block and
+        # the fstab line's block both make: last, and only while it is empty
+        # (rmdir removes nothing that holds anything — a disk still mounted
+        # there keeps its folder)
+        inside = [f"{AUTOMOUNT_BASE}/{name}" for name in (NAMES_DIR, ".unread")
+                  if os.path.isdir(f"{AUTOMOUNT_BASE}/{name}")]
+        say("    sudo rmdir " + " ".join(inside + [AUTOMOUNT_BASE]))
     say()
     if args.data and sys.stdin.isatty():
         # Last, and only after the data went by the nickname: the folder itself

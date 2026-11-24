@@ -1412,6 +1412,8 @@ USB = {"ACTION": "add", "SUBSYSTEM": "block", "SUBSYSTEMS": ["block", "scsi", "u
     ("an encrypted volume", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": "crypto"}), 0),
     ("a RAID member", dict(USB, KERNEL="sda1", **{"ENV{ID_FS_USAGE}": "raid"}), 0),
     ("a card reader's empty slot", dict(USB, KERNEL="sdb", **{"ATTR{size}": "0"}), 0),
+    ("a USB optical drive, its tray empty or an audio CD in it", dict(USB, KERNEL="sr0"), 0),
+    ("a data CD in it", dict(USB, KERNEL="sr0", **{"ENV{ID_FS_USAGE}": "filesystem"}), 1),
     ("a pull", dict(USB, KERNEL="sda1", ACTION="remove"), 0),
     ("a SATA disk", {"ACTION": "add", "SUBSYSTEM": "block", "KERNEL": "sdc1", "SUBSYSTEMS": ["block", "scsi", "ata"],
                      "ATTR{size}": "30310400"}, 0),
@@ -1704,11 +1706,23 @@ def test_remove_prints_the_undo_of_a_boot_mount_the_setup_printed(installed, mon
     assert setup.main(["remove"]) == 0
     pasted = [line[4:] for line in capsys.readouterr().out.splitlines() if line.startswith("    ")]
     sed = 'sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab'
-    assert pasted[-11:] == [
+    lines = [
         "P=/mnt/sautium-4A21-0000", 'sudo umount "$P"', sed, 'sudo rmdir "$P"', "sudo systemctl daemon-reload",
         "P=/media/sautium/0398-3084", 'sudo umount "$P"', sed, 'sudo rmdir "$P"',
         "sudo rm -f /media/sautium/.names/0398-3084", "sudo systemctl daemon-reload"]
+    assert [line for line in pasted if not line.startswith("sudo rmdir /")][-11:] == lines
     assert not any("reboot" in line or "/mnt/music" in line or "other" in line for line in pasted)
+    # … and, last, the folder disks were mounted in — which the line's own block made where no
+    # automount had: by rmdir, which takes nothing that holds anything
+    base = installed.root.parent / "media" / "sautium"
+    (base / ".names").mkdir(parents=True)
+    monkeypatch.setattr(setup, "AUTOMOUNT_BASE", str(base))
+    assert setup.main(["remove"]) == 0
+    pasted = [line[4:] for line in capsys.readouterr().out.splitlines() if line.startswith("    ")]
+    assert pasted[-1] == f"sudo rmdir {base}/.names {base}" and "rm -r" not in " ".join(pasted)
+    (base / ".unread").mkdir()                          # the automount's own, where it was installed
+    assert setup.main(["remove"]) == 0
+    assert f"    sudo rmdir {base}/.names {base}/.unread {base}\n" in capsys.readouterr().out
 
 
 def test_the_data_goes_only_after_the_nodes_nickname(installed, monkeypatch, capsys):
