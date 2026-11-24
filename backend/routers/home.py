@@ -24,8 +24,10 @@ import threading
 import time
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from db_pool import Listener, db_query, db_query_one, db_query_with_ef_search
 from playback.queue import gone_prefixes
@@ -969,3 +971,20 @@ def _cold_start_albums(limit: int, exclude: set[str] = frozenset()) -> list[dict
         """,
         {"limit": limit, "exclude": list(exclude), "gone": gone_prefixes()},
     )
+
+
+class AlbumsShown(BaseModel):
+    ids: list[UUID] = Field(..., max_length=1000)
+
+
+@router.post("/albums-away")
+def albums_away(req: AlbumsShown) -> dict:
+    """Which of the albums a shelf shows has no file that opens here now,
+    and why — the tiles' mark, by its one definition (album_away), for the
+    tiles on the page whatever page brought them: asked when what is
+    reachable changes, and set in place."""
+    rows = db_query(
+        f"SELECT a.id::text AS id, {album_away('a.id')} AS why "
+        "FROM unnest(%(ids)s::uuid[]) AS a(id)",
+        {"ids": [str(i) for i in req.ids], "gone": gone_prefixes()})
+    return {"not_here": {r["id"]: r["why"] for r in rows if r["why"]}}

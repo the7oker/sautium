@@ -166,6 +166,43 @@
     if (t.here !== false || !out) return 'file';
     return out.streams ? 'stream' : 'waits';
   }
+  // That row, for a track with no file here now (null for any other, which
+  // the album screen draws as always). 'stream': it streams as a not-owned
+  // track's row does — by track uuid, under this album's id — and is the
+  // local copy again when its file is back. 'waits': nothing streams here,
+  // so the row waits for its file — dimmed, no tap. `lines`: the track's
+  // own lines under its title, drawn by the screen.
+  function albumOutRow(t, rowKind, albumId, lines) {
+    if (rowKind === 'stream') {
+      return `
+            <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}"
+                 data-album-id="${escapeHtml(albumId)}">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${lines}
+                <div class="track-buffering" hidden></div>
+              </div>
+              <span class="track-dur"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
+              <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+            </div>
+          `;
+    }
+    if (rowKind === 'waits') {
+      return `
+            <div class="track-row is-out-track">
+              <span class="track-rank">${t.track_number || ''}</span>
+              <div class="track-info">
+                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+                ${lines}
+              </div>
+              <span class="track-dur">${fmtDuration(t.duration)}</span>
+              <span class="track-add" aria-hidden="true"></span>
+            </div>
+          `;
+    }
+    return null;
+  }
 
   // The states of the slots `msg` names, keyed `${index}|${track_id}`
   function streamStates(msg) {
@@ -3510,6 +3547,7 @@
     const out = item.not_here
       ? `<span class="album-tile-feat album-tile-out">${escapeHtml(notHereWords(item.not_here).mark)}</span>` : '';
     if (out) tile.classList.add('is-not-here');
+    if (id) tile.dataset.albumId = id;
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
         ${cover}${held}${out}
@@ -3522,6 +3560,25 @@
       tile.addEventListener('click', () => navigateToEntity('album', id));
     }
     return tile;
+  }
+
+  // An album tile's mark set in place (`why`: its disk out, its copy away;
+  // null: a file of it opens here) — what renderAlbumTile draws for
+  // `not_here`, for a tile already on the page (homeShelf).
+  function markAlbumTile(tile, why) {
+    tile.classList.toggle('is-not-here', !!why);
+    const cover = tile.querySelector('.album-cover');
+    let mark = cover.querySelector('.album-tile-out');
+    if (!why) {
+      if (mark) mark.remove();
+      return;
+    }
+    if (!mark) {
+      mark = document.createElement('span');
+      mark.className = 'album-tile-feat album-tile-out';
+      cover.appendChild(mark);
+    }
+    mark.textContent = notHereWords(why).mark;
   }
 
   // A listening-history tile. Reuses the album-tile visual (cover + two
@@ -3805,24 +3862,35 @@
     ]);
   }
 
-  // A Home shelf of albums: its first page drawn, and drawn again from a
-  // payload that says otherwise when what opens here changes (followReach:
-  // a tile's mark comes and goes with its album's disk) — the same payload
-  // touches no tile. `fill(data)` draws the row and returns its paging, if
-  // it pages.
+  // A Home shelf of albums: its first page drawn by `fill(data)`, which
+  // also starts its paging. When what opens here changes (followReach) the
+  // marks of the tiles it SHOWS — every page scrolled in — are asked again
+  // by their album ids and set in place (markAlbumTile): no tile is drawn
+  // again, so nothing flickers and a random shelf keeps its albums, and
+  // paging goes on untouched — a page that lands meanwhile brings its own
+  // marks, and only the tiles asked about are set.
   async function homeShelf(sec, url, fill) {
-    let paging = null;
-    const draw = text => {
-      followReach(sec.row, url, text, again => {
-        if (paging) paging.disconnect();
-        sec.row.replaceChildren();
-        draw(again);
-      });
-      paging = fill(JSON.parse(text));
-    };
     const r = await fetch(url);
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    draw(await r.text());
+    fill(await r.json());
+    const row = sec.row;
+    const tiles = () => [...row.querySelectorAll('.album-tile[data-album-id]')];
+    const ask = async () => {
+      const ids = [...new Set(tiles().map(t => t.dataset.albumId))];
+      if (!ids.length) return null;
+      const resp = await fetch('/api/home/albums-away', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }) });
+      if (!resp.ok) return null;
+      return JSON.stringify({ ids, not_here: (await resp.json()).not_here });
+    };
+    followReach(row, ask, null, text => {
+      const said = JSON.parse(text);
+      const asked = new Set(said.ids);
+      tiles().forEach(t => {
+        if (asked.has(t.dataset.albumId)) markAlbumTile(t, said.not_here[t.dataset.albumId] || null);
+      });
+    });
   }
 
   /* ---------- Discovery screen (Step 1.5b) ----------
@@ -5439,23 +5507,31 @@
      another, the payload is asked again and the screen repainted only if it says
      otherwise — the same answer touches no DOM. Any element may follow (an
      album's screen, a shelf's row of tiles): it names the URL its payload
-     came from, that payload's text and how it is drawn again — handed the
-     new text, for one that draws from it. */
+     came from — or how it is asked (a function giving its text, null for
+     nothing to ask) — that payload's text and how it is drawn again, handed
+     the new text, for one that draws from it. The followers are held weakly:
+     a screen the person left is the collector's, whatever the node says
+     later. */
   const _reachScreens = new Set();
-  function followReach(screen, url, text, rerender) {
-    screen._reach = { url, text, rerender };
-    _reachScreens.add(screen);
+  function followReach(screen, ask, text, rerender) {
+    if (!screen._reach) _reachScreens.add(new WeakRef(screen));
+    screen._reach = { ask, text, rerender };
   }
   async function refreshReach(screen) {
     const reach = screen._reach;
     if (!reach) return false;
     let text;
     try {
-      const resp = await fetch(reach.url);
-      if (!resp.ok) return false;
-      text = await resp.text();
+      if (typeof reach.ask === 'function') {
+        text = await reach.ask();
+      } else {
+        const resp = await fetch(reach.ask);
+        if (!resp.ok) return false;
+        text = await resp.text();
+      }
     } catch (_) { return false; }      // the node is away: the page's own reconnect repaints
-    if (!screen.isConnected || screen._reach !== reach || text === reach.text) return false;
+    if (text == null || !screen.isConnected || screen._reach !== reach || text === reach.text) return false;
+    reach.text = text;
     reach.rerender(text);
     return true;
   }
@@ -5470,9 +5546,10 @@
     if (key === _reachKey) return;
     _reachKey = key;
     if (first) return;
-    _reachScreens.forEach(screen => {
-      if (screen.isConnected) refreshReach(screen);
-      else _reachScreens.delete(screen);     // a screen left: it follows nothing
+    _reachScreens.forEach(ref => {
+      const screen = ref.deref();
+      if (!screen) _reachScreens.delete(ref);        // collected: it follows nothing
+      else if (screen.isConnected) refreshReach(screen);
     });
   }
   window.addEventListener('sautium:reach', e => reachChanged(e.detail));
@@ -6156,41 +6233,11 @@
         const composers = (t.composers || []).map(c => c.name).join(' · ');
         const composersLine = composers
           ? `<div class="track-artist-line track-composers">${escapeHtml(composers)}</div>` : '';
-        const rowKind = albumRowKind(t, out);
-        if (rowKind === 'stream') {
-          // His own track, no file of it here now: the row streams, as a
-          // not-owned track's does — by track uuid, under this album's id —
-          // and is the local copy again when its file is back.
-          trackParts.push(`
-            <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}"
-                 data-album-id="${escapeHtml(albumId)}">
-              <span class="track-rank">${t.track_number || ''}</span>
-              <div class="track-info">
-                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-                ${composersLine}
-                ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
-                <div class="track-buffering" hidden></div>
-              </div>
-              <span class="track-dur"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
-              <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
-            </div>
-          `);
-          continue;
-        }
-        if (rowKind === 'waits') {
-          // Nothing streams here: the row waits for its file — dimmed, no tap
-          trackParts.push(`
-            <div class="track-row is-out-track">
-              <span class="track-rank">${t.track_number || ''}</span>
-              <div class="track-info">
-                <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-                ${composersLine}
-                ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
-              </div>
-              <span class="track-dur">${fmtDuration(t.duration)}</span>
-              <span class="track-add" aria-hidden="true"></span>
-            </div>
-          `);
+        // his own track with no file of it here now: its row streams, or waits
+        const outRow = albumOutRow(t, albumRowKind(t, out), albumId,
+          `${composersLine}${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}`);
+        if (outRow) {
+          trackParts.push(outRow);
           continue;
         }
         if (t.location === 'hqplayer') {

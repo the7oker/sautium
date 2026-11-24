@@ -100,31 +100,92 @@ def test_an_album_partly_out_reads_each_row_by_its_own_file_and_keeps_play():
     assert streams["rows"] == ["stream", "file"] and streams["out"]["noPlay"] is False
 
 
-def test_the_album_screen_draws_those_states():
-    """The renderer reads the two functions and nothing else for it: the
-    stream rows are the phantom rows' (by track uuid, under the album's id),
-    the waiting rows have no tap, the buttons carry the refusal, Play and
-    Queue go by the album's uuid while anything is out."""
-    album = _block("async function renderAlbum(root, albumId) {", "\n  }\n\n  // Release-group screen")
-    assert "const out = albumOut(d);" in album and "albumRowKind(t, out)" in album
-    stream_row = album[album.index("if (rowKind === 'stream') {"):album.index("if (rowKind === 'waits') {")]
-    assert 'class="track-row is-phantom-track" data-track-id=' in stream_row
-    assert 'data-album-id="${escapeHtml(albumId)}"' in stream_row
-    waits_row = album[album.index("if (rowKind === 'waits') {"):album.index("if (t.location === 'hqplayer') {")]
-    assert 'class="track-row is-out-track"' in waits_row and "data-media-file-id" not in waits_row
-    assert 'data-action="play-all"${noPlayAttr}' in album and 'data-action="queue-album"${noPlayAttr}' in album
-    assert "out && out.noPlay ? ` disabled title=" in album
-    assert "byAlbum: !!out," in album
-    assert '<span class="am-demo am-yours">Your copy</span>' in album
-    handlers = _block("function wireDetailHandlers(screen, ctx = {}) {", "\n  }\n\n  /* Inline")
-    assert handlers.count("ctx.byAlbum") == 3            # Play all, and Queue's two branches
+ROWS = WORDS + "\n" + _block("function albumOutRow(t, rowKind, albumId, lines) {") + r"""
+const escapeHtml = s => String(s).replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const fmtDuration = s => `${s}s`;
+const SVG_PLUS = '+';
+const d = %(payload)s;
+const out = albumOut(d);
+const tag = html => html && html.replace(/\s+/g, ' ').trim();
+console.log(JSON.stringify(d.tracks.map(t => {
+  const html = tag(albumOutRow(t, albumRowKind(t, out), d.id, '<i>lines</i>'));
+  if (!html) return null;
+  const open = html.slice(0, html.indexOf('>') + 1);
+  return { open, tap: /data-(track|media-file)-id=/.test(open), lines: html.includes('<i>lines</i>'),
+           title: (html.match(/track-title-line">([^<]*)</) || [])[1],
+           dur: (html.match(/track-dur-num">([^<]*)</) || html.match(/track-dur">([^<]*)</) || [])[1],
+           add: html.includes('aria-label="Add to queue"'),
+           state: html.includes('class="track-buffering"') }; })));
+"""
 
 
-def test_a_refused_tap_says_the_same_words_as_a_toast():
-    report = _block("async function reportPlaybackResult(resp, body, word) {")
-    at = report.index("if (detail.reason === 'not_here') {")
-    assert "notHereWords(detail.why).title" in report[at:at + 400]
-    assert "key: 'player.not_here'" in report[at:at + 400]
+def _rows(payload: dict) -> list:
+    return _node(ROWS % {"payload": json.dumps(payload)})
+
+
+def test_the_album_screen_draws_a_row_that_streams_as_a_not_owned_tracks_and_one_that_waits_with_no_tap():
+    """The album screen's rows for a track with no file here now, drawn by
+    the page's own function from a payload: where this node streams, the
+    not-owned row's markup — tapped by track uuid under the album's id, its
+    stream's line and its [+] there; where nothing streams, a row with no
+    tap, no [+] and no stream line. A track that is here is the screen's
+    own row (null)."""
+    track = {"track_id": "t-1", "title": 'One "quoted"', "track_number": 1, "duration": 200}
+    payload = {"id": "album-1", "is_owned": True, "away": None,
+               "tracks": [{**track, "here": False}, {**track, "here": True, "media_file_id": 7}]}
+    streams = _rows({**payload, "away_part": {"why": "disk", "streams": True}})
+    assert streams[1] is None
+    assert streams[0] == {
+        "open": '<div class="track-row is-phantom-track" data-track-id="t-1" data-album-id="album-1">',
+        "tap": True, "lines": True, "title": "One &quot;quoted&quot;", "dur": "200s", "add": True,
+        "state": True}
+    waits = _rows({**payload, "away_part": {"why": "away", "streams": False}})
+    assert waits[1] is None
+    assert waits[0] == {"open": '<div class="track-row is-out-track">', "tap": False, "lines": True,
+                        "title": "One &quot;quoted&quot;", "dur": "200s", "add": False, "state": False}
+    assert _rows({**payload, "away_part": None, "tracks": [{**track, "here": True}]}) == [None]
+
+
+TOAST = WORDS + "\n" + _block("async function reportPlaybackResult(resp, body, word) {") + r"""
+const toasts = [];
+const notices = { toast: t => toasts.push(t) };
+const escapeProfileHtml = s => String(s).replace(/</g, '&lt;');
+const answerSays = () => true;
+const TRANSPORT_WORDS = {};
+const window = {};
+const refused = detail => ({ ok: false, status: 409, headers: { get: () => null },
+                             json: () => Promise.resolve({ detail }) });
+(async () => {
+  const said = [];
+  for (const detail of %(details)s) {
+    said.push(await reportPlaybackResult(refused(detail), { detail }, 'play'));
+  }
+  // a caller that has not read the body: the function reads it
+  said.push(await reportPlaybackResult(refused(%(details)s[0]), undefined, 'play'));
+  console.log(JSON.stringify({ said, toasts }));
+})();
+"""
+
+
+def test_a_refused_tap_says_the_albums_words_as_a_toast():
+    """A route's 409 `not_here`, as the page's own function reports it: a
+    warning toast under one key, titled as the album titles that state,
+    with the node's sentence — or, where it sent none, the album's own."""
+    details = [
+        {"reason": "not_here", "why": "disk",
+         "message": "Night <Walks> cannot play until its disk is connected."},
+        {"reason": "not_here", "why": "away"},
+    ]
+    out = _node(TOAST % {"details": json.dumps(details)})
+    assert out["said"] == [False, False, False]
+    assert out["toasts"] == [
+        {"kind": "warning", "key": "player.not_here", "title": "On a disk that is not connected",
+         "text": "Night &lt;Walks> cannot play until its disk is connected."},
+        {"kind": "warning", "key": "player.not_here", "title": "Your copy is away",
+         "text": "It cannot play until its files are back."},
+        {"kind": "warning", "key": "player.not_here", "title": "On a disk that is not connected",
+         "text": "Night &lt;Walks> cannot play until its disk is connected."},
+    ]
 
 
 PATH_ROW = "\n".join([
@@ -188,7 +249,7 @@ def test_the_scan_buttons_wait_for_the_folder_under_the_rows_sentence(streams, s
 
 REACH = "\n".join([
     "const _reachScreens = new Set();",
-    _block("function followReach(screen, url, text, rerender) {"),
+    _block("function followReach(screen, ask, text, rerender) {"),
     _block("async function refreshReach(screen) {"),
     "let _reachKey = null;",
     _block("function reachChanged(said) {"),
@@ -242,9 +303,10 @@ const opened = [];
 const navigateToEntity = (kind, id) => opened.push([kind, id]);
 const document = { createElement: () => {
   const classes = [], on = {};
-  return { classList: { add: c => classes.push(c) }, classes, on, innerHTML: '',
+  return { classList: { add: c => classes.push(c) }, classes, on, innerHTML: '', dataset: {},
            addEventListener: (name, fn) => { on[name] = fn; } }; } };
 const draw = item => { const t = renderAlbumTile(item); t.on.click();
+  if (t.dataset.albumId !== item.id) throw new Error('a tile without its album id');
   return { marked: t.classes.includes('is-not-here'),
            word: (t.innerHTML.match(/album-tile-out">([^<]*)</) || [])[1] || null,
            held: t.innerHTML.includes('album-tile-held') }; };
@@ -270,35 +332,109 @@ def test_a_tile_of_an_album_that_is_out_keeps_its_place_dimmed_with_the_one_word
     assert out["opened"] == [["album", "a"], ["album", "b"], ["album", "c"], ["album", "d"]]
 
 
-SHELF_DRIVER = "\n".join([
+SHELF_DRIVER = WORDS + "\n" + "\n".join([
     "const _reachScreens = new Set();",
-    _block("function followReach(screen, url, text, rerender) {"),
+    _block("function followReach(screen, ask, text, rerender) {"),
     _block("async function refreshReach(screen) {"),
+    _block("function markAlbumTile(tile, why) {"),
     _block("async function homeShelf(sec, url, fill) {"),
 ]) + r"""
-let served = JSON.stringify({ albums: [{ id: 'a', not_here: null }] });
-const fetched = [];
-const fetch = url => { fetched.push(url);
-  return Promise.resolve({ ok: true, text: () => Promise.resolve(served) }); };
-const log = [];
-const row = { isConnected: true, replaceChildren: () => log.push('emptied') };
-const fill = data => { log.push('drawn ' + data.albums.map(a => a.id + ':' + a.not_here).join(','));
-  return { disconnect: () => log.push('paging ended') }; };
+// A row of album tiles as the page holds it: each tile its id, its class
+// and its mark's word — set in place, never made again.
+const made = [];
+const tile = (id, word = null) => {
+  const t = { dataset: { albumId: id }, marked: word !== null, mark: null };
+  made.push(id);
+  t.classList = { toggle: (c, on) => { if (c !== 'is-not-here') throw new Error(c); t.marked = on; } };
+  const put = el => { t.mark = el; el.remove = () => { t.mark = null; }; };
+  const cover = { querySelector: sel => { if (sel !== '.album-tile-out') throw new Error(sel); return t.mark; },
+                  appendChild: put };
+  if (word !== null) put({ className: 'album-tile-feat album-tile-out', textContent: word });
+  t.querySelector = sel => { if (sel !== '.album-cover') throw new Error(sel); return cover; };
+  return t;
+};
+const shown = () => tiles.map(t => [t.dataset.albumId, t.marked, t.mark && t.mark.textContent]);
+const document = { createElement: tag => { if (tag !== 'span') throw new Error(tag); return {}; } };
+const tiles = [];
+const row = { isConnected: true,
+              querySelectorAll: sel => { if (sel !== '.album-tile[data-album-id]') throw new Error(sel); return tiles; },
+              replaceChildren: () => { throw new Error('the row was emptied'); } };
+let away = {};
+const asked = [];
+const fetch = (url, opts) => {
+  if (!opts) return Promise.resolve({ ok: true, json: () => Promise.resolve({ albums: [{ id: 'a' }, { id: 'b' }] }) });
+  if (url !== '/api/home/albums-away' || opts.method !== 'POST') throw new Error(url);
+  const ids = JSON.parse(opts.body).ids;
+  asked.push(ids);
+  const not_here = {};
+  ids.forEach(id => { if (away[id]) not_here[id] = away[id]; });
+  return Promise.resolve({ ok: true, json: () => Promise.resolve({ not_here }) });
+};
 (async () => {
-  await homeShelf({ row }, '/api/home/new-in-library?limit=20', fill);
-  const again = [await refreshReach(row)];                       // the same payload: no tile touched
-  served = JSON.stringify({ albums: [{ id: 'a', not_here: 'disk' }] });
-  again.push(await refreshReach(row));                           // its disk went: drawn again, once
-  again.push(await refreshReach(row));
-  console.log(JSON.stringify({ log, again, fetched: fetched.length }));
+  const steps = [];
+  await homeShelf({ row }, '/api/home/new-in-library?limit=20',
+                  data => data.albums.forEach(a => tiles.push(tile(a.id))));
+  const step = async () => { const drew = await refreshReach(row); steps.push({ drew, tiles: shown() }); };
+  tiles.push(tile('c'));                        // a page scrolled in
+  away = { c: 'disk', a: 'away' };
+  // a page that lands while the answer is on its way keeps its own marks
+  const landing = refreshReach(row);
+  tiles.push(tile('d', 'not connected'));
+  steps.push({ drew: await landing, tiles: shown() });
+  await step();                                 // asked again, the new tile among them: 'd' is here
+  await step();                                 // the same answer: nothing set
+  away = {};
+  await step();                                 // the disk is back
+  console.log(JSON.stringify({ steps, asked, made }));
 })();
 """
 
 
-def test_a_home_shelf_is_drawn_again_only_from_a_payload_that_says_otherwise():
+def test_a_home_shelf_sets_the_marks_of_the_tiles_it_shows_in_place_whatever_page_brought_them():
+    """What is reachable changed: the shelf asks about the albums of the
+    tiles on the page — the first page's and every page scrolled in — and
+    sets each one's mark in place. No tile is made again and the row is
+    never emptied, so nothing flickers and paging is untouched; a page that
+    landed while the answer was on its way keeps the marks it came with."""
     out = _node(SHELF_DRIVER)
-    assert out["again"] == [False, True, False] and out["fetched"] == 4
-    assert out["log"] == ["drawn a:null", "paging ended", "emptied", "drawn a:disk"]
+    assert out["made"] == ["a", "b", "c", "d"]                      # each tile made once
+    assert out["asked"] == [["a", "b", "c"], ["a", "b", "c", "d"], ["a", "b", "c", "d"],
+                            ["a", "b", "c", "d"]]
+    first, second, third, last = out["steps"]
+    assert first == {"drew": True, "tiles": [["a", True, "away"], ["b", False, None],
+                                             ["c", True, "not connected"], ["d", True, "not connected"]]}
+    assert second == {"drew": True, "tiles": [["a", True, "away"], ["b", False, None],
+                                              ["c", True, "not connected"], ["d", False, None]]}
+    assert third == {"drew": False, "tiles": second["tiles"]}
+    assert last == {"drew": True, "tiles": [[i, False, None] for i in "abcd"]}
     home = _block("async function renderHome(root) {")
     assert "homeShelf(newSec, '/api/home/new-in-library?limit=20'," in home
     assert "homeShelf(recSec, '/api/home/recommendations?limit=20'," in home
+
+
+LEFT_DRIVER = REACH + r"""
+const fetch = () => { throw new Error('a screen that left was asked about'); };
+(async () => {
+  let screen = { isConnected: false };              // a screen the person left
+  followReach(screen, '/api/albums/a', 'x', () => {});
+  const probe = new WeakRef(screen);
+  screen = null;
+  await new Promise(r => setTimeout(r, 0));
+  global.gc();
+  await new Promise(r => setTimeout(r, 0));
+  const held = probe.deref() !== undefined;
+  reachChanged({ key: '' });
+  reachChanged({ key: '9f2c' });                    // the next word drops what was collected
+  console.log(JSON.stringify({ held, followers: _reachScreens.size }));
+})();
+"""
+
+
+def test_a_screen_the_person_left_is_let_go_whatever_the_node_says_later():
+    """The followers are held weakly: a screen that left the page is the
+    collector's at once — not kept, with its payload and its closures, until
+    the folder's answer next moves."""
+    out = subprocess.run([NODE, "--expose-gc", "-e", "'use strict';\n" + LEFT_DRIVER],
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == {"held": False, "followers": 0}
