@@ -218,7 +218,7 @@ def _mb_cycle(sharing, published, monkeypatch, pending=("owned one", "gone quiet
     monkeypatch.setattr(mb_slice_cycle, "reopened_authors", lambda dsn, names: {})
     cycle = mb_slice_cycle.MbSliceCycle(
         "postgresql://unused", connect=_refuse, dead=DeadAddresses(), after_import=lambda: None,
-        sharing_enabled=lambda: sharing[0])
+        has_identity=lambda: True, sharing_enabled=lambda: sharing[0])
 
     async def publish(**state):
         published.append(state)
@@ -290,7 +290,7 @@ def test_the_lb_cycle_with_sharing_off_probes_no_source_and_says_why(monkeypatch
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids",
                         lambda dsn, n, newest: [("0b0c25f4-f31c-46a5-a4fb-ccbf53d663bd", None, False)])
     cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: False)
+                                        has_identity=lambda: True, sharing_enabled=lambda: False)
     cycle.find_sources = _refuse
 
     async def publish(**state):
@@ -306,10 +306,10 @@ def test_the_lb_cycle_with_sharing_off_probes_no_source_and_says_why(monkeypatch
 def test_a_node_whose_sharing_is_off_is_no_slice_source(family):
     if family == "mb":
         cycle = mb_slice_cycle.MbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
-                                            after_import=lambda: None, sharing_enabled=lambda: True)
+                                            after_import=lambda: None, has_identity=lambda: True, sharing_enabled=lambda: True)
     else:
         cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
-                                            sharing_enabled=lambda: True)
+                                            has_identity=lambda: True, sharing_enabled=lambda: True)
     usable = cycle._sources._usable
     held = {f"{family}_slices": 3}
     assert usable({**held, "sharing": True})
@@ -420,7 +420,7 @@ def _lb_stream(monkeypatch, rows, newest=None, sources=None, sharing=None):
     monkeypatch.setattr(lb_slice_cycle, "analyze_tables", lambda dsn: None)
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, version: list(rows))
     cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_refuse, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: sharing is None or sharing[0])
+                                        has_identity=lambda: True, sharing_enabled=lambda: sharing is None or sharing[0])
     sources = sources or [(SimpleNamespace(base_url="https://198.51.100.5:21000", session_deadline=0,
                                            last_health=None), "ef" * 32, None)]
     published = []

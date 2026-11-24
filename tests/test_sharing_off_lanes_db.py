@@ -208,7 +208,7 @@ def test_a_page_s_request_made_while_no_one_listened_is_asked_once_the_listen_is
     from desktop.p2p import lb_slice_cycle
     from desktop.p2p.sync_walk import DeadAddresses
     cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=_refuse, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
+                                        has_identity=lambda: True, sharing_enabled=lambda: True)
     artist, mbid = str(uuid.uuid4()), str(uuid.uuid4())
     with node.cursor() as cur:
         cur.execute("INSERT INTO artists (id, name) VALUES (%s, 'Opened Unheard')", (artist,))

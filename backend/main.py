@@ -178,6 +178,7 @@ def _build_mb_cycle(walk):
         dead=walk.dead,
         after_import=_start_canon_trigger,
         sharing_enabled=sharing_enabled,
+        has_identity=walk.has_identity,
         config={"fetch": True, "auto_interval_min": 360},
         lan=_lan_discovery,
         diag_record=_diag_record,
@@ -196,6 +197,7 @@ def _build_lb_cycle(walk):
         connect=walk.connect_peer,
         dead=walk.dead,
         sharing_enabled=sharing_enabled,
+        has_identity=walk.has_identity,
         config={"fetch": True, "auto_interval_min": 360},
         lan=_lan_discovery,
         diag_record=_diag_record,
@@ -401,6 +403,23 @@ async def _gate_follows_identity() -> None:
     import p2p_app
     if settings.serves_peer_surface and p2p_app._gate_svc is None and resolve_identity(settings):
         p2p_app._gate()
+
+
+async def _requesters_follow_identity() -> None:
+    """The node has a key from now on: the sync walk and both slice cycles,
+    which ask no peer while it has none (sync_walk.SyncWalk.has_identity),
+    are asked for a run now, not at their next interval. On the walk's own
+    channel, so that whichever process runs it hears — this one's on a Docker
+    node, the launcher's in launcher mode; the walk's end asks the cycles
+    (_after_walk, P2PManager._after_walk)."""
+    from db_pool import db_execute
+    await asyncio.to_thread(db_execute, "NOTIFY sautium_sync_request")
+
+
+# What the start decided on the identity it had then, decided again when the
+# identity appears or changes (p2p_identity.on_change; registered at start)
+_IDENTITY_FOLLOWERS = (_peer_surface_follows_identity, _announce_user, _gate_follows_identity,
+                       _requesters_follow_identity)
 
 
 def _upnp_heuristic():
@@ -928,7 +947,7 @@ async def lifespan(app: FastAPI):
     announce_port = _peer_port()
     _peer_ready = asyncio.Event()
     import p2p_identity
-    for follower in (_peer_surface_follows_identity, _announce_user, _gate_follows_identity):
+    for follower in _IDENTITY_FOLLOWERS:
         p2p_identity.on_change(follower)
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
         _start_host_network()

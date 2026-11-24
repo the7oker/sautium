@@ -135,7 +135,7 @@ def _offer_lb(dsn, key, entries, relay, owned=True):
             conn.close()
     peer = Peer({m: lb_entry(key, m, one) for m, one in entries.items()}, pub(relay))
     cycle = lb_slice_cycle.LbSliceCycle(dsn, connect=None, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
+                                        has_identity=lambda: True, sharing_enabled=lambda: True)
     return asyncio.run(cycle._exchange(peer, pub(relay), None, list(entries), None))
 
 
@@ -699,7 +699,7 @@ def test_an_lb_slice_from_an_unpublished_dump_proves_its_author_false_once_the_l
            "truncated": False}
     peer = Peer({artist: lb_entry(author, artist, one)}, pub(relay))
     cycle = lb_slice_cycle.LbSliceCycle(scratch_dsn, connect=None, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
+                                        has_identity=lambda: True, sharing_enabled=lambda: True)
     cycle._published = "20261101-000000"                    # the listing read: refused at the door
     assert asyncio.run(cycle._exchange(peer, pub(relay), None, [artist], None)) == {
         "error": "all slices failed verification"}

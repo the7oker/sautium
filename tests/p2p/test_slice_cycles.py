@@ -78,7 +78,7 @@ async def _no_connect(addr, expected_pubkey=None):
 def _mb_cycle(sources, recorded, dropped, published):
     cycle = mb_slice_cycle.MbSliceCycle(
         "postgresql://unused", connect=_no_connect, dead=DeadAddresses(), after_import=lambda: None,
-        sharing_enabled=lambda: True, diag_record=lambda kind, detail: recorded.append((kind, detail)))
+        has_identity=lambda: True, sharing_enabled=lambda: True, diag_record=lambda kind, detail: recorded.append((kind, detail)))
     cycle._sources = SimpleNamespace(drop=dropped.append)
 
     async def find_sources():
@@ -125,7 +125,7 @@ def test_an_lb_refusal_with_evidence_is_recorded_and_its_source_asked_no_more(re
     monkeypatch.setattr(lb_slice_cycle, "published_newest", lambda dsn, family: None)
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None, False)])
     cycle = lb_slice_cycle.LbSliceCycle(
-        "postgresql://unused", connect=_no_connect, dead=DeadAddresses(), sharing_enabled=lambda: True,
+        "postgresql://unused", connect=_no_connect, dead=DeadAddresses(), has_identity=lambda: True, sharing_enabled=lambda: True,
         diag_record=lambda kind, detail: recorded.append((kind, detail)))
     cycle._sources = SimpleNamespace(drop=dropped.append)
 
@@ -168,7 +168,7 @@ def test_an_lb_refusal_that_is_no_refusal_records_nothing_and_drops_its_source(r
     monkeypatch.setattr(lb_slice_cycle, "published_newest", lambda dsn, family: None)
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None, False)])
     cycle = lb_slice_cycle.LbSliceCycle(
-        "postgresql://unused", connect=_no_connect, dead=DeadAddresses(), sharing_enabled=lambda: True,
+        "postgresql://unused", connect=_no_connect, dead=DeadAddresses(), has_identity=lambda: True, sharing_enabled=lambda: True,
         diag_record=lambda kind, detail: recorded.append((kind, detail)))
     cycle._sources = SimpleNamespace(drop=dropped.append)
 
@@ -278,7 +278,7 @@ def test_an_lb_source_whose_answer_raises_is_skipped_and_its_artists_asked_of_th
     monkeypatch.setattr(lb_slice_cycle, "pending_slice_mbids", lambda dsn, n, newest: [(ARTIST, None, False)])
     monkeypatch.setattr(lb_slice_cycle, "analyze_tables", lambda dsn: None)
     cycle = lb_slice_cycle.LbSliceCycle("postgresql://unused", connect=_no_connect, dead=DeadAddresses(),
-                                        sharing_enabled=lambda: True)
+                                        has_identity=lambda: True, sharing_enabled=lambda: True)
     cycle._sources = SimpleNamespace(drop=dropped.append)
     broken, good = "d4" * 32, "e5" * 32
 

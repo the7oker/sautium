@@ -8,6 +8,12 @@ half-seconds for the launcher's secret file, warned, and went unsigned (75
 warnings a night on an unborn Docker node) — and would have been signed with
 the host's secret had the file been there. A real HTTP server on loopback
 stands for the peer; the walk's own `connect_peer` builds the client.
+
+What is held here is the CLIENT: whoever builds one for a peer gets a peer's
+client, with an identity or without. That a node with no identity builds none
+— its walk and its slice cycles ask no peer until its account is made — is
+the walk's and the cycles' own rule since 2026-11-24, held in
+tests/p2p/test_no_identity_no_dial.py.
 """
 
 import asyncio
@@ -116,7 +122,7 @@ def test_the_hosts_own_client_still_waits_out_the_start_race_and_says_so(peer, n
 class _Surface(_Peer):
     def do_GET(self):
         self.server.seen.append((self.path, {k.lower(): v for k, v in self.headers.items()}))
-        body = json.dumps({"status": "healthy", "node_id": self.server.says}).encode()
+        body = json.dumps({"status": "healthy", "node_id": self.server.says, **self.server.holds}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -126,22 +132,33 @@ class _Surface(_Peer):
     do_POST = do_GET
 
 
+class _Counted(http.server.ThreadingHTTPServer):
+    """A peer surface that counts who reached its port, whatever the
+    handshake then made of it."""
+    connections = 0
+
+    def get_request(self):
+        self.connections += 1
+        return super().get_request()
+
+
 @pytest.fixture
 def surface(tmp_path):
-    """serve(certificate, the node_id its /health says) → its port."""
+    """serve(certificate, the node_id its /health says, what else it says it
+    holds) → the server: `seen` its requests, `connections` who reached it."""
     import ssl
     servers = []
 
-    def serve(cert_pem: bytes, key_pem: bytes, says: str):
+    def serve(cert_pem: bytes, key_pem: bytes, says: str, **holds):
         folder = tmp_path / f"tls{len(servers)}"
         folder.mkdir()
         (folder / "c.pem").write_bytes(cert_pem)
         (folder / "k.pem").write_bytes(key_pem)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(str(folder / "c.pem"), str(folder / "k.pem"))
-        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Surface)
+        srv = _Counted(("127.0.0.1", 0), _Surface)
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-        srv.seen, srv.says = [], says
+        srv.seen, srv.says, srv.holds = [], says, holds
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         servers.append(srv)
         return srv
