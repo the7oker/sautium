@@ -887,8 +887,9 @@ def test_a_pause_taking_hold_inside_the_lead_is_a_slip_said_by_the_mark(ab):
     ab.wait_phase("ready")
     once = _late_pause_once(ab, 0.1)
     gaps = _silences(ab, _run_pair(ab))
-    assert once and hqp_ab._sitting.slipped == 1
-    assert ab.q("SELECT cause::text, warm FROM hqp_ab_slips") == [("mark", False)]
+    # one slip by the mark; a check the lab's load makes (B-119) may add its own
+    causes = [c for (c,) in ab.q("SELECT cause::text FROM hqp_ab_slips WHERE NOT warm ORDER BY n")]
+    assert once and causes.count("mark") == 1 and set(causes) <= {"mark", "check"}, causes
     assert all(abs(g - at) <= 0.15 for g, at in gaps), _said(gaps)
     assert ab.q("SELECT count(*) FROM hqp_ab_duels")[0][0] == 2
 
@@ -921,7 +922,12 @@ def test_a_passage_that_starts_in_digital_silence_or_dither_holds_and_sounds(ab)
         hqp_ab.open_sitting("pair", "ext2")
         ab.wait_phase("ready")
         gaps = _silences(ab, _run_pair(ab))
-        assert hqp_ab._sitting.slipped == 0 and gaps, (head, _said(gaps))
+        assert hqp_ab.view()["phase"] == "result" and gaps, (head, hqp_ab.view()["note"])
+        # never a pause held in the lead, nor the music before the resume: a
+        # check the lab's load makes (B-119) is all a slip may be
+        causes = {c for (c,) in ab.q("SELECT cause::text FROM hqp_ab_slips WHERE sitting_id = %s",
+                                       hqp_ab._sitting.row)}
+        assert causes <= {"check"}, (head, causes)
         assert all(abs(g - at) <= 0.15 for g, at in gaps), (head, _said(gaps))
         hqp_ab.close()
 
