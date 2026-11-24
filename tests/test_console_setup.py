@@ -1479,7 +1479,8 @@ def test_the_automounts_shell_parses_and_carries_the_owner(automount):
     assert all(line.endswith('TAG+="systemd", ENV{SYSTEMD_WANTS}+="sautium-automount@%k.service"')
                for line in lines[:4])
     # … and the one that ends the unit with the medium, where the reader stays
-    assert lines[4].endswith('SUBSYSTEMS=="usb", ATTR{size}=="0", ENV{SYSTEMD_READY}="0"')
+    assert lines[4].endswith(
+        'SUBSYSTEMS=="usb", KERNEL!="sr[0-9]*", ATTR{removable}=="1", ATTR{size}=="0", ENV{SYSTEMD_READY}="0"')
     # Root runs only the installed copy, never a file the person's own user can write
     assert str(automount.files["script"].parent) not in unit
     # Nothing root removes is named by a variable that could be empty
@@ -1650,6 +1651,35 @@ def test_the_rule_brings_a_volume_with_no_filesystem_named_to_the_script(what, p
     assert len([line for line in _rule_matches(properties) if "SYSTEMD_WANTS" in line]) == wants, what
 
 
+NO_SIZE = dict(USB, ACTION="change", **{"ATTR{size}": "0"})
+
+
+@pytest.mark.parametrize("what, properties, gone", [
+    ("a card reader's slot, its card pulled", dict(NO_SIZE, KERNEL="sdb", **{"ATTR{removable}": "1"}), True),
+    ("the same reader plugged in empty", dict(NO_SIZE, KERNEL="sdb", ACTION="add", **{"ATTR{removable}": "1"}), True),
+    # a fixed disk in a USB case that reports no size for a moment (a revalidation after a reset) is
+    # still there: a library in use on it must not be unmounted under its reader
+    ("a USB hard disk's whole device, no size for a moment", dict(NO_SIZE, KERNEL="sda", **{"ATTR{removable}": "0"}),
+     False),
+    ("a device that says nothing of removable media", dict(NO_SIZE, KERNEL="sda"), False),
+    ("an optical drive with no disc: systemd's own rule", dict(NO_SIZE, KERNEL="sr0", **{"ATTR{removable}": "1"}),
+     False),
+    ("a reader's slot with a card in it", dict(USB, ACTION="change", KERNEL="sdb", **{"ATTR{removable}": "1"}), False),
+    ("a reader that is being unplugged", dict(NO_SIZE, KERNEL="sdb", ACTION="remove", **{"ATTR{removable}": "1"}),
+     False),
+    ("a card slot of the machine's own, not on USB", {"ACTION": "change", "SUBSYSTEM": "block", "KERNEL": "mmcblk1",
+                                                     "SUBSYSTEMS": ["block", "mmc"], "ATTR{size}": "0",
+                                                     "ATTR{removable}": "1"}, False)])
+def test_only_a_device_whose_medium_left_is_said_not_to_be_there(what, properties, gone):
+    """Review R5. The line that ends the unit with the medium matched any USB
+    block device of size 0 — a hard disk's whole device among them, whose
+    unit, and any mount bound to it, was then stopped under a library in use.
+    It is for a reader whose medium left: the kernel's own word, removable."""
+    said = [line for line in _rule_matches(properties) if 'ENV{SYSTEMD_READY}="0"' in line]
+    assert bool(said) is gone, what
+    assert not [line for line in _rule_matches(properties) if "SYSTEMD_WANTS" in line] or not gone
+
+
 class _Reader:
     """One device's udev events taken through the rule and — as systemd acts
     on the rule's words — through the script. A unit the device wants is
@@ -1662,7 +1692,7 @@ class _Reader:
         self.automount, self.active = automount, False
 
     def event(self, action="change", size="30310400", usage=None, **blkid):
-        properties = dict(USB, ACTION=action, KERNEL="loop0", **{"ATTR{size}": size})
+        properties = dict(USB, ACTION=action, KERNEL="loop0", **{"ATTR{size}": size, "ATTR{removable}": "1"})
         if usage:
             properties["ENV{ID_FS_USAGE}"] = usage
         matched = _rule_matches(properties)

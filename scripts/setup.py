@@ -372,7 +372,11 @@ ACTION!="remove", SUBSYSTEM=="block", KERNEL=="mmcblk[0-9]*", ENV{ID_FS_USAGE}!=
 # drive with no disc), so the unit bound to it stops with the card — what it
 # mounted is unmounted, what it said of a card is taken back — and the next
 # card starts it afresh. The state follows the medium, not the reader.
-ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", ATTR{size}=="0", ENV{SYSTEMD_READY}="0"
+# Only a device whose medium can leave it, by the kernel's own word
+# (removable): a fixed disk that reports no size for a moment — a
+# revalidation after a reset — is a disk that is still there, and nothing
+# mounted from it is to be taken away. An optical drive is systemd's own.
+ACTION!="remove", SUBSYSTEM=="block", SUBSYSTEMS=="usb", KERNEL!="sr[0-9]*", ATTR{removable}=="1", ATTR{size}=="0", ENV{SYSTEMD_READY}="0"
 """
 
 AUTOMOUNT_UNIT = """\
