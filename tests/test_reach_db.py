@@ -423,6 +423,24 @@ def test_the_slot_the_output_sounds_keeps_its_way_in_until_the_output_leaves_it(
     assert mgr._reach_owed is None
 
 
+def test_a_manager_reads_its_own_owed_slot(node, monkeypatch):
+    """The slot owed its reading is this manager's: read by it, whichever
+    manager the process holds as its own."""
+    from playback import manager as manager_mod
+    from playback.base import PlaybackStatus
+    from playback.manager import PlaybackManager
+    mgr, out = node["mgr"], node["out"]
+    first, second = _queue(node)
+    mgr._on_backend_status(out, PlaybackStatus(state="paused", position=3.0, length=200.0,
+                                               queue_index=1))
+    monkeypatch.setattr(manager_mod, "manager", PlaybackManager())
+    node["gone"](True)
+    mgr.reach_changed()
+    assert first.play is None and _streams(second) and mgr._reach_owed is first
+    mgr._on_backend_status(out, PlaybackStatus(state="stopped", queue_index=1))
+    assert _wait(lambda: _streams(first))
+
+
 def test_a_new_queue_while_the_folder_is_gone_reads_its_file_slots(node):
     """A file slot committed while the folder does not answer is read as
     any slot's: no window in which the output is handed a path that does

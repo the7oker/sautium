@@ -1574,7 +1574,16 @@ class PlaybackManager:
         if owed is None or (item is owed and state in _SOUNDING):
             return
         self._reach_owed = None
-        threading.Thread(target=reach_changed, daemon=True, name="queue-reach").start()
+        threading.Thread(target=self.reach_followed, daemon=True, name="queue-reach").start()
+
+    def reach_followed(self) -> None:
+        """reach_changed on a thread of its own — the scanner's record of a
+        change, the output leaving the slot it sounded: what goes wrong
+        there is said in the log, where no caller waits to hear it."""
+        try:
+            self.reach_changed()
+        except Exception:
+            logger.exception("the queue's ways in were not read again after what is reachable here changed")
 
     def _rebound(self, backend: Optional[PlayerBackend]) -> None:
         """Slots were re-bound, or their ways in read again, under the queue:
@@ -1705,10 +1714,7 @@ def reach_changed() -> None:
     answer of the music folder changed, and the queue reads its slots' ways
     in again (PlaybackManager.reach_changed). The manager is looked up at
     the call."""
-    try:
-        manager.reach_changed()
-    except Exception:
-        logger.exception("the queue's ways in were not read again after what is reachable here changed")
+    manager.reach_followed()
 
 
 def start_files_listener() -> None:
