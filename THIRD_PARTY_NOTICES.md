@@ -60,6 +60,17 @@ Web UI has no build step, and asks no font service for its type.
 | Inter Tight, as packaged by fontsource 5.3.0 (`@fontsource/inter-tight`) | github.com/rsms/inter-tight | OFL-1.1 | `backend/static/fonts/inter-tight-*.woff2`, unmodified: weights 400–700, the Latin, Latin Extended and Cyrillic subsets; the licence beside them (`LICENSE-inter-tight.txt`) |
 | JetBrains Mono, as packaged by fontsource 5.3.0 (`@fontsource/jetbrains-mono`) | github.com/JetBrains/JetBrainsMono | OFL-1.1 | `backend/static/fonts/jetbrains-mono-*.woff2`, unmodified: weights 400–600, the same subsets; the licence beside them (`LICENSE-jetbrains-mono.txt`) |
 
+## Carried in the tree (data)
+
+Word lists a feature reads at run time, made by a script that says how
+(`scripts/make_password_lists.py`) and loaded only under the digests the
+code pins.
+
+| Data | Source | Licence | Notes |
+|---|---|---|---|
+| EFF's long diceware word list (`eff_large_wordlist.txt`, 7,776 words) | Electronic Frontier Foundation, https://www.eff.org/deeplinks/2016/07/new-wordlists-random-passphrases | CC BY (https://www.eff.org/copyright) | `desktop/password_lists/`, unmodified (SHA-256 `addd3553…b903e`); the phrase a new password is offered, and the price of its words in the estimate |
+| Famous phrases (`phrases.txt`): titles of the most linked works, and the slogans, mottos, proverbs and quotations with an item of their own, in their original form | Wikidata, through QLever's index | CC0 (https://www.wikidata.org/wiki/Wikidata:Licensing) | `desktop/password_lists/`; folded to lower case, phrases of two words or more; one of the lists the password estimate tries |
+
 ## Models (downloaded from Hugging Face on first use)
 
 | Model | Licence | Use |
@@ -78,7 +89,7 @@ customtkinter (MIT) · pystray (LGPL-3.0) · Pillow (MIT-CMU) · qrcode (BSD) ·
 psutil (BSD-3-Clause) · psycopg2-binary (LGPL with exceptions) · cryptography
 (Apache-2.0 OR BSD-3-Clause) · aiohttp (Apache-2.0 AND MIT) · Brotli (MIT) ·
 libtorrent (BSD) · argon2-cffi (MIT) · PyNaCl (Apache-2.0) · miniupnpc
-(BSD-3-Clause, the UPnP port mapping).
+(BSD-3-Clause, the UPnP port mapping) · zxcvbn (MIT, the password estimate).
 
 pystray and psycopg2-binary are LGPL. They are installed by pip on the
 user's machine as separate, replaceable modules (not statically linked);
@@ -96,7 +107,7 @@ imagehash (BSD-2-Clause) · torch, torchvision, torchaudio (BSD-3-Clause) ·
 transformers (Apache-2.0) · sentence-transformers (Apache-2.0) · hear21passt
 (Apache-2.0) · librosa (ISC) · ctranslate2 (MIT) · anthropic (MIT) · openai
 (Apache-2.0) · mcp (MIT) · pylast (Apache-2.0) · lyricsgenius (MIT) ·
-argon2-cffi (MIT) · PyNaCl (Apache-2.0) · cryptography (Apache-2.0 OR BSD-3-Clause) · python-dotenv
+argon2-cffi (MIT) · PyNaCl (Apache-2.0) · zxcvbn (MIT) · cryptography (Apache-2.0 OR BSD-3-Clause) · python-dotenv
 (BSD-3-Clause) · psutil (BSD-3-Clause) · click (BSD-3-Clause) · tqdm (MPL-2.0
 AND MIT) · numpy (BSD-3-Clause) · pandas (BSD-3-Clause) · scipy
 (BSD-3-Clause) · httpx (BSD-3-Clause) · zstandard (BSD-3-Clause) · requests (Apache-2.0) ·

@@ -1,2 +1,5 @@
 # Hooks are run by sh; a CRLF shebang breaks them under WSL and on macOS.
 scripts/git-hooks/* text eol=lf
+# Data the code loads only under a pinned digest: never converted on checkout
+# (desktop/password_strength.py also hashes the lines, not the line ends)
+desktop/password_lists/* -text
