@@ -9622,7 +9622,7 @@ class _Away:
     def resume_at(self, index, position=0.0):
         pass
 
-    def queue_replace(self, items, *, play):
+    def queue_replace(self, items, *, play, start=None):
         return list(items)
 
     def queue_append(self, items):
@@ -9631,7 +9631,7 @@ class _Away:
     def queue_insert_next(self, items, anchor_index):
         return list(items), anchor_index
 
-    def queue_changed(self, kind, *, play=False):
+    def queue_changed(self, kind, *, play=False, start=None):
         pass
 
     def queue_start(self):
@@ -13388,6 +13388,34 @@ def test_a_seek_during_a_replace_starts_the_album_at_that_second(fake, output):
     assert ("Seek", {"position": "60"}) in _start_sent(fake, n)
 
 
+def test_a_new_queue_played_from_a_slot_starts_hqplayer_at_that_entry_and_second(fake, output):
+    """PLAYBACK-UI-1's "from here" — an album from the track chosen on its
+    page, a history session from its stop: HQPlayer is handed the whole
+    album and started at the chosen entry, at the start's second; its own
+    Previous then walks back through the album."""
+    mgr, b = output
+    n = len(fake.commands)
+    album = _b_album()
+    added, _gen = mgr.replace_queue(album, play=True, start=(album[1], 60.0))
+    assert added == 3
+    _settled()
+    assert fake.playlist == [f"file:///E:/Music/B/0{i}.flac" for i in range(1, 4)]
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+    assert ("Seek", {"position": "60"}) in _start_sent(fake, n)
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
+
+
+def test_previous_past_three_seconds_seeks_hqplayer_to_the_tracks_start(fake, output):
+    """B-157 on HQPlayer: playing slot 1 at 0:42, Previous is a Seek to
+    0:00 of that track — not HQPlayer's own Previous."""
+    mgr, b = output
+    n = len(fake.commands)
+    assert mgr.previous(b)
+    assert _wait(lambda: ("Seek", {"position": "0"}) in fake.commands[n:])
+    assert not [c for c, _ in fake.commands[n:] if c in ("Previous", "SelectTrack")]
+    assert fake.track == 1
+
+
 def test_a_pause_during_a_replace_leaves_the_album_to_the_next_play(fake, output):
     """A Pause while HQPlayer takes an album drops the start the replace
     owes: HQPlayer stays stopped with the album, and the next Play starts its
@@ -15394,7 +15422,7 @@ def test_a_tap_on_a_renderer_while_a_removal_resyncs_names_its_track(monkeypatch
         def queue_remove(self, index):
             return True
 
-        def queue_changed(self, kind, *, play=False):     # its re-sync, on its loop
+        def queue_changed(self, kind, *, play=False, start=None):     # its re-sync, on its loop
             resyncing.set()
             done.wait(5)
 

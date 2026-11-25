@@ -311,7 +311,7 @@ def hqplayer_next() -> str:
 
 @mcp.tool()
 def hqplayer_previous() -> str:
-    """Go back to the previous track in HQPlayer."""
+    """Go back: past the first 3 seconds it restarts the track; within them, the track before."""
     return _hqp_transport("previous")
 
 

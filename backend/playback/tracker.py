@@ -37,6 +37,13 @@ _lock = threading.Lock()
 # output plays (carry_listen)
 _carried = False
 _scrobbler = None
+# The last queue item that sounded, the second it was at and its length —
+# kept across a Stop, a pause and the listen's end: where a listen stopped
+# (stop_in) is what was last heard, not where the output rests after it
+_last_heard: "Optional[tuple]" = None
+# A stop this close to its track's end is that track heard out: the stop is
+# the next slot's start
+_STOP_NEAR_END = 10.0
 
 
 class _PlaySession:
@@ -205,6 +212,27 @@ def follow(item, track_id: str) -> None:
             s.track_id = track_id
 
 
+def stop_in(items: list) -> Optional[tuple[int, float]]:
+    """Where the listen of `items` stopped: the 0-based index of the item
+    last heard among them (by identity — a track queued twice is two slots)
+    and its second; one heard within its last 10 s is the next item at 0
+    (none past the last: the list was heard out). None when nothing of
+    `items` sounded — a queue never played, or one the last sound was not
+    of."""
+    with _lock:
+        heard = _last_heard
+    if heard is None:
+        return None
+    item, second, length = heard
+    at = next((i for i, it in enumerate(items) if it is item), None)
+    if at is None:
+        return None
+    length = length or item.duration_seconds or 0.0
+    if length > 0 and second >= length - _STOP_NEAR_END:
+        return (at + 1, 0.0) if at + 1 < len(items) else None
+    return at, round(float(second), 2)
+
+
 def _play_identity(item) -> Optional[dict]:
     """Source-agnostic identity for the playing QueueItem: its track UUID
     (owned AND phantom carry it) + optional media_file_id. None when the item
@@ -313,7 +341,7 @@ def track_play_event(state_name: str, position: float, length: float,
 
 def _track_play_event(state_name: str, position: float, length: float, item, *,
                       external: bool, holds: bool, corrected: bool, taken: bool) -> None:
-    global _play_session, _carried
+    global _play_session, _carried, _last_heard
 
     if taken and _play_session is not None and (external or state_name != "playing"):
         return
@@ -353,6 +381,12 @@ def _track_play_event(state_name: str, position: float, length: float, item, *,
             _play_session = None
         return
     _carried = False
+
+    if item is not None and not taken:
+        # What sounded last, whatever it counts as: an excerpt's second is no
+        # place in the track — its stop is the track's start
+        _last_heard = (item, 0.0 if item.excerpt else position,
+                       0.0 if item.excerpt else length)
 
     if item is not None and item.excerpt:
         # A 30 s excerpt is not a listen: no history row (25 s of it would

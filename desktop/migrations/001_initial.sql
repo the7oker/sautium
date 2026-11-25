@@ -1973,6 +1973,12 @@ CREATE TABLE IF NOT EXISTS session_tracks (
     track_id       UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     media_file_id  INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     album_id       UUID REFERENCES albums(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    -- Where the session's listen stopped: the second of this slot that last
+    -- sounded (playback.tracker.stop_in), on one slot of a session at most;
+    -- NULL on every slot when it was heard to its end, never played, or
+    -- archived before 2026-11-25. On the slot, so the slot's deletion takes
+    -- it along. Life data: the history page's blue dot and its Resume.
+    stop_seconds   NUMERIC(10, 2) CHECK (stop_seconds >= 0),
     PRIMARY KEY (session_id, position)
 );
 
@@ -2270,6 +2276,8 @@ CREATE INDEX IF NOT EXISTS idx_session_tracks_track
     ON session_tracks(track_id);
 CREATE INDEX IF NOT EXISTS idx_session_tracks_album
     ON session_tracks(album_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_session_tracks_one_stop
+    ON session_tracks(session_id) WHERE stop_seconds IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_listening_sessions_seed_track
     ON listening_sessions(seed_track_id);
 

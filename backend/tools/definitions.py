@@ -853,7 +853,8 @@ def register_all():
 
     REGISTRY.register(ToolDef(
         name="hqplayer_previous",
-        description="Go back to the previous track in HQPlayer.",
+        description="Go back: past the first 3 seconds it restarts the track; within them, "
+                    "the track before.",
         parameters=[],
         handler=_h_hqplayer_previous,
     ))

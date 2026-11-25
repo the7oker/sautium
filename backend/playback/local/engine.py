@@ -137,7 +137,7 @@ class _Ring:
 class Command:
     kind: str                        # play|pause|stop|select|seek|seed|slot_ready|volume|resync|quit
     index: Optional[int] = None      # select, seed: 1-based queue slot
-    seconds: Optional[float] = None  # seek target; seed: the second play starts at
+    seconds: Optional[float] = None  # seek target; seed, select: the second play starts at
     level: Optional[float] = None    # volume 0..100
 
 
@@ -269,7 +269,7 @@ class Engine:
             self._resume, self._parked = 0.0, None
             self._set_state("stopped")
         elif cmd.kind == "select":
-            self._start_at(cmd.index)
+            self._start_at(cmd.index, seek_to=cmd.seconds or 0.0)
         elif cmd.kind == "seek":
             self._seek(cmd.seconds or 0.0)
         elif cmd.kind == "seed":

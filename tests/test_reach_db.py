@@ -51,11 +51,11 @@ class _Output(PlayerBackend):
     def previous(self): return True
     def select(self, index, track_id=None): return True
 
-    def queue_replace(self, items, *, play):
+    def queue_replace(self, items, *, play, start=None):
         self.replaced.append([it.opener().get("kind") for it in items])
-        return super().queue_replace(items, play=play)
+        return super().queue_replace(items, play=play, start=start)
 
-    def queue_changed(self, kind, *, play=False):
+    def queue_changed(self, kind, *, play=False, start=None):
         self.changed.append(kind)
 
 

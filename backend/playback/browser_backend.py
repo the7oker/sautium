@@ -556,10 +556,15 @@ class BrowserBackend(PlayerBackend):
 
     # -- canonical-queue hooks -------------------------------------------------------------
 
-    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+    def queue_changed(self, kind: str, *, play: bool = False,
+                      start: Optional[tuple] = None) -> None:
         if kind == "replace":
             if play and len(self._queue):
-                self._start_at(1, play=True)
+                if start is not None:
+                    self._start_at(self._queue.index_of(start[0]) or 1, play=True,
+                                   position=start[1])
+                else:
+                    self._start_at(1, play=True)
             else:
                 self.stop()
             return

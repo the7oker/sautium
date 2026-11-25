@@ -115,6 +115,9 @@ class PlayTracksRequest(BaseModel):
     # so a played-whole-album isn't labelled "Mix". Defaults to 'mix'.
     origin: Optional[str] = None
     origin_album_id: Optional[str] = None
+    # "From here": the track (uuid) of the list the play starts at, the rest
+    # of the list around it in the queue (B-156); None = the first
+    start_track_id: Optional[str] = None
 
 class QueueTracksRequest(BaseModel):
     track_ids: list[int]
@@ -132,9 +135,20 @@ class QueueEntitiesRequest(BaseModel):
     # queue-entities only: 'next' | 'end' — the whole list, owned and
     # streamed slots alike, goes there at once
     position: str = "end"
+    # play-entities only: "from here" — the track (uuid) of the list the play
+    # starts at (B-156); None = the first
+    start_track_id: Optional[str] = None
+
+class SessionStart(BaseModel):
+    position: int           # the slot's session_tracks.position
+    seconds: float = Field(0.0, ge=0)
+
 
 class PlaySessionRequest(BaseModel):
     session_id: str
+    # Where the replay starts: the blue dot — the stop, or where a tap put
+    # it (B-158); None = from the top
+    start: Optional[SessionStart] = None
 
 class QueueSessionRequest(BaseModel):
     session_id: str
@@ -1740,9 +1754,9 @@ def _transport(intent: bool, command: str, *args) -> dict:
             # the file that Play would start, looked at before the output
             # is asked; nothing of the queue opening here is said in words
             manager.before_start(b)
-        elif command in ("next", "previous"):
-            manager.before_step(b, 1 if command == "next" else -1)
-        ok = getattr(b, command)(*args)
+        elif command == "next":
+            manager.before_step(b, 1)
+        ok = manager.previous(b) if command == "previous" else getattr(b, command)(*args)
     except Exception as e:
         raise _output_error(e)
     return _starting(b, {"ok": True} if ok else _refused(b))
@@ -2025,9 +2039,39 @@ def jump(req: JumpRequest):
     return _starting(b, answer)
 
 
+_NOTHING_FROM_HERE = "Nothing from this track on streams here"
+
+
+def _start_index(tids: list, start_track_id: Optional[str]) -> Optional[int]:
+    """Where in the request's own tracks (`tids`, in its order) a "from
+    here" starts — the first place of that track — or None for no start; a
+    track the request does not hold is the caller's error (400)."""
+    if start_track_id is None:
+        return None
+    try:
+        return tids.index(start_track_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="start_track_id is not in that list")
+
+
+def _start_item(items: list, tids: list, at: int):
+    """The slot of `items` a "from here" starts at — the start is by
+    identity, never by the page's index: `tids[at]`, the request's track at
+    that place, its occurrence counted as the request counts it (a track
+    listed twice is two places); where that one was left out (nothing
+    streams it here), the first after it that was kept. None when nothing
+    from there on was kept."""
+    for j in range(at, len(tids)):
+        same = [it for it in items if it.track_id == tids[j]]
+        nth = tids[:j].count(tids[j])
+        if nth < len(same):
+            return same[nth]
+    return None
+
+
 def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
                archive: Optional[Callable[[], None]] = None,
-               left: Optional[list] = None) -> int:
+               left: Optional[list] = None, start_at: Optional[int] = None) -> int:
     """THE single path for queueing owned tracks by the rows a route read:
     each row its file where one opens here now (`id`), else its track's
     stream, queued as the track itself (_reach_segments, which refuses rows
@@ -2041,14 +2085,22 @@ def _add_owned(rows: list, *, clear_first: bool, position: str = "end",
     rotation, once the output has taken it (PlaybackManager.replace_queue);
     otherwise tracks append (``position`` next|end). Returns the count
     queued; ``left`` takes what was left out, each with why — the caller
-    expects ``len(rows) - len(left)`` slots."""
+    expects ``len(rows) - len(left)`` slots. ``start_at``: a replace that
+    plays starts at that row (_start_item) — refused (404) when nothing
+    from it on was kept."""
     items, out = _segment_items(*_reach_segments(rows))
     if left is not None:
         left.extend(out)
     if not items:
         return 0
     if clear_first:
-        added, _gen = manager.replace_queue(items, play=True, archive=archive)
+        start = None
+        if start_at is not None:
+            head = _start_item(items, [r["track_id"] for r in rows], start_at)
+            if head is None:
+                raise HTTPException(status_code=404, detail=_NOTHING_FROM_HERE)
+            start = (head, 0.0)
+        added, _gen = manager.replace_queue(items, play=True, archive=archive, start=start)
     else:
         added = manager.append(items, position) or 0
     return added
@@ -2829,6 +2881,9 @@ def phantom_availability(album_id: str) -> dict:
 class PlayPhantomAlbumRequest(BaseModel):
     album_id: str             # UUID of a phantom (not-owned) album
     position: str = "end"     # queue endpoint only: 'next' | 'end'
+    # play endpoint only: "from here" — the track (uuid) the play starts at
+    # (B-156); None = the first
+    start_track_id: Optional[str] = None
 
 
 def _output_refusal(e: Exception) -> tuple[int, str]:
@@ -2946,19 +3001,27 @@ def play_phantom_album(req: PlayPhantomAlbumRequest):
     queries = _phantom_album_queries(req.album_id)
     if not queries:
         raise HTTPException(status_code=404, detail="Phantom album not found or has no tracklist")
+    tids = [q.track_id for q in queries]
+    at = _start_index(tids, req.start_track_id)
     items, left = _streamed_items(queries)
     if not items:
         # Nothing on it streams here, as the node already knows: the queue
         # as it was; the page says so before Play
         return _tapped(queries, items, left, album=queries[0].album, artist=queries[0].artist)
+    head = _start_item(items, tids, at) if at is not None else items[0]
+    if head is None:
+        raise HTTPException(status_code=404, detail=_NOTHING_FROM_HERE)
     try:
         # The prior queue snapshotted into a session once the output took the
         # new one, then a phantom-album one opened — streamed albums land in
         # the Home shelf like owned albums (origin_album_id is the phantom
-        # album's UUID; the seed is its first track).
-        added, _gen = manager.replace_queue(items, play=True, archive=lambda: sessions.rotate_session(
-            manager.queue, 'album', origin_album_id=str(req.album_id),
-            seed_track_id=items[0].track_id))
+        # album's UUID; the seed is the track it starts at: its first, or the
+        # one chosen — "from here", whose slot's stream is fetched first).
+        added, _gen = manager.replace_queue(
+            items, play=True, start=(head, 0.0) if at is not None else None,
+            archive=lambda: sessions.rotate_session(
+                manager.queue, 'album', origin_album_id=str(req.album_id),
+                seed_track_id=head.track_id))
         _exit_radio_mode()
     except Exception as e:
         raise _output_error(e)
@@ -3270,8 +3333,9 @@ def _entity_segments(refs: list) -> tuple[list, list, list]:
     album is read per track: a file row where a copy opens here now, the
     track's stream where none does (_reach_segments). Returns (segments,
     ids that resolved to nothing playable, what of the owner's own was left
-    out for not being here where nothing streams); refs none of which opens,
-    all of them the owner's own, are refused (_not_here)."""
+    out for not being here where nothing streams, and the tracks the refs
+    expand to, in order — the place a "from here" is counted in); refs none
+    of which opens, all of them the owner's own, are refused (_not_here)."""
     hqp_id = active_hqp_endpoint()
     rows: list = []
     missing: list[str] = []
@@ -3303,7 +3367,7 @@ def _entity_segments(refs: list) -> tuple[list, list, list]:
             continue
         rows.extend(found)
     segments, left = _reach_segments(rows)
-    return segments, missing, left
+    return segments, missing, left, [r["track_id"] for r in rows]
 
 
 def _segment_items(segments: list, left: Optional[list] = None, *,
@@ -3330,7 +3394,7 @@ def _segment_items(segments: list, left: Optional[list] = None, *,
 
 
 def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = True,
-                   fill: bool = False) -> list:
+                   fill: bool = False, start: Optional[tuple] = None) -> list:
     """Replace the queue with these segments, every slot at once (and start
     it, once the queue lock is let go). `archive`, the caller's session
     rotation, runs once the output has taken the queue, before the commit
@@ -3340,11 +3404,27 @@ def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = 
     `play=False` assembles the queue without starting it: "put together a
     playlist" is a curation act, not a play command, and the canonical queue is
     independent of the output, so it works with nothing attached. `fill`: an
-    automatic fill's slots (_segment_items)."""
+    automatic fill's slots (_segment_items). `start` — (the request's
+    tracks in order, the place of the start among them, its second) — is
+    where the play starts (_start_item); nothing kept from there on is
+    refused (404)."""
     items, left = _segment_items(segments, fill=fill)
     if not items:
         raise HTTPException(status_code=404, detail="Nothing in that list streams here")
-    added, _gen = manager.replace_queue(items, play=play, archive=archive)
+    begin = None
+    if start is not None:
+        tids, at, second = start
+        head = _start_item(items, tids, at)
+        if head is None:
+            raise HTTPException(status_code=404, detail=_NOTHING_FROM_HERE)
+        if head.track_id != tids[at]:
+            second = 0.0
+        elif second and head.media_file_id is None:
+            from streaming import demo
+            if demo.consumed([head.track_id]):
+                second = 0.0        # it plays as the 30 s excerpt now: a second past it is none
+        begin = (head, second)
+    added, _gen = manager.replace_queue(items, play=play, archive=archive, start=begin)
     if not added:
         raise HTTPException(
             status_code=503,
@@ -3374,7 +3454,7 @@ def queue_entities(req: QueueEntitiesRequest):
     if bad:
         raise HTTPException(status_code=400, detail=f"invalid kind: {sorted(bad)[0]}")
 
-    segments, missing, gone = _entity_segments(req.items)
+    segments, missing, gone, _tids = _entity_segments(req.items)
     if not segments:
         raise HTTPException(status_code=404, detail="Nothing playable in that list")
     owned = sum(len(p) for k, p in segments if k == "owned")
@@ -3408,9 +3488,10 @@ def play_entities(req: QueueEntitiesRequest):
     if bad:
         raise HTTPException(status_code=400, detail=f"invalid kind: {sorted(bad)[0]}")
 
-    segments, missing, gone = _entity_segments(req.items)
+    segments, missing, gone, tids = _entity_segments(req.items)
     if not segments:
         raise HTTPException(status_code=404, detail="Nothing playable in that list")
+    at = _start_index(tids, req.start_track_id)
     owned = sum(len(p) for k, p in segments if k == "owned")
     phantom = sum(len(p) for k, p in segments if k == "phantom")
     if phantom:
@@ -3423,6 +3504,11 @@ def play_entities(req: QueueEntitiesRequest):
     head_kind, head_items = segments[0]
 
     def archive() -> None:
+        if at is not None:
+            # from here: the session's seed is the track it starts at
+            sessions.rotate_session(manager.queue, "album" if single_album else "mix",
+                                    origin_album_id=single_album, seed_track_id=tids[at])
+            return
         sessions.rotate_session(
             manager.queue, "album" if single_album else "mix",
             origin_album_id=single_album,
@@ -3432,7 +3518,8 @@ def play_entities(req: QueueEntitiesRequest):
             seed_track_id=(None if head_kind == "owned" else head_items[0].track_id))
 
     try:
-        left = _play_segments(segments, archive=archive, play=req.autoplay)
+        left = _play_segments(segments, archive=archive, play=req.autoplay,
+                              start=(tids, at, 0.0) if at is not None else None)
     except HTTPException:
         raise
     except Exception as e:
@@ -3463,10 +3550,11 @@ def _session_segments(session_id: str) -> tuple[list, int]:
     (_reach_segments, which refuses a snapshot none of whose slots opens).
     Streamed queries are built per album — the slot's album_id keeps the
     edition the listener pressed — and a slot whose album no longer lists
-    the track (or never had one) gets the display edition."""
+    the track (or never had one) gets the display edition. Also the slots
+    as (position, track_id), in order — where a start is counted."""
     hqp_id = active_hqp_endpoint()
     rows = _db_query(f"""
-        SELECT st.track_id::text AS track_id, st.album_id::text AS album_id,
+        SELECT st.position, st.track_id::text AS track_id, st.album_id::text AS album_id,
                f.id, f.location::text AS location, t.title, al.title AS album,
                CASE WHEN f.id IS NOT NULL THEN NULL
                     WHEN EXISTS (SELECT 1 FROM media_files m3
@@ -3500,7 +3588,7 @@ def _session_segments(session_id: str) -> tuple[list, int]:
         ORDER BY st.position
     """, {"id": session_id, "hqp_id": hqp_id, "gone": _gone()})
     segments, left = _reach_segments(rows)
-    return segments, len(left)
+    return segments, len(left), [(r["position"], r["track_id"]) for r in rows]
 
 
 @router.post("/play-session")
@@ -3517,9 +3605,14 @@ def play_session(req: PlaySessionRequest):
     if header is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    segments, missing = _session_segments(req.session_id)
+    segments, missing, slots = _session_segments(req.session_id)
     if not segments:
         raise HTTPException(status_code=404, detail="Nothing in this session can be played any more")
+    at = None
+    if req.start is not None:
+        at = next((i for i, (pos, _tid) in enumerate(slots) if pos == req.start.position), None)
+        if at is None:
+            raise HTTPException(status_code=400, detail="That slot is not in this session")
     owned = sum(len(p) for k, p in segments if k == "owned")
     phantom = sum(len(p) for k, p in segments if k == "phantom")
     if phantom:
@@ -3532,17 +3625,20 @@ def play_session(req: PlaySessionRequest):
         sessions.rotate_session(
             manager.queue, origin,
             origin_album_id=header["origin_album_id"],
-            seed_media_file_id=(head_items[0]["id"] if head_kind == "owned"
+            seed_media_file_id=(head_items[0]["id"] if at is None and head_kind == "owned"
                                 and (head_items[0].get("location") or "local") == "local"
                                 else None),
-            seed_track_id=(None if head_kind == "owned" else head_items[0].track_id),
+            seed_track_id=(slots[at][1] if at is not None
+                           else None if head_kind == "owned" else head_items[0].track_id),
             # A mix keeps the name it was archived under (a radio, replaying
             # as a static mix, keeps its seed's); album and track cards are
             # recomputed from their origin and need nothing carried.
             title=(header["title"] if origin == "mix" else None))
 
+    tids = [tid for _pos, tid in slots]
     try:
-        left = _play_segments(segments, archive=archive)
+        left = _play_segments(segments, archive=archive,
+                              start=(tids, at, req.start.seconds) if at is not None else None)
     except HTTPException:
         raise
     except Exception as e:
@@ -3557,7 +3653,7 @@ def queue_session(req: QueueSessionRequest):
     next), every slot at once — owned files and streamed tracks alike."""
     if req.position not in ("next", "end"):
         raise HTTPException(status_code=400, detail="position must be 'next' or 'end'")
-    segments, missing = _session_segments(req.session_id)
+    segments, missing, _slots = _session_segments(req.session_id)
     if not segments:
         raise HTTPException(status_code=404, detail="Nothing in this session can be played any more")
     owned = sum(len(p) for k, p in segments if k == "owned")
@@ -3662,12 +3758,15 @@ def play_tracks(req: PlayTracksRequest):
     rows = _file_rows(req.track_ids)
     if not rows:
         raise HTTPException(status_code=404, detail="No tracks found")
+    at = _start_index([r["track_id"] for r in rows], req.start_track_id)
 
     try:
         left: list = []
-        added = _add_owned(rows, clear_first=True, left=left, archive=lambda: sessions.rotate_session(
-            manager.queue, req.origin or 'mix', origin_album_id=req.origin_album_id,
-            seed_media_file_id=rows[0]["asked"]))
+        added = _add_owned(rows, clear_first=True, left=left, start_at=at,
+                           archive=lambda: sessions.rotate_session(
+                               manager.queue, req.origin or 'mix',
+                               origin_album_id=req.origin_album_id,
+                               seed_media_file_id=rows[at or 0]["asked"]))
         wanted = len(rows) - len(left)
         if not wanted:
             raise HTTPException(status_code=404, detail="Nothing in that list streams here")

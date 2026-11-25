@@ -263,7 +263,7 @@
 
   function updatePlayingHighlight() {
     const mfTarget = _lastNpMediaFileId != null ? String(_lastNpMediaFileId) : null;
-    document.querySelectorAll('.detail-screen .track-row[data-media-file-id]')
+    document.querySelectorAll('.detail-screen:not([data-session-id]) .track-row[data-media-file-id]')
       .forEach(row => {
         const match = mfTarget !== null
           && row.getAttribute('data-media-file-id') === mfTarget;
@@ -271,14 +271,14 @@
       });
     // Streaming (phantom) tracks: matched by track UUID instead of file id.
     const tidTarget = _lastNpPreviewTrackId != null ? String(_lastNpPreviewTrackId) : null;
-    document.querySelectorAll('.detail-screen .track-row.is-phantom-track[data-track-id]')
+    document.querySelectorAll('.detail-screen:not([data-session-id]) .track-row.is-phantom-track[data-track-id]')
       .forEach(row => {
         const match = tidTarget !== null
           && row.getAttribute('data-track-id') === tidTarget;
         row.classList.toggle('is-playing', match);
       });
     const heldTarget = _lastNpTrackId != null ? String(_lastNpTrackId) : null;
-    document.querySelectorAll('.detail-screen .track-row.is-held-track[data-track-id]')
+    document.querySelectorAll('.detail-screen:not([data-session-id]) .track-row.is-held-track[data-track-id]')
       .forEach(row => {
         const match = heldTarget !== null
           && row.getAttribute('data-track-id') === heldTarget;
@@ -6300,7 +6300,8 @@
         }
         trackParts.push(`
           <button class="track-row" type="button"
-                  data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+                  data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"
+                  data-track-id="${escapeHtml(t.track_id || '')}">
             <span class="track-rank">${t.track_number || ''}</span>
             <div class="track-info">
               <div class="track-title-line">${escapeHtml(t.title || '')}</div>
@@ -6699,10 +6700,15 @@
         // shared handlers route them (click → play-phantom-track, [+] → queue);
         // owned rows keep data-media-file-id. data-album-id is the album the
         // slot was queued from, so a click plays THIS edition of the track.
-        const attrs = t.is_phantom
+        // data-position is the slot (what a replay's start names), whatever
+        // the row is: a tap here chooses where Play starts (B-158), on every
+        // kind of row alike.
+        const attrs = (t.is_phantom
           ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
             + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
-          : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
+          : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`
+            + ` data-track-id="${escapeHtml(String(t.track_id || ''))}"`)
+          + ` data-position="${escapeHtml(String(t.position))}"`;
         trackParts.push(`
           <button ${attrs} type="button">
             <span class="track-rank">${n}</span>
@@ -6712,7 +6718,7 @@
               ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
               ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
             </div>
-            <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
+            <span class="track-dur" data-dur="${escapeHtml(fmtDuration(t.duration_seconds))}">${fmtDuration(t.duration_seconds)}</span>
             <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
           </button>
         `);
@@ -6776,11 +6782,179 @@
       <div style="height: calc(24 * var(--px));"></div>
     `;
 
+    screen.dataset.sessionId = sessionId;
     wireDetailHandlers(screen, {
       tracks: tracksList, phantomAlbumId,
-      sessionId,
+      sessionId, rowsChoose: true,
     });
-    updatePlayingHighlight();
+    wireSessionDot(screen, d);
+  }
+
+  // Listening history's dots (B-158, PLAYBACK-UI-1 §11–§12): one at a time,
+  // each with one meaning. While this session plays — the live queue is its
+  // slots, in order, and the output plays, pauses or loads — the amber dot
+  // alone, on the slot the status names, and a tap jumps there (as in the
+  // queue). Otherwise the blue dot: where a tap put it (`chosen`), else
+  // where the listen stopped — the live queue's own stop while it rests on
+  // this session (the status's `heard`), else the stop the archive kept
+  // (`stop`) — and a tap moves it, playing nothing; Resume (the dot at the
+  // stop) or Play starts there. `slots`: the session's track ids in order;
+  // `positions`: their slot positions; `playlist`, `status`: the live queue
+  // and status as player.js holds them.
+  function sessionDotView(slots, positions, playlist, status, stop, chosen) {
+    const q = playlist || [];
+    const st = status || {};
+    const mine = q.length === slots.length && q.every((e, i) => e.track_id === slots[i]);
+    if (mine && ['playing', 'paused', 'loading'].includes(st.state)) {
+      return { playing: true, at: st.track_index, stop: null, dot: null, resume: false };
+    }
+    const heard = mine && st.state === 'stopped' && st.heard
+      && positions[st.heard.index - 1] !== undefined;
+    const kept = heard ? { position: positions[st.heard.index - 1], seconds: st.heard.position } : stop;
+    const dot = chosen || kept || null;
+    const resume = !!dot && !!kept && dot.position === kept.position && dot.seconds === kept.seconds;
+    return { playing: false, at: null, stop: kept || null, dot, resume };
+  }
+
+  // The session page's dots, drawn on every status and queue the page hears
+  // (np-update, playlist-loaded) — classes and the duration cell in place,
+  // never the page again.
+  function wireSessionDot(screen, d) {
+    const rows = [...screen.querySelectorAll('.album-tracklist .track-row[data-position]')];
+    const playBtn = screen.querySelector('[data-action="play-session"]');
+    const slots = (d.tracks || []).map(t => t.track_id);
+    const positions = rows.map(r => Number(r.dataset.position));
+    let chosen = null;                 // {position, seconds}: a tap's choice
+    let view = { playing: false, dot: null, stop: null };
+    const read = () => sessionDotView(slots, positions, window.currentPlaylist,
+                                      window.currentStatus, d.stop, chosen);
+    const draw = () => {
+      if (!screen.isConnected) return false;
+      view = read();
+      rows.forEach((row, i) => {
+        const dur = row.querySelector('.track-dur');
+        const start = !!view.dot && Number(row.dataset.position) === view.dot.position;
+        row.classList.toggle('is-playing', view.playing && view.at === i + 1);
+        row.classList.toggle('is-start', start);
+        const html = (start && view.dot.seconds > 0)
+          ? `<span class="track-stop-at">${fmtDuration(view.dot.seconds)}</span><span class="track-stop-of"> / ${dur.dataset.dur}</span>`
+          : dur.dataset.dur;
+        if (dur.innerHTML !== html) dur.innerHTML = html;
+      });
+      if (playBtn) {
+        const label = `${SVG_PLAY} ${view.resume ? 'Resume' : 'Play'}`;
+        if (playBtn.innerHTML !== label) playBtn.innerHTML = label;
+      }
+      return true;
+    };
+    rows.forEach((row, i) => row.addEventListener('click', (e) => {
+      if (e.target.closest('.track-add, .track-confirm-bar') || row.classList.contains('is-confirming')) return;
+      e.stopPropagation();
+      if (view.playing) {
+        onceInFlight(row, async () => {
+          const resp = await fetch('/api/player/jump', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ index: i + 1, track_id: slots[i] }),
+          }).catch(() => null);
+          if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+          // a slot the output does not take is refused in its words, as the
+          // queue sheet's tap says it
+          const out = await resp.json();
+          if (out.ok === false && out.refusal && answerSays(out.attempt)) {
+            notices.toast({ kind: 'info', key: out.attempt != null ? 'hqplayer.diagnosis' : 'queue.refused',
+                            title: 'Not played',
+                            text: escapeHtml(out.refusal.charAt(0).toUpperCase() + out.refusal.slice(1)) });
+          }
+        });
+        return;
+      }
+      const position = Number(row.dataset.position);
+      chosen = (view.stop && view.stop.position === position) ? view.stop : { position, seconds: 0 };
+      draw();
+    }));
+    // The dot Play starts from, as drawn now (none while the session plays)
+    screen.sessionStart = () => (view.dot ? { position: view.dot.position, seconds: view.dot.seconds } : null);
+    const redraw = () => { if (!draw()) {
+      document.removeEventListener('np-update', redraw);
+      document.removeEventListener('playlist-loaded', redraw);
+    } };
+    document.addEventListener('np-update', redraw);
+    document.addEventListener('playlist-loaded', redraw);
+    draw();
+  }
+
+  // An owned album page's Play all — started at `startTrackId`, or at its
+  // first track (null). One request builder, so "from here" is Play all of
+  // the same page: the same copies (the shown variant's files, or each
+  // track's copy by the album's uuid) and the same session.
+  function playAllRequest(ctx, startTrackId) {
+    const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
+    const start = startTrackId ? { start_track_id: startTrackId } : {};
+    if (ctx.albumId && (ctx.byAlbum
+        || (ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')))) {
+      // A pick that lives in the HQPlayer's own library has no file id,
+      // and one whose file is not here now names a file that does not
+      // open: the album plays by uuid, the backend picking each track's
+      // copy for the output — natively on that HQPlayer, a stream
+      // elsewhere (the Queue button beside it goes the same way).
+      return fetch('/api/player/play-entities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: [{ kind: 'album', id: ctx.albumId }], ...start }),
+      }).catch(() => null);
+    }
+    const body = { track_ids: ids, ...start };
+    if (ctx.playOrigin) {
+      body.origin = ctx.playOrigin;
+      if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
+    }
+    return fetch('/api/player/play-tracks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch(() => null);
+  }
+
+  // "▶ From here" (B-156): the whole album, started at the row's track —
+  // Previous goes back to the tracks before it. A not-owned album streams
+  // from it (its rows say what does not stream, as Stream all's answer).
+  async function playAlbumFrom(screen, ctx, trackId) {
+    window.maybeClaimRenderer();
+    if (!ctx.phantomAlbumId) {
+      await reportPlaybackResult(await playAllRequest(ctx, trackId));
+      return;
+    }
+    const resp = await fetch('/api/player/play-phantom-album', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ album_id: ctx.phantomAlbumId, start_track_id: trackId }),
+    }).catch(() => null);
+    let body = null;
+    try { body = resp ? await resp.json() : null; } catch (_) {}
+    if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
+    applyPhantomMissing(screen, body && body.missing);
+    applyPhantomExcerpts(screen, body && body.excerpt);
+  }
+
+  // The bar's "▶ From here", before "Add to:" — on the album page's rows
+  // alone (`fromHere`, the page's action; none elsewhere). Its words sit
+  // on one line at the base width because the bar starts at the row's edge
+  // with it (`has-play`). The bar stays up, its buttons disabled, until the
+  // request settles: closing it first put the row body under a second tap.
+  function addFromHere(bar, row, fromHere) {
+    const tid = row.getAttribute('data-track-id');
+    if (!fromHere || !tid) return;
+    const name = 'Play the album from this track';
+    bar.classList.add('has-play');
+    bar.insertAdjacentHTML('afterbegin', `<button class="track-confirm-play" type="button"
+        data-confirm="from-here" aria-label="${name}" title="${name}">${SVG_PLAY}From here</button>`);
+    bar.querySelector('[data-confirm="from-here"]').addEventListener('click', e => {
+      e.stopPropagation();
+      onceInFlight(bar, async () => {
+        bar.querySelectorAll('button').forEach(b => { b.disabled = true; });
+        try { await fromHere(tid); } finally { closeQueueConfirm(row); }
+      });
+    });
   }
 
   // Run an async click action at most once at a time per element — re-clicks
@@ -7590,8 +7764,9 @@
         if (id) navigateToEntity('genre', id);
       });
     });
-    // Track row → play track
-    screen.querySelectorAll('[data-media-file-id]').forEach(el => {
+    // Track row → play track (a page whose rows choose — Listening history's
+    // — wires its own tap: wireSessionDot)
+    if (!ctx.rowsChoose) screen.querySelectorAll('[data-media-file-id]').forEach(el => {
       el.addEventListener('click', e => {
         if (e.target.closest('.track-add')) return;
         e.stopPropagation();
@@ -7611,6 +7786,11 @@
     // Open/close toggles read the click count: the second click of a
     // desktop double-click (e.detail 2) is the same intent as the first,
     // not a request to close what just opened.
+    // "▶ From here" on the album page's bars (B-156): the album's own Play
+    // all, started at the row — every row kind with a bar; no other screen
+    // has an ordered context to start in
+    const fromHere = ctx.albumId
+      ? (tid) => playAlbumFrom(screen, ctx, tid) : null;
     screen.querySelectorAll('.track-row:not(.is-phantom-track) .track-add').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -7620,7 +7800,7 @@
         if (row.classList.contains('is-confirming')) {
           closeQueueConfirm(row);
         } else {
-          openQueueConfirm(row);
+          openQueueConfirm(row, fromHere);
         }
       });
     });
@@ -7633,7 +7813,7 @@
         const row = btn.closest('.track-row');
         if (!row) return;
         if (row.classList.contains('is-confirming')) closeQueueConfirm(row);
-        else openPhantomQueueConfirm(screen, row);
+        else openPhantomQueueConfirm(screen, row, fromHere);
       });
     });
     // Held track [+] → the same confirm; the chosen position queues by track
@@ -7645,7 +7825,7 @@
         const row = btn.closest('.track-row');
         if (!row) return;
         if (row.classList.contains('is-confirming')) closeQueueConfirm(row);
-        else openHeldQueueConfirm(row);
+        else openHeldQueueConfirm(row, fromHere);
       });
     });
     // Phantom [+ Queue] → toggles the album-wide "Add album to: [Next] [End]"
@@ -7668,10 +7848,12 @@
         btn.disabled = true;            // block double-fire; faded while in flight
         window.maybeClaimRenderer();
         try {
+          // from the blue dot (B-158), or from the top where none is drawn
+          const start = screen.sessionStart ? screen.sessionStart() : null;
           const resp = await fetch('/api/player/play-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: ctx.sessionId }),
+            body: JSON.stringify({ session_id: ctx.sessionId, ...(start ? { start } : {}) }),
           }).catch(() => null);
           let body = null;
           try { body = resp ? await resp.json() : null; } catch (_) {}
@@ -7701,36 +7883,10 @@
     screen.querySelectorAll('[data-action="play-all"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (btn.disabled || !ctx.tracks || !ctx.tracks.length) return;
-        const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
         btn.disabled = true;            // block double-fire; faded while in flight
         window.maybeClaimRenderer();
         try {
-          let resp;
-          if (ctx.albumId && (ctx.byAlbum
-              || (ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')))) {
-            // A pick that lives in the HQPlayer's own library has no file id,
-            // and one whose file is not here now names a file that does not
-            // open: the album plays by uuid, the backend picking each track's
-            // copy for the output — natively on that HQPlayer, a stream
-            // elsewhere (the Queue button beside it goes the same way).
-            resp = await fetch('/api/player/play-entities', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ items: [{ kind: 'album', id: ctx.albumId }] }),
-            }).catch(() => null);
-          } else {
-            const body = { track_ids: ids };
-            if (ctx.playOrigin) {
-              body.origin = ctx.playOrigin;
-              if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
-            }
-            resp = await fetch('/api/player/play-tracks', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-            }).catch(() => null);
-          }
-          await reportPlaybackResult(resp);
+          await reportPlaybackResult(await playAllRequest(ctx, null));
         } finally { btn.disabled = false; }
       });
     });
@@ -7773,7 +7929,7 @@
     // stream via play-phantom-track; the row's line says what its stream does.
     // data-album-id (album/session screens) rides along: the track sits on every
     // album that lists it, and the slot must be the album the row was clicked on.
-    screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
+    if (!ctx.rowsChoose) screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('.track-add')) return;   // queue button handles its own
         const tid = row.getAttribute('data-track-id');
@@ -7794,7 +7950,7 @@
     // Held track row (a file in the HQPlayer's own library, none here) →
     // play-entities by track uuid: the backend picks the copy the active
     // output can open — natively on that HQPlayer, a stream elsewhere.
-    screen.querySelectorAll('.track-row.is-held-track[data-track-id]').forEach(row => {
+    if (!ctx.rowsChoose) screen.querySelectorAll('.track-row.is-held-track[data-track-id]').forEach(row => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('.track-add')) return;   // queue button handles its own
         const tid = row.getAttribute('data-track-id');
@@ -7853,7 +8009,7 @@
     if (bar) bar.remove();
   }
 
-  function openQueueConfirm(row) {
+  function openQueueConfirm(row, fromHere = null) {
     // mfId attribute name differs across call sites: detail screens
     // use data-media-file-id, Now Playing similar list uses
     // data-track-id. Same with the add-button class name (.track-add
@@ -7885,6 +8041,7 @@
     const addBtn = row.querySelector('.track-add, .np-sim-add');
     if (addBtn) row.insertBefore(bar, addBtn);
     else row.appendChild(bar);
+    addFromHere(bar, row, fromHere);
 
     if (phantomTid) {
       // Phantom match → stream-queue at the chosen position; the endpoint owns the
@@ -7972,7 +8129,7 @@
   /* Phantom queue confirms — reuse the owned "Add to: [Next] [End]" bar, but the
      chosen position streams via the phantom queue endpoints, which append
      ('end') or seamlessly insert after the current track ('next') server-side. */
-  function openPhantomQueueConfirm(screen, row) {
+  function openPhantomQueueConfirm(screen, row, fromHere = null) {
     const tid = row.getAttribute('data-track-id');
     if (!tid) return;
     row.classList.add('is-confirming');
@@ -7984,6 +8141,7 @@
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
     const addBtn = row.querySelector('.track-add');
     if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
+    addFromHere(bar, row, fromHere);
     // The bar stays up (buttons disabled) until the request settles: closing
     // it first put the row body — a play target — under the second tap.
     const go = (position) => onceInFlight(bar, async () => {
@@ -8004,7 +8162,7 @@
 
   // A held track's "Add to: [Next] [End]" — queue-entities by track uuid;
   // the backend picks the copy the active output can open.
-  function openHeldQueueConfirm(row) {
+  function openHeldQueueConfirm(row, fromHere = null) {
     const tid = row.getAttribute('data-track-id');
     if (!tid) return;
     row.classList.add('is-confirming');
@@ -8016,6 +8174,7 @@
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
     const addBtn = row.querySelector('.track-add, .np-sim-add');
     if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
+    addFromHere(bar, row, fromHere);
     const go = (position) => onceInFlight(bar, async () => {
       bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
       const resp = await fetch('/api/player/queue-entities', {

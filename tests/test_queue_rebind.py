@@ -132,7 +132,7 @@ class StubOutput:
         self.id, self.endpoint_id = output_id, endpoint_id
         self.changed = []
 
-    def queue_changed(self, kind, *, play=False):
+    def queue_changed(self, kind, *, play=False, start=None):
         self.changed.append(kind)
 
     @contextmanager

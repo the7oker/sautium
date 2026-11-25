@@ -4692,6 +4692,52 @@ owner's rule: by entry into the database.
   recipes follow the same order; the album page's date of a copy stays its
   files' arrival.
 
+### "From here", Previous to the start, a listen resumed (2026-11-25)
+
+Three playback acts every player has and Sautium did not (B-156, B-157,
+B-158; PLAYBACK-UI-1-PROPOSAL, private, holds the mock-ups and the owner's
+answers).
+
+- **One start for every new queue.** `replace_queue(items, play=True,
+  start=(item, second))` — the output starts there in the step it started
+  slot 1 in before: the browser's `_start_at(slot, position=…)`, DLNA's
+  `_load_and_play(slot, start_at=…)` (its own Seek once the renderer plays),
+  the built-in engine's `select` at a second, HQPlayer handed the whole
+  queue and started at that entry like a rebuild's resume (`_start_item`).
+  The look at a file, the none-opens refusal and the stream lane's anchor
+  read the queue from the start on. The routes find the start by identity
+  — the request's own track at its place (`_start_item`), or a session
+  slot's `position` — never by a page's index; a start left out (nothing
+  streams it) is the next kept slot, none after it a 404 in words.
+- **"▶ From here" is the album page's Play all, started at the row**: the
+  same request (`playAllRequest`: the shown variant's files, or the album by
+  its uuid), plus `start_track_id`; a not-owned album's `play-phantom-album`
+  the same way. The session is the album's, its seed the start track. The
+  row's tap still plays that one track alone; other screens' bars keep Next
+  / End — no ordered context to start in.
+- **Previous is one rule, decided once** (`PlaybackManager.previous`): past
+  the first 3 s of the track the status shows, a Seek to 0 (paused stays
+  paused, a held spot moves without sound); within them, a start under way
+  or another app's stream, the step as before. The Now Playing button, the
+  lock screen's `previoustrack` and the assistant all go through `/previous`.
+- **Where a listen stopped is the tracker's, kept by the archive.** The
+  tracker remembers the last queue item that sounded and its second
+  (`_last_heard`, nothing written per tick); `stop_in` reads it against a
+  list of slots by identity — within a track's last 10 s the stop is the
+  next slot's start, past the last none. The archive writes it on its slot
+  (`session_tracks.stop_seconds`, one per session, delta 077) — not when
+  the queue played out, never played, or was swapped for the origin's
+  tracks; a stopped status says it of the live queue (`heard`).
+- **Listening history draws one dot at a time** (`sessionDotView`): while
+  the session plays — the live queue is its slots and the output plays,
+  pauses or loads — the amber dot on the slot playing, and a tap jumps
+  there; otherwise the blue dot at the stop (the live one while the queue
+  rests on it, else the kept one) or where a tap put it, and a tap only
+  moves it. Resume (at the stop) or Play replays the session from it
+  (`play-session` with `start`); a streamed slot whose demo listen is spent
+  starts at 0:00. A replay that left a slot out is another list: the page
+  shows the blue dot then. The moved dot is the page's, never stored.
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

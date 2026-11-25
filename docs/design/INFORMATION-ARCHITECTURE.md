@@ -101,7 +101,9 @@ v5.html`. Contains: album art, metadata row (Hi-Res badge,
 key, BPM, energy — and, for a streamed 30 s excerpt, a neutral `[30s]`
 badge beside the quality badge), a progress bar that seeks on tap or
 drag, the transport row (queue · previous · play/pause · next · radio)
-and the Similar tracks shelf. The artist and album lines open their
+and the Similar tracks shelf. Previous, here and on the lock screen,
+restarts the track past its first 3 s and goes to the track before within
+them (since 2026-11-25). The artist and album lines open their
 screens. The lyrics button is parked (hidden since 2026-08-24) until the
 lyrics sheet exists; HQPlayer is reached from the More drawer, the sheet
 has no shortcut to it.
@@ -292,7 +294,7 @@ current tab stack (changes hash).
 | **Album** | Tap on album cover / title | Cover hero, metadata row (year · duration · format badge), genre chips on a separate row (up to 3), tracklist, **Play all** + **+ Queue** actions. A streaming-library (phantom) album wears a neutral `[demo]` badge in the metadata row beside the streamed-quality badge, its actions are **Stream all** · **Buy** · **+ Queue**, and a row that will play as a 30 s excerpt carries a `30s` tag beside its duration |
 | **Genre** | Tap on a genre chip (from Album / Artist / Discovery) | Hero (the top artist's photo behind the genre name), counts line, description prose, Popular tracks, Artists grid, credit end-cap (Last.fm; ListenBrainz when its counts ranked the tracks). Top albums and a related-genre strip were designed and are not built |
 | **Queue** (current playlist) | Queue button on Now Playing's transport row | The canonical queue with the playing row highlighted (an equaliser glyph where the other rows carry ×), drag-reorder by the handle, × to remove a row, summary "N tracks · time left". A tap jumps to the row (on the playing row it toggles play/pause); a long press plays the row from its start. The full list is rendered — no "and N more" truncation. Clear and Shuffle were designed and are not built |
-| **Listening session** | Tap on a Listening history card | Artists, the tracklist grouped by album, Play / Queue replaying the stored slots; a card generated from the Last.fm history carries a last.fm chip linking the owner's library |
+| **Listening session** | Tap on a Listening history card | Artists, the tracklist grouped by album, Play / Queue replaying the stored slots; one dot at a time (since 2026-11-25): while the session plays, the amber dot on the playing row (a tap jumps there); otherwise a blue dot where the listen stopped — the track and its second, "2:13 / 4:47" — moved by a tap (no play), and **Resume** (at the stop) or **Play** replays the session from it. A card generated from the Last.fm history carries a last.fm chip linking the owner's library |
 | **HQPlayer** | From More (the row is listed while HQPlayer is the selected output) or the gear on the selected HQPlayer row in Audio output | Connection (read-only: the HQPlayer's name, address · version · platform, a state dot; a tap leads to Audio output, where another one is picked or added — no editor here since 2026-09-28), Output (mode, rate — a DSD rate named "DSD256", "DSD512 (48k)" since 2026-10-17 —, volume ±1 dB with the Meter chip and HQPlayer's Limited count, the DSP speed factor), Filter (the active filter with its facts under it and the full-list picker, favourites, dither / modulator; since 2026-10-17 each picker row shows its facts — HQPlayer's ratio class, focus words and rating tag and, with an atlas file, the measured chips, a twin's line, an identical group's bracket under the sheet's engine line — with ⓘ opening the name's card over the sheet, and in SDM the modulator opens a sheet of its own like the filter picker, while a PCM dither keeps the plain picker; since 2026-11-17 (AB-1) the two filter slots as two rows when they differ — "PCM filter · 1x" and "· Nx", the one the track runs marked, each opening the picker for its slot — the picker's rows with "your pick · N" (the person's own picks in the track's context), and under the favourites a "Compare by ear" row: the comparison sheet — a warm-up first (HQPlayer turned down), then the passage chosen on a bar of the track and learned with ▶ Play, Find my filter or Two filters, blind, the steps, the result; the same sheet from a pair in a name's card ("Compare by ear") and from the assistant's `hqp_ab` block; since 2026-10-18, when the queue meets a rate HQPlayer cannot reach (or, since 2026-10-22, may not: a filter described "up" that was not tried), a line in the limiter's colour under the row it names — the filter's after its facts, the modulator's under its row; sinc-M's note (a source of its family above the output rate), which names no stop, is drawn the same way; since 2026-10-23 sinc-Mx, compared with sinc-M only into 705.6 and 768 kHz, is a filter described "up" that was not tried), Matrix profile, Benchmark (last run, CUDA offload, this computer, Run / Measure PCM·SDM / Cancel / Results, the run's progress; since 2026-10-02), Diagnostics, and — last, for an HQPlayer on another machine — Library (import / sync, rescan, forget). Every knob opens the app's own picker, not the OS select dialog (2026-09-26); a picker entry measured on this HQPlayer carries its headroom mark (a dot and its speed), the knob itself only when its setting is tight or too slow, and every knob waits while a benchmark run has HQPlayer. There is no separate DSP screen. The Meter chip opens the peak meter, a sheet over the screen: an analog true-peak needle per channel (the peak before HQPlayer's limiter), OVER, Max, Limited and its own ±1 dB, for setting gain (since 2026-10-07) |
 | **Profile (own)** | From More → Profile entry | Identity card (avatar, name, @login, invite, city, bio), account (email + verify, password, Last.fm — the connected username links to its Last.fm page, scrobbling, Listening history), hardware profile, audio chain (gear list) |
 | **Profile (viewing other)** | Tap on a user from friend chat header / friend list / future Discover-people | Read-only identity card and CTAs (Send message · Add as friend). The audio chain is not shown — the screen says sharing is private for now |
@@ -365,7 +367,8 @@ start.
 
 | Context | Tap on track row | "+" icon on row | Main button |
 |---------|------------------|-----------------|-------------|
-| **Album detail** | Play that track alone (replaces the queue) | Inline bar: Add to: [Next] · [End] | **▶ Play all** (replaces the queue with the album) · **+ Queue** (the same inline bar for the whole album; the screen stays) |
+| **Album detail** | Play that track alone (replaces the queue) | Inline bar: [▶ From here] Add to: [Next] · [End] — From here plays the whole album from that track (since 2026-11-25) | **▶ Play all** (replaces the queue with the album) · **+ Queue** (the same inline bar for the whole album; the screen stays) |
+| **Listening session** | Moves the blue dot — where Play starts (no play); while the session plays, jumps there | Inline bar: Add to: [Next] · [End] | **▶ Resume** (from the stop) / **▶ Play** (from the dot, or the top) · **+ Queue** |
 | **Standalone track** (search result, home feed, Similar, recommendation) | Play now, replaces queue with single-track queue | Inline bar: Add to: [Next] · [End] | — |
 | **Track inside Queue** | Jump playback to this position (on the playing row: play/pause); a long press plays the row from its start | — | — |
 
@@ -374,6 +377,8 @@ start.
 A tap on "+" turns the row into an inline bar — "Add to: [Next] [End]" —
 and the "+" into the × that closes it:
 
+- **▶ From here** (the album page's rows alone, since 2026-11-25) — play the
+  whole album from this track; Previous goes back to the tracks before it
 - **Next** — insert after currently-playing track
 - **End** — append to queue
 
@@ -909,7 +914,7 @@ or is a thin query over existing data.
 | Genre chips | `album_genres` + `genres.name`, top 3 by count; none → the primary artist's genres (`genre_queries.album_genre_chips`) | — |
 | Composer line | `track_credits` (the files' composer tags): "Composer: …" / "Composers: …" under the artist line, the ones every shown track has, each a link to his page; none when no file names one (since 2026-11-21) | MusicBrainz's work relations (CREDITS-MB) |
 | Tracklist | `tracks` ordered by `track_number`; a track's composers beyond the album line under its title | — |
-| Play all / + Queue | the transport calls in `app-shell.js` (`/api/player/play-tracks`, `/api/player/queue-tracks`) | + queue history snapshot before replace |
+| Play all / + Queue | the transport calls in `app-shell.js` (`/api/player/play-tracks`, `/api/player/queue-tracks`; by the album's uuid through `/play-entities` / `/queue-entities` when a file is not here now or a pick is held at the HQPlayer); "▶ From here" is the same Play all with `start_track_id` | + queue history snapshot before replace |
 
 ### Genre
 

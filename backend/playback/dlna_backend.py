@@ -2957,7 +2957,8 @@ class DlnaBackend(PlayerBackend):
 
     # -- canonical-queue hooks -------------------------------------------------------
 
-    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+    def queue_changed(self, kind: str, *, play: bool = False,
+                      start: Optional[tuple] = None) -> None:
         if kind == "replace":
             if self._external:
                 # Another controller holds the renderer: the spot — or a play
@@ -2970,7 +2971,13 @@ class DlnaBackend(PlayerBackend):
                         self._emit_now()        # nothing of ours plays there to stop
                 self._call(_drop())
             if play and len(self._queue):
-                self._call_async(self._load_and_play(1))
+                if start is not None:
+                    # at the start's second: the load's own Seek once the
+                    # renderer plays (_seek_on_start)
+                    self._call_async(self._load_and_play(self._queue.index_of(start[0]) or 1,
+                                                         start_at=start[1]))
+                else:
+                    self._call_async(self._load_and_play(1))
             elif not self._external:
                 self.stop()
             return
