@@ -2333,15 +2333,19 @@ body.sautium-base {
    title is the room "Add to:" needs on one line at the base width. */
 .track-confirm-bar.has-play {
   padding-left: 0;
-  gap: calc(8 * var(--px));
+  gap: calc(6 * var(--px));
 }
 .track-confirm-bar.has-play .track-confirm-ask { white-space: nowrap; }
+/* Measured at 360 (the real page, 2026-11-25): the four at the bar's own
+   sizes overflow its 266px by 13; Next and End a little narrower here, the
+   gaps 6, and they sit in it whole. */
+.track-confirm-bar.has-play .track-confirm-btn { padding: 0 calc(12 * var(--px)); }
 .track-confirm-play {
   height: calc(32 * var(--px));
-  padding: 0 calc(10 * var(--px));
+  padding: 0 calc(9 * var(--px));
   display: inline-flex;
   align-items: center;
-  gap: calc(6 * var(--px));
+  gap: calc(5 * var(--px));
   flex-shrink: 0;
   border-radius: calc(6 * var(--px));
   border: 0;

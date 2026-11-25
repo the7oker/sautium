@@ -6828,9 +6828,17 @@
     let view = { playing: false, dot: null, stop: null };
     const read = () => sessionDotView(slots, positions, window.currentPlaylist,
                                       window.currentStatus, d.stop, chosen);
+    const key = (v) => (v.playing ? 'playing' : JSON.stringify(v.stop));
     const draw = () => {
       if (!screen.isConnected) return false;
+      const was = key(view);
       view = read();
+      if (chosen && key(view) !== was) {
+        // the session played, or its play stopped somewhere new: that is
+        // the dot now — a tap's choice was of the stop before
+        chosen = null;
+        view = read();
+      }
       rows.forEach((row, i) => {
         const dur = row.querySelector('.track-dur');
         const start = !!view.dot && Number(row.dataset.position) === view.dot.position;
