@@ -69,6 +69,13 @@ def here(mf: str = "mf", av: str = "av") -> str:
 
 HERE = here()
 
+# Why a row of an owned track names no file that opens: its copies are away
+# (a Rescan set them aside), or lie under a folder that does not answer. A
+# template over a row aliased {f} carrying `here` and `absent_since`; NULL
+# where the row opens. The play routes' refusals and the queue's rows say it.
+NOT_HERE_WHY = ("CASE WHEN {f}.here THEN NULL WHEN {f}.absent_since IS NOT NULL THEN 'away' "
+                "ELSE 'disk' END")
+
 
 def album_away(album: str, variant: str = "NULL") -> str:
     """SQL expression: why no file of the album `album` (an albums.id

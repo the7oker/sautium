@@ -21,14 +21,17 @@ sooner, one moved away later, and a slot beyond the window waits. The
 window's unresolved slots are resolved in one waterfall pass off the lane
 (album context kept); a slot whose resolve finds nothing, or whose fetch
 fails, is `unplayable` with the reason's code; a landing makes it a `proxy`
-stream. The output that parked a play on the slot is told
-(`PlayerBackend.slot_ready`) either way, so the play goes on — the stream,
-or past the slot. A slot removed cancels its own fetch at the source, and a
-replaced queue all of its own (Lane.prune). What a streamed row shows —
-waiting, buffering with its progress, ready, failed with why — is read off
-the slot's way in and the proxy's entry (Lane.slots) and told as one message
-on the page's event stream, never as a queue version: a progress step
-repaints no sheet.
+stream. Where the node streams nothing no fetch is asked and the window
+bounds nothing: every slot waiting for a stream is unplayable at once — one
+of the owner's own copy that is not here now as `not_here` with its why
+(the album page's words), any other as `off`. The output that parked a play
+on the slot is told (`PlayerBackend.slot_ready`) either way, so the play
+goes on — the stream, or past the slot. A slot removed cancels its own
+fetch at the source, and a replaced queue all of its own (Lane.prune).
+What a streamed row shows — waiting, buffering with its progress, ready,
+failed with why — is read off the slot's way in and the proxy's entry
+(Lane.slots) and told as one message on the page's event stream, never as
+a queue version: a progress step repaints no sheet.
 
 HQPlayer probes an http entry when it is ADDED, so a stream it has not got
 cannot sit in its playlist: that output holds the queue up to its first
@@ -38,6 +41,7 @@ is (an m4a, a CUE slice whose cut is not on disk yet) is pending there the
 same way, and the lane prepares it in the same order.
 """
 
+import functools
 import logging
 import threading
 from contextlib import contextmanager
@@ -45,7 +49,7 @@ from typing import Callable, Optional
 
 from db_pool import db_query
 from playback.queue import file_source, gone_prefixes
-from sql_queries import HERE, best_rip_order, owned_rank
+from sql_queries import HERE, NOT_HERE_WHY, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
 
@@ -85,17 +89,17 @@ _COPIES_SQL = f"""
         SELECT o.track_id FROM media_files o WHERE o.id = ANY(%(mids)s::int[])
     )
     SELECT f.track_id::text AS track_id, f.id, f.location::text AS location, f.hqp_endpoint_id,
-           f.here,
+           f.here, {NOT_HERE_WHY.format(f='f')} AS why,
            mf.file_path, mf.file_format::text AS file_format,
            mf.cue_start_seconds, mf.cue_end_seconds,
            hf.hqp_path, hf.file_format::text AS hqp_format
     FROM (
-        SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id, {HERE} AS here,
+        SELECT mf.id, mf.track_id, av.location, av.hqp_endpoint_id, av.absent_since, {HERE} AS here,
                mf.is_lossless, mf.sample_rate, mf.bit_depth
         FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
         WHERE mf.track_id = ANY(ARRAY(SELECT id FROM t))
         UNION ALL
-        SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id, true,
+        SELECT hf.id, hf.track_id, av.location, av.hqp_endpoint_id, av.absent_since, true,
                hf.is_lossless, hf.sample_rate, hf.bit_depth
         FROM hqp_library_files hf JOIN album_variants av ON av.id = hf.album_variant_id
         WHERE hf.track_id = ANY(ARRAY(SELECT id FROM t))
@@ -248,6 +252,52 @@ def _prepared(item, play: Optional[dict]) -> Optional[dict]:
     return play
 
 
+def _copies(items: list, endpoint_id: Optional[int]) -> tuple[dict, dict, dict]:
+    """Every copy of the tracks of the slots read against them (by_copies),
+    in one query: the copies here now by the track they belong to now, best
+    first; the track each slot's own file belongs to now; and, per track,
+    why its copies do not open here now ('disk' | 'away', sql_queries.
+    NOT_HERE_WHY of each: one under a folder that does not answer says more
+    than one set away, as the album page's pick does). A file the latest
+    look did not find while its folder answers is not there: 'away', the
+    word a refused start says of it (PlaybackManager._refuse_if_none_opens)."""
+    owned = [it for it in items if by_copies(it)]
+    by_track: dict = {}
+    track_of: dict = {}             # a slot's own file -> the track it belongs to now
+    why: dict = {}
+    if not owned:
+        return by_track, track_of, why
+    unseen = unopened()             # files the latest look did not find (observe)
+    mids = sorted({it.media_file_id for it in owned
+                   if it.source.get("kind") == "file" and it.media_file_id is not None})
+    for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}), "mids": mids,
+                                    "hqp_id": endpoint_id, "gone": gone_prefixes()}):
+        if r["location"] == "local":
+            track_of[r["id"]] = r["track_id"]
+        if r["here"] and r["file_path"] not in unseen:
+            by_track.setdefault(r["track_id"], []).append(r)
+        elif r["location"] == "local" and why.get(r["track_id"]) != "disk":
+            why[r["track_id"]] = r["why"] or "away"
+    return by_track, track_of, why
+
+
+def _track_now(item, track_of: dict) -> str:
+    """The track a slot's copies are of: for a slot that is a file, the
+    track that file belongs to now — the canon may have rewritten the uuid
+    its enqueue read."""
+    return (track_of.get(item.media_file_id) if item.source.get("kind") == "file" else None) \
+        or item.track_id
+
+
+def not_here_whys(items: list) -> list:
+    """Per slot, in order: why the owner's own copy of its track does not
+    open here now ('disk' | 'away', _copies) — or None for a slot of a track
+    he holds no copy of here at all (not owned, or held only in another
+    HQPlayer's library): that one is streaming's to say."""
+    _here, track_of, why = _copies(items, None)
+    return [why.get(_track_now(it, track_of)) if by_copies(it) else None for it in items]
+
+
 def native_plays(items: list, output_id: Optional[str],
                  endpoint_id: Optional[int]) -> list:
     """Per item, in order: how this output opens it when that is not what
@@ -268,19 +318,7 @@ def native_plays(items: list, output_id: Optional[str],
     other copies are those of the track that file belongs to now: the
     slot's `track_id` is what the enqueue read, and the canon may have
     rewritten the track's uuid since."""
-    owned = [it for it in items if by_copies(it)]
-    by_track: dict = {}
-    track_of: dict = {}             # a slot's own file -> the track it belongs to now
-    unseen = unopened()             # files the latest look did not find (observe)
-    if owned:
-        mids = sorted({it.media_file_id for it in owned
-                       if it.source.get("kind") == "file" and it.media_file_id is not None})
-        for r in db_query(_COPIES_SQL, {"ids": sorted({it.track_id for it in owned}), "mids": mids,
-                                        "hqp_id": endpoint_id, "gone": gone_prefixes()}):
-            if r["location"] == "local":
-                track_of[r["id"]] = r["track_id"]
-            if r["here"] and r["file_path"] not in unseen:
-                by_track.setdefault(r["track_id"], []).append(r)
+    by_track, track_of, _ = _copies(items, endpoint_id)
     fills: list = []
 
     def fill_streams() -> bool:
@@ -297,8 +335,7 @@ def native_plays(items: list, output_id: Optional[str],
         if not by_copies(it):
             out.append(None)
             continue
-        track = (track_of.get(it.media_file_id) if kind == "file" else None) or it.track_id
-        rows = by_track.get(track, [])
+        rows = by_track.get(_track_now(it, track_of), [])
         local = next((r for r in rows if r["location"] == "local"), None)
         # the slot's own file, where that opens now
         own_file = kind == "file" and any(
@@ -390,18 +427,22 @@ class Lane:
     def maintain(self) -> None:
         """The queue or the playhead moved: the window's unresolved slots are
         resolved (off the lane, one waterfall pass), and the lane, if idle,
-        looks again. Cheap on the status thread: a snapshot of LEAD slots."""
+        looks again. Where this node streams nothing no fetch is asked, and
+        the window — which bounds the fetches — bounds nothing: every slot
+        that waits for a stream is settled at once. Cheap on the status
+        thread: a snapshot, and what of it waits unresolved."""
         proxy = self._proxy
         from streaming import service as streaming_service
-        up = streaming_service.is_enabled()
-        if up and (proxy is None or not streaming_service.providers_preferred()):
+        flows = streams()
+        if flows and (proxy is None or not streaming_service.providers_preferred()):
             # every provider aside or cooling down for now: the window waits,
             # asked again at the next look (the status tick)
             if proxy is not None:
                 proxy.wake()
             return
+        snapshot = self._queue.snapshot()
         todo = []
-        for _s, it in self._window(self._queue.snapshot()):
+        for it in ([it for _s, it in self._window(snapshot)] if flows else snapshot):
             play = it.play
             if (play is not None and play.get("kind") == "pending" and not play.get("prepare")
                     and not play.get("token") and not play.get("resolving")):
@@ -409,21 +450,26 @@ class Lane:
                 if self._queue.swap_play(it, play, marked, bump=False):
                     todo.append((it, marked))
         if todo:
-            # Off the status thread, as every settle is: with streaming off
-            # the resolve says so on the rows ("off", never kept: a re-read of
-            # the way in, or streaming coming up — revive — asks again)
+            # Off the status thread, as every settle is: where nothing
+            # streams the resolve says why on the rows (_unstreamed — never
+            # kept: a re-read of the way in, or streaming coming up — revive
+            # — asks again)
             threading.Thread(target=self._resolve, args=(todo,), daemon=True,
                              name="queue-resolve").start()
         if proxy is not None:
             proxy.wake()
 
     def revive(self) -> None:
-        """Streaming came up (streaming.service): the slots it failed as off
-        are to come again, and the window looks anew."""
+        """Streaming came up (streaming.service): the slots settled for want
+        of it are read as streams again (_stream_play — a fill's own copy
+        stays a gap unless radio may stream), and the window looks anew."""
+        fill_streams = functools.cache(_fill_streams)
         for it in self._queue.snapshot():
             play = it.play
-            if play is not None and play.get("code") == "off":
-                self._queue.swap_play(it, play, {"kind": "pending"})
+            if play is not None and play.get("code") in ("off", "not_here"):
+                again = _stream_play(it, fill_streams)
+                if again != play:
+                    self._queue.swap_play(it, play, again)
         self._changed()
         self.maintain()
 
@@ -505,11 +551,10 @@ class Lane:
         from streaming import service as streaming_service
         # The resolve and the query builders live with the play endpoints.
         from routers.player import _phantom_track_query, _refused_code, _resolve_waterfall
-        if not streaming_service.is_enabled():
-            for it, marked in todo:
-                self._fail(it, marked, "off")
-            if streaming_service.is_enabled():
-                self.revive()       # it came up as these failed: revive skipped them
+        if not streams():
+            self._unstreamed(todo)
+            if streams():
+                self.revive()       # it came up as these settled: revive skipped them
             return
         if not streaming_service.providers_preferred():
             # every provider aside since the look that marked them: to come again
@@ -601,16 +646,38 @@ class Lane:
         return [(it, it.play) for it in self._queue.snapshot()
                 if (it.play or {}).get("kind") == "pending" and it.play.get("token") == token]
 
-    def _fail(self, item, expected: dict, code: str) -> None:
-        index = self._settle(item, expected, {"kind": "unplayable", "reason": REASONS[code],
-                                              "code": code, "lane": True})
+    def _unstreamed(self, todo: list) -> None:
+        """This node streams nothing: every slot waiting for a stream says
+        why at once — one of the owner's own copy that is not here now as
+        the album page says it (not_here, its `why`), any other in
+        streaming's words (off). A slot's own line is the debug log's; the
+        log says the count once, and the rows' states are told once."""
+        settled = {"not_here": 0, "off": 0}
+        for (it, marked), why in zip(todo, not_here_whys([it for it, _m in todo])):
+            code = "not_here" if why else "off"
+            if self._fail(it, marked, code, why=why, bulk=True) is not None:
+                settled[code] += 1
+        if any(settled.values()):
+            logger.info("%d queued slot(s) unplayable here, this node streams nothing: "
+                        "%d of the owner's copies not here, %d with no copy here",
+                        sum(settled.values()), settled["not_here"], settled["off"])
+            self._changed()
+
+    def _fail(self, item, expected: dict, code: str, *, why: Optional[str] = None,
+              bulk: bool = False) -> Optional[int]:
+        play = {"kind": "unplayable", "reason": REASONS[code], "code": code, "lane": True}
+        if why:
+            play["why"] = why
+        index = self._settle(item, expected, play, bulk=bulk)
         if index is not None:
             self._on_failed(item, index, code)
+        return index
 
-    def _settle(self, item, expected: dict, play: dict) -> Optional[int]:
+    def _settle(self, item, expected: dict, play: dict, *, bulk: bool = False) -> Optional[int]:
         """The slot's way in is `play` now — if it still was `expected`: the
         output that parked on it hears so (slot_ready). Its 1-based slot, or
-        None when it left the queue or moved on meanwhile."""
+        None when it left the queue or moved on meanwhile. `bulk`: one of
+        many settled together, whose caller says them once."""
         # The output's mark (`arriving`) and the swap are one step under the
         # queue's lock: no reader — an HQPlayer mirror, a canary tick — sees
         # the slot landed and unmarked. The row's state is the `slots`
@@ -622,11 +689,13 @@ class Lane:
         if index is None:
             return None
         if play["kind"] == "unplayable":
-            logger.info("queue slot %d unplayable here: %s", index, play["reason"])
+            logger.log(logging.DEBUG if bulk else logging.INFO,
+                       "queue slot %d unplayable here: %s", index, play["reason"])
         else:
             logger.debug("queue slot %d ready — %s — %s", index, item.artist, item.title)
         self._notify(item)
-        self._changed()
+        if not bulk:
+            self._changed()
         return index
 
     # -- tokens nobody wants -----------------------------------------------
@@ -656,11 +725,12 @@ class Lane:
     def slots(self) -> list:
         """Every streamed slot's state, in queue order: {index, track_id,
         album_id (the album it was queued from), whole? (radio's: never an excerpt),
-        state, progress?, reason?} — `waiting` (its fetch not begun: beyond the
+        state, progress?, reason?, why?} — `waiting` (its fetch not begun: beyond the
         window, behind another in the lane, unresolved, its bytes dropped by
         the budget), `buffering` (its fetch runs; progress where the provider
-        gives it), `ready`, `failed` (reason: the code). "Found in the
-        catalog" is waiting, never buffering."""
+        gives it), `ready`, `failed` (reason: the code; why: 'disk' | 'away'
+        for the owner's own copy that is not here where nothing streams).
+        "Found in the catalog" is waiting, never buffering."""
         proxy = self._proxy
         out = []
         for index, it in enumerate(self._queue.snapshot(), 1):
@@ -672,6 +742,8 @@ class Lane:
                 row["whole"] = True
             if src.get("kind") == "unplayable":
                 row.update(state="failed", reason=src.get("code") or "unknown")
+                if src.get("why"):
+                    row["why"] = src["why"]
             else:
                 tok = src.get("token")
                 st = proxy.state(tok) if (proxy is not None and tok) else None

@@ -93,6 +93,7 @@ def node(fake, listens, scratch_dsn, monkeypatch, caplog):
     proxy = streaming_service._proxy
     monkeypatch.setattr(streaming_service, "is_enabled", lambda: True)
     monkeypatch.setattr(streaming_service, "providers_preferred", lambda: [prov])
+    monkeypatch.setattr(streaming_service, "providers_registered", lambda: True)
     monkeypatch.setattr(player, "_phantom_track_query", lambda tid, album_id=None: TrackQuery(
         artist="Hidden Orchestra", title=tid, album="Night Walks", duration=300.0, track_id=tid,
         album_id=album_id))
