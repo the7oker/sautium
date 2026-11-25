@@ -265,3 +265,38 @@ def test_the_variant_picker_has_a_row_of_its_own():
     meta = head[head.index('<div class="album-meta-block">'):]
     meta = meta[:meta.index('<div class="album-meta-row">')]
     assert meta.index("album-artist-line") < meta.index("${composerHtml}") < meta.index("${variantHtml}")
+
+
+def _specificity(selector: str) -> int:
+    """Classes, attributes and pseudo-classes of a selector without ids —
+    the column every rule over a button differs in."""
+    bare = re.sub(r"::[\w-]+", "", selector)
+    return len(re.findall(r"\.[\w-]|\[|:(?!:)", bare))
+
+
+def test_a_disabled_primary_button_is_dim_on_a_neutral_fill_wherever_it_stands():
+    """PI-NODE-2E H4: half an amber fill still read as a button; a disabled
+    primary takes the dim look of a disabled HQPlayer chip (its text dim, on
+    the recessed fill a chip has, inside its hairline) — no colour of its
+    own, and no later or stronger rule over a primary button gives it its
+    amber back."""
+    css = _css()
+    rules = [([s.strip() for s in head.split(",")], body)
+             for head, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)]
+    disabled = [(sels, body) for sels, body in rules if ".btn-primary:disabled" in sels]
+    assert len(disabled) == 1
+    decls = lambda body: {k.strip(): v.strip() for k, v in (d.split(":", 1) for d in body.split(";") if ":" in d)}
+    sels, look = disabled[0][0], decls(disabled[0][1])
+    chip = next(decls(body) for selectors, body in rules if ".hqp-chip-btn" in selectors)
+    assert look["color"] == _rule(css, ".hqp-chip-btn:disabled")["color"] == "var(--color-text-dim)"
+    assert look["background"] == chip["background"] == "var(--color-surface-lo)"
+    assert look["border"] == "1px solid var(--color-divider)" and "opacity" not in look
+    # every rule that paints a primary button where a disabled one stands is out-ranked by this one
+    for selectors, decl in rules:
+        if not re.search(r"(^|[;\s])(background|color|border)\s*:", decl):
+            continue
+        for sel in selectors:
+            last = re.split(r"[\s>+~]+", sel)[-1]
+            if ".btn-primary" not in last or ":" in last:
+                continue
+            assert _specificity(sel) < 2 or f"{sel}:disabled" in sels, sel
