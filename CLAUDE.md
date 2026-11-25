@@ -722,10 +722,12 @@ See:
   card in the slot, by `machine_tier.storage_medium`) that nobody set up a
   mount for (a line of fstab, a `.mount`/`.automount` unit, autofs). The
   automount says a volume blkid names no filesystem on, too: the type line of
-  its `.unread` file is then `ambivalent` (`blkid -p` exits 8: the marks of
-  more than one filesystem, a quick format over an older one) or `unknown`
-  (it exits 2: none found) — the latter only of a disk's only volume, or
-  beside other partitions of one whose partition type is for data (a
+  its `.unread` file is then `ambivalent` (`wipefs` lists the marks of more
+  than one filesystem, a quick format over an older one — by its list since
+  2026-11-25: `blkid -p`'s exit is 2 for both on util-linux 2.41) or
+  `unknown` (it lists none) — the latter only of a disk's only volume, or
+  beside other partitions of one whose partition type (the table's, by
+  `partx`, since 2026-11-25) is for data (a
   Windows-partitioned disk's reserved partition, a boot or recovery one, an
   eMMC's own areas, a reader's empty slot and anything under 1 MiB are
   silent). The unit ends with the medium, not the reader: a USB card reader

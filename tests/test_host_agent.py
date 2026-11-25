@@ -370,11 +370,10 @@ def test_a_check_answers_what_the_survey_found(monkeypatch):
 
 
 def test_a_diagnostics_report_carries_no_setup_code():
-    # A code of before 2026-11-19 had three groups: scrubbed too, as two of them and a tail
+    # A code of before 2026-11-19 had three groups: scrubbed too, whole
     text = "setup code: K7QM-ZP4X\nan older one: K7QM-ZP4X-9HTR\nnot one: K7QM ZP4X\n"
     scrubbed = ha._scrub(text)
-    assert scrubbed == ("setup code: [setup code removed]\nan older one: [setup code removed]-9HTR\n"
-                        "not one: K7QM ZP4X\n")
+    assert scrubbed == "setup code: [setup code removed]\nan older one: [setup code removed]\nnot one: K7QM ZP4X\n"
     sys.path.insert(0, str(REPO / "backend"))
     import device_auth
     assert ha.SETUP_CODE.pattern == device_auth._SETUP_CODE_FORM.pattern
@@ -382,6 +381,23 @@ def test_a_diagnostics_report_carries_no_setup_code():
     # the node writes and by every form it takes a typed code in (PI-NODE-2C F5)
     assert ha.SETUP_CODE.search(ha.SCRUBBED) is None and device_auth.setup_candidates(ha.SCRUBBED) == []
     assert ha.SETUP_CODE.search(ha._scrub("the code is K7QM-ZP4X (a new one at each start)")) is None
+
+
+def test_the_scrub_takes_a_setup_code_standing_alone_and_never_an_invite_codes_groups():
+    """H8. The scrub was the code's form, unbounded: an invite code — a name,
+    `#` and three groups of upper-case hex, of the setup code's alphabet
+    whenever they hold no 0 or 1 — lost two of its groups in every kept log
+    and every report that named one."""
+    for invite in ("listener#ABCD-EF23-4567", "listener#9A8B-7C6D-5E4F", "a#2345-6789-ABCD", "x#2345-6789-0BCD"):
+        for line in (f"invite code: {invite}", f"code={invite}", f'"{invite}"', invite, f"({invite}).",
+                     f"{invite}\nnext"):
+            assert ha._scrub(line) == line, line
+    for code in ("K7QM-ZP4X", "K7QM-ZP4X-9HTR"):          # two groups, and three before 2026-11-19
+        for before, after in (("", ""), ("code=", ""), ("setup code: ", "\n"), ('"', '"'), ("'", "'"),
+                              ("(", ")"), ("is ", "."), ("\t", " (also in setup_code.txt)"), ("a\n", "\nb")):
+            assert ha._scrub(f"{before}{code}{after}") == f"{before}{ha.SCRUBBED}{after}", (before, code, after)
+    for other in ("AK7QM-ZP4X", "K7QM-ZP4XA", "k7qm-zp4x", "K7QM-ZP4X-9HTR-ABCD"):
+        assert ha._scrub(other) == other, other
 
 
 def test_the_agent_and_the_node_agree_on_the_verbs_and_their_answers():
