@@ -1583,9 +1583,11 @@ def read_log(source: dict, info: dict, uri: Optional[str] = None) -> dict:
     out = {"source": source["kind"], "where": source.get("where"), "read_at": _iso(time.time()),
            "lines": [], "cause": None, "note": None}
     if source["kind"] == "none":
-        out["note"] = ("HQPlayer runs on another computer; its log is there — on Windows "
-                       "%LOCALAPPDATA%\\HQPlayer\\HQPlayer<version>Desktop.log, on macOS in "
-                       "~/.hqplayer/, written while logging is on in HQPlayer's settings.")
+        major = _major((info or {}).get("version"))
+        name = f"HQPlayer{major}Desktop.log" if major else "HQPlayer<version>Desktop.log"
+        out["note"] = (f"HQPlayer runs on another computer; its log is there — on Windows "
+                       f"%LOCALAPPDATA%\\HQPlayer\\{name}, on Linux and macOS ~/.hqplayer/{name}, "
+                       "written while logging is on in HQPlayer's settings.")
         return out
     try:
         if source["kind"] == "local":
@@ -1606,7 +1608,8 @@ def _major(version: Optional[str]) -> Optional[int]:
 
 
 _MOUNT_HINT = ("On a Docker node, set HQPLAYER_DATA_DIR in .env to HQPlayer's folder on the "
-               "host (on Windows %LOCALAPPDATA%\\HQPlayer) and recreate the container.")
+               "host (on Windows %LOCALAPPDATA%\\HQPlayer, on Linux and macOS ~/.hqplayer) and "
+               "recreate the container.")
 
 
 def _local_log(info: dict) -> tuple:

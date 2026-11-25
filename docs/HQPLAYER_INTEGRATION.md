@@ -2230,15 +2230,21 @@ answers. Where it lives:
 - **HQPlayer Desktop, macOS**: data in `~/.hqplayer/`; with logging on the log
   is `HQPlayer6Desktop.log` beside `settings.xml` (Desktop 6, the test Mac,
   2026-10-18).
+- **HQPlayer Desktop, Linux**: the same — `~/.hqplayer/HQPlayer6Desktop.log`
+  beside `settings.xml`, off on a first start (`<log enabled="0"/>`) until
+  logging is turned on in its settings (Desktop 6.2.1 on Raspberry Pi OS
+  trixie, 2026-11-24).
 - **HQPlayer Embedded / HQPlayer OS**: `GET http://<box>:8088/log` — plain
   text, the whole log since hqplayerd started, **no login** (verified
   2026-10-02 on HQPlayer OS, Embedded 6.1.0 / engine 6.2.3; the other admin
   pages answer HTTP Digest).
 - **HQPlayer Desktop on another computer**: no source from here; the sheet
-  says where its log lives.
+  says where its log lives (`%LOCALAPPDATA%\HQPlayer\` on Windows,
+  `~/.hqplayer/` on Linux and macOS, named by the major version).
 
 A Docker node reads the Desktop's folder through a read-only mount
-(`HQPLAYER_DATA_DIR` in `.env` → `/hqplayer`; only `settings.xml` and
+(`HQPLAYER_DATA_DIR` in `.env` — `%LOCALAPPDATA%\HQPlayer` on a Windows host,
+`~/.hqplayer` on a Linux or macOS one — → `/hqplayer`; only `settings.xml` and
 `HQPlayer*Desktop.log` are opened); the launcher reads its platform's own
 place. Recognised causes — every pattern seen in the maintainer's Desktop 5/6
 and Embedded logs, anything else shown raw: a file not found
