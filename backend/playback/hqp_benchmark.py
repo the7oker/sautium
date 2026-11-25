@@ -103,6 +103,7 @@ settle, and whether it dropped out — the speed seen just before a dropout
 is the host's boundary (hqp_load.thresholds).
 """
 
+import datetime
 import logging
 import sys
 import random
@@ -2317,20 +2318,25 @@ def _ledger(run_id: int, p: Point, result: str, note: Optional[str] = None,
 _watched: Dict[int, Optional[int]] = {}
 
 
-def _end_point(run_id: int, end: str) -> Optional[dict]:
+def _end_point(run_id: int, end: str, answered_at: datetime.datetime) -> Optional[dict]:
     """The run's slow start ended so (BENCH-GUARD-1 Gap 2): 'answered' with
-    the seconds from its Play to now — the row was written at the build
-    limit — 'ended' with none (when HQPlayer went is not known). Its filter
-    and those seconds, or None when no such point waits for its end."""
+    the seconds from its Play to HQPlayer's answer (`answered_at`) — the row
+    was written at the build limit — 'ended' with none (when HQPlayer went
+    is not known). Its filter and those seconds, or None when no such point
+    waits for its end."""
     return db_execute("""
         UPDATE hqp_benchmark_points
            SET build_end = %(end)s::hqp_build_end,
                build_s = CASE WHEN %(end)s = 'answered'
-                              THEN round((extract(epoch FROM now() - at) + %(bound)s)::numeric, 1)
+                              THEN round((extract(epoch FROM %(t)s - at) + %(bound)s)::numeric, 1)
                          END
          WHERE run_id = %(run)s AND result = 'slow_start' AND build_end IS NULL
         RETURNING filter, build_s
-    """, {"run": run_id, "end": end, "bound": BUILD_LIMIT_S})
+    """, {"run": run_id, "end": end, "t": answered_at, "bound": BUILD_LIMIT_S})
+
+
+def _now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
 
 
 def _build_end(before: Optional[int], now: Optional[int]) -> Optional[str]:
@@ -2353,45 +2359,47 @@ def _build_end(before: Optional[int], now: Optional[int]) -> Optional[str]:
 def _watch_build(run_id: int, serial: Optional[int], reached) -> Optional[str]:
     """A run that ended on a slow start: the restore reached HQPlayer
     (`reached`, its link) — its answer says now how the silence ended, and
-    the end is returned; silent through it, or not answering this question,
-    its end is read at HQPlayer's first answer to the playback link
-    (_put_run_back)."""
-    status = None
-    if reached is not None:
-        try:
-            status = reached("get_status")
-        except (_Reopened, _Lost):
-            status = None
-    if status is not None:
-        end = _build_end(serial, status.track_serial)
-        if end is not None:
-            _end_point(run_id, end)
-        return end
-    with _lock:
-        _watched[run_id] = serial
-    return None
+    the end is returned (unknown when it does not answer this question);
+    silent through it, its end is read at HQPlayer's first answer to the
+    playback link (_put_run_back)."""
+    if reached is None:
+        with _lock:
+            _watched[run_id] = serial
+        return None
+    # The run is over and closed as reached: no later answer is read for it,
+    # so a question not answered now leaves the end unknown (review round 3)
+    try:
+        status = _again(lambda: reached("get_status"))
+    except _Lost:
+        return None
+    end = None if status is None else _build_end(serial, status.track_serial)
+    if end is not None:
+        _end_point(run_id, end, _now())
+    return end
 
 
-def _end_read(run: dict, link) -> Optional[str]:
+def _end_read(run: dict, link) -> Optional[tuple]:
     """HQPlayer answers the put-back of a run that ended on a slow start
     (_watch_build): its first answer — read before anything is put back —
-    says how the silence ended (_build_end). None: no end waits, it cannot
-    tell, or HQPlayer did not answer (raised: silent still, or gone — read
+    says how the silence ended (_build_end), with when it came. None: no end
+    waits, or HQPlayer did not answer (raised: silent still, or gone — read
     at the next answer)."""
     with _lock:
         if run["id"] not in _watched:
             return None
         serial = _watched[run["id"]]
     status = link("get_status")
-    return None if status is None else _build_end(serial, status.track_serial)
+    return None if status is None else (_build_end(serial, status.track_serial), _now())
 
 
-def _end_said(run: dict, end: Optional[str]) -> Optional[str]:
-    """The end read (_end_read) on the point's row once the put-back
-    answered, and the recover note's clause for it, or None."""
+def _end_said(run: dict, read: Optional[tuple]) -> Optional[str]:
+    """The end read (_end_read: the end and when HQPlayer answered) on the
+    point's row once the put-back answered, and the recover note's clause
+    for it, or None."""
     with _lock:
         _watched.pop(run["id"], None)
-    row = _end_point(run["id"], end) if end is not None else None
+    end = read[0] if read is not None else None
+    row = _end_point(run["id"], end, read[1]) if end is not None else None
     if row is None:
         return None
     if end == "ended":

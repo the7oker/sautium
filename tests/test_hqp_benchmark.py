@@ -1699,10 +1699,11 @@ def test_a_slow_starts_end_is_read_off_hqplayers_track_serial():
 
 
 def test_the_end_the_restore_reads_is_the_one_its_row_and_its_words_hold(run):
-    """Review round 2 M1, L5: the restore reaching HQPlayer reads the end at
-    once — restarted under it, the serial counted afresh: ended, and the
-    run's words say too heavy; not answering that question, the end is
-    read at HQPlayer's next answer instead, never lost."""
+    """Review round 2 M1, round 3: the restore reaching HQPlayer reads the
+    end at once — restarted under it, the serial counted afresh: ended, and
+    the run's words say too heavy; not answering that question, the end
+    stays unknown — the run is closed as reached, no later answer is read
+    for it — and nothing is kept for it."""
     def slow_run():
         (rid,), = run.q("""INSERT INTO hqp_benchmark_runs (hqp_endpoint_id, hqp_engine, mode, points_planned,
                              pre_mode, pre_rate, pre_filter, pre_filter1x, pre_shaper, pre_volume)
@@ -1722,8 +1723,8 @@ def test_the_end_the_restore_reads_is_the_one_its_row_and_its_words_hold(run):
     def silent(method):
         raise bench._Lost("no answer")
     unread = slow_run()
-    assert bench._watch_build(unread, 5, silent) is None and bench._watched[unread] == 5
-    bench._watched.pop(unread)
+    assert bench._watch_build(unread, 5, silent) is None and unread not in bench._watched
+    assert run.q("SELECT build_end FROM hqp_benchmark_points WHERE run_id = %s", unread) == [(None,)]
 
 
 def test_a_point_at_auto_playing_across_families_off_hqplayers_list_waits_for_the_ask():

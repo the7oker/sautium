@@ -2888,7 +2888,10 @@ class HqpBackend(PlayerBackend):
                 quiet = building.get("not_answering")
                 if not quiet and (long_build is None or long_build[0] != building["since"]):
                     # a build begun before the poller saw the last one end:
-                    # that one's long word is no longer said (review round 2 M2)
+                    # that one's long word is no longer said (review round 2
+                    # M2) — gone in it, that is said (round 3)
+                    if self._long_said is not None and link.build.last_end() == "lost":
+                        self._build_lost = {**self._long_said[1], "since": self._long_said[0]}
                     long_build, self._long_said = self._long_build(building), None
                 long = long_build is not None and time.monotonic() >= long_build[1]
                 if long:
