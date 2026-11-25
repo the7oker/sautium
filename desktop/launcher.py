@@ -513,8 +513,7 @@ class LauncherApp(ctk.CTk):
 
         # QRs carry a pairing code so scanning the phone straight into a
         # signed-in session needs no typing. They keep themselves current
-        # from here on: scheduled against the code's own deadline, and
-        # redrawn out of turn if the code is burned.
+        # from here on, scheduled against the code's own deadline.
         self._start_event_streams()
         self._refresh_pairing_qr()
 
@@ -586,12 +585,9 @@ class LauncherApp(ctk.CTk):
                 except RuntimeError:
                     return          # main loop gone
 
-        for path, handler in (
-            ("/api/settings/library/stream", self._on_library_event),
-            ("/api/auth/pin/stream", self._refresh_pairing_qr),
-        ):
-            threading.Thread(target=_consume, args=(path, handler),
-                             daemon=True).start()
+        threading.Thread(target=_consume,
+                         args=("/api/settings/library/stream", self._on_library_event),
+                         daemon=True).start()
 
     def _on_library_event(self):
         """A scan or enrich worker reached a checkpoint. Only a scan this
@@ -602,12 +598,10 @@ class LauncherApp(ctk.CTk):
 
     def _refresh_pairing_qr(self):
         """Draw the QR with a code that is current, and arrange to redraw it
-        before that stops being true.
-
-        Two triggers, and they need different mechanisms. Expiry is a
-        deadline the server hands us, so we schedule against it — no polling,
-        we are not asking whether anything happened. A burn by failed /pair
-        guesses is unforeseeable, and that is what the SSE channel is for."""
+        before that stops being true: expiry is a deadline the server hands
+        us, so we schedule against it — no polling, we are not asking whether
+        anything happened. Nothing else ends a code: a wrong one burns
+        nothing (device_auth.redeem_pin)."""
         if self._qr_timer is not None:
             self.after_cancel(self._qr_timer)
             self._qr_timer = None

@@ -159,7 +159,7 @@ def test_the_first_run_form_offers_the_email_and_keeps_its_grant_for_the_next_pa
     assert 'input("auth-email", "email", "email (optional)")' in AUTH
     assert "This machine is too small to earn its network identity by computing." in AUTH
     assert AUTH.index("That email does not look right") < AUTH.index(
-        "let res = await window.Sautium.auth.createAccount(...given);")
+        "let res = await window.Sautium.auth.createAccount(...given, false, keep, email);")
     assert 'if (ok && email) await rememberEmail(email, given[1]);' in AUTH
     assert "sessionStorage.setItem(EMAIL_GRANT_KEY, r.data.grant)" in AUTH
     assert "const firstRunGrant = window.Sautium.auth.takeFirstRunEmailGrant();" in SHELL

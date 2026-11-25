@@ -1535,17 +1535,18 @@ def _notices_state() -> Dict[str, Any]:
 
 
 _REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures",
-            "power.undervoltage", "update.result")
+            "auth.pin_failures", "power.undervoltage", "update.result")
 
 
-def _login_failures_notice() -> Optional[Dict[str, Any]]:
-    """Wrong passwords since the owner last saw them
-    (device_auth.login_refused): a report, dropped once seen. Its onset is
+def _failures_notice(key: str) -> Optional[Dict[str, Any]]:
+    """Wrong credentials since the owner last saw them — passwords
+    (device_auth.login_refused) or pairing codes (device_auth.pin_refused),
+    each record's key its notice's: a report, dropped once seen. Its onset is
     the latest failure, so one after the owner looked is news."""
-    failures = _read(device_auth.LOGIN_FAILURES_KEY)
+    failures = _read(key)
     if not failures:
         return None
-    return {"key": "auth.login_failures", "kind": "warning", "since": failures["last"], "until": None,
+    return {"key": key, "kind": "warning", "since": failures["last"], "until": None,
             "data": {"count": failures["count"], "first": failures["since"], "last": failures["last"]}}
 
 
@@ -1760,9 +1761,10 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({"key": f"support.request.{row['id']}", "kind": "info",
                       "since": row["received_at"], "until": row["expires_at"],
                       "data": _support_request(row)})
-    login_failures = _login_failures_notice()
-    if login_failures is not None:
-        items.append(login_failures)
+    for key in (device_auth.LOGIN_FAILURES_KEY, device_auth.PIN_FAILURES_KEY):
+        failures = _failures_notice(key)
+        if failures is not None:
+            items.append(failures)
     # A signed release newer than the one this node runs, as the host
     # agent's last check found it (routers/host.py): the Update is one tap,
     # in Profile's Hardware profile block
@@ -1835,6 +1837,8 @@ def post_guidance_seen(task: str) -> Dict[str, Any]:
         # again while a lingering row stays retired — every derived row,
         # a seen report the channel no longer serves among them.
         _write("notice.seen", {n["key"]: n["since"] for n in _notice_items()})
+        # The wrong pairing codes' record starts again at the next one
+        device_auth.pin_failures_seen()
     elif task == "hqp_library":
         # per HQPlayer: another one chosen later lights the trail again
         import hqp_library

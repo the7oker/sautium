@@ -14029,6 +14029,25 @@
             'network is trying to guess the password.',
     };
   };
+  // Wrong pairing codes since the owner last saw this (device_auth.py
+  // pin_refused): a code Sautium shows is never typed, so one is a damaged
+  // link or a guess. A report, gone once seen.
+  NOTICE_COPY['auth.pin_failures'] = n => {
+    const d = n.data || {};
+    const at = (iso) => {
+      const t = new Date(iso);
+      return `${escapeHtml(t.toLocaleDateString([], { month: 'short', day: 'numeric' }))} at ` +
+             `<span class="num">${escapeHtml(t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))}</span>`;
+    };
+    const count = Number(d.count) || 0;
+    return {
+      title: 'Wrong pairing codes',
+      // The record is written as the count doubles (device_auth.pin_refused)
+      text: `${count === 1 ? '' : 'At least '}<span class="num">${count}</span> wrong pairing code${count === 1 ? '' : 's'} since ${at(d.first)}, ` +
+            `the last on ${at(d.last)}. A code Sautium shows is never typed; if these were not a damaged ` +
+            'link of yours, someone on your network is trying to guess one.',
+    };
+  };
   // A Raspberry Pi whose supply dropped under its voltage since the node's
   // start (backend/power_watch.py): a report, gone once seen. Draft words
   // for the owner's words review.
@@ -14453,7 +14472,7 @@
           <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">${STEP_UP_HOST_NOTE}</p>` : `
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${STEP_UP_LABEL}</span>
-            <input class="add-gear-input" data-step-up type="password" autocomplete="current-password">
+            ${window.Sautium.auth.passwordField('', '', 'current-password', 'data-step-up')}
           </label>`,
       // {password} to send, or {error}: what is missing, in words
       read(root) {
@@ -14761,10 +14780,10 @@
           <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
             Latin letters, digits, - or _ — it sits inside your invite code.
           </p>
-          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+          <div style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${needsPassword ? 'Password' : 'Password — optional'}</span>
-            <input class="add-gear-input" id="idPass" type="password" placeholder="min 8 characters" autocomplete="new-password">
-          </label>
+            <div id="idNewPass"></div>
+          </div>
           <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
             ${needsPassword
               ? 'This node is signed into by its password.'
@@ -14772,12 +14791,12 @@
           </p>
           <label id="idConfirmRow" style="display:flex;flex-direction:column;gap:calc(4*var(--px));" hidden>
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
-            <input class="add-gear-input" id="idPass2" type="password" autocomplete="new-password">
+            ${window.Sautium.auth.passwordField('idPass2', '', 'new-password')}
           </label>
           ${asksCurrent ? `
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Current password</span>
-            <input class="add-gear-input" id="idCurrent" type="password" autocomplete="current-password">
+            ${window.Sautium.auth.passwordField('idCurrent', '', 'current-password')}
           </label>` : `
           <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
             This node has no password, so the computer that runs Sautium vouches for the change:
@@ -14793,8 +14812,16 @@
     overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     const nameInput = overlay.querySelector('#idName');
-    const passInput = overlay.querySelector('#idPass');
     const pass2Input = overlay.querySelector('#idPass2');
+    // The new password's block (auth.js newPassword): the phrase offered,
+    // the time one GPU would take, the person's word under a year
+    const newPass = window.Sautium.auth.newPassword(overlay.querySelector('#idNewPass'), {
+      signed: true, id: 'idPass', placeholder: 'new password',
+      inputs: () => ({ username: nameInput.value.trim(), email: '' }),
+      onUse: (phrase) => { pass2Input.value = phrase; pass2Input.type = 'text'; },
+    });
+    nameInput.addEventListener('input', newPass.refresh);
+    const passInput = newPass.field;
     const currentInput = overlay.querySelector('#idCurrent');
     const confirmRow = overlay.querySelector('#idConfirmRow');
     const msg = overlay.querySelector('#idMsg');
@@ -14810,7 +14837,6 @@
       const currentPassword = currentInput ? currentInput.value : '';
       if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Nickname: 3-32 Latin letters, digits, - or _.');
       if (needsPassword && !password) return fail('Enter a password: this node is signed into by it.');
-      if (password && password.length < 8) return fail('Password must be at least 8 characters.');
       if (password && password !== pass2Input.value) return fail("Passwords don't match.");
       if (currentInput && !currentPassword) return fail('Enter the current password.');
       if (!asksCurrent && !window.Sautium.auth.hasHostCode()) {
@@ -14821,9 +14847,16 @@
       msg.textContent = 'Deriving the new key…';
       let result;
       try {
-        result = await window.Sautium.auth.changeIdentity(username, password, currentPassword);
+        result = await window.Sautium.auth.changeIdentity(username, password, currentPassword, newPass.keep());
       } catch (err) {
         result = { ok: false, error: 'Could not reach the node — try again.' };
+      }
+      if (result.weak) {
+        // Nothing changed: the door's words where the time is shown
+        confirmBtn.disabled = false;
+        newPass.said(result.weak);
+        return fail(result.weak.zone === 'word' ? 'Tick “I understand, keep it” to keep this password, or choose another.'
+          : 'Choose another password, or use the phrase.');
       }
       if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
       close();
@@ -19888,6 +19921,22 @@
     // dialog opens here, with no second tap (auth.js rememberEmail)
     const firstRunGrant = window.Sautium.auth.takeFirstRunEmailGrant();
     if (firstRunGrant) openEmailVerifyFlow(firstRunGrant);
+    // The sign-in just made said this account's password is under a year
+    // of one GPU, the first time it was estimated (device_auth.told_once):
+    // said once, here, and kept nowhere
+    const told = window.Sautium.auth.takePasswordTold();
+    if (told) {
+      window.notifyDialog({
+        title: 'This password can be found',
+        kind: 'info',
+        message: `One GPU would find this account's password in ${window.escapeProfileHtml(told.words)}. ` +
+          (told.env
+            ? "To change it: set a new P2P_PASSWORD in the node's .env and start it again. "
+            : 'To change it: Profile → Change nickname or password. ') +
+          'A new password is a new key and a new invite code: friends are told, and every device ' +
+          'signs in again.',
+      });
+    }
     // Registered before any screen's own listener: Friends and a chat
     // header repaint from the state this one has already taken
     window.addEventListener('sautium:identity', e => nodeIdentity.apply(e.detail || {}));

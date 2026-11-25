@@ -1993,11 +1993,16 @@ def signed_get(path: str) -> Optional[dict]:
         return None
 
 
+# The pairing code the node mints (backend/device_auth.PIN_GROUPS: 7 groups
+# of 4, 140 bits — nobody types it, so it is long; held to it by a test)
+PAIRING_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){6}")
+
+
 def cmd_pair(args) -> int:
     refuse_root()
     answer = signed_get("/api/auth/pin")
     code = str((answer or {}).get("code", ""))
-    if not agent.SETUP_CODE.fullmatch(code):
+    if not PAIRING_CODE.fullmatch(code):
         raise Stop("the node gave no pairing code: it must be running (docker compose up -d) and have "
                    "its account (open its address and create it first)")
     addresses = own_addresses()

@@ -280,6 +280,23 @@
     return { eph, ephB64: hs.eph, nodePubkey: hs.node_pubkey };
   }
 
+  // The routes of the first-run setup: the one moment a node answers with no
+  // identity of its own (handshake's `creating`)
+  const SETUP_PATHS = new Set(["/api/auth/create-account", "/api/auth/setup-estimate",
+                               "/api/auth/setup-phrase"]);
+
+  // What is sealed, padded to a whole number of BOX_BUCKET bytes (the
+  // `_pad` member every reader ignores): a box's length would otherwise be
+  // its payload's — a password's length, in every login's box. (The meter's
+  // requests still follow the keystrokes in number: what that says is
+  // accepted, SEC-S2 §15.) The node pads its replies the same way
+  // (device_auth.padded).
+  const BOX_BUCKET = 1024;
+  function padded(payload) {
+    const bare = enc.encode(JSON.stringify({ ...payload, _pad: "" })).length;
+    return enc.encode(JSON.stringify({ ...payload, _pad: " ".repeat((BOX_BUCKET - bare % BOX_BUCKET) % BOX_BUCKET) }));
+  }
+
   // POST `payload` sealed to a fresh handshake and open the sealed reply.
   // `viaSigned` sends it through the signing wrapper, for the routes that
   // want a signature on top of the box (logout-all, change-identity).
@@ -287,11 +304,10 @@
   // the node could not open (`channel`: its handshake let go meanwhile — the
   // node keeps a bounded number) is sealed again once, to a fresh handshake.
   async function boxedPost(path, payload, viaSigned, again = true, method = "POST") {
-    const hs = await handshake(path === "/api/auth/create-account");
+    const hs = await handshake(SETUP_PATHS.has(path));
     const kp = nacl.box.keyPair();
     const nonce = nacl.randomBytes(nacl.box.nonceLength);
-    const sealed = nacl.box(enc.encode(JSON.stringify(payload)), nonce,
-                            hs.eph, kp.secretKey);
+    const sealed = nacl.box(padded(payload), nonce, hs.eph, kp.secretKey);
     const r = await (viaSigned ? fetch : _origFetch)(path, {
       method,
       headers: { "Content-Type": "application/json" },
@@ -392,15 +408,24 @@
       if (!r.ok) return failure(r);
       setToken(r.data.token);
       pinNode(r.nodePubkey);
+      // The first sign-in of this password since the estimate exists: its
+      // time, for the page that loads next to say once (app-shell.js)
+      if (r.data.password) {
+        try { sessionStorage.setItem(PASSWORD_TOLD_KEY, JSON.stringify(r.data.password)); } catch (_) { /* no storage: not said */ }
+      }
       return true;
     },
     // `newIdentity`: the person's word that the pair is to make an identity
     // other than the one this node's records were signed with — sent only
     // after ANOTHER_IDENTITY came back and he was told what it costs.
-    async createAccount(username, password, setupCode, newIdentity = false) {
+    // `keep`: the person's word for a password one GPU would find within a
+    // year; `email`: the one typed beside it, a word the estimate tries
+    // first. A password under the door's edge resolves {weak: verdict}.
+    async createAccount(username, password, setupCode, newIdentity = false, keep = false, email = "") {
       const r = await boxedPost("/api/auth/create-account",
                                 { username, password, setup_code: setupCode,
-                                  new_identity: newIdentity });
+                                  new_identity: newIdentity, keep, email });
+      if (r.ok && r.data.password) return { weak: r.data.password };
       if (r.ok) {
         setToken(r.data.token);
         pinNode(r.data.public_key_hex);
@@ -414,7 +439,7 @@
       if (r.status === 429 && r.resp.headers.get("X-Sautium-Auth-Error") === "shut") {
         return `Too many wrong setup codes — the next try is taken in ${r.resp.headers.get("Retry-After")} s.`;
       }
-      if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: 8+ characters.";
+      if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: required.";
       return errorDetail(r, "Could not create the account.");
     },
     async pair(code) {
@@ -438,7 +463,7 @@
       setToken(r.data.token);
       return true;
     },
-    async changeIdentity(username, password, currentPassword) {
+    async changeIdentity(username, password, currentPassword, keep = false) {
       // A new name or password is a new key, and the token is bound to the
       // key — every paired browser is out, this one takes the fresh token
       // from the same reply and pins the new key. An account with a password
@@ -448,7 +473,7 @@
       try {
         r = await boxedPost("/api/auth/change-identity",
                             { username, password, current_password: currentPassword || "",
-                              pin: hostCode }, true);
+                              pin: hostCode, keep }, true);
       } catch (e) {
         if (e instanceof NodeChanged || e instanceof NodeUnset) {
           return { ok: false, error: "The node answering is not the one this browser signed in to — reload the page." };
@@ -459,6 +484,7 @@
         return { ok: false, error: r.status === 503 ? BUSY : r.status === 429 ? shut(r)
           : await errorDetail(r, `HTTP ${r.status}`) };
       }
+      if (r.data.password) return { ok: false, weak: r.data.password };
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
       return { ok: true, ...r.data };
@@ -495,6 +521,155 @@
                  : await errorDetail(r, `HTTP ${r.status}`) };
     },
   };
+
+  // -- a new password ----------------------------------------------------------
+  //
+  // Every form that makes or changes the account's password (the first-run
+  // setup here, Profile's change in app-shell.js) builds it alike: a phrase
+  // the node draws offered first, the field with its show control, and under
+  // it the time one GPU would take to find what is typed — the node's own
+  // estimate, the one its door holds (desktop/password_strength), asked
+  // through the box. One estimate is in flight at a time: a keystroke while
+  // one is out marks the field changed, and the answer's arrival sends the
+  // text as it stands then; no timer guesses when typing has stopped.
+
+  // Every sentence here is the node's (desktop/password_strength: the
+  // meter's line, a door's, the phrase's count, the note), so the launcher's
+  // wizard and this page say the same words.
+  const htmlText = (s) => String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const EYE = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+
+  // A password field with its show control. Paste is never blocked.
+  // `attrs`: more attributes of the input, as markup.
+  function passwordField(id, placeholder, autocomplete, attrs = "") {
+    return `<div class="pw-field">
+      <input class="add-gear-input" ${id ? `id="${id}"` : ""} ${attrs} type="password" placeholder="${htmlText(placeholder)}"
+             autocomplete="${autocomplete}" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button type="button" class="pw-show" aria-label="Show password" aria-pressed="false">${EYE}</button>
+    </div>`;
+  }
+
+  // Every show control on the page, one listener: a tap shows its field's
+  // text, the next hides it again.
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest && e.target.closest(".pw-show");
+    if (!btn) return;
+    const field = btn.parentElement.querySelector("input");
+    const shown = field.type === "password";
+    field.type = shown ? "text" : "password";
+    btn.setAttribute("aria-pressed", String(shown));
+    btn.setAttribute("aria-label", shown ? "Hide password" : "Show password");
+  });
+
+
+  // Build the new-password block into `root`. `signed`: a form of a
+  // signed-in browser (the signed routes); otherwise the first-run setup's.
+  // `inputs()`: the nickname and email typed beside it, which the estimate
+  // tries first. `onUse(phrase)`: a confirmation field to fill as well.
+  function newPassword(root, { signed, id, placeholder, inputs, onUse }) {
+    root.innerHTML = `
+      <p class="pw-offer" hidden>A phrase is drawn for you:
+        <span class="pw-phrase"></span> — <span class="pw-phrase-time"></span>
+        Keep it, write it down, or type your own.
+        <button type="button" class="pw-link" data-pw-use>Use it</button>
+        <button type="button" class="pw-link" data-pw-another>Another</button></p>
+      ${passwordField(id, placeholder, "new-password")}
+      <p class="pw-meter" aria-live="polite"></p>
+      <label class="pw-keep" hidden><input type="checkbox" data-pw-keep> I understand, keep it</label>
+      <p class="pw-note"></p>`;
+    const field = root.querySelector("input.add-gear-input");
+    const offer = root.querySelector(".pw-offer");
+    const meter = root.querySelector(".pw-meter");
+    const keepRow = root.querySelector(".pw-keep");
+    const keepBox = root.querySelector("[data-pw-keep]");
+    let drawn = null;               // {phrase, words}
+    let inFlight = false;
+    let changed = false;
+
+    const say = (zone, html) => {
+      meter.dataset.zone = zone;
+      meter.innerHTML = html;
+      keepRow.hidden = zone !== "word";
+      if (zone !== "word") keepBox.checked = false;
+    };
+    const showOffer = (o) => {
+      drawn = o;
+      offer.querySelector(".pw-phrase").textContent = o.phrase;
+      offer.querySelector(".pw-phrase-time").textContent = o.count;
+      root.querySelector(".pw-note").textContent = o.note;
+      offer.hidden = false;
+    };
+    let drawing = false;
+    async function draw() {
+      if (drawing) return;
+      drawing = true;
+      try {
+        const r = await boxedPost(signed ? "/api/auth/phrase" : "/api/auth/setup-phrase", {}, signed);
+        if (r.ok) showOffer(r.data);
+      } catch (e) {
+        // A node this browser has not accepted yet (NodeChanged) or one with
+        // no identity at a signed form (NodeUnset): the offer stays hidden,
+        // and the form's own submit asks the question
+        if (!(e instanceof NodeChanged || e instanceof NodeUnset)) throw e;
+      } finally {
+        drawing = false;
+      }
+    }
+    async function measure() {
+      const text = field.value;
+      // A node this page could not ask before (not accepted yet): its phrase
+      // is drawn now that the person types
+      if (!drawn) draw();
+      if (!text) { say("", ""); return; }
+      if (drawn && text === drawn.phrase) {
+        say("clear", htmlText(drawn.meter));
+        return;
+      }
+      inFlight = true;
+      changed = false;
+      let r = null;
+      try {
+        r = await boxedPost(signed ? "/api/auth/estimate" : "/api/auth/setup-estimate",
+                            { password: text, ...inputs() }, signed);
+      } catch (e) {
+        if (!(e instanceof NodeChanged || e instanceof NodeUnset)) { inFlight = false; throw e; }
+      }
+      inFlight = false;
+      if (changed) { measure(); return; }
+      // No answer (busy, a node not accepted): no time rather than an old one
+      if (!r || !r.ok) { say("", ""); return; }
+      say(r.data.zone, htmlText(r.data.meter));
+    }
+    const ask = () => { if (inFlight) changed = true; else measure(); };
+    field.addEventListener("input", ask);
+    root.querySelector("[data-pw-another]").addEventListener("click", draw);
+    root.querySelector("[data-pw-use]").addEventListener("click", () => {
+      if (!drawn) return;
+      field.value = drawn.phrase;
+      field.type = "text";           // to be read and written down
+      if (onUse) onUse(drawn.phrase);
+      // As if typed: the meter and the form's own listeners follow
+      field.dispatchEvent(new Event("input"));
+    });
+    draw();
+    return {
+      field,
+      keep: () => keepBox.checked,
+      // The nickname or email beside it changed: the estimate tries them first
+      refresh: ask,
+      // A door's verdict: its words in the meter's place, its phrase offered
+      said(v) {
+        if (v.offer) showOffer(v.offer);
+        say(v.zone, htmlText(v.door));
+      },
+    };
+  }
+
+  window.Sautium.auth.newPassword = newPassword;
+  window.Sautium.auth.passwordField = passwordField;
 
   // -- login gate ------------------------------------------------------------
 
@@ -551,6 +726,8 @@
               spellcheck="false" style="width:100%;margin-bottom:calc(10*var(--px));">`;
 
     let mode = "pin";
+    // The create form's new-password block (newPassword)
+    let newPass = null;
     let unnamedKey = false;
     let username = "";
     let emailRoad = false;
@@ -585,7 +762,7 @@
         // identity by computing it is the way to one (draft words for the
         // owner's words review); on any other it skips the wait.
         fields.innerHTML = input("auth-user", "text", "nickname") +
-                           input("auth-pass", "password", "password (8+ characters)") +
+                           '<div id="auth-newpass"></div>' +
                            input("auth-setup", "text", "setup code", setupFromUrl) +
                            input("auth-email", "email", "email (optional)") +
                            `<p class="confirm-message" style="margin-top:0;">${emailRoad
@@ -596,6 +773,14 @@
                              : "Optional. A verified email gives this node its network identity at " +
                                "once; without one it earns it by a calculation that takes a while."}</p>`;
         groupSetupCode(fields.querySelector("#auth-setup"));
+        newPass = newPassword(fields.querySelector("#auth-newpass"), {
+          signed: false, id: "auth-pass", placeholder: "password",
+          inputs: () => ({ username: fields.querySelector("#auth-user").value.trim(),
+                           email: (fields.querySelector("#auth-email") || { value: "" }).value.trim() }),
+        });
+        for (const beside of ["#auth-user", "#auth-email"]) {
+          fields.querySelector(beside).addEventListener("input", newPass.refresh);
+        }
         submit.textContent = "Create account";
       } else if (mode === "restore") {
         // No key, while the database says the node had one: the same
@@ -614,7 +799,8 @@
           "The setup code proves you run this node. " + setupCodePlace();
         fields.innerHTML = input("auth-user", "text", "nickname",
                                  /^[A-Za-z0-9_-]{3,32}$/.test(username) ? username : "") +
-                           input("auth-pass", "password", "password") +
+                           passwordField("auth-pass", "password", "current-password") +
+                           '<label class="pw-keep" hidden><input type="checkbox" data-pw-keep> I understand, keep it</label>' +
                            input("auth-setup", "text", "setup code", setupFromUrl);
         groupSetupCode(fields.querySelector("#auth-setup"));
         submit.textContent = "Bring it back";
@@ -623,7 +809,7 @@
         msg.textContent = username
           ? `Signing in as ${username}. Enter the account password.`
           : "Enter the account password.";
-        fields.innerHTML = input("auth-pass", "password", "password");
+        fields.innerHTML = passwordField("auth-pass", "password", "current-password");
       } else if (mode === "none") {
         // Nothing here can sign this browser in: a key with no account beside
         // it, or an account with no password on a node no host shows a code
@@ -645,7 +831,7 @@
           "This node has no account password. On the computer that runs " +
           "Sautium press “Open Web UI”, or scan the QR code shown " +
           "there with this device.";
-        fields.innerHTML = input("auth-pin", "text", "XXXX-XXXX");
+        fields.innerHTML = input("auth-pin", "text", "the pairing link or code");
       }
       showForm();
     }
@@ -742,7 +928,11 @@
             msg.textContent = "That email does not look right. Correct it, or leave the field empty.";
             return;
           }
-          let res = await window.Sautium.auth.createAccount(...given);
+          // The person's word for a password under a year: the block's box
+          // on the create form, the restore form's own once a door asked
+          const keepBox = fields.querySelector("[data-pw-keep]");
+          const keep = newPass ? newPass.keep() : !!(keepBox && keepBox.checked);
+          let res = await window.Sautium.auth.createAccount(...given, false, keep, email);
           if (res === ANOTHER_IDENTITY) {
             const yes = await window.confirmDestructive({
               title: "Another identity",
@@ -754,8 +944,14 @@
               confirmText: "Make a new identity", cancelText: "Check them again",
               focusCancel: true,
             });
-            res = yes ? await window.Sautium.auth.createAccount(...given, true)
+            res = yes ? await window.Sautium.auth.createAccount(...given, true, keep, email)
               : "Nothing was made. Check the nickname and password, then try again.";
+          }
+          if (res && res.weak) {
+            // Nothing was made: the door's words where the time is shown
+            if (newPass) newPass.said(res.weak);
+            else if (keepBox) keepBox.parentElement.hidden = res.weak.zone !== "word";
+            res = res.weak.door + (res.weak.zone === "word" ? " Tick the box to keep it." : "");
           }
           ok = res === true;
           why = typeof res === "string" ? res : "Could not create the account.";
@@ -766,8 +962,10 @@
           ok = res === true;
           why = typeof res === "string" ? res : "Wrong password.";
         } else {
-          const res = await window.Sautium.auth.pair(
-            overlay.querySelector("#auth-pin").value.trim());
+          // A pasted link carries the code in its fragment
+          const typed = overlay.querySelector("#auth-pin").value.trim();
+          const linked = /(?:^|[#&])pair=([A-Za-z0-9-]+)/.exec(typed);
+          const res = await window.Sautium.auth.pair(linked ? linked[1] : typed);
           ok = res === true;
           why = typeof res === "string" ? res : "That code is wrong or has expired — get a new one on the host.";
         }
@@ -787,7 +985,9 @@
 
     submit.addEventListener("click", attempt);
     overlay.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") attempt();
+      // Enter on a button is that button's (the phrase's Use it, Another, a
+      // show control): the form is sent from a field
+      if (e.key === "Enter" && !(e.target.closest && e.target.closest("button"))) attempt();
     });
   }
 
@@ -844,6 +1044,15 @@
   // (app-shell.js). A failure here loses nothing: the account exists, and
   // the trail leads to Profile's Email row.
   const EMAIL_GRANT_KEY = "sautium.first_run_email_grant";
+  const PASSWORD_TOLD_KEY = "sautium.password_told";
+  window.Sautium.auth.takePasswordTold = () => {
+    let told = null;
+    try {
+      told = JSON.parse(sessionStorage.getItem(PASSWORD_TOLD_KEY) || "null");
+      sessionStorage.removeItem(PASSWORD_TOLD_KEY);
+    } catch (_) { /* no storage: nothing to say */ }
+    return told;
+  };
   async function rememberEmail(email, password) {
     try {
       const r = await window.Sautium.auth.boxed("/api/p2p/account/email", { email },

@@ -22,6 +22,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
+from desktop import password_strength
 from desktop.agent_login import (
     AgentLogin,
     claude_login_command,
@@ -257,6 +258,7 @@ class SetupWizard(ctk.CTkToplevel):
             self._account_pass_val = password
             self._account_pass2_val = password2
             self._account_email_val = email
+            self._account_keep_val = self._account_keep.get()
 
             if email and "@" not in email:
                 self._account_error.configure(text="Invalid email address")
@@ -278,10 +280,20 @@ class SetupWizard(ctk.CTkToplevel):
                     self._account_error.configure(
                         text="Choose a nickname to go with the password")
                     return False
-                if len(password) < 8:
+                # The edge every door holds (desktop/password_strength):
+                # under an hour of one GPU refused, under a year kept only
+                # on the person's own word
+                verdict = password_strength.verdict(password, (username, email))
+                # The box beside the meter follows the words as validated
+                # now (the email may have been typed after the password)
+                self._account_measure()
+                if verdict["zone"] == "refused":
                     self._account_error.configure(
-                        text="Password must be at least 8 characters"
-                    )
+                        text=verdict["door"] + " Use the phrase above, or another.")
+                    return False
+                if verdict["zone"] == "word" and not self._account_keep.get():
+                    self._account_error.configure(
+                        text=verdict["door"] + " Tick “I understand, keep it” to keep it, or choose another.")
                     return False
                 if password != password2:
                     self._account_error.configure(text="Passwords don't match")
@@ -612,22 +624,99 @@ class SetupWizard(ctk.CTkToplevel):
         hint(2, "Latin letters, digits, - or _ — it sits inside your invite code.")
 
         label(3, "Password — optional")
-        self._account_pass = entry(
-            4, getattr(self, "_account_pass_val", ""), show="*",
-            placeholder_text="min 8 characters")
-        hint(5, "Makes this nickname yours on any device. Without it, the "
-                "identity lives only on this machine.")
+        # A phrase drawn for the person first (desktop/password_strength:
+        # four words of EFF's list by `secrets`), with the draw's own count
+        offer = ctk.CTkFrame(fields, fg_color="transparent")
+        offer.grid(row=4, column=0, sticky="ew", pady=(0, 4))
+        self._phrase = getattr(self, "_phrase", None) or password_strength.phrase_offer()
+        offer_text = ctk.CTkLabel(offer, anchor="w", height=0, justify="left", wraplength=360,
+                                  font=ctk.CTkFont(size=12), text="")
+        offer_text.pack(side="left", fill="x", expand=True)
 
-        confirm_label = label(6, "Confirm password")
+        def show_offer():
+            offer_text.configure(
+                text=f"A phrase is drawn for you: {self._phrase['phrase']} — {self._phrase['count']} "
+                     "Keep it, write it down, or type your own.")
+
+        def another():
+            self._phrase = password_strength.phrase_offer()
+            show_offer()
+            measure()
+
+        def use_phrase():
+            for widget in (self._account_pass, self._account_pass2):
+                widget.delete(0, "end")
+                widget.insert(0, self._phrase["phrase"])
+            show_var.set(True)
+            toggle_show()
+            sync_confirm()
+            measure()
+
+        ctk.CTkButton(offer, text="Another", width=70, command=another,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=(4, 0))
+        ctk.CTkButton(offer, text="Use it", width=60, command=use_phrase,
+                      fg_color="transparent", border_width=1).pack(side="right")
+        show_offer()
+
+        pass_row = ctk.CTkFrame(fields, fg_color="transparent")
+        pass_row.grid(row=5, column=0, sticky="ew", pady=(0, 4))
+        pass_row.grid_columnconfigure(0, weight=1)
+        self._account_pass = ctk.CTkEntry(pass_row, show="*", placeholder_text="password")
+        self._account_pass.grid(row=0, column=0, sticky="ew")
+        if getattr(self, "_account_pass_val", ""):
+            self._account_pass.insert(0, self._account_pass_val)
+        show_var = ctk.BooleanVar(value=False)
+
+        def toggle_show():
+            mask = "" if show_var.get() else "*"
+            self._account_pass.configure(show=mask)
+            self._account_pass2.configure(show=mask)
+
+        ctk.CTkCheckBox(pass_row, text="Show", variable=show_var, command=toggle_show,
+                        width=60).grid(row=0, column=1, padx=(8, 0))
+
+        # The time one GPU would take, as every door reads it — on each key
+        # released: an event, a few milliseconds of zxcvbn
+        meter = ctk.CTkLabel(fields, text="", anchor="w", height=0, justify="left",
+                             wraplength=520, font=ctk.CTkFont(size=12))
+        meter.grid(row=6, column=0, sticky="ew", pady=(0, 2))
+        self._account_keep = ctk.BooleanVar(value=getattr(self, "_account_keep_val", False))
+        keep_box = ctk.CTkCheckBox(fields, text="I understand, keep it", variable=self._account_keep)
+        keep_box.grid(row=7, column=0, sticky="w", pady=(0, 4))
+
+        def measure(_event=None):
+            text = self._account_pass.get()
+            zone = ""
+            if not text:
+                meter.configure(text="")
+            elif text == self._phrase["phrase"]:
+                zone = "clear"
+                meter.configure(text=self._phrase["meter"], text_color="gray")
+            else:
+                v = password_strength.verdict(text, (self._account_user.get().strip(),
+                                                     self._account_email.get().strip()))
+                zone = v["zone"]
+                meter.configure(text=v["meter"],
+                                text_color={"refused": "#C1564E", "word": "#E8B06F"}.get(zone, "gray"))
+            if zone == "word":
+                keep_box.grid()
+            else:
+                self._account_keep.set(False)
+                keep_box.grid_remove()
+
+        hint(8, "Makes this nickname yours on any device. Without it, the "
+                "identity lives only on this machine. " + password_strength.PASSWORD_NOTE)
+
+        confirm_label = label(9, "Confirm password")
         self._account_pass2 = entry(
-            7, getattr(self, "_account_pass2_val", ""), show="*")
+            10, getattr(self, "_account_pass2_val", ""), show="*")
         self._account_pass2.grid_configure(pady=(0, 10))
 
-        label(8, "Email — optional")
+        label(11, "Email — optional")
         self._account_email = entry(
-            9, getattr(self, "_account_email_val", ""),
+            12, getattr(self, "_account_email_val", ""),
             placeholder_text="you@example.com")
-        hint(10, "Friends find you by it, and the network admits you at once "
+        hint(13, "Friends find you by it, and the network admits you at once "
                 "— no proof of work to mine — with priority access when it "
                 "is busy. If this machine is ever lost, the mailbox carries "
                 "your standing to the next identity.")
@@ -635,7 +724,7 @@ class SetupWizard(ctk.CTkToplevel):
         # The other way in: a backup of an existing node. Its identity and
         # database replace whatever the fields above would have created.
         restore_row = ctk.CTkFrame(fields, fg_color="transparent")
-        restore_row.grid(row=11, column=0, sticky="ew", pady=(4, 0))
+        restore_row.grid(row=14, column=0, sticky="ew", pady=(4, 0))
         self._restore_status = ctk.CTkLabel(
             restore_row, anchor="w", height=0, font=ctk.CTkFont(size=12),
             justify="left", wraplength=330,
@@ -659,8 +748,13 @@ class SetupWizard(ctk.CTkToplevel):
             for widget in (confirm_label, self._account_pass2):
                 widget.grid() if show else widget.grid_remove()
 
-        self._account_pass.bind("<KeyRelease>", sync_confirm)
+        self._account_pass.bind("<KeyRelease>", lambda e: (sync_confirm(), measure()))
+        # The nickname and email are what the estimate tries first
+        for beside in (self._account_user, self._account_email):
+            beside.bind("<KeyRelease>", measure)
+        self._account_measure = measure
         sync_confirm()
+        measure()
 
         self._account_error = ctk.CTkLabel(
             self.content_frame, text="", text_color="red",
