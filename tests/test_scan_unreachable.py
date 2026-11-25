@@ -608,6 +608,31 @@ def test_a_prune_of_its_own_keeps_what_it_could_not_read(cur, library, monkeypat
 # nobody had played or analysed, and when the folder came back its analysis
 # stayed unlinked, so the next pass recomputed it in full.
 
+def test_the_away_count_says_the_copies_and_the_albums_no_other_copy_holds(cur, library):
+    """"Away 27 albums" counted every album with a copy away, those with a
+    copy here too; the row says both, an album with no other copy by
+    sql_queries.album_away's rule — a copy that holds no file is none
+    (PI-NODE-2E H3)."""
+    solo = _owned_file(cur, "Solo/LP")
+    kept = _owned_file(cur, "Kept/LP (CD)")
+    for folder in (solo, kept):
+        cur.execute("UPDATE album_variants SET absent_since = now() WHERE directory_path = %s",
+                    (folder,))
+    cur.execute("SELECT album_id FROM album_variants WHERE directory_path = %s", (solo,))
+    cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s)",
+                (cur.fetchone()[0], solo + " (empty)"))
+    cur.execute("SELECT album_id FROM album_variants WHERE directory_path = %s", (kept,))
+    album = cur.fetchone()[0]
+    track = str(uuid.uuid4())
+    cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'Silent Walking')", (track,))
+    cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
+                (album, kept.replace("(CD)", "(Vinyl)")))
+    cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path) VALUES (%s, %s, %s)",
+                (track, cur.fetchone()[0], kept.replace("(CD)", "(Vinyl)") + "/01.flac"))
+
+    assert asyncio.run(settings_router._library_state())["away"] == {"copies": 2, "albums": 1}
+
+
 def test_the_plan_names_what_the_removal_would_delete_and_deletes_nothing(
         cur, library, main_module, monkeypatch):
     _owned_file(cur)                              # a whole copy gone: away

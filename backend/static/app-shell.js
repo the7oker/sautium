@@ -18629,6 +18629,14 @@
     return lines.join(' ');
   }
   let _prunePlanOpen = false;
+  // The Away row's count: the copies away, and of them the albums no other
+  // copy holds (lib.away.albums) — what a removal takes with them.
+  function _awayCount(away) {
+    const copies = `${_count(away.copies, 'copy', 'copies')} away`;
+    return away.albums
+      ? `${copies} — ${_count(away.albums, 'album has', 'albums have')} no other copy`
+      : `${copies} — each album has another copy`;
+  }
   // The yeses this tab sent (plan id → kind) until the run that answers one
   // ends: a removal the node refused when it looked — the folder gone
   // between the yes and the removal — is said once, here, where yes was
@@ -19014,7 +19022,7 @@
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Away</span>
-            <span class="row-stack-value" data-library-away>${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
+            <span class="row-stack-value" data-library-away>${escapeProfileHtml(_awayCount(away))}</span>
           </div>
           <div class="row-stack-sub">Their files were not found at the last Rescan. They stay in your library until you remove them, and come back by themselves when a scan finds their files.</div>
         </div>
@@ -19267,7 +19275,7 @@
       set('[data-library-last-scan]', fmtRelative(lib.last_scan_at));
       if (lib.last_scan_at) set('[data-library-last-scan-at]', fmtAbs(lib.last_scan_at));
     }
-    set('[data-library-away]', _count((lib.away || {}).albums, 'album', 'albums'));
+    set('[data-library-away]', _awayCount(lib.away || {}));
   }
 
   // What decides the Library screen's structure beyond its workers and its

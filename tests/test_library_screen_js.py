@@ -111,12 +111,13 @@ const escapeProfileHtml = s => String(s);
 const _count = (n, one, many) => `${n || 0} ${n === 1 ? one : many}`;
 const _statCell = (label, value) => `[${label}=${value}]`;
 %(cells)s
+%(away)s
 %(numbers)s
 const made = sel => ({ textContent: 'old', innerHTML: 'old', dataset: {}, sel });
 const els = {};
 const root = { querySelector: sel => (els[sel] = els[sel] || made(sel)) };
 const lib = { total_tracks: 8187, total_artists: 58, total_albums: 223, total_genres: 13, total_size_bytes: 4096,
-              last_scan_at: 'T1', away: { albums: 200, copies: 200 } };
+              last_scan_at: 'T1', away: { albums: 180, copies: 200 } };
 _refreshLibraryNumbers(root, lib, false);
 const first = { stats: els['[data-library-stats]'].innerHTML, size: els['[data-library-size]'].textContent,
                 scan: els['[data-library-last-scan]'].textContent, at: els['[data-library-last-scan-at]'].textContent,
@@ -133,13 +134,14 @@ console.log(JSON.stringify({ first, again: els['[data-library-stats]'].innerHTML
 
 
 def test_the_numbers_are_written_where_they_stand_and_only_when_they_moved():
-    script = NUMBERS % {"cells": _function("_libraryStatCells(lib)"),
+    script = NUMBERS % {"cells": _function("_libraryStatCells(lib)"), "away": _function("_awayCount(away)"),
                         "numbers": _function("_refreshLibraryNumbers(root, lib, scanRunning)")}
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == {
         "first": {"stats": "[Tracks=8187][Artists=58][Albums=223][Genres=13]", "size": "4096 B",
-                  "scan": "rel:T1", "at": "abs:T1", "away": "200 albums"},
+                  "scan": "rel:T1", "at": "abs:T1",
+                  "away": "200 copies away — 180 albums have no other copy"},
         "again": "untouched", "running": "running…"}
 
 
@@ -413,3 +415,21 @@ def test_a_removal_refused_when_it_looked_is_said_once_to_the_tab_that_said_yes(
         {"kind": "error", "key": "library.prune", "title": "Rescan", "text": "refused here"}]
     assert got["kept"] == []
 
+
+AWAY = r"""
+'use strict';
+const fmtNum = n => String(n);
+const _count = (n, one, many) => `${fmtNum(n)} ${n === 1 ? one : many}`;
+%(away)s
+console.log(JSON.stringify(%(cases)s.map(_awayCount)));
+"""
+
+
+def test_the_away_count_says_the_copies_and_the_albums_no_other_copy_holds():
+    cases = [{"copies": 27, "albums": 18}, {"copies": 1, "albums": 1}, {"copies": 3, "albums": 0}]
+    script = AWAY % {"away": _function("_awayCount(away)"), "cases": json.dumps(cases)}
+    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == ["27 copies away — 18 albums have no other copy",
+                                      "1 copy away — 1 album has no other copy",
+                                      "3 copies away — each album has another copy"]
