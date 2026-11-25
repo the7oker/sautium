@@ -858,6 +858,9 @@ async def _library_state() -> Dict[str, Any]:
         "cancel_requested":  bool(_scan_state.get("cancel_requested")),
         "progress":          _scan_state.get("progress"),
         "stats":             _scan_state.get("stats"),
+        # the last run's outcome: a removal refused when it looked
+        # (result.prune.refused) is said by the page that said yes
+        "result":            _scan_state.get("result"),
         "prune_plan":        (_prune_plan_counts(_scan_state["prune_plan"])
                               if _scan_state.get("prune_plan") else None),
     }
@@ -878,10 +881,18 @@ async def _library_state() -> Dict[str, Any]:
     # wakes them.
     check_folder()
     # Copies a Rescan found none of the files of: kept, and removed only from
-    # the row these numbers make (the partial index holds only them).
+    # the row these numbers make (the partial index holds only them). Of
+    # their albums, those that are away — no copy holding a file is not
+    # (sql_queries.album_away's rule): what a removal would take with them.
     away = db_query_one("""
-        SELECT count(*) AS copies, count(DISTINCT album_id) AS albums
-        FROM album_variants WHERE absent_since IS NOT NULL""")
+        SELECT count(*) AS copies,
+               count(DISTINCT av.album_id) FILTER (WHERE NOT EXISTS (
+                   SELECT 1 FROM album_variants o
+                    WHERE o.album_id = av.album_id AND o.absent_since IS NULL
+                      AND (EXISTS (SELECT 1 FROM media_files m WHERE m.album_variant_id = o.id)
+                           OR EXISTS (SELECT 1 FROM hqp_library_files h
+                                       WHERE h.album_variant_id = o.id)))) AS albums
+        FROM album_variants av WHERE av.absent_since IS NOT NULL""")
 
     import library_root
     from claude_code import is_launcher_mode
