@@ -1559,12 +1559,12 @@ def test_a_queued_file_of_a_copy_set_aside_moves_to_a_present_copy(
     from playback.queue import QueueItem, rebind_origins
     _also_on_a_compilation(library, library / "Ostrava Unit" / "Pulse Archive" / "01.flac")
     _scan(main_module, monkeypatch, False)
-    cur.execute("SELECT mf.id, mf.track_id::text FROM media_files mf JOIN tracks t ON t.id = mf.track_id "
+    cur.execute("SELECT mf.id, mf.track_id::text, mf.file_path FROM media_files mf JOIN tracks t ON t.id = mf.track_id "
                 "WHERE mf.file_path LIKE '%%/Pulse Archive/%%' ORDER BY t.title")
-    (carrier_mf, carrier), (relay_mf, relay) = cur.fetchall()
+    (carrier_mf, carrier, carrier_path), (relay_mf, relay, relay_path) = cur.fetchall()
     slots = [QueueItem(track_id=tid, media_file_id=mid, title="",
-                       source={"kind": "file", "path": "", "format": "FLAC"})
-             for mid, tid in ((carrier_mf, carrier), (relay_mf, relay))]
+                       source={"kind": "file", "path": path, "format": "FLAC"})
+             for mid, tid, path in ((carrier_mf, carrier, carrier_path), (relay_mf, relay, relay_path))]
     _move(library / "Ostrava Unit", tmp_path / "card" / "Ostrava Unit")
     listener = psycopg2.connect(scratch_dsn)
     listener.autocommit = True
