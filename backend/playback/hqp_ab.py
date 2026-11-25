@@ -169,6 +169,7 @@ WORDS = {
     "rate": "It would make HQPlayer stop on this track: it does not convert {src} to {out}",
     "not_in_atlas": "Not in Sautium's measurements for this context",
     "slow_start": "Over a minute to start here",
+    "too_heavy": "Ended HQPlayer here",                                              # BENCH-GUARD-1 C3c
     "refused": "HQPlayer refuses it at this setting",
     "unstarted": "HQPlayer never got it going on this computer",
     "identical": "The same output as {other}, so one of them is offered.",
@@ -185,6 +186,7 @@ EMPTY = {
     "rate": "Every other filter would make HQPlayer stop on this track: none converts {src} to {out}.",
     "not_in_atlas": "No other filter is in Sautium's measurements for this context.",
     "slow_start": "Every other filter took over a minute to start here.",
+    "too_heavy": "Every other filter ended HQPlayer here.",
     "refused": "HQPlayer refuses every other filter at this setting.",
     "unstarted": "HQPlayer never got the other filters going on this computer.",
     "identical": "Every other filter gives the same output as yours here.",

@@ -438,6 +438,49 @@ def test_a_condition_the_output_is_in_is_a_toast_while_it_lasts():
     assert _keys(out["rebuilding"])[2] == _keys(out["connecting"])[2] == []
 
 
+def test_a_build_past_this_hosts_usual_one_is_a_word_the_person_closes():
+    """BENCH-GUARD-1 (B-153 (3), Q8): a silent build past this host's usual
+    one turns its passive toast into a word the person may close: what such
+    a build took here — the Benchmark's measurement, never a guess — how to
+    leave now, and across rate families what avoids it; HQPlayer answering
+    ends it. HQPlayer gone in it is said once."""
+    base = {"state": "stopped", "output": OUT}
+    build = {"since": 100.0, "command": "Play", "silent": True}
+    across = {"usual_s": 25.1, "cross": True, "source": 44100, "rate": 768000, "source_name": "44.1 kHz",
+              "rate_name": "768 kHz", "own": None,
+              "across": {"start_s": None, "built_s": 358.0, "slow": 3, "ended": False}}
+    within = {"usual_s": 20.0, "measured": False, "cross": None, "source": None, "rate": None, "own": None,
+              "across": None}
+    measured = {**within, "usual_s": 25.1, "measured": True, "cross": False,
+                "own": {"slow_start": True, "ended": False, "built_s": 93.0}}
+    out = _run({"across": [base, {**base, "building": build}, {**base, "building": {**build, "long": across}},
+                           base],
+                "within": [base, {**base, "building": {**build, "long": within}}],
+                "measured": [base, {**base, "building": {**build, "long": measured}}],
+                "unfinished": [base, {**base, "building": {**build, "unfinished": True, "long": within}}],
+                "lost": [base, {**base, "build_lost": {**within, "since": 100.0}}, base,
+                         {**base, "build_lost": {**within, "since": 100.0}}]}, cap=3)
+    assert _keys(out["across"]) == [[], ["hqplayer.building"], ["hqplayer.building"], []]
+    shown = out["across"][2]["shown"][0]
+    assert (shown["title"], shown["taps"], shown["buttons"]) == ("HQPlayer is still building the filter", True,
+                                                                 ["×"])
+    assert shown["text"] == (
+        "It answers nothing until it is done. From a 44.1 kHz source to 768 kHz is a change of rate family, and "
+        "some filters take minutes or hours to build for it here — on this HQPlayer one such filter took 6 min, "
+        "and 3 did not start within a minute. To leave now, restart HQPlayer, then choose a lighter filter "
+        "before you press Play — HQPlayer comes back on this setting. With the rate at Auto and Auto rate "
+        "family on, HQPlayer stays in each source's family and builds none of this.")
+    assert out["within"][1]["shown"][0]["text"] == (
+        "It answers nothing until it is done — longer than a start usually takes (20 s). To leave now, restart "
+        "HQPlayer, then choose a lighter filter before you press Play — HQPlayer comes back on this setting.")
+    assert out["measured"][1]["shown"][0]["text"].startswith(
+        "It answers nothing until it is done — longer than any start the Benchmark measured here (25 s) — this "
+        "setting took 93 s here before.")
+    assert out["unfinished"][1]["shown"][0]["text"].startswith("It did not finish in 10 minutes. To leave now")
+    assert "hqplayer.build_lost" in _keys(out["lost"])[1]
+    assert out["lost"][1]["shown"][0]["title"] == "HQPlayer went away while it built the filter"
+
+
 def test_news_never_waits_behind_a_lasting_toast():
     """A phone shows one toast. A lasting one on screen steps aside for
     news — the news shows at once, the lasting toast waits behind it and is
@@ -598,7 +641,7 @@ def test_a_connections_floor_reaches_the_page_when_its_first_status_is_supersede
 # objects' — in any spelling (a dot, a bracket, a destructuring)
 NOTICE_KEYS = ("diagnosis", "output_event", "event_floor", "building", "not_answering", "rebuilding", "resume",
                "paused_on_device", "dsp_change", "seek_missed", "other_refused", "hold", "connecting", "taken",
-               "starting", "failing")
+               "starting", "failing", "build_lost")
 # How often the two objects, whole, reach for the status outside their handlers' argument, raise a
 # notice, or listen for one: the sheet's radio button says its failure in a toast, and its Similar
 # rows mark the track that plays; nothing else

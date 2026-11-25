@@ -22,7 +22,10 @@ and the source HQPlayer decodes (<metadata samplerate channels>): each one
 changes the cost. hqp_dsp_speed is the per-key rollup the pickers badge
 from, refreshed in the transaction that writes the sample: the key's newest
 benchmark point and every listen after it, all of them while it has none.
-Samples live RETENTION_DAYS; the rollup keeps what they said.
+Samples live RETENTION_DAYS; the rollup keeps what they said. What the
+engine itself answered a benchmark — a refusal, a setting it never got
+going, one it did not start within the build limit — holds for as long as
+the engine build does (ENGINE_ANSWERS).
 """
 
 import logging
@@ -52,6 +55,12 @@ SAMPLE_AFTER_S = 15.0
 SAMPLE_EVERY_S = 60.0
 
 RETENTION_DAYS = 90
+# What a run asked that the ENGINE answered — refused, never got going, or
+# not started within the build limit — holds while the engine build is the
+# same (BENCH-GUARD-1 Q1): a build that took past the limit does not get
+# faster with time, and a refusal is the engine's own rule. A measured speed
+# moves with the host's state (B-142) and keeps the retention.
+ENGINE_ANSWERS = ("refused", "unstarted", "slow_start")
 # Listens that make a benchmark point needless — as one benchmark point does.
 PASSIVE_COVER = 3
 # A dropout above this speed is not the DSP falling behind (a setting that
@@ -216,6 +225,22 @@ _RUN_KEY = """r.hqp_endpoint_id = %(endpoint_id)s AND r.hqp_engine = %(engine)s
           AND r.matrix_profile IS NOT DISTINCT FROM %(matrix_profile)s
           AND r.convolution = %(convolution)s"""
 
+
+# A ledger row's answer as the readers that show it name it: a slow start
+# HQPlayer did not come out of — it went away or was restarted in the build
+# (BENCH-GUARD-1 Gap 2) — is "too heavy here"; planning reads `result` alone.
+def _shown(p: str) -> str:
+    return (f"CASE WHEN {p}.result = 'slow_start' AND {p}.build_end = 'ended' THEN 'too_heavy' "
+            f"ELSE {p}.result::text END")
+
+
+def _lives(p: str, days: str = "%(days)s") -> str:
+    """A ledger row (`p`) that still counts: an engine's own answer
+    (ENGINE_ANSWERS) for as long as its key — the engine build among it —
+    holds, any other within the retention."""
+    answers = ", ".join(f"'{a}'" for a in ENGINE_ANSWERS)
+    return f"({p}.result IN ({answers}) OR {p}.at >= now() - make_interval(days => {days}))"
+
 _ROLLUP_SQL = f"""
     WITH s AS (
         SELECT process_speed, source, sampled_at, dropout, settled, init_s, settle_s,
@@ -295,13 +320,15 @@ def context(endpoint: dict, *, mode: str, state: dict) -> Dict[str, Any]:
 
 
 def covered(ctx: Dict[str, Any]) -> set:
-    """The keys that need no benchmark point, within the retention and for
-    this build and context — (rate, filter, shaper, src_rate, src_channels):
-    a benchmark point or PASSIVE_COVER listens of what HQPlayer PLAYED, and
+    """The keys that need no benchmark point, for this build and context —
+    (rate, filter, shaper, src_rate, src_channels): a benchmark point or
+    PASSIVE_COVER listens of what HQPlayer PLAYED within the retention, and
     every point a run ASKED for that ended in an answer (measured, unsettled,
-    dropped out, refused by HQPlayer, never started on this host — not
-    a point that failed to run): a refused combination, or an adaptive rate
-    that plays another one, is never a sample of the key that was asked."""
+    dropped out within the retention; refused by HQPlayer, never started or
+    not started within the build limit on this host for as long as the engine
+    is the same — not a point that failed to run): a refused combination, or
+    an adaptive rate that plays another one, is never a sample of the key
+    that was asked."""
     rows = db_query(f"""
         SELECT rate_out AS rate, filter, shaper, src_rate, src_channels FROM hqp_dsp_speed
          WHERE {_KEY}
@@ -312,7 +339,7 @@ def covered(ctx: Dict[str, Any]) -> set:
           FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
          WHERE {_RUN_KEY}
            AND p.result NOT IN ('failed', 'implied')
-           AND p.at >= now() - make_interval(days => %(days)s)
+           AND {_lives("p")}
     """, {**ctx, "days": RETENTION_DAYS, "cover": PASSIVE_COVER})
     return {(r["rate"], r["filter"], r["shaper"], r["src_rate"], r["src_channels"]) for r in rows}
 
@@ -336,7 +363,7 @@ def keeps_up(ctx: Dict[str, Any]) -> Dict[tuple, bool]:
           LEFT JOIN hqp_dsp_samples s ON s.id = p.sample_id
          WHERE {_RUN_KEY}
            AND (s.id IS NOT NULL OR p.result IN ('unstarted', 'slow_start'))
-           AND p.at >= now() - make_interval(days => %(days)s)
+           AND {_lives("p")}
         UNION ALL
         SELECT 1, last_seen, rate_out, filter, shaper, src_rate, src_channels,
                speed_p10 >= %(ok)s AND NOT coalesce(dropout, FALSE)
@@ -433,7 +460,7 @@ _IMPLIED_HOLDS = f"""(p.result <> 'implied' OR p.implied_ok = COALESCE(
             AND q.rate_hz = p.implied_from AND q.filter = p.filter AND q.shaper = p.shaper
             AND q.src_rate = p.src_rate AND q.src_channels = p.src_channels
             AND (s.id IS NOT NULL OR q.result IN ('unstarted', 'slow_start'))
-            AND q.at >= now() - make_interval(days => {RETENTION_DAYS})
+            AND {_lives("q", str(RETENTION_DAYS))}
           ORDER BY q.at DESC, q.id DESC LIMIT 1)))"""
 
 
@@ -494,8 +521,9 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
         if r["filter"] == filter and r["shaper"] == shaper:
             out["rates"][str(r["rate_out"])] = entry
     # What a benchmark ASKED at a picker entry's key with no sample there:
-    # HQPlayer refused it, never got it going, or did not start it within the
-    # build limit ("refused" | "unstarted" | "slow_start") — no speed, so no mark, yet
+    # HQPlayer refused it, never got it going, did not start it within the
+    # build limit, or ended in that build ("refused" | "unstarted" |
+    # "slow_start" | "too_heavy") — no speed, so no mark, yet
     # measured all the same: a row says so instead of offering a run that
     # ends alike — or a neighbour on its ladder answered for it ("implied":
     # a mark of its class, no speed). Its newest answer there within the
@@ -505,7 +533,7 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
     asked = db_query(f"""
         SELECT * FROM (
             SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper)
-                   p.rate_hz, p.filter, p.shaper, p.result::text AS result, p.implied_from,
+                   p.rate_hz, p.filter, p.shaper, {_shown("p")} AS result, p.implied_from,
                    p.implied_ok, p.at, p.id, {_IMPLIED_HOLDS} AS holds
               FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
              WHERE {_RUN_KEY} AND p.result <> 'failed'
@@ -513,9 +541,9 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
                AND ((p.rate_hz IN (%(rate_out)s, %(asked)s)
                      AND (p.shaper = %(shaper)s OR p.filter = %(filter)s))
                     OR (p.filter = %(filter)s AND p.shaper = %(shaper)s))
-               AND p.at >= now() - make_interval(days => %(days)s)
+               AND {_lives("p")}
              ORDER BY p.rate_hz, p.filter, p.shaper, p.at DESC, p.id DESC) newest
-         WHERE result IN ('refused', 'unstarted', 'slow_start', 'implied') AND holds
+         WHERE result IN ('refused', 'unstarted', 'slow_start', 'too_heavy', 'implied') AND holds
          ORDER BY at DESC, id DESC
     """, {**ctx, **th, "rate_out": rate_out, "filter": filter, "shaper": shaper,
           "src_rate": src_rate, "src_channels": src_channels, "days": RETENTION_DAYS,
@@ -570,7 +598,9 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
 # Every key measured in a context, classed at its thresholds, and every
 # combination a run asked for that HQPlayer refused, never got going or
 # did not start within the build limit (class 'refused' / 'unstarted' /
-# 'slow_start', no speed), or that a neighbour on its ladder answered for
+# 'slow_start', no speed; how long a slow start took once HQPlayer answered:
+# `build_s`) or ended HQPlayer in that build ('too_heavy'), or that a
+# neighbour on its ladder answered for
 # (its class, no speed, the rate that answered: `implied_from`) — the newest
 # answer — unordered.
 _RESULTS_SQL = f"""
@@ -578,16 +608,16 @@ _RESULTS_SQL = f"""
                round(speed_p10::numeric, 2)::float AS speed, {_CLASS} AS class,
                bench_settled, round(bench_init_s::numeric, 1)::float AS init_s, dropout,
                round(bench_lo::numeric, 2)::float AS lo, round(bench_hi::numeric, 2)::float AS hi,
-               NULL::integer AS implied_from
+               NULL::integer AS implied_from, NULL::float AS build_s
           FROM hqp_dsp_speed
          WHERE {_KEY}
         UNION ALL
         SELECT filter, shaper, rate_hz, src_rate, src_channels, 0, NULL::float,
                CASE WHEN result <> 'implied' THEN result WHEN implied_ok THEN 'ok' ELSE 'no' END,
-               NULL::boolean, NULL::float, FALSE, NULL::float, NULL::float, implied_from
+               NULL::boolean, NULL::float, FALSE, NULL::float, NULL::float, implied_from, build_s
           FROM (SELECT DISTINCT ON (p.rate_hz, p.filter, p.shaper, p.src_rate, p.src_channels)
                        p.filter, p.shaper, p.rate_hz, p.src_rate, p.src_channels,
-                       p.result::text AS result, p.implied_from, p.implied_ok,
+                       {_shown("p")} AS result, p.implied_from, p.implied_ok, p.build_s,
                        {_IMPLIED_HOLDS} AS holds
                   FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
                  WHERE p.result IN ('refused', 'unstarted', 'slow_start', 'implied') AND {_RUN_KEY}
@@ -607,12 +637,81 @@ _RESULTS_SQL = f"""
 # The most rows of one name the assistant is told (hqplayer_host_fit)
 FIT_ROWS = 24
 
+# A build silent this long is long on any host — the Benchmark's own line
+# (hqp_benchmark.LONG_BUILD_S); a host whose Benchmark measured a longer
+# start within a rate family takes that as its usual build (build_facts)
+LONG_BUILD_FLOOR_S = 20.0
+
+
+def _same_family(a: str, b: str) -> str:
+    """hqp_rate_check.same_family in SQL: the two rates a whole power of two apart."""
+    hi, lo = f"greatest({a}, {b})", f"least({a}, {b})"
+    return f"({lo} > 0 AND mod({hi}, {lo}) = 0 AND (({hi} / {lo}) & ({hi} / {lo} - 1)) = 0)"
+
+
+def build_facts(endpoint_id: int, *, rate_out: Optional[int] = None, filter: Optional[str] = None,
+                shaper: Optional[str] = None, src_rate: Optional[int] = None) -> Dict[str, Any]:
+    """What this HQPlayer's Benchmark measured of its builds, for the word
+    said while HQPlayer builds in silence (BENCH-GUARD-1): its usual build —
+    the longest start measured within a rate family, LONG_BUILD_FLOOR_S at
+    least (`measured`: whether the usual build is a measured start, not
+    the floor) — and across
+    families (a point asked at an automatic rate is no such point) the longest start measured, the longest a
+    slow start took once HQPlayer answered (`built_s`), how many slow starts
+    there were and whether one ended HQPlayer; and, for a setting named
+    (its output rate, the filter running for `src_rate`, its shaper or none
+    for any), its own answer here: a start measured, a slow start and how
+    long it took, or an end. On the engine build and CUDA state the endpoint
+    holds now, every mode."""
+    within, across = _same_family("s.rate_out", "s.src_rate"), _same_family("p.rate_hz", "p.src_rate")
+    row = db_query_one(f"""
+        WITH e AS (SELECT id, hqp_engine, cuda FROM hqp_endpoints WHERE id = %(e)s),
+        s AS (
+            SELECT s.init_s, s.rate_out, s.src_rate, s.filter, s.shaper
+              FROM hqp_dsp_samples s JOIN e ON e.id = s.hqp_endpoint_id AND e.hqp_engine = s.hqp_engine
+                                           AND e.cuda IS NOT DISTINCT FROM s.cuda
+             WHERE s.source = 'benchmark' AND s.init_s IS NOT NULL),
+        p AS (
+            SELECT p.build_end, p.build_s, p.rate_hz, p.src_rate, p.filter, p.shaper, p.at
+              FROM hqp_benchmark_points p
+              JOIN hqp_benchmark_runs r ON r.id = p.run_id
+              JOIN e ON e.id = r.hqp_endpoint_id AND e.hqp_engine = r.hqp_engine
+                    AND e.cuda IS NOT DISTINCT FROM r.cuda
+             WHERE p.result = 'slow_start')
+        SELECT (SELECT max(init_s) FROM s WHERE {within}) AS within_s,
+               (SELECT max(init_s) FROM s WHERE NOT {within}) AS across_s,
+               (SELECT max(build_s) FROM p WHERE build_end = 'answered' AND p.rate_hz > 0
+                   AND NOT {across}) AS built_s,
+               (SELECT count(*) FROM p WHERE p.rate_hz > 0 AND NOT {across}) AS slow,
+               (SELECT coalesce(bool_or(build_end = 'ended'), FALSE) FROM p
+                 WHERE p.rate_hz > 0 AND NOT {across}) AS ended,
+               (SELECT max(init_s) FROM s
+                 WHERE s.rate_out = %(rate)s AND s.filter = %(filter)s AND s.src_rate = %(src)s
+                   AND (%(shaper)s::text IS NULL OR s.shaper = %(shaper)s)) AS own_s,
+               (SELECT row_to_json(x) FROM (
+                    SELECT build_end, build_s FROM p
+                     WHERE p.rate_hz = %(rate)s AND p.filter = %(filter)s AND p.src_rate = %(src)s
+                       AND (%(shaper)s::text IS NULL OR p.shaper = %(shaper)s)
+                     ORDER BY (build_end = 'ended') DESC NULLS LAST, p.at DESC LIMIT 1) x) AS own_slow
+    """, {"e": endpoint_id, "rate": rate_out, "filter": filter, "shaper": shaper, "src": src_rate})
+    own = None
+    if row["own_slow"] is not None:
+        own = {"slow_start": True, "ended": row["own_slow"]["build_end"] == "ended",
+               "built_s": row["own_slow"]["build_s"]}
+    elif row["own_s"] is not None:
+        own = {"start_s": round(row["own_s"], 1)}
+    return {"usual_s": round(max(LONG_BUILD_FLOOR_S, row["within_s"] or 0.0), 1),
+            "measured": row["within_s"] is not None and row["within_s"] >= LONG_BUILD_FLOOR_S,
+            "across": {"start_s": None if row["across_s"] is None else round(row["across_s"], 1),
+                       "built_s": row["built_s"], "slow": row["slow"], "ended": row["ended"]},
+            "own": own}
+
 
 def results(ctx: Dict[str, Any]) -> list:
     """Every key measured in this context, classed, and every combination a
     run asked for that HQPlayer refused, never got going or did not start
     here within the build limit (class 'refused' / 'unstarted' / 'slow_start',
-    no speed), or
+    no speed), or ended HQPlayer in that build ('too_heavy'), or
     that a neighbour answered for (its class, no speed; the newest answer) —
     the benchmark's results sheet lays them out per axis."""
     return db_query(f"{_RESULTS_SQL} ORDER BY src_rate, rate_out, shaper, filter", {**ctx, **thresholds(ctx)})

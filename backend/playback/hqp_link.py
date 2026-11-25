@@ -342,6 +342,11 @@ class BuildWatch:
                            "or restarted, and is asked again")
         self._link._build_ended(how)
 
+    def last_end(self) -> Optional[str]:
+        """How the latest build to end ended: 'answered', 'timeout', 'lost';
+        None before any."""
+        return self._ended[1]
+
     def answering(self, building: bool) -> None:
         """The poller's reading of an Embedded box: building while it says it
         plays with nothing out yet, over as soon as it does not."""
