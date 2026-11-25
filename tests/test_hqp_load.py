@@ -784,6 +784,33 @@ def test_a_slow_start_and_an_implied_rung_are_answers_of_their_own(db):
         _asked(db, run, "implied", shaper="L")
 
 
+def test_the_engines_own_answers_outlive_the_retention_on_the_same_engine(db):
+    """BENCH-GUARD-1 Gap 1 (Q1): a combination that took past the build limit,
+    one the host never got going and one HQPlayer refused stay answered for
+    as long as the engine build is the same — a slow build does not get
+    faster with time — while a measured point keeps the retention; under
+    another engine build none of them answers."""
+    run = _run_row(db)
+    old = "now() - interval '200 days'"
+    _asked(db, run, "slow_start", shaper="S", at=old)
+    _asked(db, run, "unstarted", shaper="U", at=old)
+    _asked(db, run, "refused", shaper="R", at=old)
+    _asked(db, run, "unsettled", shaper="M", at=old)
+    ctx = _ctx(db)
+    key = lambda sh: (11289600, "poly-sinc-gauss-xla", sh, 44100, 2)   # noqa: E731
+    assert hqp_load.covered(ctx) == {key("S"), key("U"), key("R")}
+    known = hqp_load.keeps_up(ctx)
+    assert (known[key("S")], known[key("U")]) == (False, False)
+    hr = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-xla", shaper="ASDM7ECv3",
+                           src_rate=44100, src_channels=2)
+    assert hr["refused"]["shapers"] == {"S": "slow_start", "U": "unstarted", "R": "refused"}
+    # a rung its old slow-start neighbour answers for still stands on it
+    _implied(db, run, 22579200, False, shaper="S")
+    assert (22579200, "S") in {(r["rate_out"], r["shaper"]) for r in hqp_load.results(ctx)}
+    newer = _ctx(db, engine="6.2.4")
+    assert hqp_load.covered(newer) == set() and hqp_load.keeps_up(newer) == {}
+
+
 def test_a_points_range_rides_its_mark_and_an_earlier_engines_mark_is_only_a_hint(db):
     """HQP-BENCH-63 §2.1: a benchmark point's lowest and highest reading ride
     its key's mark; C1 (the owner's, 2026-11-22): on a key the running engine

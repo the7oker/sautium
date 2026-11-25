@@ -22,7 +22,10 @@ and the source HQPlayer decodes (<metadata samplerate channels>): each one
 changes the cost. hqp_dsp_speed is the per-key rollup the pickers badge
 from, refreshed in the transaction that writes the sample: the key's newest
 benchmark point and every listen after it, all of them while it has none.
-Samples live RETENTION_DAYS; the rollup keeps what they said.
+Samples live RETENTION_DAYS; the rollup keeps what they said. What the
+engine itself answered a benchmark — a refusal, a setting it never got
+going, one it did not start within the build limit — holds for as long as
+the engine build does (ENGINE_ANSWERS).
 """
 
 import logging
@@ -52,6 +55,12 @@ SAMPLE_AFTER_S = 15.0
 SAMPLE_EVERY_S = 60.0
 
 RETENTION_DAYS = 90
+# What a run asked that the ENGINE answered — refused, never got going, or
+# not started within the build limit — holds while the engine build is the
+# same (BENCH-GUARD-1 Q1): a build that took past the limit does not get
+# faster with time, and a refusal is the engine's own rule. A measured speed
+# moves with the host's state (B-142) and keeps the retention.
+ENGINE_ANSWERS = ("refused", "unstarted", "slow_start")
 # Listens that make a benchmark point needless — as one benchmark point does.
 PASSIVE_COVER = 3
 # A dropout above this speed is not the DSP falling behind (a setting that
@@ -216,6 +225,14 @@ _RUN_KEY = """r.hqp_endpoint_id = %(endpoint_id)s AND r.hqp_engine = %(engine)s
           AND r.matrix_profile IS NOT DISTINCT FROM %(matrix_profile)s
           AND r.convolution = %(convolution)s"""
 
+
+def _lives(p: str, days: str = "%(days)s") -> str:
+    """A ledger row (`p`) that still counts: an engine's own answer
+    (ENGINE_ANSWERS) for as long as its key — the engine build among it —
+    holds, any other within the retention."""
+    answers = ", ".join(f"'{a}'" for a in ENGINE_ANSWERS)
+    return f"({p}.result IN ({answers}) OR {p}.at >= now() - make_interval(days => {days}))"
+
 _ROLLUP_SQL = f"""
     WITH s AS (
         SELECT process_speed, source, sampled_at, dropout, settled, init_s, settle_s,
@@ -295,13 +312,15 @@ def context(endpoint: dict, *, mode: str, state: dict) -> Dict[str, Any]:
 
 
 def covered(ctx: Dict[str, Any]) -> set:
-    """The keys that need no benchmark point, within the retention and for
-    this build and context — (rate, filter, shaper, src_rate, src_channels):
-    a benchmark point or PASSIVE_COVER listens of what HQPlayer PLAYED, and
+    """The keys that need no benchmark point, for this build and context —
+    (rate, filter, shaper, src_rate, src_channels): a benchmark point or
+    PASSIVE_COVER listens of what HQPlayer PLAYED within the retention, and
     every point a run ASKED for that ended in an answer (measured, unsettled,
-    dropped out, refused by HQPlayer, never started on this host — not
-    a point that failed to run): a refused combination, or an adaptive rate
-    that plays another one, is never a sample of the key that was asked."""
+    dropped out within the retention; refused by HQPlayer, never started or
+    not started within the build limit on this host for as long as the engine
+    is the same — not a point that failed to run): a refused combination, or
+    an adaptive rate that plays another one, is never a sample of the key
+    that was asked."""
     rows = db_query(f"""
         SELECT rate_out AS rate, filter, shaper, src_rate, src_channels FROM hqp_dsp_speed
          WHERE {_KEY}
@@ -312,7 +331,7 @@ def covered(ctx: Dict[str, Any]) -> set:
           FROM hqp_benchmark_points p JOIN hqp_benchmark_runs r ON r.id = p.run_id
          WHERE {_RUN_KEY}
            AND p.result NOT IN ('failed', 'implied')
-           AND p.at >= now() - make_interval(days => %(days)s)
+           AND {_lives("p")}
     """, {**ctx, "days": RETENTION_DAYS, "cover": PASSIVE_COVER})
     return {(r["rate"], r["filter"], r["shaper"], r["src_rate"], r["src_channels"]) for r in rows}
 
@@ -336,7 +355,7 @@ def keeps_up(ctx: Dict[str, Any]) -> Dict[tuple, bool]:
           LEFT JOIN hqp_dsp_samples s ON s.id = p.sample_id
          WHERE {_RUN_KEY}
            AND (s.id IS NOT NULL OR p.result IN ('unstarted', 'slow_start'))
-           AND p.at >= now() - make_interval(days => %(days)s)
+           AND {_lives("p")}
         UNION ALL
         SELECT 1, last_seen, rate_out, filter, shaper, src_rate, src_channels,
                speed_p10 >= %(ok)s AND NOT coalesce(dropout, FALSE)
@@ -433,7 +452,7 @@ _IMPLIED_HOLDS = f"""(p.result <> 'implied' OR p.implied_ok = COALESCE(
             AND q.rate_hz = p.implied_from AND q.filter = p.filter AND q.shaper = p.shaper
             AND q.src_rate = p.src_rate AND q.src_channels = p.src_channels
             AND (s.id IS NOT NULL OR q.result IN ('unstarted', 'slow_start'))
-            AND q.at >= now() - make_interval(days => {RETENTION_DAYS})
+            AND {_lives("q", str(RETENTION_DAYS))}
           ORDER BY q.at DESC, q.id DESC LIMIT 1)))"""
 
 
@@ -513,7 +532,7 @@ def headroom(ctx: Dict[str, Any], *, rate_out: int, filter: str, shaper: str,
                AND ((p.rate_hz IN (%(rate_out)s, %(asked)s)
                      AND (p.shaper = %(shaper)s OR p.filter = %(filter)s))
                     OR (p.filter = %(filter)s AND p.shaper = %(shaper)s))
-               AND p.at >= now() - make_interval(days => %(days)s)
+               AND {_lives("p")}
              ORDER BY p.rate_hz, p.filter, p.shaper, p.at DESC, p.id DESC) newest
          WHERE result IN ('refused', 'unstarted', 'slow_start', 'implied') AND holds
          ORDER BY at DESC, id DESC

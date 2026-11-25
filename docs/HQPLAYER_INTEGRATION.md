@@ -2415,13 +2415,15 @@ cooling — so Sautium measures it instead of predicting it
   hold, the lowered volume, the put-back and the ledger are every run's.
 - **The benchmark** (`POST /api/hqplayer/benchmark`, `GET` for its state and
   the results, `…/cancel`): one mode — the one HQPlayer is in; the other only
-  when asked (`{"mode": "pcm"}`) — and only the points nothing covers yet
-  within 90 days: a benchmark sample or three listens of the key, or an
+  when asked (`{"mode": "pcm"}`) — and only the points nothing covers yet:
+  within 90 days a benchmark sample or three listens of the key, or an
   earlier run's point that ASKED for it and ended in an answer
-  (`hqp_benchmark_points`: measured, unsettled, dropped out, refused, never
-  started on this host, no start within the build limit (`slow_start`,
-  since 2026-11-22; migration 072 named the two silent builds of 2026-11-20
-  so) — not one that
+  (`hqp_benchmark_points`: measured, unsettled, dropped out); for as long as
+  the engine build is the same (since 2026-11-25, BENCH-GUARD-1: a build
+  that took past the limit does not get faster with time, and a refusal is
+  the engine's own rule) one HQPlayer refused, never started on this host,
+  or did not start within the build limit (`slow_start`, since 2026-11-22;
+  migration 072 named the two silent builds of 2026-11-20 so) — not one that
   failed to run, nor a rung a neighbour on its ladder answered for
   (`implied`: written for the sheet, read afresh by every plan)). A repeat run fills gaps: a combination HQPlayer refuses
   ("…512+fs" below 512×) and an adaptive output rate that plays another rate
