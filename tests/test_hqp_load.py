@@ -827,8 +827,8 @@ def test_build_facts_are_this_hosts_measured_builds_never_a_guess(db):
     from playback import hqp_benchmark
     assert hqp_load.LONG_BUILD_FLOOR_S == hqp_benchmark.LONG_BUILD_S
     facts = hqp_load.build_facts(db.endpoint_id)
-    assert facts == {"usual_s": 20.0, "across": {"start_s": None, "built_s": None, "slow": 0,
-                                                 "ended": False}, "own": None}
+    assert facts == {"usual_s": 20.0, "measured": False, "across": {"start_s": None, "built_s": None, "slow": 0,
+                                                                    "ended": False}, "own": None}
 
     def bench(init_s, rate_out, **kw):
         hqp_load.write(_sample(db, 2.0, rate_out=rate_out, source="benchmark", settled=True,
@@ -845,7 +845,7 @@ def test_build_facts_are_this_hosts_measured_builds_never_a_guess(db):
                            VALUES (%s, %s, 'poly-sinc-gauss-xla', %s, 44100, 2, 'slow_start', %s, %s)""",
                         (run, rate, shaper, end, took))
     facts = hqp_load.build_facts(db.endpoint_id)
-    assert facts["usual_s"] == 25.1
+    assert (facts["usual_s"], facts["measured"]) == (25.1, True)
     assert facts["across"] == {"start_s": 40.0, "built_s": 358.0, "slow": 3, "ended": True}
     own = hqp_load.build_facts(db.endpoint_id, rate_out=12288000, filter="poly-sinc-gauss-xla",
                                src_rate=44100)["own"]

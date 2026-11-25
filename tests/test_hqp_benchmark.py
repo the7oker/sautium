@@ -796,6 +796,8 @@ class DspFake(FakeHqp):
                 if self.playlist and not self._dead and not refused:
                     if self.state != int(PlaybackState.PLAYING):
                         self.position = 0.0
+                        if self.track_serial is not None:
+                            self.track_serial += 1      # a take: one more, as HQPlayer counts it
                         if (running, key[2]) in self.builds:
                             self.silence(self.builds[(running, key[2])])
                         self._stuck = self._stuck or (running, key[2]) == self.sticks_at
@@ -848,7 +850,9 @@ class DspFake(FakeHqp):
                         f'length="120" volume="{self.volume}" tracks_total="{len(self.playlist)}" '
                         f'process_speed="{speed}" input_fill="-1" output_fill="{out}" '
                         f'active_mode="{self.MODES[self.mode][0]}" active_filter="{running}" '
-                        f'active_shaper="{self.SHAPERS[self.mode][sh]}" active_rate="{key[2]}">'
+                        f'active_shaper="{self.SHAPERS[self.mode][sh]}" active_rate="{key[2]}"'
+                        + (f' track_serial="{self.track_serial}"' if self.track_serial is not None else "")
+                        + '>'
                         + (f'<metadata samplerate="{src}" bits="{1 if src > 768000 else 24}" channels="2" '
                            f'sdm="{int(src > 768000)}"/>' if playing else '')
                         + '</Status>')
@@ -1680,6 +1684,36 @@ def _closed_by_its_answer(run) -> str:
     return run.q("SELECT note FROM hqp_benchmark_runs")[0][0]
 
 
+def test_a_slow_starts_end_is_read_off_hqplayers_track_serial():
+    """Review round 1 H1: how the silence ended is read off HQPlayer's first
+    answer, never off a connection that need not be open meanwhile —
+    HQPlayer counts its track_serial afresh at its start: lower than the
+    run last read it, it was started again (ended); as high or higher, it
+    built on (answered); not told where there is no serial or nothing
+    ever played."""
+    assert bench._build_end(7, 0) == "ended" and bench._build_end(7, 2) == "ended"
+    assert bench._build_end(7, 7) == "answered" and bench._build_end(7, 8) == "answered"
+    assert bench._build_end(0, 1) == "answered"
+    assert bench._build_end(0, 0) is None
+    assert bench._build_end(None, 3) is None and bench._build_end(3, None) is None
+
+
+def test_a_point_at_auto_playing_across_families_off_hqplayers_list_waits_for_the_ask():
+    """Review round 1 L10: at Auto, a rate Auto played that HQPlayer's list
+    does not hold is asked as Auto — and where it is of another family than
+    the source's, those points are across families too."""
+    d, cur = _lists("desktop_sdm.json")
+    rates = [r for r in _PCM_RATES if r["rate"] != 768000]
+    current = {"rate": 0, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1}
+    srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
+    plan = bench.build_grid("pcm", filters=d["filters"], shapers=_PCM_SHAPERS, rates=rates,
+                            current=current, srcs=srcs, covered=set(), keeps_up={},
+                            rng=random.Random(2), played={"pcm44": 768000, "pcm96": 768000})
+    assert not [p for p in plan.points[1:-1] if p.source == "pcm44" and p.rate_hz == 0]
+    assert set(plan.across_left) == {(44100, 768000)}
+    assert [p for p in plan.points[1:-1] if p.source == "pcm96" and p.rate_hz == 0]   # its own family
+
+
 def test_a_slow_start_that_builds_on_after_the_run_says_how_long_it_took(run, monkeypatch):
     """BENCH-GUARD-1 Gap 2: the run ended at the bound, HQPlayer built on and
     answered the playback link by itself: the slow start's end is
@@ -1710,7 +1744,7 @@ def test_a_slow_start_hqplayer_is_restarted_out_of_after_the_run_is_too_heavy_he
 def test_a_flap_while_hqplayer_builds_on_after_the_run_is_no_end(run, monkeypatch):
     fake = run.fake
     _silent_past_the_bound(run, monkeypatch, seconds=8.0)
-    assert _wait(lambda: hl.chosen().silent_after is not None, 15)
+    assert _wait(lambda: run.mgr.held is None, 15)          # the playback link has HQPlayer again
     with fake._lock:
         conns = list(fake._conns)
     for c in conns:                     # the hop drops them; HQPlayer builds on

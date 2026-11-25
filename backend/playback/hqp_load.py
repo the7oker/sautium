@@ -654,7 +654,8 @@ def build_facts(endpoint_id: int, *, rate_out: Optional[int] = None, filter: Opt
     """What this HQPlayer's Benchmark measured of its builds, for the word
     said while HQPlayer builds in silence (BENCH-GUARD-1): its usual build —
     the longest start measured within a rate family, LONG_BUILD_FLOOR_S at
-    least — and across families the longest start measured, the longest a
+    least (`measured`: whether a start was measured at all) — and across
+    families (a point asked at an automatic rate is no such point) the longest start measured, the longest a
     slow start took once HQPlayer answered (`built_s`), how many slow starts
     there were and whether one ended HQPlayer; and, for a setting named
     (its output rate, the filter running for `src_rate`, its shaper or none
@@ -678,9 +679,11 @@ def build_facts(endpoint_id: int, *, rate_out: Optional[int] = None, filter: Opt
              WHERE p.result = 'slow_start')
         SELECT (SELECT max(init_s) FROM s WHERE {within}) AS within_s,
                (SELECT max(init_s) FROM s WHERE NOT {within}) AS across_s,
-               (SELECT max(build_s) FROM p WHERE build_end = 'answered' AND NOT {across}) AS built_s,
-               (SELECT count(*) FROM p WHERE NOT {across}) AS slow,
-               (SELECT coalesce(bool_or(build_end = 'ended'), FALSE) FROM p WHERE NOT {across}) AS ended,
+               (SELECT max(build_s) FROM p WHERE build_end = 'answered' AND p.rate_hz > 0
+                   AND NOT {across}) AS built_s,
+               (SELECT count(*) FROM p WHERE p.rate_hz > 0 AND NOT {across}) AS slow,
+               (SELECT coalesce(bool_or(build_end = 'ended'), FALSE) FROM p
+                 WHERE p.rate_hz > 0 AND NOT {across}) AS ended,
                (SELECT max(init_s) FROM s
                  WHERE s.rate_out = %(rate)s AND s.filter = %(filter)s AND s.src_rate = %(src)s
                    AND (%(shaper)s::text IS NULL OR s.shaper = %(shaper)s)) AS own_s,
@@ -697,6 +700,7 @@ def build_facts(endpoint_id: int, *, rate_out: Optional[int] = None, filter: Opt
     elif row["own_s"] is not None:
         own = {"start_s": round(row["own_s"], 1)}
     return {"usual_s": round(max(LONG_BUILD_FLOOR_S, row["within_s"] or 0.0), 1),
+            "measured": row["within_s"] is not None,
             "across": {"start_s": None if row["across_s"] is None else round(row["across_s"], 1),
                        "built_s": row["built_s"], "slow": row["slow"], "ended": row["ended"]},
             "own": own}

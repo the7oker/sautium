@@ -719,13 +719,6 @@ class HqpLink:
         # wait: people's commands are refused, questions go on, and its next
         # answer ends it
         self.silent_since: Optional[float] = None
-        # The client's loss count (closed, reset, refused) when HQPlayer was
-        # last seen silent — a request that timed out or was answered late
-        # (past BUILDING_AFTER_S), or a build begun: a loss after it and an
-        # answer with no silence since is an HQPlayer
-        # that went away and came back, never one that built on through a
-        # connection the hop dropped (hqp_benchmark's slow start's end)
-        self.silent_after: Optional[int] = None
         # The command whose short silence the request on the connection may
         # be in (a Stop's teardown — SHORT_SILENCE_COMMANDS): no detach waits
         # for it — nor for one waiting its turn on the connection (teardown_due,
@@ -1120,10 +1113,7 @@ class HqpLink:
             if after is not None:
                 c.inherit(STOP_ANSWER_S if after in SHORT_SILENCE_COMMANDS else BUILD_LIMIT_S,
                           watched=after not in SHORT_SILENCE_COMMANDS)
-            asked = time.monotonic()
             yield
-            if c.timed_out or (c.answered and time.monotonic() - asked > BUILDING_AFTER_S):
-                self.silent_after = c.losses
             if c.answered:
                 self._answered()
                 if command in HANDOVER_COMMANDS:
@@ -1377,7 +1367,6 @@ class HqpLink:
     # -- the build's moments --------------------------------------------------------
 
     def _build_began(self) -> None:
-        self.silent_after = self.client.losses      # a build is HQPlayer seen silent
         self.lock.wake()
         with self._conn:
             self._conn.notify_all()

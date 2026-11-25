@@ -7069,8 +7069,10 @@
     // Within a family, or a change whose setting is not named yet: this
     // setting's own answer alone (none for a change)
     const mine = own ? fact : '';
-    return `It answers nothing until it is done — longer than any start the Benchmark measured here (${
-      hqpBuildTook(f.usual_s)})${mine}. ${HQP_LEAVE}`;
+    const usual = f.measured
+      ? `longer than any start the Benchmark measured here (${hqpBuildTook(f.usual_s)})`
+      : `longer than a start usually takes (${hqpBuildTook(f.usual_s)})`;
+    return `It answers nothing until it is done — ${usual}${mine}. ${HQP_LEAVE}`;
   }
   function outputConditionCopy(data) {
     const b = data.building;
@@ -7105,8 +7107,8 @@
   let saidBuildLost = null;
   function onBuildLost(data) {
     const lost = data && data.build_lost;
-    if (!lost || lost === saidBuildLost) return;
-    saidBuildLost = lost;
+    if (!lost || lost.since === saidBuildLost) return;
+    saidBuildLost = lost.since;
     notices.toast({ kind: 'error', key: 'hqplayer.build_lost', title: 'HQPlayer went away while it built the filter',
                     text: 'If it comes back on the same setting, the next Play builds it again — choose a lighter filter before you press Play.' });
   }
@@ -10425,7 +10427,9 @@
         ? 'HQPlayer is not answering — a run can start once it does.'
         : 'HQPlayer is building the filter — a run can start once it is done.';
     } else if (est && est.points <= 2) {
-      hint = `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
+      hint = est.across
+        ? `Every ${escapeHtml(est.mode)} setting within the rate families is measured on this HQPlayer; ${est.across.points} across rate families ${est.across.points === 1 ? 'is' : 'are'} left out unless you ask.`
+        : `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
     } else if (est) {
       hint = `Plays test noise${b.volume_control ? " at HQPlayer's lowest volume" : ''} through the ${est.points} ${escapeHtml(est.mode)} settings not measured here yet — ${fmtAbout(est.seconds)}.`;
       if (est.across) hint += ` ${est.across.points} more across rate families ${est.across.points === 1 ? 'is' : 'are'} left out unless you ask.`;

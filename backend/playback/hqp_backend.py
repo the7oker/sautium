@@ -1402,6 +1402,8 @@ class HqpBackend(PlayerBackend):
         # A long build HQPlayer went away in: its word, said with the next
         # status (BENCH-GUARD-1 C4d), then gone
         self._build_lost: Optional[dict] = None
+        # The silent build said long here, and its word: (its `since`, the facts)
+        self._long_said: Optional[tuple] = None
         # The position on the clock of the take HQPlayer plays (_clocked):
         # the poller's alone; and this node's newest Seek HQPlayer took, as
         # (second, sent at, the attempt whose start sent it — None for the
@@ -2868,9 +2870,9 @@ class HqpBackend(PlayerBackend):
             if building is None and long_build is not None:
                 # The long build is over: gone in it, that is said until
                 # HQPlayer answers again (C4d, Q9); answered, nothing is
-                if link.build.last_end() == "lost" and time.monotonic() >= long_build[1]:
-                    self._build_lost = long_build[2]
-                long_build = None
+                if link.build.last_end() == "lost" and self._long_said is not None:
+                    self._build_lost = {**self._long_said[1], "since": self._long_said[0]}
+                long_build = self._long_said = None
             if building is not None and building["silent"]:
                 # HQPlayer answers nothing while it builds: said from the
                 # watch, not asked — the watch wakes the poller at the end,
@@ -2887,14 +2889,17 @@ class HqpBackend(PlayerBackend):
                 if not quiet and (long_build is None or long_build[0] != building["since"]):
                     long_build = self._long_build(building)
                 long = long_build is not None and time.monotonic() >= long_build[1]
+                if long:
+                    # kept with the build: every word of it says it from here,
+                    # a miss's past the build limit included (_register_failure)
+                    self._long_said = (long_build[0], long_build[2])
                 if not unfinished or building is not said_unfinished:
                     try:
                         if quiet:
                             # The Status a switch away holds: no build of ours
                             self._emit_silence({"not_answering": NOT_ANSWERING})
                         else:
-                            self._emit_building({**building, "long": long_build[2]} if long
-                                                else building)
+                            self._emit_building(building)
                     except Exception:
                         logger.exception("HQPlayer's build was not said on the status")
                     if unfinished:
@@ -5344,7 +5349,11 @@ class HqpBackend(PlayerBackend):
             self._say(PlaybackStatus(state="disconnected"))
 
     def _emit_building(self, state: dict) -> None:
-        """The last status again, with the build HQPlayer is in."""
+        """The last status again, with the build HQPlayer is in — long here
+        once the poller said so (`long`, BENCH-GUARD-1)."""
+        long = self._long_said
+        if long is not None and long[0] == state["since"]:
+            state = {**state, "long": long[1]}
         self._emit_silence({"building": state})
 
     def _long_build(self, building: dict) -> tuple:
@@ -5355,8 +5364,16 @@ class HqpBackend(PlayerBackend):
         whether the build is across families and this setting's own answer
         here. A change's build is said without them: the held check reads
         the setting the change replaces until it is through."""
-        start = building.get("command") in _START_COMMANDS
-        check = self._rate_check if start else None
+        # A start's setting and source, from the held rate check — only while
+        # it was judged for this queue and for the slot the start goes to: a
+        # new album's Play, or another slot of a mixed queue, builds before a
+        # tick judges the check again (_rate_notice_now's guard)
+        check = self._rate_check
+        command, slot = building.get("command"), self._start_slot()
+        if (command not in _START_COMMANDS or check is None
+                or self._rate_gen != self._queue.generation
+                or not (slot == self._rate_slot or (slot is None and command == "Play"))):
+            check = None
         setting: Dict[str, Any] = {}
         cross = None
         if check is not None and check.rate and check.first:
@@ -5370,7 +5387,8 @@ class HqpBackend(PlayerBackend):
         except psycopg2.Error as e:
             # A database that cannot answer costs the word its facts, never the poll
             logger.warning("This HQPlayer's build times were not read: %s", e)
-            facts = {"usual_s": hqp_load.LONG_BUILD_FLOOR_S, "across": None, "own": None}
+            facts = {"usual_s": hqp_load.LONG_BUILD_FLOOR_S, "measured": False, "across": None,
+                     "own": None}
         facts.update(cross=cross, source=setting.get("src_rate"), rate=setting.get("rate_out"),
                      source_name=hqp_atlas.rate_name(check.first) if setting else None,
                      rate_name=hqp_atlas.rate_name(check.rate) if setting else None)

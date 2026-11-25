@@ -449,11 +449,17 @@ def test_a_build_past_this_hosts_usual_one_is_a_word_the_person_closes():
     across = {"usual_s": 25.1, "cross": True, "source": 44100, "rate": 768000, "source_name": "44.1 kHz",
               "rate_name": "768 kHz", "own": None,
               "across": {"start_s": None, "built_s": 358.0, "slow": 3, "ended": False}}
-    within = {"usual_s": 20.0, "cross": None, "source": None, "rate": None, "own": None, "across": None}
+    within = {"usual_s": 20.0, "measured": False, "cross": None, "source": None, "rate": None, "own": None,
+              "across": None}
+    measured = {**within, "usual_s": 25.1, "measured": True, "cross": False,
+                "own": {"slow_start": True, "ended": False, "built_s": 93.0}}
     out = _run({"across": [base, {**base, "building": build}, {**base, "building": {**build, "long": across}},
                            base],
                 "within": [base, {**base, "building": {**build, "long": within}}],
-                "lost": [base, {**base, "build_lost": within}, base, base]}, cap=3)
+                "measured": [base, {**base, "building": {**build, "long": measured}}],
+                "unfinished": [base, {**base, "building": {**build, "unfinished": True, "long": within}}],
+                "lost": [base, {**base, "build_lost": {**within, "since": 100.0}}, base,
+                         {**base, "build_lost": {**within, "since": 100.0}}]}, cap=3)
     assert _keys(out["across"]) == [[], ["hqplayer.building"], ["hqplayer.building"], []]
     shown = out["across"][2]["shown"][0]
     assert (shown["title"], shown["taps"], shown["buttons"]) == ("HQPlayer is still building the filter", True,
@@ -465,9 +471,12 @@ def test_a_build_past_this_hosts_usual_one_is_a_word_the_person_closes():
         "before you press Play — HQPlayer comes back on this setting. With the rate at Auto and Auto rate "
         "family on, HQPlayer stays in each source's family and builds none of this.")
     assert out["within"][1]["shown"][0]["text"] == (
-        "It answers nothing until it is done — longer than any start the Benchmark measured here (20 s). To "
-        "leave now, restart HQPlayer, then choose a lighter filter before you press Play — HQPlayer comes back "
-        "on this setting.")
+        "It answers nothing until it is done — longer than a start usually takes (20 s). To leave now, restart "
+        "HQPlayer, then choose a lighter filter before you press Play — HQPlayer comes back on this setting.")
+    assert out["measured"][1]["shown"][0]["text"].startswith(
+        "It answers nothing until it is done — longer than any start the Benchmark measured here (25 s) — this "
+        "setting took 93 s here before.")
+    assert out["unfinished"][1]["shown"][0]["text"].startswith("It did not finish in 10 minutes. To leave now")
     assert "hqplayer.build_lost" in _keys(out["lost"])[1]
     assert out["lost"][1]["shown"][0]["title"] == "HQPlayer went away while it built the filter"
 

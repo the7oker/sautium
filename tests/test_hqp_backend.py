@@ -7939,16 +7939,36 @@ def test_a_starts_long_build_names_its_setting_and_whether_it_crosses_families(f
     asked = _long_facts(monkeypatch)
     b._rate_check = types.SimpleNamespace(rate=768000, first=44100,
                                           key=("pcm", 768000, "one-x", "n-x", None, None))
+    b._rate_gen, b._rate_slot = b._queue.generation, 1
     _, at, facts = b._long_build({"since": time.time() - 0.1, "command": "Play", "silent": True})
     assert asked == [{"rate_out": 768000, "src_rate": 44100, "filter": "one-x", "shaper": None}]
     assert (facts["cross"], facts["source"], facts["rate"]) == (True, 44100, 768000)
     assert 0.2 <= at - time.monotonic() <= 0.4
     b._rate_check = types.SimpleNamespace(rate=705600, first=96000,
                                           key=("sdm", 705600, "one-x", "n-x", "ASDM7", None))
-    _, _, facts = b._long_build({"since": time.time(), "command": "SelectTrack", "silent": True})
+    _, _, facts = b._long_build({"since": time.time(), "command": "Play", "silent": True})
     assert asked[-1]["filter"] == "n-x" and asked[-1]["shaper"] == "ASDM7" and facts["cross"] is True
     _, _, facts = b._long_build({"since": time.time(), "command": "SetFilter", "silent": True})
     assert asked[-1] == {} and facts["cross"] is None
+    # Review round 1 M3: a check judged for another queue, or a start to a
+    # slot it was not judged for, names no setting
+    _, _, facts = b._long_build({"since": time.time(), "command": "SelectTrack", "silent": True})
+    assert asked[-1] == {} and facts["cross"] is None            # no start slot known: not the check's
+    b._rate_gen = b._queue.generation - 1
+    _, _, facts = b._long_build({"since": time.time(), "command": "Play", "silent": True})
+    assert asked[-1] == {} and facts["cross"] is None
+
+
+def test_a_long_builds_word_stays_with_it_past_the_build_limit(fake, output, monkeypatch):
+    """Review round 1 M4: once long, every word of that build says it — the
+    one a silence past the build limit says again included — never another
+    build's."""
+    mgr, b = output
+    seen = _seen(mgr, "building")
+    b._long_said = (100.0, {"usual_s": 20.0, "measured": False})
+    b._emit_building({"since": 100.0, "command": "Play", "silent": True, "unfinished": True})
+    b._emit_building({"since": 200.0, "command": "Play", "silent": True})
+    assert seen[-2]["long"] == {"usual_s": 20.0, "measured": False} and "long" not in seen[-1]
 
 
 def test_hqplayer_gone_in_a_long_build_is_said_once(fake, output, monkeypatch):
@@ -7964,7 +7984,8 @@ def test_hqplayer_gone_in_a_long_build_is_said_once(fake, output, monkeypatch):
     assert _wait(lambda: any(x and x.get("long") for x in building), 5)
     fake.restart()
     assert _wait(lambda: any(lost), 10)
-    assert sum(1 for x in lost if x) == 1 and next(x for x in lost if x)["usual_s"] == 0.4
+    said = [x for x in lost if x]
+    assert len(said) == 1 and said[0]["usual_s"] == 0.4 and said[0]["since"]
 
 
 def test_hqplayer_picked_again_before_its_build_ends_plays_on_unstopped(fake, output, monkeypatch):

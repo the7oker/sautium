@@ -597,8 +597,12 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
     # asynchronous conversion — every slow build and both long silences on 6.3.3
     # were 44.1 kHz → 768 kHz (HQP-BENCH-63 F6) — so they go last, and a
     # hang there ends a run that measured everything else
-    cross = [p for p in singles if p.key not in covered and p.rate_hz
-             and not same_family(p.rate_hz, srcs[p.source]["rate"])]
+    # — a point asked at Auto by the rate Auto played on its source there,
+    # when HQPlayer's list does not hold that rate (Auto rate family off)
+    def plays(p: Point) -> int:
+        return p.rate_hz or (known_rates.get(p.source, 0) if auto else 0)
+    cross = [p for p in singles if p.key not in covered and plays(p)
+             and not same_family(plays(p), srcs[p.source]["rate"])]
     steps: Dict[int, List[Point]] = {0: [p for p in singles if p.key not in covered
                                          and p not in cross]}
     for lid, by_rate in ladders.items():
@@ -627,7 +631,7 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
                 fresh.append(p)
         rng.shuffle(fresh)
         points += fresh
-    left = () if across else tuple((srcs[p.source]["rate"], p.rate_hz)
+    left = () if across else tuple((srcs[p.source]["rate"], plays(p))
                                    for p in [*cross, *unswept]
                                    if p.key not in seen and p.key not in covered)
     return Plan(points=[*points, own], rungs=rungs, known=dict(keeps_up),
@@ -1009,13 +1013,15 @@ class _SlowStartRun(_Lost):
     too heavy here (BENCH-GUARD-1 Gap 2)."""
 
     def __init__(self, p: "Point", verb: str, *, restarted: bool = False, marked: bool = False,
-                 ended: bool = False):
+                 ended: bool = False, serial: Optional[int] = None):
         rate_hz, filt, _, src_rate, _ = p.key
         rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
         self.what = (f"{filt} at {rate} from a {rate_name(src_rate)} source"
                      + (" again" if verb == "started" else ""))
         self.verb, self.restarted, self.marked = verb, restarted, marked
         self.ended = ended or restarted
+        # HQPlayer's track_serial as the run last read it before the silence
+        self.serial = serial
         super().__init__(self.words(reached=False))
 
     def words(self, *, reached: bool) -> str:
@@ -1077,6 +1083,9 @@ class _Link:
         self.c = HQPlayerClient(host=settings.hqplayer_host, port=settings.hqplayer_port,
                                 timeout=answer_s, ring=False)
         self.wait = wait
+        # The <Status track_serial> it read last: HQPlayer counts it one more
+        # at each Play and afresh at its start (_build_end)
+        self.serial: Optional[int] = None
 
     def connect(self) -> bool:
         return self.c.connect()
@@ -1101,6 +1110,8 @@ class _Link:
         result = getattr(self.c, method)(*args, **kwargs)
         if not self.c.is_connected():
             self._reconnect(silent=self.c.timed_out)
+        if method == "get_status" and result is not None and result.track_serial is not None:
+            self.serial = result.track_serial
         return result
 
     def _reconnect(self, *, silent: bool) -> None:
@@ -1507,7 +1518,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
                                                                   switched)
             if silenced:
                 if note.marked and not note.ended:
-                    _watch_build(run_id, reached=reached, gone=gone)
+                    _watch_build(run_id, note.serial, link if reached else None)
                 # its words say what the restore did, or that it is owed
                 note = "; ".join(x for x in (note.words(reached=reached),
                                              restore_note if reached else None) if x)
@@ -1785,7 +1796,7 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                         build_s=round(ended, 1) if marked and ended is not None else None)
                 raise _SlowStartRun(p, "played" if missed == "failed" else "prepared",
                                     restarted=result.get("restarted", False), marked=marked,
-                                    ended=ended is not None)
+                                    ended=ended is not None, serial=link.serial)
             _ledger(run_id, p, missed, result[missed])
             stats[missed] += 1
             if not result.get("outran"):            # that one played
@@ -2298,11 +2309,11 @@ def _ledger(run_id: int, p: Point, result: str, note: Optional[str] = None,
         raise _Abort(_FORGOTTEN)
 
 
-# A run closed on a slow start whose end the run did not see → the playback
-# link's loss count at its close (_watch_build): the end is read at
-# HQPlayer's first answer after it (_build_end_seen). In memory: a node that
+# A run closed on a slow start whose end the run did not see → HQPlayer's
+# track_serial as the run last read it (_watch_build): the end is read off
+# HQPlayer's first answer after it (_build_end). In memory: a node that
 # restarts meanwhile leaves that end unknown, never guessed.
-_watched: Dict[int, int] = {}
+_watched: Dict[int, Optional[int]] = {}
 
 
 def _end_point(run_id: int, end: str) -> Optional[dict]:
@@ -2321,39 +2332,60 @@ def _end_point(run_id: int, end: str) -> Optional[dict]:
     """, {"run": run_id, "end": end, "bound": BUILD_LIMIT_S})
 
 
-def _watch_build(run_id: int, *, reached: bool, gone: bool) -> None:
-    """A run that ended on a slow start: HQPlayer answering the restore came
-    out of the build; going away under it did not; silent through it, its
-    end is read at its first answer to the playback link (_build_end_seen)."""
-    if reached or gone:
-        _end_point(run_id, "answered" if reached else "ended")
-        return
-    from playback import hqp_link
-    try:
-        losses = hqp_link.chosen().client.losses
-    except hqp_link.NotChosen:
+def _build_end(before: Optional[int], now: Optional[int]) -> Optional[str]:
+    """How the silence the run ended in ended, by HQPlayer's track_serial —
+    one more at each Play, counted afresh at its start: lower at its first
+    answer than the run last read it, HQPlayer was started again — the
+    kernel ended it, or a person restarted it, out of the build — 'ended';
+    as high or higher, it built on and answered — 'answered'. None where it
+    cannot tell: no serial (HQPlayer 5), or nothing played since HQPlayer
+    started and nothing since (both 0)."""
+    if before is None or now is None:
+        return None
+    if now < before:
+        return "ended"
+    if now > before or before > 0:
+        return "answered"
+    return None
+
+
+def _watch_build(run_id: int, serial: Optional[int], reached) -> None:
+    """A run that ended on a slow start: the restore reached HQPlayer
+    (`reached`, its link) — its answer says now how the silence ended;
+    silent through it, its end is read at HQPlayer's first answer to the
+    playback link (_put_run_back)."""
+    if reached is not None:
+        try:
+            status = reached("get_status")
+        except (_Reopened, _Lost):
+            status = None
+        end = _build_end(serial, status.track_serial if status is not None else None)
+        if end is not None:
+            _end_point(run_id, end)
         return
     with _lock:
-        _watched[run_id] = losses
+        _watched[run_id] = serial
 
 
 def _build_end_seen(run: dict, link) -> Optional[str]:
-    """HQPlayer answered the put-back of a run that ended on a slow start
-    (_watch_build): it went away and came back — a loss since the run's
-    close, and no silence seen after the last one: the kernel ended it, or a
-    person restarted it, out of the build — or it built on and answered. A
-    flap of the hop is the second: the next connection met the same silence.
-    The recover note's clause for it, or None."""
+    """HQPlayer answers the put-back of a run that ended on a slow start
+    (_watch_build): its first answer — read before anything is put back —
+    says how the silence ended (_build_end). The recover note's clause for
+    it, or None."""
     with _lock:
-        losses = _watched.pop(run["id"], None)
-    if losses is None:
+        if run["id"] not in _watched:
+            return None
+        serial = _watched[run["id"]]
+    status = link("get_status")         # silent still, or gone: raised, read at the next answer
+    if status is None:
         return None
-    c = link.client
-    ended = c.losses > losses and (link.silent_after is None or link.silent_after < c.losses)
-    row = _end_point(run["id"], "ended" if ended else "answered")
+    with _lock:
+        _watched.pop(run["id"], None)
+    end = _build_end(serial, status.track_serial)
+    row = _end_point(run["id"], end) if end is not None else None
     if row is None:
         return None
-    if ended:
+    if end == "ended":
         return (f"HQPlayer ended, or was restarted, while it prepared {row['filter']} — marked "
                 "too heavy here")
     return f"HQPlayer took {_minutes(row['build_s'])} to prepare {row['filter']}"
@@ -2503,9 +2535,9 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
                 with _lock:
                     _putting.add(run["id"])
                 try:
+                    said = _build_end_seen(run, _OnLink(link))
                     done = _recover(_OnLink(link), run, gave)
                     if done is not None:
-                        said = _build_end_seen(run, link)
                         if said is not None:
                             done["note"] = done["note"].replace("cut short; ", f"cut short; {said}; ", 1)
                         if quiet:
@@ -2572,6 +2604,8 @@ def _close_owed(run: dict, note: str, left: bool = False, restored: bool = False
     `theirs`: a person's change superseded the put-back — a return point its
     round trip left (_keep_point) goes too, HQPlayer theirs. Once only: a
     run another path closed meanwhile stays as that path closed it."""
+    with _lock:
+        _watched.pop(run["id"], None)       # an end no answer read stays unknown
     row = db_execute("""UPDATE hqp_benchmark_runs SET finished_at = now(), outcome = 'interrupted',
                                note = concat_ws('; ', note, %(n)s::text),
                                left_at = CASE WHEN %(left)s THEN now() END,
