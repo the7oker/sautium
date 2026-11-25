@@ -4725,7 +4725,7 @@ answers).
   (`_last_heard`, nothing written per tick); `stop_in` reads it against a
   list of slots by identity — within a track's last 10 s the stop is the
   next slot's start, past the last none. The archive writes it on its slot
-  (`session_tracks.stop_seconds`, one per session, delta 077) — not when
+  (`session_tracks.stop_seconds`, one per session, delta 078) — not when
   the queue played out, never played, or was swapped for the origin's
   tracks; a stopped status says it of the live queue (`heard`).
 - **Listening history draws one dot at a time** (`sessionDotView`): while
