@@ -6520,6 +6520,38 @@ a.am-kind { text-decoration: none; }
   font-family: var(--font-sans);
 }
 .add-gear-input:focus { outline: 1px solid var(--color-blue); border-color: var(--color-blue); }
+/* A password field with its show control (auth.js passwordField), and the
+   new-password block around one (newPassword): the phrase offered, the time
+   one GPU would take, the person's word, the note. */
+.pw-field { position: relative; width: 100%; }
+.pw-field .add-gear-input { padding-right: calc(44 * var(--px)); }
+.pw-show {
+  position: absolute; top: 0; right: 0;
+  width: calc(44 * var(--px)); height: calc(44 * var(--px));
+  display: flex; align-items: center; justify-content: center;
+  background: none; border: 0; color: var(--color-text-muted); cursor: pointer;
+}
+.pw-show[aria-pressed="true"] { color: var(--color-text); }
+.pw-offer, .pw-meter, .pw-note {
+  margin: calc(6 * var(--px)) 0 0;
+  font-size: calc(12 * var(--px)); line-height: 1.5;
+  color: var(--color-text-muted);
+}
+.pw-note { color: var(--color-text-dim); }
+.pw-phrase { color: var(--color-text); font-weight: 600; }
+.pw-meter:empty { display: none; }
+.pw-meter[data-zone="refused"] { color: var(--color-negative); }
+.pw-meter[data-zone="word"] { color: var(--color-amber); }
+.pw-link {
+  background: none; border: 0; padding: 0 calc(4 * var(--px));
+  color: var(--color-amber); font: inherit; text-decoration: underline; cursor: pointer;
+}
+.pw-keep {
+  display: flex; align-items: center; gap: calc(8 * var(--px));
+  margin-top: calc(6 * var(--px));
+  font-size: calc(13 * var(--px)); color: var(--color-text);
+}
+.pw-keep[hidden] { display: none; }
 /* <select class="add-gear-input"> matches the HQPlayer dropdown chevron
    pattern so country / future dropdowns read as the same component
    family as the HQP settings selects. Native UA chevron is suppressed. */

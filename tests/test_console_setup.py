@@ -1175,13 +1175,26 @@ def test_the_agent_and_the_setup_and_the_node_spell_the_code_alike():
     and the kept log is scrubbed by — and the node's own, the same pattern."""
     backend = (REPO / "backend" / "device_auth.py").read_text(encoding="utf-8")
     assert "SETUP_CODE_GROUPS = 2" in backend
-    assert not hasattr(setup, "SETUP_CODE") and SOURCE.count("agent.SETUP_CODE.fullmatch(") == 2
+    assert not hasattr(setup, "SETUP_CODE") and SOURCE.count("agent.SETUP_CODE.fullmatch(") == 1
     assert setup.agent.SETUP_CODE.fullmatch("K7QM-ZP4X") and not setup.agent.SETUP_CODE.fullmatch("K7QM-ZP4X-9HTR")
     sys.path.insert(0, str(REPO / "backend"))
     device_auth = pytest.importorskip("device_auth")
     assert setup.agent.SETUP_CODE.pattern == device_auth._SETUP_CODE_FORM.pattern
     for _ in range(200):                                # … and every code the node mints is of it
         assert setup.agent.SETUP_CODE.fullmatch(device_auth._code(device_auth.SETUP_CODE_GROUPS))
+
+
+def test_the_setup_reads_the_pairing_code_by_the_node_s_own_form():
+    """The pairing code is not the setup code: 7 groups, never typed
+    (SEC-S2 A3). `./sautium pair` reads what the node mints, and nothing
+    shorter."""
+    sys.path.insert(0, str(REPO / "backend"))
+    device_auth = pytest.importorskip("device_auth")
+    assert device_auth.PIN_GROUPS == 7
+    for _ in range(200):
+        code = device_auth._code(device_auth.PIN_GROUPS)
+        assert setup.PAIRING_CODE.fullmatch(code) and not setup.agent.SETUP_CODE.fullmatch(code)
+    assert not setup.PAIRING_CODE.fullmatch("K7QM-ZP4X")
 
 
 def test_a_picture_that_is_not_only_blocks_is_not_shown(monkeypatch):

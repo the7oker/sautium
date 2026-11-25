@@ -692,8 +692,10 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(device_auth.prepare_setup)
     # A start about to make its account from P2P_USERNAME under the nickname
     # kept for Support refuses before that key is on record (B-132), as the
-    # master's refusal above does: a state, not a crash
-    refusal = await asyncio.to_thread(device_auth.reserved_name_refusal)
+    # master's refusal above does: a state, not a crash; so does one about to
+    # make it from a P2P_PASSWORD one GPU would find within an hour (SEC-S2)
+    refusal = (await asyncio.to_thread(device_auth.reserved_name_refusal)
+               or await asyncio.to_thread(device_auth.env_password_refusal))
     if refusal:
         import os
         from uvicorn.main import STARTUP_FAILURE

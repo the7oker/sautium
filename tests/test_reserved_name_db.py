@@ -134,7 +134,7 @@ def test_a_new_account_under_the_name_is_refused_before_any_derivation(db, pin, 
     _settings(monkeypatch)
     derive.key = _Key("Sautium")
     with pytest.raises(ValueError, match="kept for Sautium's own Support"):
-        device_auth._write_identity(tmp_path, "Sautium", "a password")
+        device_auth._write_identity(tmp_path, "Sautium", "a password amber lanterns ford")
     assert derive.calls == []
     assert not (tmp_path / "node_ed25519.key").exists()
 
@@ -144,11 +144,11 @@ def test_the_master_on_a_new_database_makes_its_account_and_another_key_there_do
     _settings(monkeypatch, sautium_master=True)
     derive.key = _Key("Sautium")                           # the pair derives another key
     with pytest.raises(ValueError, match="kept for Sautium's own Support"):
-        device_auth._write_identity(tmp_path / "other", "Sautium", "a password")
+        device_auth._write_identity(tmp_path / "other", "Sautium", "a password amber lanterns ford")
     assert derive.calls == ["Sautium"]                     # the key decides: derived first
     assert not (tmp_path / "other" / "node_ed25519.key").exists()
     derive.key = pin
-    info = device_auth._write_identity(tmp_path / "master", "Sautium", "the master's password")
+    info = device_auth._write_identity(tmp_path / "master", "Sautium", "the master's password amber lanterns ford")
     assert info["public_key_hex"] == pin.pub
 
 
@@ -158,18 +158,18 @@ def test_a_holder_brings_its_identity_back_and_its_records_name_no_other(db, pin
     holder = _Key("sautium")
     _record(db, holder.pub)
     derive.key = holder
-    info = device_auth._write_identity(tmp_path / "back", "sautium", "its password")
+    info = device_auth._write_identity(tmp_path / "back", "sautium", "its password amber lanterns ford")
     assert info["public_key_hex"] == holder.pub
     # a new identity over a holder's records takes the name no more than a stranger does
     derive.key = _Key("sautium")
     with pytest.raises(ValueError, match="kept for Sautium's own Support"):
-        device_auth._write_identity(tmp_path / "new", "sautium", "another", new_identity=True)
+        device_auth._write_identity(tmp_path / "new", "sautium", "another amber lanterns ford", new_identity=True)
 
 
 def test_any_other_name_is_made_as_before(db, pin, derive, tmp_path, monkeypatch):
     _settings(monkeypatch)
     derive.key = _Key("alice")
-    assert device_auth._write_identity(tmp_path, "alice", "a password")["username"] == "alice"
+    assert device_auth._write_identity(tmp_path, "alice", "a password amber lanterns ford")["username"] == "alice"
 
 
 # --- a rotation (desktop/node_identity.rotate_identity) ------------------------

@@ -80,7 +80,9 @@ def _seal(client, payload):
 
     def open_(response):
         env = response.json()
-        return json.loads(box.decrypt(base64.b64decode(env["box"]), base64.b64decode(env["nonce"])))
+        said = json.loads(box.decrypt(base64.b64decode(env["box"]), base64.b64decode(env["nonce"])))
+        said.pop("_pad")                     # the bucket's padding (device_auth.padded)
+        return said
     return envelope, open_
 
 
@@ -220,7 +222,6 @@ def test_an_account_without_a_password_vouches_by_its_hosts_code(node, monkeypat
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
     monkeypatch.setattr(device_auth, "_pin", None)
     monkeypatch.setattr(device_auth, "_pin_prev", None)
-    monkeypatch.setattr(device_auth, "_pin_lock", asyncio.Lock())
     code = device_auth.issue_pin()
     for pin in ("", "WRNG-CODE"):
         r, _ = _send(node.client, "PUT", "/api/settings/ai/key", {"api_key": API_KEY, "pin": pin})

@@ -48,7 +48,9 @@ def test_roundtrip_and_reply():
     answer = reply({"token": "t0k"})
     box = Box(client_key, PublicKey(base64.b64decode(hs["eph"])))
     opened = box.decrypt(base64.b64decode(answer["box"]), base64.b64decode(answer["nonce"]))
-    assert json.loads(opened) == {"token": "t0k"}
+    assert len(opened) % device_auth.BOX_BUCKET == 0       # padded: its length says nothing
+    said = json.loads(opened)
+    assert said.pop("_pad").strip() == "" and said == {"token": "t0k"}
 
 
 def test_handshake_is_consumed_on_first_use():

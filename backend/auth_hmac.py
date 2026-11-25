@@ -138,15 +138,18 @@ WHITELIST_EXACT = {
     "/api/p2p/chat/wake",
     # A client with no token yet cannot sign — these ARE the credential
     # checks. They defend themselves: /login costs an Argon2id derivation
-    # under a semaphore, /pair burns one of five attempts under a lock, and
+    # under a semaphore, /pair compares a code of 140 bits, and
     # /create-account only answers while the node has no identity at all
     # (first-run setup), with the setup code the node wrote at its start,
-    # and refuses every call after that.
+    # and refuses every call after that. The setup form's meter and its
+    # phrase answer only in that same window, one estimate at a time.
     "/api/auth/status",
     "/api/auth/handshake",
     "/api/auth/login",
     "/api/auth/pair",
     "/api/auth/create-account",
+    "/api/auth/setup-estimate",
+    "/api/auth/setup-phrase",
     # The browser posts a policy violation on its own, unsigned (csp.py):
     # the route bounds the body and logs each kind once, so many at most.
     "/api/csp-report",
