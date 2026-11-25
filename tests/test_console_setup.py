@@ -1523,17 +1523,32 @@ case "$col:$dev" in
   NAME:/dev/loop0) echo loop0; cat "$STUB/partitions" 2>/dev/null ;;
   NAME:*) echo "${dev#/dev/}"; cat "$STUB/siblings" 2>/dev/null ;;
   SIZE:*) cat "$STUB/size" 2>/dev/null || echo 15500000000 ;;
-  PARTTYPE:*) cat "$STUB/parttype" 2>/dev/null ;;
+  PARTTYPE:*) ;;    # udev's property: none for a partition its probe found no filesystem on (F24)
 esac
 ''',
-    # `blkid -p`: the low-level probe's exit alone (2: nothing found, as on a
-    # blank volume) — or the real blkid's on an image, where a test has one
+    # `blkid -p`: the low-level probe's exit alone, which tells nothing apart:
+    # 2 for a blank volume and, on util-linux 2.41, for two marks; 8 for two
+    # marks before it
     "blkid": '''#!/bin/sh
-if [ "$1" = -p ]; then
-  if [ -e "$STUB/image" ]; then exec "$(cat "$STUB/real-blkid")" -p "$STUB/image"; fi
-  exit "$(cat "$STUB/probe" 2>/dev/null || echo 2)"
-fi
+[ "$1" != -p ] || exit "$(cat "$STUB/probe" 2>/dev/null || echo 2)"
 cat "$STUB/blkid-$4" 2>/dev/null
+''',
+    # the signatures on the device, one TYPE a line as wipefs lists them (a
+    # filesystem at each offset it is found at) — or the real wipefs's on an
+    # image, where a test has one
+    "wipefs": '''#!/bin/sh
+[ "$*" = "--no-act --noheadings --parsable --output TYPE /dev/loop0" ] || exit 64
+[ ! -e "$STUB/wipefs-fails" ] || exit 1
+if [ -e "$STUB/image" ]; then exec "$(cat "$STUB/real-wipefs")" "$1" "$2" "$3" "$4" "$5" "$STUB/image"; fi
+[ ! -e "$STUB/signatures" ] || cat "$STUB/signatures"
+''',
+    # the partition table of the disk `pkname` names: `table`'s lines "N TYPE",
+    # the type right-aligned as partx prints it
+    "partx": '''#!/bin/sh
+echo "$*" >> "$STUB/partx-calls"
+[ "$1 $2 $3 $4 $6" = "-g -o TYPE -n /dev/$(cat "$STUB/pkname")" ] || exit 64
+[ -e "$STUB/table" ] || exit 0
+while read -r n type; do [ "$n" != "$5" ] || echo " $type"; done < "$STUB/table"
 ''',
     "mount": '''#!/bin/sh
 echo "$*" >> "$STUB/mount-calls"
@@ -1547,7 +1562,7 @@ echo "$*" >> "$STUB/umount-calls"
 }
 # What the script uses of the system besides: linked into the stubs' folder,
 # so that the PATH is the test's own (an ntfs-3g this machine has is not found)
-PLAIN_TOOLS = ("cat", "head", "tr", "wc", "grep", "mkdir", "rmdir", "rm", "mv")
+PLAIN_TOOLS = ("cat", "head", "tr", "wc", "grep", "sort", "mkdir", "rmdir", "rm", "mv")
 
 
 @pytest.fixture
@@ -1565,7 +1580,9 @@ def automount(tmp_path, monkeypatch):
         (bin_dir / name).chmod(0o755)
     for name in PLAIN_TOOLS:
         (bin_dir / name).symlink_to(shutil.which(name))
-    files = setup.automount_files(tmp_path / "out", 1000, 1000, base=str(base), state=str(state))
+    sysfs = tmp_path / "sys"                   # the kernel's: a partition's number, by its name
+    files = setup.automount_files(tmp_path / "out", 1000, 1000, base=str(base), state=str(state),
+                                  sysfs=str(sysfs))
     env = {"PATH": str(bin_dir), "STUB": str(stub)}
     sh = shutil.which("sh")
 
@@ -1581,8 +1598,17 @@ def automount(tmp_path, monkeypatch):
     def ntfs_3g():
         (bin_dir / "ntfs-3g").write_text("#!/bin/sh\n")
         (bin_dir / "ntfs-3g").chmod(0o755)
+
+    def partition(number, disk="sda", siblings=("sda1", "sda2"), table=()):
+        """The plugged volume as partition `number` of `disk`, beside
+        `siblings`, its disk's table `table`'s (number, type) pairs."""
+        (sysfs / "class" / "block" / "loop0").mkdir(parents=True, exist_ok=True)
+        (sysfs / "class" / "block" / "loop0" / "partition").write_text(f"{number}\n")
+        (stub / "pkname").write_text(disk + "\n")
+        (stub / "siblings").write_text("".join(f"{s}\n" for s in siblings))
+        (stub / "table").write_text("".join(f"{n} {t}\n" for n, t in table))
     return types.SimpleNamespace(plug=plug, calls=calls, base=base, state=state, stub=stub, files=files,
-                                 ntfs_3g=ntfs_3g, unread=base / ".unread" / "loop0")
+                                 ntfs_3g=ntfs_3g, partition=partition, unread=base / ".unread" / "loop0")
 
 
 def test_the_automounts_shell_parses_and_carries_the_owner(automount):
@@ -1871,46 +1897,74 @@ def test_a_card_after_another_in_the_same_reader_gets_its_own_start(automount):
     assert automount.calls()[-1].endswith(f"/dev/loop0 {automount.base / '0398-3084'}") and len(automount.calls()) == 2
 
 
-def _nothing_named(automount, **stub):
-    """A plugged volume blkid names no type on; the stub's files as given."""
+def _nothing_named(automount, signatures=(), **stub):
+    """A plugged volume blkid names no type on, wipefs listing `signatures`;
+    the stub's other files as given."""
+    (automount.stub / "signatures").write_text("".join(f"{s}\n" for s in signatures))
     for name, text in stub.items():
         (automount.stub / name.replace("_", "-")).write_text(str(text) + "\n")
     return automount.plug(TYPE="", UUID="", LABEL="")
 
 
-@pytest.mark.parametrize("probe, said, why", [
-    (8, "ambivalent", "it carries the marks of more than one filesystem"),
-    (2, "unknown", "no filesystem is found on it")])
-def test_a_volume_with_no_one_filesystem_is_said_to_the_node(automount, probe, said, why):
-    """`blkid -p` tells the two apart: 8 — more than one signature (a quick
-    format over an older filesystem), 2 — none. Either way the file keeps its
-    four lines; there is no label to give and no driver was tried (F18)."""
+# A quick NTFS format over an ext2 stick, as wipefs lists it (PI-NODE-2E §10.9):
+# the old superblock, the new boot sector, and that sector's 0x55AA, which
+# libblkid reads as a DOS partition table
+TWO_MARKS = ("ext2", "ntfs", "dos")
+
+
+@pytest.mark.parametrize("signatures, probe, said, why", [
+    (TWO_MARKS, 2, "ambivalent", "it carries the marks of more than one filesystem"),       # util-linux 2.41
+    (TWO_MARKS, 8, "ambivalent", "it carries the marks of more than one filesystem"),       # before it
+    (("vfat", "vfat", "vfat", "ext2"), 2, "ambivalent", "it carries the marks of more than one filesystem"),
+    ((), 2, "unknown", "no filesystem is found on it"),
+    ((), 8, "unknown", "no filesystem is found on it"),
+    (("dos",), 8, "unknown", "no filesystem is found on it"),            # a partition table's mark alone
+    (("PMBR", "gpt"), 8, "unknown", "no filesystem is found on it")])
+def test_a_volume_with_no_one_filesystem_is_said_to_the_node(automount, signatures, probe, said, why):
+    """wipefs's list tells the two apart: two filesystems or more (a quick
+    format over an older one) — a filesystem it finds at several offsets is
+    one, a partition table's own signature none — or no filesystem at all.
+    `blkid -p`'s exit, which told them apart until PI-NODE-2E, says 2 for
+    both on util-linux 2.41 (F24). Either way the file keeps its four lines;
+    there is no label to give and no driver was tried (F18)."""
     if not BOOT_ID.exists():
         pytest.skip("no boot id on this system")
-    result = _nothing_named(automount, probe=probe)
+    result = _nothing_named(automount, signatures, probe=probe)
     assert result.returncode == 0 and f"loop0 ({said}) is not mounted: {why}" in result.stderr
     assert automount.unread.read_text() == f"{BOOT_ID.read_text().strip()}\n{said}\n\n-\n"
     assert automount.calls() == [] and not (automount.state / "loop0").exists()
     assert automount.plug("unmount").returncode == 0 and not automount.unread.exists()      # gone at the pull
 
 
+@pytest.mark.parametrize("signatures", [("ntfs", "dos"), ("vfat", "vfat", "vfat"), ("iso9660",)])
+def test_one_filesystem_blkid_did_not_name_is_the_journals_alone(automount, signatures):
+    """A signature the full probe finds and plain blkid did not: a volume
+    with one filesystem is no "disk Sautium cannot tell" — its boot sector's
+    `dos` mark is not a second one."""
+    result = _nothing_named(automount, signatures, probe=8)
+    assert result.returncode == 0 and f"loop0: no filesystem named, and wipefs finds {signatures[0]}" in result.stderr
+    assert not (automount.base / ".unread").exists() and automount.calls() == []
+
+
 def test_what_is_no_volume_of_files_is_never_said(automount):
     def silent(name="loop0", **stub):
-        for leftover in ("probe", "size", "pkname", "siblings", "parttype", "partitions"):
+        for leftover in ("probe", "size", "pkname", "siblings", "table", "partitions", "signatures",
+                         "wipefs-fails"):
             (automount.stub / leftover).unlink(missing_ok=True)
         for key, text in stub.items():
             (automount.stub / key).write_text(str(text) + "\n")
         result = automount.plug(name=name, TYPE="", UUID="", LABEL="")
         assert result.returncode == 0, result.stderr
         return not (automount.base / ".unread").exists() and automount.calls() == []
-    assert not silent(probe=2)                                    # the case itself: said
+    assert not silent()                                           # the case itself: said
     shutil.rmtree(automount.base / ".unread")
     assert silent(size=0) and silent(size=1024) and silent(size=1048575)       # an empty slot; an extended
     assert not silent(size=1048576)                                             # partition's container
     shutil.rmtree(automount.base / ".unread")
     assert silent(size="")                                         # no size to read: not a volume
     assert silent(partitions="loop0p1")                            # a whole disk that holds partitions
-    assert silent(probe=4) and silent(probe=0)                     # the probe failed, or found what plain blkid did not
+    assert silent(signatures="ntfs")                               # what plain blkid did not name
+    assert silent(**{"wipefs-fails": ""})                          # nothing listed: nothing to say it by
     # an eMMC's own areas never were volumes of files (the names are the kernel's)
     script = automount.files["script"].read_text()
     assert 'case "$name" in mmcblk*boot*|mmcblk*rpmb) exit 0 ;; esac' in script
@@ -1929,12 +1983,11 @@ def test_a_disk_windows_partitioned_is_one_mount_and_no_unread_row(automount):
     no filesystem beside the NTFS one. Every plug of such a disk would have
     said "a disk Sautium cannot tell" of a partition nobody put music on
     (PI-NODE-2D §14, Q10)."""
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\nsda2\n")
-    (automount.stub / "parttype").write_text(MSR + "\n")
+    automount.partition(1, table=[(1, MSR), (2, BASIC_DATA)])
     assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0           # the reserved partition
     assert automount.calls() == [] and not (automount.base / ".unread").exists()
-    (automount.stub / "parttype").write_text(BASIC_DATA + "\n")
+    assert automount.calls("partx") == ["-g -o TYPE -n 1 /dev/sda"]             # its type from the table
+    automount.partition(2, table=[(1, MSR), (2, BASIC_DATA)])
     automount.ntfs_3g()
     assert automount.plug(TYPE="ntfs", UUID="01DC5A7E6B2F4C10", LABEL="Music").returncode == 0
     (call,) = automount.calls()                                                   # one mount
@@ -1944,37 +1997,47 @@ def test_a_disk_windows_partitioned_is_one_mount_and_no_unread_row(automount):
 @pytest.mark.parametrize("parttype, said", [
     (MSR, False), (EFI_SYSTEM, False), ("21686148-6449-6e6f-744e-656564454649", False),        # BIOS boot
     ("426f6f74-0000-11aa-aa11-00306543ecac", False), ("52637672-7900-11aa-aa11-00306543ecac", False),  # Apple's
-    ("0x5", False), ("0xef", False), ("", False), ("a type; reboot", False),
+    ("0x5", False), ("0xef", False), ("0x27", False), ("", False), ("a type; reboot", False),  # 0x27: recovery
     (BASIC_DATA, True), (BASIC_DATA.upper(), True), ("0fc63daf-8483-4772-8e79-3d69d8477de4", True),
     ("48465300-0000-11aa-aa11-00306543ecac", True), ("0x7", True), ("0xc", True), ("0x83", True)])
 def test_beside_other_partitions_only_one_for_data_is_said_as_unknown(automount, parttype, said):
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\nsda2\n")
-    (automount.stub / "parttype").write_text(parttype + "\n")
-    assert _nothing_named(automount, probe=2).returncode == 0
+    """The type is the partition table's, read by partx: udev exports no
+    PARTTYPE for a partition its probe found no filesystem on — exactly the
+    partition asked about here — so the lsblk column it was read from was
+    empty on a real disk, and an NTFS partition quick-formatted over another
+    was silent (F24; the fake lsblk answers that column empty)."""
+    automount.partition(2, table=[(1, "0xc"), (2, parttype)])
+    assert _nothing_named(automount).returncode == 0
     assert automount.unread.exists() is said
+    assert automount.calls("partx") == ["-g -o TYPE -n 2 /dev/sda"]
     if said:
         assert automount.unread.read_text().splitlines()[1:] == ["unknown", "", "-"]
+
+
+@pytest.mark.parametrize("number", ["", "2; reboot", "../1", "-n 1", "x"])
+def test_a_partition_number_that_is_no_number_is_never_handed_to_partx(automount, number):
+    automount.partition(number, table=[(1, BASIC_DATA), (2, BASIC_DATA)])
+    assert _nothing_named(automount).returncode == 0
+    assert automount.calls("partx") == [] and not (automount.base / ".unread").exists()
 
 
 def test_a_disks_only_volume_is_said_whatever_its_partition_type(automount):
     """A blank stick with its one partition, and an unpartitioned one: the
     person plugged a disk in and is owed why it shows nothing."""
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\n")
-    assert _nothing_named(automount, probe=2, parttype=MSR).returncode == 0
+    automount.partition(1, siblings=("sda1",), table=[(1, MSR)])
+    assert _nothing_named(automount).returncode == 0
     assert automount.unread.read_text().splitlines()[1] == "unknown"
+    assert automount.calls("partx") == []                                          # no type to ask
     automount.plug("unmount")
     (automount.stub / "pkname").write_text("")                                    # a whole disk, no table
     (automount.stub / "siblings").unlink()
-    assert _nothing_named(automount, probe=2).returncode == 0
+    assert _nothing_named(automount).returncode == 0
     assert automount.unread.read_text().splitlines()[1] == "unknown"
 
 
 def test_the_marks_of_two_filesystems_are_said_wherever_they_are_met(automount):
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\nsda2\n")
-    assert _nothing_named(automount, probe=8, parttype=MSR).returncode == 0
+    automount.partition(1, table=[(1, MSR), (2, BASIC_DATA)])
+    assert _nothing_named(automount, TWO_MARKS).returncode == 0
     assert automount.unread.read_text().splitlines()[1] == "ambivalent"
 
 
@@ -1994,37 +2057,34 @@ def _image(tmp_path, first, second):
     return image, superblock
 
 
-@pytest.mark.parametrize("second", [["mkntfs", "-Q", "-F", "-L", "16Gb"], ["mkfs.vfat", "-F", "32", "-n", "STICK"]],
+@pytest.mark.parametrize("over, second", [("ntfs", ["mkntfs", "-Q", "-F", "-L", "16Gb"]),
+                                          ("vfat", ["mkfs.vfat", "-F", "32", "-n", "STICK"])],
                          ids=["ntfs over ext2", "fat over ext2"])
-def test_the_real_blkid_tells_two_signatures_from_none(automount, tmp_path, second):
-    """The script's branch rests on what the system's own blkid answers: run
+def test_the_real_wipefs_tells_two_signatures_from_none(automount, tmp_path, over, second):
+    """The script's branch rests on what the system's own wipefs lists: run
     here on a real two-signature image and on a blank one, through the
-    script (the stub hands `blkid -p` to the real one over the image)."""
+    script (the stub hands the question to the real wipefs over the image)."""
     tools = {name: shutil.which(name, path=os.environ["PATH"] + ":/usr/sbin:/sbin")
-             for name in ("blkid", "mkfs.ext2", second[0])}
+             for name in ("blkid", "wipefs", "mkfs.ext2", second[0])}
     if not all(tools.values()) or not BOOT_ID.exists():
         pytest.skip("no " + ", ".join(name for name, path in tools.items() if not path) + " on this system")
     image, superblock = _image(tmp_path, tools["mkfs.ext2"], [tools[second[0]]] + second[1:])
-    blkid = tools["blkid"]
-
-    def probe():
-        return subprocess.run([blkid, "-p", str(image)], capture_output=True, text=True)
-    assert probe().returncode == 0                                 # one format: named
     with open(image, "r+b") as f:
         f.seek(1024)
         f.write(superblock)
-    answered = probe()
-    assert answered.returncode == 8 and "ambivalent result" in answered.stderr
-    plain = subprocess.run([blkid, "-c", "/dev/null", "-o", "value", "-s", "TYPE", str(image)], capture_output=True)
+    listed = subprocess.run([tools["wipefs"], "--no-act", "--noheadings", "--parsable", "--output", "TYPE",
+                             str(image)], capture_output=True, text=True, check=True).stdout.split()
+    assert {"ext2", over} <= set(listed)                           # each at one offset or several
+    plain = subprocess.run([tools["blkid"], "-c", "/dev/null", "-o", "value", "-s", "TYPE", str(image)],
+                           capture_output=True)
     assert plain.returncode == 2 and plain.stdout == b""           # what the script's first question gets
-    (automount.stub / "real-blkid").write_text(blkid)
+    (automount.stub / "real-wipefs").write_text(tools["wipefs"])
     shutil.copy(image, automount.stub / "image")
     assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0
     assert automount.unread.read_text().splitlines()[1:] == ["ambivalent", "", "-"]
     automount.plug("unmount")
     with open(automount.stub / "image", "wb") as f:                # a blank volume
         f.truncate(64 * 1024 * 1024)
-    assert subprocess.run([blkid, "-p", str(automount.stub / "image")], capture_output=True).returncode == 2
     assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0
     assert automount.unread.read_text().splitlines()[1:] == ["unknown", "", "-"]
 

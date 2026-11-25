@@ -413,9 +413,10 @@ ExecStop=/usr/local/lib/sautium/automount unmount %I
 # (backend/library_root.py). The unit stays active for such a volume, so
 # that its stop at the pull takes the file away. Where blkid names no
 # filesystem the type line is one of the script's own two words:
-# `ambivalent` (the low-level probe finds the marks of more than one — its
-# exit 8), `unknown` (it finds none — its exit 2; said only of a volume that
-# can be one of files, see the script).
+# `ambivalent` (wipefs lists the marks of more than one), `unknown` (it lists
+# none; said only of a volume that can be one of files, see the script).
+# Never by `blkid -p`'s exit: 8 for two marks on an older util-linux, 2 for
+# the same disk on 2.41 (Debian trixie), as for a blank one.
 AUTOMOUNT_SCRIPT = """\
 #!/bin/sh
 # Sautium: mount a plugged disk read-only under {base}/<its UUID>, for the
@@ -426,6 +427,7 @@ set -eu
 BASE={base}
 OWNER={uid}:{gid}
 STATE={state}
+SYSFS={sysfs}
 verb="${{1:-}}"
 name="${{2:-}}"
 case "$name" in ""|*[!A-Za-z0-9]*) exit 64 ;; esac     # a kernel name, nothing else
@@ -489,21 +491,39 @@ if [ -z "$type" ]; then
     size=$(lsblk -n -d -b -o SIZE "$dev" 2>/dev/null | head -n 1 | tr -d ' ' || true)
     case "$size" in ""|*[!0-9]*) exit 0 ;; esac
     [ "$size" -ge 1048576 ] || exit 0
-    probe=0
-    blkid -p "$dev" >/dev/null 2>&1 || probe=$?
-    case "$probe" in
-        8)  type=ambivalent
-            unread "it carries the marks of more than one filesystem (wipefs lists them)" - ;;
-        2)  ;;
-        *)  echo "sautium-automount: $name: no filesystem named, and blkid -p answered $probe" >&2
+    # What is on it, as wipefs lists it (read only): a filesystem once for
+    # each offset it is found at, and a partition table's signature, which a
+    # FAT or NTFS boot sector carries too — no filesystem (libblkid's
+    # partition probers; `minix` names a filesystem as well, so it counts)
+    if ! listed=$(wipefs --no-act --noheadings --parsable --output TYPE "$dev"); then
+        echo "sautium-automount: $name: no filesystem named, and wipefs could not list its signatures" >&2
+        exit 0
+    fi
+    marks=$(printf '%s\\n' "$listed" | grep -v -x -e '' -e aix -e atari -e bsd -e dos -e gpt -e mac -e PMBR \\
+            -e sgi -e solaris -e sun -e ultrix -e unixware | sort -u)
+    count=0
+    [ -z "$marks" ] || count=$(printf '%s\\n' "$marks" | wc -l)
+    case "$count" in
+        0)  ;;
+        1)  echo "sautium-automount: $name: no filesystem named, and wipefs finds $marks" >&2
             exit 0 ;;
+        *)  type=ambivalent
+            unread "it carries the marks of more than one filesystem (wipefs lists them)" - ;;
     esac
     # None found. Beside other partitions, only one whose type is for data:
     # a disk Windows partitioned carries a reserved partition with nothing on
     # it next to its NTFS one, and others a boot or recovery partition —
     # nobody put music there. A disk's only volume is said whatever its type.
+    # The type is the partition table's, by partx: udev exports none for a
+    # partition its probe found no filesystem on, which this one is.
     if [ "$dev_disk" != "$name" ] && [ "$(lsblk -n -o NAME "/dev/$dev_disk" 2>/dev/null | wc -l)" -gt 2 ]; then
-        parttype=$(lsblk -n -d -o PARTTYPE "$dev" 2>/dev/null | head -n 1 | tr -d ' ' | tr 'A-F' 'a-f' || true)
+        number=$(cat "$SYSFS/class/block/$name/partition" 2>/dev/null || true)
+        case "$number" in ""|*[!0-9]*) exit 0 ;; esac
+        if ! parttype=$(partx -g -o TYPE -n "$number" "/dev/$dev_disk"); then
+            echo "sautium-automount: $name: no filesystem named, and partx could not read its partition type" >&2
+            exit 0
+        fi
+        parttype=$(printf '%s' "$parttype" | head -n 1 | tr -d ' ' | tr 'A-F' 'a-f')
         case "$parttype" in
             ebd0a0a2-b9e5-4433-87c0-68b6b72699c7) ;;    # GPT: Microsoft basic data (FAT, exFAT, NTFS)
             0fc63daf-8483-4772-8e79-3d69d8477de4) ;;    # Linux filesystem
@@ -556,7 +576,7 @@ printf '%s\\n' "$point" > "$STATE/$name"
 
 
 def automount_files(folder: Path, uid: int, gid: int, base: str = AUTOMOUNT_BASE,
-                    state: str = "/run/sautium-automount") -> Dict[str, Path]:
+                    state: str = "/run/sautium-automount", sysfs: str = "/sys") -> Dict[str, Path]:
     """The automount's three files, written into ./host/automount for the
     person to read and install."""
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -567,7 +587,8 @@ def automount_files(folder: Path, uid: int, gid: int, base: str = AUTOMOUNT_BASE
     agent._write_private(files["unit"], AUTOMOUNT_UNIT.encode(), 0o644)
     agent._write_private(files["script"],
                          AUTOMOUNT_SCRIPT.format(base=shlex.quote(base), uid=uid, gid=gid,
-                                                 state=shlex.quote(state)).encode(), 0o755)
+                                                 state=shlex.quote(state),
+                                                 sysfs=shlex.quote(sysfs)).encode(), 0o755)
     return files
 
 
