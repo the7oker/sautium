@@ -98,6 +98,13 @@ REFUSED_HERE = "{rate} · {other}: refused by HQPlayer when the Benchmark asked 
 UNSTARTED_HERE = "{rate} · {other}: never got going here when the Benchmark asked it"
 SLOW_START_HERE = ("{rate} · {other}: did not start within a minute when the Benchmark asked it "
                    "(HQPlayer answers nothing while it prepares) — not asked again on this engine")
+# BENCH-GUARD-1 §4 C5, for the words sitting
+ENDED_HERE = ("{rate} · {other}: HQPlayer ended, or was restarted, while it prepared it when the Benchmark "
+              "asked it — too heavy here; not asked again on this engine")
+SLOW_BUILT = ("{rate} · {other}: did not start within a minute when the Benchmark asked it — HQPlayer took "
+              "{took} to prepare it; not asked again on this engine")
+ACROSS = ("A {source} at {rate} is a conversion across rate families. At Auto with HQPlayer's Auto rate "
+          "family on, this source plays in its own family and no such filter is built.")
 IMPLIED_HERE = "{rate} · {other}: {cls}, by the Benchmark's measurement at {from_rate} (not measured itself)"
 AUTO = "auto"
 MORE = "… and {n} more."
@@ -600,6 +607,11 @@ def _rate_word(hz: int) -> str:
     return rate_name(hz) if hz else AUTO
 
 
+def _took(seconds: float) -> str:
+    """A build's length: seconds under two minutes, else minutes."""
+    return f"{seconds:.0f} s" if seconds < 120 else f"{seconds / 60:.0f} min"
+
+
 def _samples(n: int) -> str:
     return SAMPLES[n != 1].format(n=n)
 
@@ -622,11 +634,22 @@ def _host_fit(args: Mapping[str, str], read: Read) -> List[str]:
                        matrix=MATRIX.format(profile=ctx["matrix_profile"]) if ctx["matrix_profile"] else "",
                        convolution=CONVOLUTION if ctx["convolution"] else "")]
     source = None
+    across: List[int] = []          # the source's rates across families, in its rows' order
+
+    def said_across() -> None:
+        if across:
+            out.append(INDENT + ACROSS.format(source=_source(*source),
+                                              rate=", ".join(_rate_word(x) for x in dict.fromkeys(across))))
+            across.clear()
     for r in host["rows"]:
         if (r["src_rate"], r["src_channels"]) != source:
+            said_across()
             source = (r["src_rate"], r["src_channels"])
             out.append(INDENT + FROM_SOURCE.format(source=_source(*source)))
         out.append(INDENT * 2 + _host_row(r, host["knob"], th))
+        if r["rate_out"] and not hqp_rate_check.same_family(r["rate_out"], r["src_rate"]):
+            across.append(r["rate_out"])
+    said_across()
     if host["total"] > len(host["rows"]):
         out.append(INDENT + MORE.format(n=host["total"] - len(host["rows"])))
     return out + [OWN]
@@ -639,6 +662,10 @@ def _host_row(r: Mapping[str, Any], knob: str, th: Mapping[str, Any]) -> str:
         return REFUSED_HERE.format(rate=rate, other=other)
     if r["class"] == "unstarted":
         return UNSTARTED_HERE.format(rate=rate, other=other)
+    if r["class"] == "too_heavy":
+        return ENDED_HERE.format(rate=rate, other=other)
+    if r["class"] == "slow_start" and r.get("build_s") is not None:
+        return SLOW_BUILT.format(rate=rate, other=other, took=_took(r["build_s"]))
     if r["class"] == "slow_start":
         return SLOW_START_HERE.format(rate=rate, other=other)
     if r["speed"] is None:
