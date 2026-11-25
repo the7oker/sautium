@@ -270,6 +270,7 @@ PATH_ROW = "\n".join([
     _block("function paintMusicPathRow(row, missing) {"),
     "let _nodeStreams = null;",
     "let _nodeStreamsAsked = false;",
+    "let _prunePlanHeld = null;",
     _block("function paintMusicFolder(missing) {"),
 ])
 
@@ -278,13 +279,15 @@ const classes = new Set();
 const sub = { textContent: '', hidden: true };
 const row = { classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) },
               dataset: { musicFolder: 'setup' }, querySelector: () => sub };
-const buttons = [{ disabled: false }, { disabled: false }];
+const buttons = [{ disabled: false }, { disabled: false }, { disabled: false }];
 let notice = null, asked = 0, answer;
 const notices = { get: () => notice };
 const document = { querySelectorAll: sel => {
-    if (sel !== '[data-action="scan"], [data-action="scan-prune"]') throw new Error(sel);
+    if (sel !== '[data-action="scan"], [data-action="scan-prune"], [data-action="remove-away"]') throw new Error(sel);
     return buttons; },
-  querySelector: sel => { if (sel !== '[data-music-path-row]') throw new Error(sel); return row; } };
+  querySelector: sel => {
+    if (sel === '[data-away-why]') return null;          // the Away row is not on this screen's stub
+    if (sel !== '[data-music-path-row]') throw new Error(sel); return row; } };
 const fetch = url => { asked += 1; if (url !== '/api/player/reach') throw new Error(url);
   return Promise.resolve({ ok: true, json: () => Promise.resolve(answer) }); };
 const seen = () => ({ line: sub.textContent, disabled: buttons.map(b => b.disabled),
@@ -310,15 +313,15 @@ STREAMS = ("Not connected — your own tracks stream or wait, and nothing can be
 
 @pytest.mark.parametrize("streams, said", [(True, STREAMS), (False, WAITS)])
 def test_the_scan_buttons_wait_for_the_folder_under_the_rows_sentence(streams, said):
-    """F13: "Scan for new" and "Rescan" are disabled while the notice
-    stands, and back with its end; the row says whether the albums stream
-    meanwhile, asked once."""
+    """F13: "Scan for new", "Rescan" and the Away row's Remove (2E F23) are
+    disabled while the notice stands, and back with its end; the row says
+    whether the albums stream meanwhile, asked once."""
     steps = _node(PATH_ROW_DRIVER % {"streams": json.dumps(streams)})
-    assert steps[0] == {"line": "setup", "disabled": [False, False], "error": False, "asked": 0}
-    assert steps[1] == {"line": WAITS, "disabled": [True, True], "error": True, "asked": 1}
-    assert steps[2] == {"line": said, "disabled": [True, True], "error": True, "asked": 1}
+    assert steps[0] == {"line": "setup", "disabled": [False] * 3, "error": False, "asked": 0}
+    assert steps[1] == {"line": WAITS, "disabled": [True] * 3, "error": True, "asked": 1}
+    assert steps[2] == {"line": said, "disabled": [True] * 3, "error": True, "asked": 1}
     assert steps[3] == steps[2]
-    assert steps[4] == {"line": "setup", "disabled": [False, False], "error": False, "asked": 1}
+    assert steps[4] == {"line": "setup", "disabled": [False] * 3, "error": False, "asked": 1}
     # the three places that paint the row paint the buttons with it
     assert SOURCE.count("paintMusicFolder(!!notices.get('library.mount_missing'));") == 3
 

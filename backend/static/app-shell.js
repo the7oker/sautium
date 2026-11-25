@@ -18727,11 +18727,16 @@
                       text: escapeProfileHtml(r.prune.refused) });
     }
   }
+  let _prunePlanHeld = null;       // the question the folder's absence holds back
   async function _askPrunePlan(plan) {
     // One question at a time: a plan that arrives while one is open (another
     // device's Rescan, a yes that had to ask again) waits for the render that
-    // follows the answer.
+    // follows the answer. With the music folder out the node refuses any yes
+    // (PI-NODE-2E F23): the question waits, and the snapshot the folder's
+    // return sends asks it.
     if (!plan || _prunePlanOpen || _prunePlansAsked.has(plan.id)) return;
+    if (notices.get('library.mount_missing')) { _prunePlanHeld = plan; return; }
+    _prunePlanHeld = null;
     _prunePlansAsked.add(plan.id);
     _prunePlanOpen = true;
     const remove = await window.confirmDestructive({
@@ -18809,7 +18814,10 @@
   let _nodeStreams = null;        // null: not known for this stretch
   let _nodeStreamsAsked = false;
   function paintMusicFolder(missing) {
-    if (!missing) { _nodeStreams = null; _nodeStreamsAsked = false; }
+    if (!missing) {
+      _nodeStreams = null; _nodeStreamsAsked = false;
+      if (_prunePlanHeld) _askPrunePlan(_prunePlanHeld);
+    }
     const row = document.querySelector('[data-music-path-row]');
     if (row) {
       row.dataset.musicStreams = _nodeStreams ? '1' : '';

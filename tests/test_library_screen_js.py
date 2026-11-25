@@ -329,7 +329,7 @@ const escapeHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replac
 const fmtPathForDisplay = p => p;
 const NOTICE_COPY = {};
 %(copy)s
-let _nodeStreams = null, _nodeStreamsAsked = false;
+let _nodeStreams = null, _nodeStreamsAsked = false, _prunePlanHeld = null;
 let shown = null;
 const notices = { get: k => (k === 'library.mount_missing' ? shown : null) };
 const buttons = ['scan', 'scan-prune', 'remove-away'].map(action => ({ action, disabled: false }));
@@ -371,12 +371,14 @@ ASK = r"""
 'use strict';
 const escapeProfileHtml = s => String(s);
 const _prunePlansAsked = new Set();
-let _prunePlanOpen = false;
+let _prunePlanOpen = false, _prunePlanHeld = null;
 const _prunePlanTitle = p => 't', _prunePlanMessage = p => 'm';
 const parseHash = () => 'home', render = () => {};
 const toasts = [];
-const notices = { toast: t => toasts.push(t) };
-const window = { confirmDestructive: async () => true };
+let missing = null;
+const notices = { toast: t => toasts.push(t), get: key => (key === 'library.mount_missing' ? missing : null) };
+let confirms = 0;
+const window = { confirmDestructive: async () => { confirms += 1; return true; } };
 %(sent)s
 const atSend = [];
 let answer = { ok: true, status: 200 };
@@ -396,7 +398,17 @@ const fetch = async url => { atSend.push([..._pruneYesSent.keys()]);
   // a yes refused at the route: its own toast, nothing kept for the run
   answer = { ok: false, status: 409 };
   await _askPrunePlan({ id: 'p3', kind: 'rescan' });
-  console.log(JSON.stringify({ atSend, toasts, kept: [..._pruneYesSent.keys()] }));
+  // the folder out: a waiting question is not asked (its yes would only be refused) — asked once it is back
+  answer = { ok: true, status: 200 };
+  missing = { key: 'library.mount_missing' };
+  const before = confirms;
+  await _askPrunePlan({ id: 'p4', kind: 'away' });
+  await _askPrunePlan({ id: 'p4', kind: 'away' });
+  const whileOut = confirms - before;
+  missing = null;
+  await _askPrunePlan(_prunePlanHeld);                      // what paintMusicFolder(false) asks at the notice's end
+  console.log(JSON.stringify({ atSend, toasts, kept: [..._pruneYesSent.keys()], whileOut,
+                               afterBack: confirms - before }));
 })();
 """
 
@@ -409,11 +421,12 @@ def test_a_removal_refused_when_it_looked_is_said_once_to_the_tab_that_said_yes(
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout)
-    assert got["atSend"] == [["p1"], ["p2"], ["p3"]]               # known before the run can end
+    assert got["atSend"] == [["p1"], ["p2"], ["p3"], ["p4"]]       # known before the run can end
     assert got["toasts"] == [
         {"kind": "error", "key": "library.prune", "title": "Albums away", "text": "Not connected."},
         {"kind": "error", "key": "library.prune", "title": "Rescan", "text": "refused here"}]
-    assert got["kept"] == []
+    assert got["kept"] == ["p4"]
+    assert got["whileOut"] == 0 and got["afterBack"] == 1          # PI-NODE-2E Q6: waits, asked when back
 
 
 AWAY = r"""
