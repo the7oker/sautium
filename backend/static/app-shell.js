@@ -4287,16 +4287,16 @@
     // The three AI scopes exist only where a model runs: a node whose models
     // are off or absent never loads one, so it offers none of them (the
     // chips sit in the closed filters panel, so nothing is seen to go).
-    const scopes = fetch('/api/settings/hardware')
-      .then(r => r.ok ? r.json() : null)
+    // The same answer says whether the MusicBrainz scope's words may point
+    // at the offline databases (mbScopeWords, mbCooldownWords).
+    const scopes = nodeHardware(true)
       .then(hw => {
         if (!hw || hw.detected.ml_available) return;
         for (const value of ['bio', 'sound', 'lyrics']) {
           const chip = screen.querySelector(`#discoveryScopeRow .f-chip[data-value="${value}"]`);
           if (chip) chip.hidden = true;
         }
-      })
-      .catch(err => console.warn('hardware profile failed:', err));
+      });
     const mbStatus = fetch('/api/discovery/mb-status')
       .then(r => r.ok ? r.json() : { available: false, state: 'none' })
       .then(s => {
@@ -4314,6 +4314,36 @@
   // words review.
   const DISCOVERY_NO_MODELS = 'This search needs AI models, and none runs on this node.'
     + ' Search by names and titles instead.';
+
+  // Why the MusicBrainz scope cannot be searched now, by the chip's state.
+  // `offered`: this node offers the offline databases (dumpsOffered) — where
+  // it does not, the network's road is the only one named. Draft words for
+  // the owner's words review: 'off', and every Nano sentence.
+  function mbScopeWords(state, offered) {
+    if (state === 'off') {
+      return 'P2P sharing is off, so this node asks no other node about artists. Turn it on in '
+        + '<b>More → Sync &amp; P2P</b>' + (offered
+          ? ', or download the catalog yourself in <b>More → Offline databases</b>.'
+          : ', and it searches the network\'s catalog nodes.');
+    }
+    if (state === 'searching') {
+      return 'Looking for MusicBrainz catalog nodes on the network — give it a minute.'
+        + (offered ? ' Or download the catalog yourself in <b>More → Offline databases</b>.' : '');
+    }
+    return offered
+      ? 'No MusicBrainz catalog nodes are reachable, and the optional local dump is not loaded. '
+        + 'Download it in <b>More → Offline databases</b>.'
+      : 'No MusicBrainz catalog nodes are reachable right now.';
+  }
+
+  // A network search past its rate limit. Network search is a shared
+  // volunteer resource — the client rate-limits itself; where the node
+  // offers the offline databases the wait doubles as the pitch for the
+  // unlimited local option.
+  function mbCooldownWords(seconds, offered) {
+    return `Network search is rate-limited (shared volunteer nodes) — retry in ~${seconds}s${
+      offered ? ', or download the catalog in More → Offline databases for unlimited local search' : ''}.`;
+  }
 
   function applyMbChipState(chip, s) {
     chip.dataset.mbState = s.state || (s.available ? 'local' : 'none');
@@ -4359,21 +4389,9 @@
             // Only the MB scope chip disables (no dump) — tapping it must
             // say why instead of dying silently.
             if (chip.id === 'discoveryMbChip') {
-              const mbState = chip.dataset.mbState;
-              // Draft words for the owner's words review: 'off'.
               window.notifyDialog({
                 title: 'MusicBrainz search', kind: 'info',
-                message: mbState === 'off'
-                  ? 'P2P sharing is off, so this node asks no other node about '
-                    + 'artists. Turn it on in <b>More → Sync &amp; P2P</b>, or download the '
-                    + 'catalog yourself in <b>More → Offline databases</b>.'
-                  : mbState === 'searching'
-                  ? 'Looking for MusicBrainz catalog nodes on the network — '
-                    + 'give it a minute. Or download the catalog yourself in '
-                    + '<b>More → Offline databases</b>.'
-                  : 'No MusicBrainz catalog nodes are reachable, and the '
-                    + 'optional local dump is not loaded. Download it in '
-                    + '<b>More → Offline databases</b>.',
+                message: mbScopeWords(chip.dataset.mbState, dumpsOffered()),
               });
             }
             return;
@@ -4921,10 +4939,7 @@
           if (mbBtn) mbBtn.hidden = true;
           const emptyP = empty.querySelector('p');
           if (emptyP) emptyP.textContent = data.cooldown
-            // Network search is a shared volunteer resource — the client
-            // rate-limits itself; the wait message doubles as the pitch
-            // for the unlimited local option.
-            ? `Network search is rate-limited (shared volunteer nodes) — retry in ~${data.cooldown}s, or download the catalog in More → Offline databases for unlimited local search.`
+            ? mbCooldownWords(data.cooldown, dumpsOffered())
             : data.available === false
               ? 'MusicBrainz dump is not loaded on this device, and no catalog nodes are reachable.'
               : 'No matches in MusicBrainz.';
@@ -9534,6 +9549,7 @@
       // corrected by the event instead of by a re-open.
       document.addEventListener('np-update', () => this._syncOutputRows());
       this._syncOutputRows();
+      this._syncDatabasesRow(false);
     },
     open() {
       if (!this.el) this.init();
@@ -9548,6 +9564,7 @@
       });
       updateFabVisibility(currentRoute);
       this._refreshHqpStatus();
+      this._syncDatabasesRow(true);
       guide.paint();
     },
     close() {
@@ -9570,6 +9587,15 @@
       const hqpRow = this.el.querySelector('#hqpHint').closest('.more-row');
       hqpRow.hidden = out.type !== 'hqplayer';
       this.el.querySelector('#outputHint').textContent = out.label || '';
+    },
+    // "Offline databases" is drawn only where the node offers them
+    // (dumpsOffered): at once from the answer the page holds, then from the
+    // node's own — read at the drawer's build and again at each open, for a
+    // dump loaded or removed meanwhile.
+    async _syncDatabasesRow(fresh) {
+      const row = this.el.querySelector('[data-go="more/databases"]');
+      row.hidden = !dumpsOffered();
+      row.hidden = !dumpsOffered(await nodeHardware(fresh));
     },
     async _refreshHqpStatus() {
       const hint = this.el && this.el.querySelector('#hqpHint');
@@ -16135,7 +16161,9 @@
   }
 
   // AI canonization tier — toggle + "Run now" + live progress/reasoning log.
-  function _renderAiCanon(ai) {
+  // `offered`: the node offers the offline databases (dumpsOffered) — the
+  // catalogue's need then says where to download it.
+  function _renderAiCanon(ai, offered) {
     const c = ai.canonization;
     if (!c || !c.available) return '';
     const job = c.job || {};
@@ -16160,7 +16188,7 @@
         </div>
         ${noDump ? `
           <div class="form-row stacked">
-            <div class="row-stack-sub">Needs the local MusicBrainz catalogue — canonization resolves names against it. Download it in <b>Offline databases</b>.</div>
+            <div class="row-stack-sub">Needs the local MusicBrainz catalogue — canonization resolves names against it.${offered ? ' Download it in <b>Offline databases</b>.' : ''}</div>
           </div>` : ''}
       </div>
       ${running ? `
@@ -17876,8 +17904,34 @@
 
   const DUMPS_NOT_ON_NANO = 'Not offered on this node. The MusicBrainz catalogue alone is a 7.5 GB download '
     + 'that takes about 21 GB in the database and hours to load — more than a Nano node is set up for. This node '
-    + 'settles artist and album names, and listening statistics, from other Sautium nodes\' answers instead. '
-    + 'Turning the AI models on (More › Profile) makes this a full node, and the databases are offered again.';
+    + 'settles artist and album names, and listening statistics, from other Sautium nodes\' answers instead.';
+  // Under the models row on More › Profile, where the databases are not offered
+  const DUMPS_ON_A_FULL_NODE = 'Offline databases (the MusicBrainz catalogue, 7.5 GB) are offered on a full node: turning the AI models on makes this one.';
+
+  // The node's hardware answer (GET /api/settings/hardware) as the page last
+  // read it, for the places that need only whether the dumps are offered.
+  // One ask is shared until a caller wants the node's word again (`fresh`);
+  // a failed ask leaves the answer held as it was.
+  let _hardware = null, _hardwareAsk = null;
+  function nodeHardware(fresh = false) {
+    if (fresh || !_hardwareAsk) {
+      _hardwareAsk = fetch('/api/settings/hardware')
+        .then(r => r.ok ? r.json() : null)
+        .then(hw => { if (hw) _hardware = hw; return _hardware; })
+        .catch(err => { console.warn('hardware profile failed:', err); _hardwareAsk = null; return _hardware; });
+    }
+    return _hardwareAsk;
+  }
+
+  // A Nano node is not offered the dumps: a download of tens of GB and
+  // hours of loading on a machine set up to do neither. One it already
+  // holds (a restore, an owner who loaded it before) is shown as anywhere —
+  // `dumps_held`, the node's one rule (routers/settings.py). `hw`: the
+  // hardware answer or the Offline databases screen's own; none read yet
+  // offers them.
+  function dumpsOffered(hw = _hardware) {
+    return !(hw && hw.nano && !hw.dumps_held);
+  }
 
   async function renderDatabases(root) {
     const data = await _fetchDumps();
@@ -17887,14 +17941,7 @@
       return;
     }
     const families = Object.keys(DUMP_FAMILIES);
-    // A Nano node is not offered the dumps: a download of tens of GB and
-    // hours of loading on a machine set up to do neither. One it already
-    // holds (a restore, an owner who loaded it before) is shown as anywhere.
-    const held = families.some(f => {
-      const d = data[DUMP_FAMILIES[f].key] || {};
-      return d.loaded || (d.update && d.update.running);
-    });
-    if (data.nano && !held) {
+    if (!dumpsOffered(data)) {
       root.innerHTML = `
         <section class="screen screen-settings">
           ${_settingsHeader('Offline databases')}
@@ -17988,6 +18035,8 @@
   // of desktop/machine_tier.py's NANO_BELOW_* rule, the disk the setup asks
   // for the full node). Draft words for the owner's words review.
   function hwModelsRow(hw) {
+    const dumps = dumpsOffered(hw) ? ''
+      : `<div class="row-stack-sub">${escapeProfileHtml(DUMPS_ON_A_FULL_NODE)}</div>`;
     if (hw.models === 'absent') {
       const why = !hw.restartable ? 'Not available: no AI models exist for this machine.'
         : hw.birth_preset === 'nano'
@@ -17997,7 +18046,7 @@
             + '25 GB of free disk and 8 GB of memory to work well).'
           : 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full';
       return `<div class="form-row stacked"><div class="row-stack"><span class="row-stack-label">AI models</span></div>
-        <div class="row-stack-sub">${escapeProfileHtml(why)}</div></div>`;
+        <div class="row-stack-sub">${escapeProfileHtml(why)}</div>${dumps}</div>`;
     }
     const on = !!hw.models_switch;
     const pending = hw.restart_required
@@ -18009,7 +18058,7 @@
             <span class="row-stack-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
           </div>
           <button class="profile-btn secondary" type="button" data-action="models-switch" data-on="${on ? '0' : '1'}">${on ? 'Turn off' : 'Turn on'}</button>
-        </div>${pending}</div>`;
+        </div>${pending}${dumps}</div>`;
   }
 
   // The "Sautium" row: what runs here, and the one control the host agent's
@@ -19502,6 +19551,9 @@
   // again. The screen's own re-renders (a stream wake, a canon batch, the
   // sign-in notice coming or going) read the verdict it holds.
   async function renderAI(root, { look = true } = {}) {
+    // The answer the page already asked for at its start: the canonization's
+    // need names the offline databases only where they are offered
+    const hardware = nodeHardware();
     let ai = null;
     try {
       const r = await fetch('/api/settings/ai');
@@ -19516,6 +19568,7 @@
     // Gear research runs on Claude Code whatever answers the chat, so its
     // sign-in is shown here whenever the queue waits for it — the notice
     // points at this screen.
+    const hw = await hardware;
     const researchNeedsClaude = ai.provider !== 'claude_code' && !!notices.get('claude_code.signed_out');
     let claudeState = null;
     if (ai.provider === 'claude_code' || researchNeedsClaude) {
@@ -19540,7 +19593,7 @@
         ${researchNeedsClaude && claudeState ? `
           <div class="profile-group-label">Claude Code · gear research</div>
           <div class="form-group">${_renderClaudeCodeBlock(claudeState)}</div>` : ''}
-        ${_renderAiCanon(ai)}
+        ${_renderAiCanon(ai, dumpsOffered(hw))}
       </section>
     `;
     _wireBack(root);

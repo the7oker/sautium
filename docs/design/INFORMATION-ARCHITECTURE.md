@@ -164,7 +164,10 @@ A **bottom-up sheet** with a vertical list of entries:
   over `DUMP_FAMILIES`. Its own section rather than rows on Library or
   Streaming library: the dumps are neither the user's files nor a catalog
   of music — they are reference data the whole node reads, and the set of
-  them grows
+  them grows. A Nano node holding none is not offered them (since
+  2026-11-25): the drawer has no row there (`/api/settings/hardware`'s
+  `dumps_held`), the screen reached by its address says why, and More ›
+  Profile says under the models row that a full node is offered them
 - AI assistant (`#more/ai`) — which agent answers the chat and its sign-in;
   also Claude Code's sign-in whenever gear research waits for it, since
   research runs on Claude Code whichever agent answers the chat
