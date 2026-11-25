@@ -263,7 +263,7 @@
 
   function updatePlayingHighlight() {
     const mfTarget = _lastNpMediaFileId != null ? String(_lastNpMediaFileId) : null;
-    document.querySelectorAll('.detail-screen .track-row[data-media-file-id]')
+    document.querySelectorAll('.detail-screen:not([data-session-id]) .track-row[data-media-file-id]')
       .forEach(row => {
         const match = mfTarget !== null
           && row.getAttribute('data-media-file-id') === mfTarget;
@@ -271,14 +271,14 @@
       });
     // Streaming (phantom) tracks: matched by track UUID instead of file id.
     const tidTarget = _lastNpPreviewTrackId != null ? String(_lastNpPreviewTrackId) : null;
-    document.querySelectorAll('.detail-screen .track-row.is-phantom-track[data-track-id]')
+    document.querySelectorAll('.detail-screen:not([data-session-id]) .track-row.is-phantom-track[data-track-id]')
       .forEach(row => {
         const match = tidTarget !== null
           && row.getAttribute('data-track-id') === tidTarget;
         row.classList.toggle('is-playing', match);
       });
     const heldTarget = _lastNpTrackId != null ? String(_lastNpTrackId) : null;
-    document.querySelectorAll('.detail-screen .track-row.is-held-track[data-track-id]')
+    document.querySelectorAll('.detail-screen:not([data-session-id]) .track-row.is-held-track[data-track-id]')
       .forEach(row => {
         const match = heldTarget !== null
           && row.getAttribute('data-track-id') === heldTarget;
@@ -6300,7 +6300,8 @@
         }
         trackParts.push(`
           <button class="track-row" type="button"
-                  data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}">
+                  data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"
+                  data-track-id="${escapeHtml(t.track_id || '')}">
             <span class="track-rank">${t.track_number || ''}</span>
             <div class="track-info">
               <div class="track-title-line">${escapeHtml(t.title || '')}</div>
@@ -6699,10 +6700,19 @@
         // shared handlers route them (click → play-phantom-track, [+] → queue);
         // owned rows keep data-media-file-id. data-album-id is the album the
         // slot was queued from, so a click plays THIS edition of the track.
-        const attrs = t.is_phantom
+        // data-position is the slot (what a replay's start names), whatever
+        // the row is: a tap here chooses where Play starts (B-158), on every
+        // kind of row alike.
+        // A slot of his own with no file id (held at the HQPlayer, its file
+        // gone since, or streamed for want of it) is a held row: its "+"
+        // queues the track by uuid, the backend picking the copy.
+        const attrs = (t.is_phantom
           ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
             + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
-          : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
+          : t.media_file_id
+            ? `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id))}"`
+            : `class="track-row is-held-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`)
+          + ` data-position="${escapeHtml(String(t.position))}"`;
         trackParts.push(`
           <button ${attrs} type="button">
             <span class="track-rank">${n}</span>
@@ -6712,7 +6722,7 @@
               ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
               ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
             </div>
-            <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
+            <span class="track-dur" data-dur="${escapeHtml(fmtDuration(t.duration_seconds))}">${fmtDuration(t.duration_seconds)}</span>
             <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
           </button>
         `);
@@ -6759,7 +6769,7 @@
         </div>
       </div>
       <div class="album-actions${singleAlbumId ? ' has-album' : ''}">
-        <button class="btn-primary" type="button" data-action="play-session"${count ? '' : ' disabled'}>${SVG_PLAY} Play</button>
+        <button class="btn-primary" type="button" data-action="play-session"${count ? '' : ' disabled'}>${SVG_PLAY} <span data-play-label>Play</span></button>
         ${singleAlbumId ? `
           <button class="btn-secondary album-open-btn" type="button" data-album-id="${escapeHtml(singleAlbumId)}">
             <span class="btn-icon">${SVG_DISC}</span><span class="btn-label">Album</span>
@@ -6776,11 +6786,193 @@
       <div style="height: calc(24 * var(--px));"></div>
     `;
 
+    screen.dataset.sessionId = sessionId;
     wireDetailHandlers(screen, {
       tracks: tracksList, phantomAlbumId,
-      sessionId,
+      sessionId, rowsChoose: true,
     });
-    updatePlayingHighlight();
+    wireSessionDot(screen, d);
+  }
+
+  // Listening history's dots (B-158, PLAYBACK-UI-1 §11–§12): one at a time,
+  // each with one meaning. While this session plays — the live queue is its
+  // slots, in order, and the output plays, pauses or loads — the amber dot
+  // alone, on the slot the status names, and a tap jumps there (as in the
+  // queue). Otherwise the blue dot: where a tap put it (`chosen`), else
+  // where the listen stopped — the live queue's own stop while it rests on
+  // this session (the status's `heard`), else the stop the archive kept
+  // (`stop`) — and a tap moves it, playing nothing; Resume (the dot at the
+  // stop) or Play starts there. `slots`: the session's track ids in order;
+  // `positions`: their slot positions; `playlist`, `status`: the live queue
+  // and status as player.js holds them.
+  function sessionDotView(slots, positions, playlist, status, stop, chosen) {
+    const q = playlist || [];
+    const st = status || {};
+    const mine = q.length === slots.length && q.every((e, i) => e.track_id === slots[i]);
+    if (mine && ['playing', 'paused', 'loading'].includes(st.state)) {
+      return { playing: true, at: st.track_index, stop: null, dot: null, resume: false };
+    }
+    const heard = mine && st.state === 'stopped' && st.heard
+      && positions[st.heard.index - 1] !== undefined;
+    const kept = heard ? { position: positions[st.heard.index - 1], seconds: st.heard.position } : stop;
+    const dot = chosen || kept || null;
+    const resume = !!dot && !!kept && dot.position === kept.position && dot.seconds === kept.seconds;
+    return { playing: false, at: null, stop: kept || null, dot, resume };
+  }
+
+  // The session page's dots, drawn on every status and queue the page hears
+  // (np-update, playlist-loaded) — classes and the duration cell in place,
+  // never the page again.
+  function wireSessionDot(screen, d) {
+    const rows = [...screen.querySelectorAll('.album-tracklist .track-row[data-position]')];
+    const playBtn = screen.querySelector('[data-action="play-session"]');
+    const slots = (d.tracks || []).map(t => t.track_id);
+    const positions = rows.map(r => Number(r.dataset.position));
+    let chosen = null;                 // {position, seconds}: a tap's choice
+    let view = { playing: false, dot: null, stop: null };
+    const read = () => sessionDotView(slots, positions, window.currentPlaylist,
+                                      window.currentStatus, d.stop, chosen);
+    const key = (v) => (v.playing ? 'playing' : JSON.stringify(v.stop));
+    const draw = () => {
+      if (!screen.isConnected) return;
+      const was = key(view);
+      view = read();
+      if (chosen && key(view) !== was) {
+        // the session played, or its play stopped somewhere new: that is
+        // the dot now — a tap's choice was of the stop before
+        chosen = null;
+        view = read();
+      }
+      rows.forEach((row, i) => {
+        const dur = row.querySelector('.track-dur');
+        const start = !!view.dot && Number(row.dataset.position) === view.dot.position;
+        row.classList.toggle('is-playing', view.playing && view.at === i + 1);
+        row.classList.toggle('is-start', start);
+        const html = (start && view.dot.seconds > 0)
+          ? `<span class="track-stop-at">${fmtDuration(view.dot.seconds)}</span><span class="track-stop-of"> / ${dur.dataset.dur}</span>`
+          : dur.dataset.dur;
+        if (dur.innerHTML !== html) dur.innerHTML = html;
+      });
+      const label = playBtn && playBtn.querySelector('[data-play-label]');
+      const word = view.resume ? 'Resume' : 'Play';
+      if (label && label.textContent !== word) label.textContent = word;
+    };
+    rows.forEach((row, i) => row.addEventListener('click', (e) => {
+      if (e.target.closest('.track-add, .track-confirm-bar') || row.classList.contains('is-confirming')) return;
+      e.stopPropagation();
+      if (view.playing && view.at === i + 1) {
+        // its own playing row: pause / play, as the queue sheet's
+        if (typeof window.togglePlayPause === 'function') window.togglePlayPause();
+        return;
+      }
+      if (view.playing) {
+        onceInFlight(row, async () => {
+          const resp = await fetch('/api/player/jump', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ index: i + 1, track_id: slots[i] }),
+          }).catch(() => null);
+          if (!resp || !resp.ok) { await reportPlaybackResult(resp); return; }
+          // a slot the output does not take is refused in its words, as the
+          // queue sheet's tap says it
+          const out = await resp.json();
+          if (out.ok === false && out.refusal && answerSays(out.attempt)) {
+            notices.toast({ kind: 'info', key: out.attempt != null ? 'hqplayer.diagnosis' : 'queue.refused',
+                            title: 'Not played',
+                            text: escapeHtml(out.refusal.charAt(0).toUpperCase() + out.refusal.slice(1)) });
+          }
+        });
+        return;
+      }
+      const position = Number(row.dataset.position);
+      chosen = (view.stop && view.stop.position === position) ? view.stop : { position, seconds: 0 };
+      draw();
+    }));
+    // The dot Play starts from, as drawn now (none while the session plays)
+    screen.sessionStart = () => (view.dot ? { position: view.dot.position, seconds: view.dot.seconds } : null);
+    const detach = () => {
+      if (screen.isConnected) return;
+      document.removeEventListener('np-update', draw);
+      document.removeEventListener('playlist-loaded', draw);
+      window.removeEventListener('sautium:route', detach);
+    };
+    document.addEventListener('np-update', draw);
+    document.addEventListener('playlist-loaded', draw);
+    window.addEventListener('sautium:route', detach);
+    draw();
+  }
+
+  // An owned album page's Play all — started at `startTrackId`, or at its
+  // first track (null). One request builder, so "from here" is Play all of
+  // the same page: the same copies (the shown variant's files, or each
+  // track's copy by the album's uuid) and the same session.
+  function playAllRequest(ctx, startTrackId) {
+    const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
+    const start = startTrackId ? { start_track_id: startTrackId } : {};
+    if (ctx.albumId && (ctx.byAlbum
+        || (ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')))) {
+      // A pick that lives in the HQPlayer's own library has no file id,
+      // and one whose file is not here now names a file that does not
+      // open: the album plays by uuid, the backend picking each track's
+      // copy for the output — natively on that HQPlayer, a stream
+      // elsewhere (the Queue button beside it goes the same way).
+      return fetch('/api/player/play-entities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: [{ kind: 'album', id: ctx.albumId }], ...start }),
+      }).catch(() => null);
+    }
+    const body = { track_ids: ids, ...start };
+    if (ctx.playOrigin) {
+      body.origin = ctx.playOrigin;
+      if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
+    }
+    return fetch('/api/player/play-tracks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).catch(() => null);
+  }
+
+  // "▶ From here" (B-156): the whole album, started at the row's track —
+  // Previous goes back to the tracks before it. A not-owned album streams
+  // from it (its rows say what does not stream, as Stream all's answer).
+  async function playAlbumFrom(screen, ctx, trackId) {
+    window.maybeClaimRenderer();
+    if (!ctx.phantomAlbumId) {
+      await reportPlaybackResult(await playAllRequest(ctx, trackId));
+      return;
+    }
+    const resp = await fetch('/api/player/play-phantom-album', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ album_id: ctx.phantomAlbumId, start_track_id: trackId }),
+    }).catch(() => null);
+    let body = null;
+    try { body = resp ? await resp.json() : null; } catch (_) {}
+    if (!resp || !resp.ok) { await reportPlaybackResult(resp, body); return; }
+    applyPhantomMissing(screen, body && body.missing);
+    applyPhantomExcerpts(screen, body && body.excerpt);
+  }
+
+  // The bar's "▶ From here", before "Add to:" — on the album page's rows
+  // alone (`fromHere`, the page's action; none elsewhere). Its words sit
+  // on one line at the base width because the bar starts at the row's edge
+  // with it (`has-play`). The bar stays up, its buttons disabled, until the
+  // request settles: closing it first put the row body under a second tap.
+  function addFromHere(bar, row, fromHere) {
+    const tid = row.getAttribute('data-track-id');
+    if (!fromHere || !tid) return;
+    const name = 'Play the album from this track';
+    bar.classList.add('has-play');
+    bar.insertAdjacentHTML('afterbegin', `<button class="track-confirm-play" type="button"
+        data-confirm="from-here" aria-label="${name}" title="${name}">${SVG_PLAY}From here</button>`);
+    bar.querySelector('[data-confirm="from-here"]').addEventListener('click', e => {
+      e.stopPropagation();
+      onceInFlight(bar, async () => {
+        bar.querySelectorAll('button').forEach(b => { b.disabled = true; });
+        try { await fromHere(tid); } finally { closeQueueConfirm(row); }
+      });
+    });
   }
 
   // Run an async click action at most once at a time per element — re-clicks
@@ -7040,6 +7232,40 @@
     silent: statusToast('hqplayer.silent'),
     rebuilding: statusToast('hqplayer.rebuilding'),
   };
+  // How long a build took or waited, as the person reads it
+  function hqpBuildTook(seconds) {
+    return seconds < 120 ? `${Math.round(seconds)} s` : `${Math.round(seconds / 60)} min`;
+  }
+  // A silent build past this host's usual one (BENCH-GUARD-1, the backend's
+  // `building.long`): what such a build took here, as the Benchmark
+  // measured it — never guessed — how to leave it, and, across rate
+  // families, what avoids it. Words: BENCH-GUARD-1 §4 C4, for the words sitting.
+  const HQP_LEAVE = 'To leave now, restart HQPlayer, then choose a lighter filter before you press Play — HQPlayer comes back on this setting.';
+  function hqpLongBuildText(f) {
+    const own = f.own;
+    const across = f.across || {};
+    let fact = '';
+    if (own && own.ended) fact = ' — this setting ended HQPlayer here before';
+    else if (own && own.slow_start) fact = own.built_s != null
+      ? ` — this setting took ${hqpBuildTook(own.built_s)} here before` : ' — this setting took over a minute here before';
+    else if (own && own.start_s != null) fact = ` — this setting took ${hqpBuildTook(own.start_s)} here before`;
+    else if (across.ended) fact = ' — on this HQPlayer one such filter ended HQPlayer';
+    else if (across.built_s != null) fact = ` — on this HQPlayer one such filter took ${hqpBuildTook(across.built_s)}${
+      across.slow > 1 ? `, and ${across.slow} did not start within a minute` : ''}`;
+    else if (across.slow) fact = ` — on this HQPlayer ${across.slow} such filter${across.slow === 1 ? '' : 's'} did not start within a minute`;
+    if (f.cross) {
+      return `It answers nothing until it is done. From a ${escapeHtml(f.source_name)} source to ${
+        escapeHtml(f.rate_name)} is a change of rate family, and some filters take minutes or hours to build for it here${
+        fact}. ${HQP_LEAVE} With the rate at Auto and Auto rate family on, HQPlayer stays in each source's family and builds none of this.`;
+    }
+    // Within a family, or a change whose setting is not named yet: this
+    // setting's own answer alone (none for a change)
+    const mine = own ? fact : '';
+    const usual = f.measured
+      ? `longer than any start the Benchmark measured here (${hqpBuildTook(f.usual_s)})`
+      : `longer than a start usually takes (${hqpBuildTook(f.usual_s)})`;
+    return `It answers nothing until it is done — ${usual}${mine}. ${HQP_LEAVE}`;
+  }
   function outputConditionCopy(data) {
     const b = data.building;
     return {
@@ -7049,7 +7275,12 @@
       },
       building: b && (b.unfinished ? {
         tag: `unfinished:${b.since}`, kind: 'error',
-        title: 'HQPlayer did not finish building the filter', text: 'Restart HQPlayer.',
+        title: 'HQPlayer did not finish building the filter',
+        text: b.long ? `It did not finish in 10 minutes. ${HQP_LEAVE}` : 'Restart HQPlayer.',
+      } : b.long ? {
+        // Long here: a word the person may close — it can stand for half an hour (Q8)
+        tag: `long:${b.since}`,
+        title: 'HQPlayer is still building the filter', text: hqpLongBuildText(b.long),
       } : {
         tag: `building:${b.since}`, passive: true,
         title: 'HQPlayer is building the filter',
@@ -7064,6 +7295,16 @@
       },
     };
   }
+  // HQPlayer went away in a long build (BENCH-GUARD-1 C4d): said once
+  let saidBuildLost = null;
+  function onBuildLost(data) {
+    const lost = data && data.build_lost;
+    if (!lost || lost.since === saidBuildLost) return;
+    saidBuildLost = lost.since;
+    notices.toast({ kind: 'error', key: 'hqplayer.build_lost', title: 'HQPlayer went away while it built the filter',
+                    text: 'If it comes back on the same setting, the next Play builds it again — choose a lighter filter before you press Play.' });
+  }
+  document.addEventListener('np-update', (e) => onBuildLost(e.detail));
   function onOutputCondition(data) {
     if (!data) return;
     const copy = outputConditionCopy(data);
@@ -7590,8 +7831,9 @@
         if (id) navigateToEntity('genre', id);
       });
     });
-    // Track row → play track
-    screen.querySelectorAll('[data-media-file-id]').forEach(el => {
+    // Track row → play track (a page whose rows choose — Listening history's
+    // — wires its own tap: wireSessionDot)
+    if (!ctx.rowsChoose) screen.querySelectorAll('[data-media-file-id]').forEach(el => {
       el.addEventListener('click', e => {
         if (e.target.closest('.track-add')) return;
         e.stopPropagation();
@@ -7611,6 +7853,11 @@
     // Open/close toggles read the click count: the second click of a
     // desktop double-click (e.detail 2) is the same intent as the first,
     // not a request to close what just opened.
+    // "▶ From here" on the album page's bars (B-156): the album's own Play
+    // all, started at the row — every row kind with a bar; no other screen
+    // has an ordered context to start in
+    const fromHere = ctx.albumId
+      ? (tid) => playAlbumFrom(screen, ctx, tid) : null;
     screen.querySelectorAll('.track-row:not(.is-phantom-track) .track-add').forEach(btn => {
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -7620,7 +7867,7 @@
         if (row.classList.contains('is-confirming')) {
           closeQueueConfirm(row);
         } else {
-          openQueueConfirm(row);
+          openQueueConfirm(row, fromHere);
         }
       });
     });
@@ -7633,7 +7880,7 @@
         const row = btn.closest('.track-row');
         if (!row) return;
         if (row.classList.contains('is-confirming')) closeQueueConfirm(row);
-        else openPhantomQueueConfirm(screen, row);
+        else openPhantomQueueConfirm(screen, row, fromHere);
       });
     });
     // Held track [+] → the same confirm; the chosen position queues by track
@@ -7645,7 +7892,7 @@
         const row = btn.closest('.track-row');
         if (!row) return;
         if (row.classList.contains('is-confirming')) closeQueueConfirm(row);
-        else openHeldQueueConfirm(row);
+        else openHeldQueueConfirm(row, fromHere);
       });
     });
     // Phantom [+ Queue] → toggles the album-wide "Add album to: [Next] [End]"
@@ -7668,10 +7915,12 @@
         btn.disabled = true;            // block double-fire; faded while in flight
         window.maybeClaimRenderer();
         try {
+          // from the blue dot (B-158), or from the top where none is drawn
+          const start = screen.sessionStart ? screen.sessionStart() : null;
           const resp = await fetch('/api/player/play-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_id: ctx.sessionId }),
+            body: JSON.stringify({ session_id: ctx.sessionId, ...(start ? { start } : {}) }),
           }).catch(() => null);
           let body = null;
           try { body = resp ? await resp.json() : null; } catch (_) {}
@@ -7701,36 +7950,10 @@
     screen.querySelectorAll('[data-action="play-all"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (btn.disabled || !ctx.tracks || !ctx.tracks.length) return;
-        const ids = ctx.tracks.map(t => t.media_file_id).filter(Boolean);
         btn.disabled = true;            // block double-fire; faded while in flight
         window.maybeClaimRenderer();
         try {
-          let resp;
-          if (ctx.albumId && (ctx.byAlbum
-              || (ids.length < ctx.tracks.length && ctx.tracks.some(t => t.location === 'hqplayer')))) {
-            // A pick that lives in the HQPlayer's own library has no file id,
-            // and one whose file is not here now names a file that does not
-            // open: the album plays by uuid, the backend picking each track's
-            // copy for the output — natively on that HQPlayer, a stream
-            // elsewhere (the Queue button beside it goes the same way).
-            resp = await fetch('/api/player/play-entities', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ items: [{ kind: 'album', id: ctx.albumId }] }),
-            }).catch(() => null);
-          } else {
-            const body = { track_ids: ids };
-            if (ctx.playOrigin) {
-              body.origin = ctx.playOrigin;
-              if (ctx.originAlbumId) body.origin_album_id = ctx.originAlbumId;
-            }
-            resp = await fetch('/api/player/play-tracks', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-            }).catch(() => null);
-          }
-          await reportPlaybackResult(resp);
+          await reportPlaybackResult(await playAllRequest(ctx, null));
         } finally { btn.disabled = false; }
       });
     });
@@ -7773,7 +7996,7 @@
     // stream via play-phantom-track; the row's line says what its stream does.
     // data-album-id (album/session screens) rides along: the track sits on every
     // album that lists it, and the slot must be the album the row was clicked on.
-    screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
+    if (!ctx.rowsChoose) screen.querySelectorAll('.track-row.is-phantom-track[data-track-id]').forEach(row => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('.track-add')) return;   // queue button handles its own
         const tid = row.getAttribute('data-track-id');
@@ -7794,7 +8017,7 @@
     // Held track row (a file in the HQPlayer's own library, none here) →
     // play-entities by track uuid: the backend picks the copy the active
     // output can open — natively on that HQPlayer, a stream elsewhere.
-    screen.querySelectorAll('.track-row.is-held-track[data-track-id]').forEach(row => {
+    if (!ctx.rowsChoose) screen.querySelectorAll('.track-row.is-held-track[data-track-id]').forEach(row => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('.track-add')) return;   // queue button handles its own
         const tid = row.getAttribute('data-track-id');
@@ -7853,7 +8076,7 @@
     if (bar) bar.remove();
   }
 
-  function openQueueConfirm(row) {
+  function openQueueConfirm(row, fromHere = null) {
     // mfId attribute name differs across call sites: detail screens
     // use data-media-file-id, Now Playing similar list uses
     // data-track-id. Same with the add-button class name (.track-add
@@ -7866,7 +8089,7 @@
       ? row.getAttribute('data-phantom-tid') : null;
     const mfId = phantomTid ? null : parseInt(
       row.getAttribute('data-media-file-id')
-        || row.getAttribute('data-track-id'),
+        || (row.classList.contains('np-sim-row') ? row.getAttribute('data-track-id') : null),
       10,
     );
     if (!phantomTid && !mfId) return;
@@ -7885,6 +8108,7 @@
     const addBtn = row.querySelector('.track-add, .np-sim-add');
     if (addBtn) row.insertBefore(bar, addBtn);
     else row.appendChild(bar);
+    addFromHere(bar, row, fromHere);
 
     if (phantomTid) {
       // Phantom match → stream-queue at the chosen position; the endpoint owns the
@@ -7972,7 +8196,7 @@
   /* Phantom queue confirms — reuse the owned "Add to: [Next] [End]" bar, but the
      chosen position streams via the phantom queue endpoints, which append
      ('end') or seamlessly insert after the current track ('next') server-side. */
-  function openPhantomQueueConfirm(screen, row) {
+  function openPhantomQueueConfirm(screen, row, fromHere = null) {
     const tid = row.getAttribute('data-track-id');
     if (!tid) return;
     row.classList.add('is-confirming');
@@ -7984,6 +8208,7 @@
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
     const addBtn = row.querySelector('.track-add');
     if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
+    addFromHere(bar, row, fromHere);
     // The bar stays up (buttons disabled) until the request settles: closing
     // it first put the row body — a play target — under the second tap.
     const go = (position) => onceInFlight(bar, async () => {
@@ -8004,7 +8229,7 @@
 
   // A held track's "Add to: [Next] [End]" — queue-entities by track uuid;
   // the backend picks the copy the active output can open.
-  function openHeldQueueConfirm(row) {
+  function openHeldQueueConfirm(row, fromHere = null) {
     const tid = row.getAttribute('data-track-id');
     if (!tid) return;
     row.classList.add('is-confirming');
@@ -8016,6 +8241,7 @@
       <button class="track-confirm-btn" type="button" data-confirm="end">End</button>`;
     const addBtn = row.querySelector('.track-add, .np-sim-add');
     if (addBtn) row.insertBefore(bar, addBtn); else row.appendChild(bar);
+    addFromHere(bar, row, fromHere);
     const go = (position) => onceInFlight(bar, async () => {
       bar.querySelectorAll('.track-confirm-btn').forEach(b => { b.disabled = true; });
       const resp = await fetch('/api/player/queue-entities', {
@@ -10378,9 +10604,12 @@
         ? 'HQPlayer is not answering — a run can start once it does.'
         : 'HQPlayer is building the filter — a run can start once it is done.';
     } else if (est && est.points <= 2) {
-      hint = `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
+      hint = est.across
+        ? `Every ${escapeHtml(est.mode)} setting within the rate families is measured on this HQPlayer; ${est.across.points} across rate families ${est.across.points === 1 ? 'is' : 'are'} left out unless you ask.`
+        : `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
     } else if (est) {
       hint = `Plays test noise${b.volume_control ? " at HQPlayer's lowest volume" : ''} through the ${est.points} ${escapeHtml(est.mode)} settings not measured here yet — ${fmtAbout(est.seconds)}.`;
+      if (est.across) hint += ` ${est.across.points} more across rate families ${est.across.points === 1 ? 'is' : 'are'} left out unless you ask.`;
     } else {
       hint = HQP_BENCH_NO_ESTIMATE[b.no_estimate];
     }
@@ -10414,6 +10643,7 @@
       ? `<button type="button" class="hqp-chip-btn is-danger" data-action="bench-cancel" ${job.cancel_requested ? 'disabled' : ''}><span>${job.cancel_requested ? 'Cancelling…' : 'Cancel'}</span></button>`
       : !s.connected || buildWaits ? ''
       : `${est ? `<button type="button" class="hqp-chip-btn" data-action="bench-run"><span>${run && run.stale ? 'Re-run' : 'Run benchmark'}</span></button>` : ''}
+         ${est && est.across ? '<button type="button" class="hqp-chip-btn" data-action="bench-across"><span>Measure across rate families…</span></button>' : ''}
          ${(b.other_modes || []).map(m => `<button type="button" class="hqp-chip-btn" data-action="bench-other" data-mode="${escapeHtml(m)}"><span>Measure ${escapeHtml(m.toUpperCase())}</span></button>`).join('')}
          ${run ? '<button type="button" class="hqp-chip-btn" data-action="bench-results"><span>Results</span></button>' : ''}`;
     return `
@@ -10433,7 +10663,36 @@
   // `entry`: one picker entry measured alone ({kind, name, src_rate,
   // src_channels} — the source its mark is read for), in the mode HQPlayer
   // is in: the owner's own setting, then that entry with the rest of it.
-  async function runHqpBenchmark(s, mode, entry = null) {
+  // The points across rate families (BENCH-GUARD-1): planned only at the
+  // owner's ask, after a word of what they may cost here and of what avoids
+  // them. Words: BENCH-GUARD-1 §4 C1, for the words sitting.
+  async function runHqpBenchmarkAcross(s) {
+    const b = s.benchmark || {};
+    const across = b.estimate && b.estimate.across;
+    if (!across) return;
+    const conversions = across.conversions.map(c =>
+      `a ${escapeHtml(fmtRateLabel(c.source))} source at ${escapeHtml(fmtRateLabel(c.rate))}`);
+    const which = [...new Set(conversions)].join(' and ');
+    const cost = 'For that conversion HQPlayer prepares some filters for minutes, some for hours, and answers nothing meanwhile; on a machine short of memory one can use it all and end HQPlayer — on a 16 GB Raspberry Pi one took 15 GB.';
+    const lines = across.auto
+      ? [`At Auto, HQPlayer plays ${which} here — another rate family. ${cost}`,
+         `${across.points} setting${across.points === 1 ? ' is' : 's are'} left to measure this way.`,
+         'Turning on Auto rate family in HQPlayer\'s settings keeps each source in its own family, and none of this is built.']
+      : [`Your rate is fixed, so HQPlayer plays ${which} — a conversion into another rate family. ${cost}`,
+         `${across.points} setting${across.points === 1 ? ' is' : 's are'} left to measure this way.`,
+         'With the rate at Auto and Auto rate family on in HQPlayer\'s settings, each source plays in its own family and none of this is built.'];
+    // What every run's own question says, as this one starts the run itself
+    lines.push(`Sautium stops playback and plays test noise through ${escapeProfileHtml(s.label || 'HQPlayer')}${
+      b.volume_control ? ' at its lowest volume' : ''}. Your queue comes back when it is done.`);
+    if (!b.volume_control) lines.push('<b>HQPlayer cannot turn the noise down below your level on this output — turn your amplifier down first.</b>');
+    const ok = await window.confirmDestructive({
+      title: 'Measure across rate families?', message: lines.join('<br><br>'),
+      confirmText: 'Measure them', cancelText: 'Not now', confirmKind: 'primary', focusCancel: true,
+    });
+    if (ok) await runHqpBenchmark(s, null, null, { across: true, asked: true });
+  }
+
+  async function runHqpBenchmark(s, mode, entry = null, { across = false, asked = false } = {}) {
     const b = s.benchmark || {};
     const est = !mode && !entry && b.estimate;
     const what = mode ? `its ${mode.toUpperCase()} settings — HQPlayer switches to ${mode.toUpperCase()} and back`
@@ -10447,7 +10706,8 @@
          'The DAC may click its relays when the rate changes. Your queue comes back when it is done.'];
     if (!b.volume_control) lines.push('<b>HQPlayer cannot turn the noise down below your level on this output — turn your amplifier down first.</b>');
     if (!b.cuda) lines.push('CUDA offload is not known for this HQPlayer: what is measured now is kept apart from runs after you set it.');
-    const ok = await window.confirmDestructive({
+    // Asked across families, the person has just said yes to what it may cost
+    const ok = asked || await window.confirmDestructive({
       title: entry ? `Test the speed of ${entry.name}?` : 'Run the benchmark?', message: lines.join('<br><br>'),
       confirmText: entry ? 'Test speed' : 'Run', confirmKind: 'primary',
     });
@@ -10456,7 +10716,7 @@
     try {
       r = await fetch('/api/hqplayer/benchmark', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ mode: mode || null, entry, fixed_volume_ok: !b.volume_control }),
+        body: JSON.stringify({ mode: mode || null, entry, across, fixed_volume_ok: !b.volume_control }),
       });
       out = await r.json();
     } catch (err) {
@@ -10477,7 +10737,12 @@
     if (!row) return '<td class="hqp-bench-none">—</td>';
     if (row.class === 'refused') return '<td class="hqp-bench-none" title="HQPlayer refuses this combination">⊘</td>';
     if (row.class === 'unstarted') return '<td class="hqp-bench-none" title="HQPlayer never got it going on this host (still building it a minute after Play)">○</td>';
-    if (row.class === 'slow_start') return '<td class="hqp-bench-none" title="Over a minute to start here: HQPlayer answered nothing that long after Play">⊗</td>';
+    if (row.class === 'slow_start') {
+      const took = row.build_s != null ? ` — it took ${fmtAbout(row.build_s).replace('about ', '')}` : '';
+      return `<td class="hqp-bench-none" title="Over a minute to start here: HQPlayer answered nothing that long after Play${took}">⊗</td>`;
+    }
+    // BENCH-GUARD-1: HQPlayer ended, or was restarted, while it built it
+    if (row.class === 'too_heavy') return '<td class="hqp-bench-none" title="Ended HQPlayer here: it ended, or was restarted, while it prepared this — not tested again on this HQPlayer version">✕</td>';
     if (row.speed == null) {
       const title = `${row.class === 'ok' ? 'Keeps up here (faster than' : 'Too slow here (slower than'} at ${fmtRateLabel(row.implied_from)})`;
       return `<td title="${escapeHtml(title)}"><span class="hqp-hr is-${row.class}"><span class="hqp-hr-dot"></span></span></td>`;
@@ -11206,6 +11471,7 @@
 
       const benchActions = {
         'bench-run': () => runHqpBenchmark(s, null),
+        'bench-across': () => runHqpBenchmarkAcross(s),
         'bench-other': (el) => runHqpBenchmark(s, el.dataset.mode),
         'bench-cancel': () => fetch('/api/hqplayer/benchmark/cancel', { method: 'POST' }),
         'bench-results': () => openHqpBenchResults(),
@@ -11263,6 +11529,7 @@
     refused: 'HQPlayer refuses it at this setting',
     unstarted: 'HQPlayer never got it going on this computer',
     slow_start: 'Over 1 min to start here',
+    too_heavy: 'Ended HQPlayer here',
   };
   // With the two filter slots apart, `slot` ('1x' | 'nx') is the one the
   // picker chooses for. "your pick · N" (AB-1 §14.5) counts the person's own
@@ -11402,12 +11669,14 @@
           close();
           if (!f) return;
           // A combination that took over a minute to start here on this engine: asked first (Q4)
-          if (refused[f.name] === 'slow_start') {
+          if (refused[f.name] === 'slow_start' || refused[f.name] === 'too_heavy') {
             const cuda = bench.cuda && bench.cuda !== 'off' ? 'on' : 'off';
+            const engine = escapeHtml((state.info && state.info.engine) || '');
             const ok = await window.confirmDestructive({
               title: `Choose ${f.name}?`,
-              message: `This took more than a minute to start here last time (HQPlayer ${
-                escapeHtml((state.info && state.info.engine) || '')}, CUDA ${cuda}), and HQPlayer answers nothing while it prepares. Choose it anyway?`,
+              message: refused[f.name] === 'too_heavy'
+                ? `HQPlayer ended, or was restarted, while it prepared this here last time (HQPlayer ${engine}, CUDA ${cuda}). Choose it anyway?`
+                : `This took more than a minute to start here last time (HQPlayer ${engine}, CUDA ${cuda}), and HQPlayer answers nothing while it prepares. Choose it anyway?`,
               confirmText: 'Choose it',
             });
             if (!ok) return;

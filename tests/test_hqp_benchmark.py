@@ -221,21 +221,84 @@ def test_at_auto_the_rest_is_planned_at_the_rates_the_owners_setting_played():
     assert {p.rate_hz for p in plan.points if p.source == "pcm44"} == {0, 352800, 705600}
 
 
-def test_points_at_another_family_than_their_source_go_after_every_ladder():
+_PCM_SHAPERS = [{"index": 0, "name": "none", "value": 0}, {"index": 1, "name": "LNS15", "value": 1}]
+_PCM_RATES = [{"index": 0, "rate": 0}, {"index": 1, "rate": 352800}, {"index": 2, "rate": 384000},
+              {"index": 3, "rate": 705600}, {"index": 4, "rate": 768000}]
+
+
+def _pcm_grid(rate=4, **kw):
+    """A PCM plan at the owner's `rate` slot (4: a fixed 768 kHz) over both signals."""
+    d, cur = _lists("desktop_sdm.json")
+    current = {"rate": rate, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1}
+    srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
+    args = dict(filters=d["filters"], shapers=_PCM_SHAPERS, rates=_PCM_RATES, current=current,
+                srcs=srcs, covered=set(), keeps_up={}, rng=random.Random(5))
+    args.update(kw)
+    return d, srcs, bench.build_grid("pcm", **args)
+
+
+def test_no_point_across_rate_families_is_planned_unless_asked():
+    """BENCH-GUARD-1 (B-153 (a)): the points at a rate of another family than
+    their source's — the only class that ran away, on the lab machine and on
+    a 16 GB Pi (one build ended HQPlayer for memory) — are planned only at
+    the owner's ask; the owner's own setting stays first and last whatever
+    its family, and the plan says what it left out."""
+    from hqp_rate_check import same_family
+    d, srcs, plan = _pcm_grid()
+    pts = plan.points
+    assert pts[0].own and pts[-1].own and pts[0].key[0] == 768000
+    assert [p for p in pts[1:-1] if not same_family(p.rate_hz, srcs[p.source]["rate"])] == []
+    assert len(plan.across_left) == len(d["filters"]) - 1        # 44.1 kHz → 768 kHz, but the owner's
+    assert set(plan.across_left) == {(44100, 768000)}
+    # what is covered already is not counted as left out
+    first = next(p for p in _pcm_grid(across=True)[2].points[1:-1] if p.rate_hz == 768000
+                 and p.source == "pcm44")
+    assert len(_pcm_grid(covered={first.key})[2].across_left) == len(d["filters"]) - 2
+    # within each source's family nothing is left out
+    assert _pcm_grid(rate=0)[2].across_left == ()
+
+
+def test_at_auto_playing_across_families_those_points_wait_for_the_ask():
+    """At Auto with HQPlayer's Auto rate family off, Auto plays a 44.1 kHz
+    source at the default rate of the other family: the rest planned there
+    is across families and left out unless asked."""
+    d, srcs, plan = _pcm_grid(rate=0, played={"pcm44": 768000, "pcm96": 768000})
+    assert {(p.source, p.rate_hz) for p in plan.points[1:-1] if p.source == "pcm44"} <= \
+        {("pcm44", 352800), ("pcm44", 705600)}
+    assert set(plan.across_left) == {(44100, 768000)}
+    asked = _pcm_grid(rate=0, played={"pcm44": 768000, "pcm96": 768000}, across=True)[2]
+    assert ("pcm44", 768000) in {(p.source, p.rate_hz) for p in asked.points} and asked.across_left == ()
+
+
+def test_sdm_filters_at_a_fixed_rate_of_the_other_family_are_measured_at_its_twin():
+    """BENCH-GUARD-1 Q5: every filter at the owner's DSD rate with the owner's
+    modulator — at a 48k-family rate, at the 44.1k-family rate of the same
+    multiple (the one Auto rate family picks), no build across families;
+    none where HQPlayer lists no twin; the owner's rate itself when asked."""
+    rates = [{"index": 0, "rate": 0}] + [{"index": i + 1, "rate": r} for i, r in enumerate(
+        (2822400, 3072000, 5644800, 6144000, 11289600, 12288000))]
+    current = {"rate": 6, "filterNx": 53, "filter1x": 49, "shaper": 21}     # 48k × 256
+    d, _, grid = _grid("desktop_sdm.json", rates=rates, current=current, seed=5)
+    swept = {p.key[1] for p in grid.points[1:-1] if p.key in grid.sweep}
+    assert {p.rate_hz for p in grid.points[1:-1] if p.key in grid.sweep} == {11289600}
+    assert swept == {f["name"] for f in d["filters"]}
+    assert {r for _, r in grid.across_left} == {12288000}
+    _, _, asked = _grid("desktop_sdm.json", rates=rates, current=current, seed=5, across=True)
+    assert {p.rate_hz for p in asked.points[1:-1] if p.key in asked.sweep} == {12288000}
+    assert asked.across_left == ()
+    no_twin = [r for r in rates if r["rate"] != 11289600]
+    _, _, grid = _grid("desktop_sdm.json", rates=no_twin, current=current, seed=5)
+    assert not [p for p in grid.points[1:-1] if p.key in grid.sweep and not p.own]
+
+
+def test_points_at_another_family_than_their_source_go_after_every_ladder_when_asked():
     """HQP-BENCH-63 §3.6 (F6): every slow build and both hangs on 6.3.3 were
     44.1 kHz → 768 kHz — the owner's rate for a source of the other family.
-    Those points go after every ladder point and before the drift check; the
-    owner's own setting stays first."""
+    Asked for (BENCH-GUARD-1), those points go after every ladder point and
+    before the drift check; the owner's own setting stays first."""
     from hqp_rate_check import same_family
-    d, cur = _lists("desktop_sdm.json")
-    shapers = [{"index": 0, "name": "none", "value": 0}, {"index": 1, "name": "LNS15", "value": 1}]
-    rates = [{"index": 0, "rate": 0}, {"index": 1, "rate": 352800}, {"index": 2, "rate": 384000},
-             {"index": 3, "rate": 705600}, {"index": 4, "rate": 768000}]
-    current = {"rate": 4, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1}
-    srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
-    pts = bench.build_grid("pcm", filters=d["filters"], shapers=shapers, rates=rates,
-                           current=current, srcs=srcs, covered=set(), keeps_up={},
-                           rng=random.Random(5)).points
+    d, srcs, plan = _pcm_grid(across=True)
+    pts = plan.points
     assert pts[0].own and pts[-1].own and pts[0].key[0] == 768000
     cross = [i for i, p in enumerate(pts[1:-1], 1)
              if not same_family(p.rate_hz, srcs[p.source]["rate"])]
@@ -256,7 +319,7 @@ def test_a_pcm_source_is_never_asked_below_its_own_rate():
     srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
     plan = bench.build_grid("pcm", filters=d["filters"], shapers=shapers, rates=rates,
                             current=current, srcs=srcs, covered=set(), keeps_up={},
-                            rng=random.Random(3))
+                            rng=random.Random(3), across=True)
 
     def rungs(src):
         return {p.rate_hz for lid, r in plan.rungs.items() if lid[3] == src for p in r}
@@ -733,6 +796,8 @@ class DspFake(FakeHqp):
                 if self.playlist and not self._dead and not refused:
                     if self.state != int(PlaybackState.PLAYING):
                         self.position = 0.0
+                        if self.track_serial is not None:
+                            self.track_serial += 1      # a take: one more, as HQPlayer counts it
                         if (running, key[2]) in self.builds:
                             self.silence(self.builds[(running, key[2])])
                         self._stuck = self._stuck or (running, key[2]) == self.sticks_at
@@ -785,7 +850,9 @@ class DspFake(FakeHqp):
                         f'length="120" volume="{self.volume}" tracks_total="{len(self.playlist)}" '
                         f'process_speed="{speed}" input_fill="-1" output_fill="{out}" '
                         f'active_mode="{self.MODES[self.mode][0]}" active_filter="{running}" '
-                        f'active_shaper="{self.SHAPERS[self.mode][sh]}" active_rate="{key[2]}">'
+                        f'active_shaper="{self.SHAPERS[self.mode][sh]}" active_rate="{key[2]}"'
+                        + (f' track_serial="{self.track_serial}"' if self.track_serial is not None else "")
+                        + '>'
                         + (f'<metadata samplerate="{src}" bits="{1 if src > 768000 else 24}" channels="2" '
                            f'sdm="{int(src > 768000)}"/>' if playing else '')
                         + '</Status>')
@@ -1163,6 +1230,36 @@ def test_the_screen_says_where_one_entry_can_be_measured(run):
     assert not bench.running()
 
 
+def test_the_estimate_leaves_the_points_across_families_out_and_the_ask_brings_them(run, monkeypatch):
+    """BENCH-GUARD-1: the sheet's estimate counts what a run asks — none of
+    the points across rate families — and says what it leaves out, the
+    conversions they are and whether the owner's rate is Auto; the sheet's
+    ask reaches the run (`across`)."""
+    import hqp_library
+    from playback import hqp_benchmark
+    from routers import hqplayer as hqp_router
+    monkeypatch.setattr(hqp_library, "local_cuda", lambda: (False, None))
+    ep = hqp_library.endpoint_by_address("127.0.0.1", run.fake.port)
+    d, cur = _lists("desktop_sdm.json")
+    lists = {"modes": [{"index": 1, "name": "PCM", "value": 0}], "rates": _PCM_RATES,
+             "filters": d["filters"], "shapers": _PCM_SHAPERS}
+    state = {"mode": 1, "rate": 4, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1,
+             "volume": -3.0}
+    est = hqp_router._benchmark_block(ep, state, lists, None)["estimate"]
+    assert est["across"] == {"points": len(d["filters"]) - 1, "auto": False,
+                             "conversions": [{"source": 44100, "rate": 768000}]}
+    planned = hqp_benchmark.plan(ep, kind="pcm", mode_name="PCM", state=state, filters=d["filters"],
+                                 shapers=_PCM_SHAPERS, rates=_PCM_RATES)
+    assert est["points"] == planned.asks()
+    assert "across" not in hqp_router._benchmark_block(ep, {**state, "rate": 0}, lists, None)["estimate"]
+    asked = {}
+    monkeypatch.setattr(hqp_benchmark, "start", lambda mode, **kw: asked.update(kw) or {})
+    hqp_router.start_benchmark(hqp_router.BenchmarkRequest(across=True))
+    assert asked["across"] is True
+    hqp_router.start_benchmark(hqp_router.BenchmarkRequest())
+    assert asked["across"] is False
+
+
 def test_while_held_nothing_else_drives_the_output(run, monkeypatch):
     fake, mgr = run.fake, run.mgr
     fake.jitter = 0.2                                          # never settles: points take the cap
@@ -1263,7 +1360,7 @@ def test_three_failures_of_one_source_end_its_points_and_the_run_goes_on(run, tm
     _owner_dsd(run, tmp_path, monkeypatch)
     _pcm_owner_at(fake, [0, 88200, 176400, 352800, 705600, 1411200, 2822400], 3)
     fake.misplays = {3}                  # the DSD file's slot: HQPlayer plays entry 1 for it
-    bench.start()
+    bench.start(across=True)             # the 96 kHz signal's points are all across families
     assert _wait(lambda: not bench.running(), 120)
     st = bench.state()
     assert st["outcome"] == "done", st["note"]
@@ -1454,13 +1551,16 @@ def test_a_point_hqplayer_is_silent_in_past_the_bound_is_a_slow_start_and_ends_t
     another does."""
     st = _silent_past_the_bound(run, monkeypatch)
     assert st["outcome"] == "failed", st
+    # BENCH-GUARD-1 Gap 3: the build outlives the run, and a restart brings
+    # HQPlayer back on the test setting, put back at its first answer
     assert st["note"] == (
         "HQPlayer is still preparing sinc-L at DSD256 from a 44.1 kHz source. Between rate families "
-        "some filters take a very long time to prepare — hours, for some. While your processor stays "
-        "busy, HQPlayer is still working on it; if it sits idle, HQPlayer has stopped. Either way, "
-        "restarting HQPlayer ends it. Sautium puts your filter, rate and volume back as soon as "
-        "HQPlayer answers. This combination is now marked as taking over a minute to start here and "
-        "is not tested again."), st["note"]
+        "some filters take a very long time to prepare — hours, for some — and HQPlayer goes on "
+        "after the run, answering nothing until it is done. While your processor stays busy, it is "
+        "still working on it; if it sits idle, HQPlayer has stopped. Restarting HQPlayer ends it: "
+        "HQPlayer comes back on this test setting, and Sautium puts your filter, rate and volume "
+        "back as soon as it answers, before anything plays. This combination is now marked as "
+        "taking over a minute to start here and is not tested again."), st["note"]
     (note,), = run.q("""SELECT note FROM hqp_benchmark_points
                          WHERE filter = 'sinc-L' AND rate_hz = 11289600 AND result = 'slow_start'""")
     assert note.endswith("s after Play — still preparing it, or stopped"), note
@@ -1497,15 +1597,20 @@ def test_hqplayer_restarted_after_a_hang_is_put_back_whole_over_what_it_saved(ru
     assert fake.settings() == before, (fake.settings(), before)
     assert run.q("SELECT outcome::text, left_at IS NULL, restored_at IS NOT NULL "
                  "FROM hqp_benchmark_runs") == [("interrupted", True, True)]
+    # restarted out of the build it was silent in: too heavy here (BENCH-GUARD-1)
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE result = 'slow_start'") == \
+        [("ended",)]
     restored = _run_restored()
     assert restored["data"]["slow_start"] is True and restored["data"]["volume_left"] is None, restored
 
 
-def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run, monkeypatch):
-    """HQP-BENCH-63 round 1 M4: the person restarts HQPlayer a minute into a
-    silent build: the point is not made again on it
-    (failed, asked again by a later run, no mark), the run ends saying so,
-    and HQPlayer — answering again — is put back at once."""
+def test_hqplayer_restarted_out_of_a_long_silent_build_is_too_heavy_here(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2 (Q3, reversing HQP-BENCH-63 round 1 M4): HQPlayer
+    restarted out of a silent build past LONG_BUILD_S — a person's restart
+    and the kernel's out-of-memory end look alike — is too heavy here: the
+    point is a slow start that ended, not asked again on that engine; the
+    run ends saying so, and HQPlayer — answering again — is put back at
+    once."""
     fake = run.fake
     monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
     monkeypatch.setattr(bench, "LONG_BUILD_S", 0.3)
@@ -1519,13 +1624,166 @@ def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run
     fake.restart()
     assert _wait(lambda: not bench.running(), 60)
     st = bench.state()
-    assert st["note"].startswith("HQPlayer was restarted while it prepared sinc-L at DSD256 from a "
-                                 "44.1 kHz source. It answered again, and your filter, rate and volume "
-                                 "were put back."), st["note"]
-    assert run.q("SELECT result::text FROM hqp_benchmark_points WHERE filter = 'sinc-L' "
-                 "AND rate_hz = 11289600") == [("failed",)]
+    assert st["note"].startswith(
+        "HQPlayer ended, or was restarted, while it prepared sinc-L at DSD256 from a 44.1 kHz source. "
+        "This combination is now marked as too heavy here and is not tested again on this HQPlayer "
+        "version. It answered again, and your filter, rate and volume were put back."), st["note"]
+    (end,), = run.q("SELECT result::text || ' ' || build_end::text FROM hqp_benchmark_points "
+                    "WHERE filter = 'sinc-L' AND rate_hz = 11289600")
+    assert end == "slow_start ended", end
     assert run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
     assert fake.settings() == before
+    ctx = {"endpoint_id": run.endpoint_id, "engine": "6.2.3", "cuda": "full",
+           "mode": "SDM (DSD)", "matrix_profile": None, "convolution": False}
+    key = (11289600, "sinc-L", "ASDM7EC", 44100, 2)
+    assert key in hqp_load.covered(ctx)
+    assert [r["class"] for r in hqp_load.results(ctx) if r["filter"] == "sinc-L"
+            and r["rate_out"] == 11289600] == ["too_heavy"]
+
+
+def test_hqplayer_gone_out_of_a_long_silent_build_is_too_heavy_here(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2: HQPlayer gone past the reconnect pauses out of a
+    long silent build — the kernel ended it for memory, and its unit does
+    not restart it (a 16 GB Pi, 2026-11-25) — is too heavy here; the run is
+    lost, and put back whole once HQPlayer is started again."""
+    fake, mgr = run.fake, run.mgr
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.3)
+    monkeypatch.setattr(bench, "_RECONNECT_PAUSES", (0.1, 0.1))
+    monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
+    before = fake.settings()
+    fake.builds[("sinc-L", 11289600)] = 999.0
+    bench.start()
+    assert _wait(lambda: ((mgr.held or {}).get("progress") or {}).get("point_label", "")
+                 .startswith("HQPlayer is preparing"), 30)
+    time.sleep(0.4)
+    fake.builds.clear()
+    fake.close()                        # the process ended; nothing restarts it
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["note"].startswith("HQPlayer ended, or was restarted, while it prepared "
+                                            "sinc-L at DSD256"), bench.state()["note"]
+    assert run.q("SELECT result::text, build_end::text FROM hqp_benchmark_points "
+                 "WHERE filter = 'sinc-L' AND rate_hz = 11289600") == [("slow_start", "ended")]
+    assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
+        [(True, True)]
+    fake.come_back()
+
+    def closed():
+        mgr.active.poke()
+        return run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert _wait(closed, 30)
+    assert fake.settings() == before
+
+
+def _closed_by_its_answer(run) -> str:
+    """The run's put-back once HQPlayer answers the playback link: its note."""
+    def closed():
+        run.mgr.active.poke()
+        return run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert _wait(closed, 30)
+    return run.q("SELECT note FROM hqp_benchmark_runs")[0][0]
+
+
+def test_a_slow_starts_end_is_read_off_hqplayers_track_serial():
+    """Review round 1 H1: how the silence ended is read off HQPlayer's first
+    answer, never off a connection that need not be open meanwhile —
+    HQPlayer counts its track_serial afresh at its start: lower than the
+    run last read it, it was started again (ended); as high or higher, it
+    built on (answered); not told where there is no serial or nothing
+    ever played."""
+    assert bench._build_end(7, 0) == "ended" and bench._build_end(7, 2) == "ended"
+    assert bench._build_end(7, 7) == "answered" and bench._build_end(7, 8) == "answered"
+    assert bench._build_end(0, 1) == "answered"
+    assert bench._build_end(0, 0) is None
+    assert bench._build_end(None, 3) is None and bench._build_end(3, None) is None
+
+
+def test_the_end_the_restore_reads_is_the_one_its_row_and_its_words_hold(run):
+    """Review round 2 M1, round 3: the restore reaching HQPlayer reads the
+    end at once — restarted under it, the serial counted afresh: ended, and
+    the run's words say too heavy; not answering that question, the end
+    stays unknown — the run is closed as reached, no later answer is read
+    for it — and nothing is kept for it."""
+    def slow_run():
+        (rid,), = run.q("""INSERT INTO hqp_benchmark_runs (hqp_endpoint_id, hqp_engine, mode, points_planned,
+                             pre_mode, pre_rate, pre_filter, pre_filter1x, pre_shaper, pre_volume)
+                           VALUES (%s, '6.2.3', 'PCM', 3, 1, 0, 0, 0, 0, -3.0) RETURNING id""", run.endpoint_id)
+        run.q("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate, src_channels, result)
+                 VALUES (%s, 768000, 'sinc-L', 'TPDF', 44100, 2, 'slow_start') RETURNING id""", rid)
+        return rid
+    restarted = slow_run()
+    from types import SimpleNamespace
+    assert bench._watch_build(restarted, 5, lambda m: SimpleNamespace(track_serial=0)) == "ended"
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE run_id = %s", restarted) == [("ended",)]
+    words = bench._SlowStartRun(bench.Point(4, 768000, 0, 0, 0, "pcm44", "", (768000, "sinc-L", "TPDF", 44100, 2)),
+                                "prepared", marked=True)
+    words.ended = True
+    assert "marked as too heavy here" in words.words(reached=True)
+
+    def silent(method):
+        raise bench._Lost("no answer")
+    unread = slow_run()
+    assert bench._watch_build(unread, 5, silent) is None and unread not in bench._watched
+    assert run.q("SELECT build_end FROM hqp_benchmark_points WHERE run_id = %s", unread) == [(None,)]
+
+
+def test_a_point_at_auto_playing_across_families_off_hqplayers_list_waits_for_the_ask():
+    """Review round 1 L10: at Auto, a rate Auto played that HQPlayer's list
+    does not hold is asked as Auto — and where it is of another family than
+    the source's, those points are across families too."""
+    d, cur = _lists("desktop_sdm.json")
+    rates = [r for r in _PCM_RATES if r["rate"] != 768000]
+    current = {"rate": 0, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1}
+    srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
+    plan = bench.build_grid("pcm", filters=d["filters"], shapers=_PCM_SHAPERS, rates=rates,
+                            current=current, srcs=srcs, covered=set(), keeps_up={},
+                            rng=random.Random(2), played={"pcm44": 768000, "pcm96": 768000})
+    assert not [p for p in plan.points[1:-1] if p.source == "pcm44" and p.rate_hz == 0]
+    assert set(plan.across_left) == {(44100, 768000)}
+    assert [p for p in plan.points[1:-1] if p.source == "pcm96" and p.rate_hz == 0]   # its own family
+
+
+def test_a_slow_start_that_builds_on_after_the_run_says_how_long_it_took(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2: the run ended at the bound, HQPlayer built on and
+    answered the playback link by itself: the slow start's end is
+    'answered', with the seconds from its Play to that answer."""
+    _silent_past_the_bound(run, monkeypatch, seconds=3.0)
+    note = _closed_by_its_answer(run)
+    (end, took), = run.q("SELECT build_end::text, build_s FROM hqp_benchmark_points "
+                         "WHERE result = 'slow_start'")
+    assert end == "answered" and 2.0 <= took <= 15.0, (end, took)
+    assert "HQPlayer took " in note and "to prepare sinc-L" in note, note
+
+
+def test_a_slow_start_hqplayer_is_restarted_out_of_after_the_run_is_too_heavy_here(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2: the run ended at the bound and HQPlayer, still
+    building, went away and came back at once — restarted out of the build:
+    'ended'; a connection the hop drops while HQPlayer builds on is not
+    (the next connection meets the same silence) — 'answered'."""
+    fake = run.fake
+    _silent_past_the_bound(run, monkeypatch)
+    fake.builds.clear()
+    fake.restart()
+    note = _closed_by_its_answer(run)
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE result = 'slow_start'") == \
+        [("ended",)]
+    assert "HQPlayer ended, or was restarted, while it prepared sinc-L — marked too heavy here" in note
+
+
+def test_a_flap_while_hqplayer_builds_on_after_the_run_is_no_end(run, monkeypatch):
+    fake = run.fake
+    _silent_past_the_bound(run, monkeypatch, seconds=8.0)
+    assert _wait(lambda: run.mgr.held is None, 15)          # the playback link has HQPlayer again
+    with fake._lock:
+        conns = list(fake._conns)
+    for c in conns:                     # the hop drops them; HQPlayer builds on
+        try:
+            c.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    _closed_by_its_answer(run)
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE result = 'slow_start'") == \
+        [("answered",)]
 
 
 def test_a_cancel_in_a_long_silent_build_marks_hqplayer_lost(run, monkeypatch):

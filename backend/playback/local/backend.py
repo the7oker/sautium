@@ -117,9 +117,13 @@ class LocalBackend(PlayerBackend):
     # queue_changed, AFTER the canonical commit, so the engine never acts on
     # the pre-mutation queue.
 
-    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+    def queue_changed(self, kind: str, *, play: bool = False,
+                      start: Optional[tuple] = None) -> None:
         if kind == "replace":
-            if play and len(self._queue):
+            if play and len(self._queue) and start is not None:
+                self._engine.post("select", index=self._queue.index_of(start[0]),
+                                  seconds=start[1])
+            elif play and len(self._queue):
                 self._engine.post("select", index=1)
             else:
                 self._engine.post("stop")

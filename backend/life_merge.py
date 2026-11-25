@@ -521,9 +521,11 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
         sessions = [r[0] for r in cur.fetchall()]
         merged["sessions"] = len(sessions)
         if sessions:
-            run(f"""INSERT INTO session_tracks (session_id, position, media_file_id, track_id, album_id)
+            run(f"""INSERT INTO session_tracks (session_id, position, media_file_id, track_id, album_id,
+                                                stop_seconds)
                     SELECT st.session_id, st.position, {_MEDIA_FILE_FOR.format(track='st.track_id')},
-                           st.track_id, (SELECT a.id FROM albums a WHERE a.id = st.album_id)
+                           st.track_id, (SELECT a.id FROM albums a WHERE a.id = st.album_id),
+                           st.stop_seconds
                       FROM _S_.session_tracks st
                      WHERE st.session_id = ANY(CAST(%(ids)s AS uuid[]))
                     ON CONFLICT DO NOTHING""", {"ids": [str(s) for s in sessions]})
