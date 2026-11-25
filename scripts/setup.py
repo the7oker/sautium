@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Sautium on a Linux machine, from a clone: the console setup (`./sautium`).
 
-    ./sautium            set the node up, or go on where a run stopped
+    ./sautium            set the node up, or go on where a run stopped (it moves
+                         the folder to a release only before the host agent is
+                         installed, and never to one older than its own; after
+                         that, releases are the host agent's: ./sautium update)
     ./sautium status     what is installed, what runs, what is mounted
     ./sautium roots      the folders it may read music from; --forget <folder>
     ./sautium pair       a code and its QR to sign another device in
@@ -67,6 +70,8 @@ FOREIGN_FILESYSTEMS = {"exfat", "vfat", "msdos", "ntfs", "ntfs3", "fuseblk"}
 # Free space Docker's data root needs for what the preset builds and keeps
 NEED_GB = {"nano": 8, None: 25}
 SMALL_FILE = 4096
+# The version a tree states, as desktop/updater.py reads it
+STATED_VERSION = re.compile(r'^VERSION = "(\d+)\.(\d+)\.(\d+)"$', re.M)
 
 
 def _load(name: str, path: Path):
@@ -1272,15 +1277,55 @@ def last_screen(m: dict, preset: Optional[str]) -> None:
 
 # -- the commands ----------------------------------------------------------------------
 
+def agent_installed() -> bool:
+    return bool(agent.read_env(agent.host_dir(ROOT) / "agent.env").get("SAUTIUM_HOST_CHANNEL_KEY"))
+
+
+def stated_version(commit: str) -> Tuple[int, int, int]:
+    """The version `commit`'s tree states (desktop/build_common.py, the
+    updater's own reading); (0, 0, 0) when it states none."""
+    match = STATED_VERSION.search(out(run(["git", "show", f"{commit}:desktop/build_common.py"])))
+    return tuple(int(part) for part in match.groups()) if match else (0, 0, 0)
+
+
+def head_release() -> Optional[str]:
+    """The release HEAD is on: a tag of the version its tree states, naming
+    HEAD's commit — the clone's own, or one the host agent fetched."""
+    name = "v%d.%d.%d" % stated_version("HEAD")
+    refs = out(run(["git", "for-each-ref", "--points-at", "HEAD", "--format=%(refname)",
+                    f"refs/tags/{name}", f"{agent.RELEASE_REFS}{name}"]))
+    return name if refs else None
+
+
 def release_step() -> None:
     """Born on a release where the clone holds one whose tree has this setup;
     said plainly otherwise. The setup does not pretend to verify its own
     clone: the check that means something is the person's, against the key
-    the site publishes."""
+    the site publishes.
+
+    It moves a checkout only before the host agent exists, and only forward
+    of the version HEAD's tree states: once the agent is installed the
+    release is the agent's, which moves the checkout only to a release its
+    chain walk verified. The releases the agent fetched (RELEASE_REFS) are
+    unverified until that walk, so they are never one the setup moves to
+    (PI-NODE-2E F22: a setup run again after an update went back to the
+    clone's own older tag)."""
+    head = agent.head(ROOT)
+    if agent_installed():
+        name = head_release()
+        if name is None:
+            say(f"This folder is at commit {head[:12]}, on no release. The host agent takes the next signed "
+                "release: ./sautium update")
+            return
+        say(f"This folder is on the release {name}. The host agent takes the next one: ./sautium update")
+        verify_hint(name)
+        return
     tags = [t for t in out(run(["git", "tag", "--list", "v*", "--sort=-v:refname"])).split()
             if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
     newest = tags[0] if tags else None
-    if newest is not None and out(run(["git", "rev-parse", f"{newest}^{{commit}}"])) != agent.head(ROOT):
+    if newest is not None and tuple(int(p) for p in newest[1:].split(".")) < stated_version("HEAD"):
+        newest = None
+    if newest is not None and out(run(["git", "rev-parse", f"{newest}^{{commit}}"])) != head:
         # Moved to it only where that release carries this setup: an older
         # one would take the setup away from under its own run
         if run(["git", "cat-file", "-e", f"{newest}:scripts/setup.py"]).returncode == 0:
@@ -1290,13 +1335,21 @@ def release_step() -> None:
             say(f"Moved this folder to the release {newest}; its own setup goes on from here.")
             os.execv(sys.executable, [sys.executable, "-I", str(ROOT / "scripts" / "setup.py")] + sys.argv[1:])
         newest = None
+    newest = newest or head_release()
     if newest is None:
         say("This folder is not on a signed release (it holds none, or none that carries this setup):")
         say("updates begin with the next release.")
         return
-    say(f"This folder is on the release {newest}. To check it against the key Sautium publishes")
+    say(f"This folder is on the release {newest}.")
+    verify_hint(newest)
+
+
+def verify_hint(name: str) -> None:
+    ref = name if run(["git", "show-ref", "--verify", "--quiet", f"refs/tags/{name}"]).returncode == 0 \
+        else f"{agent.RELEASE_REFS}{name}"
+    say("To check it against the key Sautium publishes")
     say("(sautium.net › Download), save the key line from that page as release_signers, then:")
-    say(f"    git -c gpg.ssh.allowedSignersFile=release_signers verify-tag {newest}")
+    say(f"    git -c gpg.ssh.allowedSignersFile=release_signers verify-tag {ref}")
 
 
 def desktop_automounter() -> bool:
@@ -2012,7 +2065,7 @@ def cmd_pair(args) -> int:
 
 def cmd_update(args) -> int:
     refuse_root()
-    if not agent.read_env(agent.host_dir(ROOT) / "agent.env").get("SAUTIUM_HOST_CHANNEL_KEY"):
+    if not agent_installed():
         raise Stop("this node has no host agent: run ./sautium to install it")
     requests = ROOT / "run" / "requests"
     try:
@@ -2262,7 +2315,7 @@ def main(argv: List[str]) -> int:
         p.add_argument("--assistant", choices=("none", "claude"), help="what the image carries for the assistant")
         p.add_argument("--yes", action="store_true", help="never stop at a root step: print it and go on")
     setup_flags(parser)
-    setup_flags(sub.add_parser("setup", help="set the node up (the default)"))
+    setup_flags(sub.add_parser("setup", help="set the node up (the default); the host agent, once installed, updates it"))
     sub.add_parser("status", help="what is installed, what runs")
     roots = sub.add_parser("roots", help="the folders this node may read music from")
     roots.add_argument("--forget", metavar="FOLDER", help="stop reading a folder: the folder itself is untouched")

@@ -1019,6 +1019,130 @@ def test_a_first_start_has_no_log_to_keep(checkout, monkeypatch):
     assert docker.asked == ["ps", "up"] and not (checkout / "host" / "logs").exists()
 
 
+# -- the release the setup leaves the folder on (PI-NODE-2E F22) ----------------------------
+# The setup moves a checkout only forward, and only before the host agent
+# exists: on 2D's evening a setup run again after an update checked out the
+# clone's own newest tag — older than the release the agent had installed —
+# and the node ran v0.2.11's code over a v0.2.14 database.
+
+class _Moved(Exception):
+    pass
+
+
+def _g(root: Path, *args: str) -> str:
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@t", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    return subprocess.run(["git", *args], cwd=root, env=env, check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def _commit(root: Path, version: str, setup_file: bool = True) -> str:
+    (root / "desktop").mkdir(exist_ok=True)
+    (root / "desktop" / "build_common.py").write_text(f'VERSION = "{version}"\n')
+    if setup_file:
+        (root / "scripts").mkdir(exist_ok=True)
+        (root / "scripts" / "setup.py").write_text(f"# {version}\n")
+    _g(root, "add", "-A")
+    _g(root, "commit", "-q", "--allow-empty", "-m", version)
+    return _g(root, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def releases(checkout, monkeypatch):
+    """A clone whose own tags are v0.2.11; releases above it as the host
+    agent's fetch keeps them (refs/sautium/releases/), and `main` past them."""
+    root = checkout
+    _g(root, "init", "-q", "-b", "main")
+    (root / ".gitignore").write_text("host/\ndata/\n")
+    commits = {}
+    for version in ("0.2.11", "0.2.12", "0.2.13", "0.2.14"):
+        commits[version] = _commit(root, version)
+        _g(root, "tag", "-a", "-m", version, f"v{version}")
+    for version in ("0.2.12", "0.2.13", "0.2.14"):
+        _g(root, "update-ref", f"{setup.agent.RELEASE_REFS}v{version}", _g(root, "rev-parse", f"v{version}"))
+        _g(root, "tag", "-d", f"v{version}")
+    commits["main"] = _commit(root, "0.2.14")
+    monkeypatch.setattr(setup.os, "execv", lambda *a: (_ for _ in ()).throw(_Moved(a)))
+    return commits
+
+
+def _on(root: Path, commit: str) -> None:
+    _g(root, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", commit)
+
+
+def _agent_installed(root: Path) -> None:
+    (root / "host" / "agent.env").write_text("SAUTIUM_HOST_CHANNEL_KEY=" + "ab" * 32 + "\n")
+
+
+def test_a_setup_run_again_after_the_agents_update_leaves_the_checkout_on_its_release(releases, checkout, capsys):
+    _on(checkout, releases["0.2.14"])
+    _agent_installed(checkout)
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+    said = capsys.readouterr().out
+    assert "on the release v0.2.14" in said and "./sautium update" in said and "v0.2.11" not in said
+    assert f"verify-tag {setup.agent.RELEASE_REFS}v0.2.14" in said      # a ref git resolves
+
+
+def test_with_the_agent_installed_the_setup_moves_no_checkout_even_forward(releases, checkout, capsys):
+    _on(checkout, releases["0.2.11"])
+    _agent_installed(checkout)
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.15", releases["main"])     # a tag the person fetched himself
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.11"]
+    assert "./sautium update" in capsys.readouterr().out
+
+
+def test_with_the_agent_installed_a_checkout_on_no_release_is_said_as_its_commit(releases, checkout, capsys):
+    _on(checkout, releases["main"])
+    _agent_installed(checkout)
+    setup.release_step()
+    said = capsys.readouterr().out
+    assert releases["main"][:12] in said and "on no release" in said and "./sautium update" in said
+
+
+def test_without_the_agent_the_setup_never_moves_below_the_version_head_states(releases, checkout, capsys):
+    _on(checkout, releases["0.2.14"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+    assert "on the release v0.2.14" in capsys.readouterr().out
+
+
+def test_a_fresh_clones_first_setup_still_moves_to_its_newest_release(releases, checkout):
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.14", _g(checkout, "rev-parse", f"{setup.agent.RELEASE_REFS}v0.2.14"))
+    for version in ("0.2.12", "0.2.13", "0.2.14"):
+        _g(checkout, "update-ref", "-d", f"{setup.agent.RELEASE_REFS}v{version}")
+    _g(checkout, "checkout", "-q", "main")
+    with pytest.raises(_Moved):
+        setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+
+
+def test_the_agents_fetched_refs_are_never_a_release_the_setup_moves_to(releases, checkout):
+    _on(checkout, releases["0.2.11"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.11"]
+
+
+def test_without_the_agent_a_newer_tag_of_the_persons_own_clone_is_taken_forward(releases, checkout):
+    _on(checkout, releases["0.2.11"])
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.14", _g(checkout, "rev-parse", f"{setup.agent.RELEASE_REFS}v0.2.14"))
+    with pytest.raises(_Moved):
+        setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+
+
+def test_a_release_without_the_setup_is_never_moved_to(releases, checkout):
+    _on(checkout, releases["0.2.11"])
+    (checkout / "scripts" / "setup.py").unlink()
+    _g(checkout, "add", "-A")
+    _g(checkout, "commit", "-q", "-m", "no setup")
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.12", "HEAD")
+    _on(checkout, releases["0.2.11"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.11"]
+
+
 # -- the roots ---------------------------------------------------------------------------
 
 def test_a_root_is_a_folder_of_music_never_a_part_of_the_system(checkout, tmp_path):
