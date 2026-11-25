@@ -1352,7 +1352,9 @@ def release_step() -> None:
     tags = [t for t in out(run(["git", "tag", "--list", "v*", "--sort=-v:refname"])).split()
             if re.fullmatch(r"v\d+\.\d+\.\d+", t)]
     newest = tags[0] if tags else None
-    if newest is not None and tuple(int(p) for p in newest[1:].split(".")) < stated_version("HEAD"):
+    # The version its tree states, not its name: a tag is no way forward to
+    # a tree older than HEAD's whatever it is called
+    if newest is not None and stated_version(newest) < stated_version("HEAD"):
         newest = None
     if newest is not None and out(run(["git", "rev-parse", f"{newest}^{{commit}}"])) != head:
         # Moved to it only where that release carries this setup: an older
@@ -1767,7 +1769,7 @@ def moved_block(root: str, old: dict, label: str, systemd: int, forgotten: bool 
                                         else "when the machine starts") + " (optional)",
           (f"A line of /etc/fstab mounts the disk {uuid} at {root}, where Sautium does not\n"
            "look: it never appears in Sautium. The block below mounts it where Sautium sees it.\n"
-           "Sautium finds its albums at the new place by itself; nothing is read or analysed again."
+           "Sautium finds its albums at the new place when it starts again; nothing is read or analysed again."
            if forgotten else
            f"The line of /etc/fstab that mounts the music disk at {root} gives Sautium the\n"
            "mount point itself: a disk pulled or put back while Sautium runs is not seen. This moves it to\n"
@@ -1832,7 +1834,17 @@ def boot_mount_steps(roots: List[str], labels: Dict[str, str], shown: Optional[s
                    "sudo systemctl daemon-reload"],
                   boot_mount_undo(point))
     for point, old in forgotten_old_lines(roots, targets):
-        moved_block(point, old, root_label(point), systemd, forgotten=True)
+        if fstab_line(f"{AUTOMOUNT_BASE}/{old['uuid']}") is None:
+            moved_block(point, old, root_label(point), systemd, forgotten=True)
+            continue
+        # The disk's line at the new point is in already: the old one alone goes
+        line = f"UUID={old['uuid']} {point} {old['fstype']} {old['options']} 0 0"
+        block("An old line of /etc/fstab (optional)",
+              f"A line of /etc/fstab still mounts the disk {old['uuid']} at {point} as well as at\n"
+              f"{AUTOMOUNT_BASE}/{old['uuid']}, where Sautium sees it: the block takes the old line out.",
+              boot_mount_undo(point),
+              [f"sudo mkdir -p {shlex.quote(point)}", f"L={shlex.quote(line)}",
+               "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab", "sudo systemctl daemon-reload"])
     for root in roots:
         if root == AUTOMOUNT_BASE:
             continue
@@ -2208,11 +2220,19 @@ def say_roots() -> List[str]:
     systemd = systemd_version()
     stepped = [r for r in roots if r != AUTOMOUNT_BASE and (old_boot_mount(r) or disk_of(r, systemd))]
     targets = out(run(["findmnt", "--fstab", "-n", "-o", "TARGET"]))
-    forgotten = [point for point, _old in forgotten_old_lines(roots, targets)]
+    forgotten = [point for point, old in forgotten_old_lines(roots, targets)
+                 if fstab_line(f"{AUTOMOUNT_BASE}/{old['uuid']}") is None]     # else its disk is seen there
     for line in root_lines(roots, out(run(["findmnt", "-rn", "-o", "TARGET,FSTYPE,OPTIONS"])), held_labels(override),
                            stepped, held_by_the_node(), forgotten):
         say(line)
     return roots
+
+
+def disks_folder_ready() -> bool:
+    """The automount's folder holds the labels' folder, which the
+    automount's install and the setup's fstab block both make: the node
+    reads it as the folder disks are mounted in (library_root._disks_folder)."""
+    return os.path.isdir(os.path.join(AUTOMOUNT_BASE, NAMES_DIR))
 
 
 def cmd_roots(args) -> int:
@@ -2235,9 +2255,10 @@ def cmd_roots(args) -> int:
         raise Stop(f"{printable(args.forget)} is not one of this node's music roots (./sautium roots lists them)")
     old = OLD_BOOT_MOUNT_POINT.fullmatch(root)
     moved_to = f"{AUTOMOUNT_BASE}/{old.group(1)}" if old else None
-    # The setup's old line moved to the new point: the node takes the albums
-    # along at its start, by the disk's UUID (library_root.apply)
-    moved = bool(moved_to and AUTOMOUNT_BASE in roots and fstab_line(moved_to))
+    # The node takes the albums along at its start, by the disk's UUID,
+    # wherever its disks' folder is one (library_root.apply's own condition):
+    # the new line, or the automount, then mounts the disk at the new point
+    moved = bool(moved_to and AUTOMOUNT_BASE in roots and disks_folder_ready())
     if moved:
         say(f"Sautium finds the albums under {root} at {moved_to} when it starts again; nothing is removed.")
     else:
@@ -2259,7 +2280,7 @@ def cmd_roots(args) -> int:
         say()
     elif root_state(root, []) == "empty" and os.stat(root).st_uid == 0 and not os.path.ismount(root):
         say(f"The empty folder left in its place is root's: sudo rmdir {shlex.quote(root)}")
-    if moved and not os.path.ismount(moved_to):
+    if moved and fstab_line(moved_to) and not os.path.ismount(moved_to):
         # The node that held the old mount point held the disk with it: a
         # mount asked for while it ran may have found the disk busy
         say(f"Its disk is not mounted at {moved_to} now: plug it in again, and it appears in Sautium.")

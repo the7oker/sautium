@@ -1132,6 +1132,15 @@ def test_without_the_agent_a_newer_tag_of_the_persons_own_clone_is_taken_forward
     assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
 
 
+def test_a_tag_named_above_head_on_a_tree_that_states_less_is_never_moved_to(releases, checkout):
+    """The floor reads the version the tag's tree states, not its name: a
+    tag named v0.2.15 on v0.2.11's commit is no way forward (review round 1)."""
+    _on(checkout, releases["0.2.14"])
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.15", releases["0.2.11"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+
+
 def test_a_release_without_the_setup_is_never_moved_to(releases, checkout):
     _on(checkout, releases["0.2.11"])
     (checkout / "scripts" / "setup.py").unlink()
@@ -2596,7 +2605,8 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     said = _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"])
     assert ("A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not\n"
             "look: it never appears in Sautium. The block below mounts it where Sautium sees it.\n"
-            "Sautium finds its albums at the new place by itself; nothing is read or analysed again.\n") in said
+            "Sautium finds its albums at the new place when it starts again; nothing is read or analysed again.\n"
+            ) in said
     assert said.count("Paste into a terminal that may use sudo:") == 1 and "--forget" not in said
     pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
     assert pasted[:2] == ["P=/mnt/sautium-4A21-0000", 'sudo umount "$P"'] and "U=4A21-0000" in pasted
@@ -2605,6 +2615,14 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
         "A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not look: "
         "it never appears in Sautium (./sautium shows the step)")
     assert not any("A line of /etc/fstab" in line for line in _roots_said(fstab, roots))      # a root names it
+    # … and where the disk's line at the new point is in already, the old line alone is taken out:
+    # no second line for the disk (review round 1, L2)
+    fstab.write_text(at_boot + "\n" + LINE_4A21 + "\n")
+    said = _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"])
+    assert ("A line of /etc/fstab still mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000 as well as at\n"
+            "/media/sautium/4A21-0000, where Sautium sees it: the block takes the old line out.") in said
+    assert "tee -a /etc/fstab" not in said.split("To undo it later:")[0]
+    fstab.write_text(at_boot + "\n")
     # a line at that point the setup did not write is the person's own: no step — one that names the
     # disk otherwise, and one that would mount it for writing or run what is on it (the node's bind
     # does not make a mount that arrives later read-only)
@@ -2695,6 +2713,8 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     # A root the setup's own fstab line mounts: that line's undo is printed, for the person
     monkeypatch.setattr(setup, "fstab_line", lambda point: {"source": "UUID=4A21-0000", "fstype": "exfat", "options": "ro"})
     monkeypatch.setattr(setup, "node_running", lambda: False)
+    # (the node re-points where its disks' folder holds the labels' folder: the automount's or the line's)
+    monkeypatch.setattr(setup, "disks_folder_ready", lambda: True)
     assert setup.main(["roots", "--forget", "/mnt/sautium-4A21-0000"]) == 0
     said = capsys.readouterr().out
     assert "    P=/mnt/sautium-4A21-0000" in said and '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in said
@@ -2707,6 +2727,17 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     # the old mount point held the disk too), that is said
     assert "Its disk is not mounted at /media/sautium/4A21-0000 now: plug it in again" in said
     assert setup.held_roots(override) == [str(music), setup.AUTOMOUNT_BASE]
+    # The node's own condition, not the line's (review M2): with the automount alone — the old line
+    # undone, no new line — the node re-points as well, and the setup says so; with no disks' folder
+    # it does not, and the albums are away
+    for ready, words in ((True, "Sautium finds the albums under /mnt/sautium-5B32-0000 at "
+                                "/media/sautium/5B32-0000 when it starts again"),
+                         (False, "Albums under /mnt/sautium-5B32-0000 will show as away")):
+        override.write_text(setup.roots_override(["/mnt/sautium-5B32-0000", setup.AUTOMOUNT_BASE]))
+        monkeypatch.setattr(setup, "fstab_line", lambda point: None)
+        monkeypatch.setattr(setup, "disks_folder_ready", lambda: ready)
+        assert setup.main(["roots", "--forget", "/mnt/sautium-5B32-0000"]) == 0
+        assert words in capsys.readouterr().out
     # The empty folder Docker made where a root's folder was is root's: its rmdir is the person's
     made = tmp_path / "Made"
     made.mkdir()
