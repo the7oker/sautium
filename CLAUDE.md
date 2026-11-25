@@ -719,7 +719,8 @@ See:
   block, and since 2026-11-25 (PI-NODE-2E) the node re-points its files at
   its next start (`library_root.apply`: the stored paths, copies, covers and
   the chosen folder under the old point move to the new one by the UUID both
-  carry — nothing read again, nothing away); a `--music` folder that is someone's own mount point is taken as
+  carry, a queued slot's path with them — nothing read again; a copy whose
+  new place a scan filled already stays as it was, away); a `--music` folder that is someone's own mount point is taken as
   named and said — never its parent, which the person did not name; the
   setup's own line is offered only for a disk a person pulls (USB storage, a
   card in the slot, by `machine_tier.storage_medium`) that nobody set up a

@@ -823,6 +823,28 @@ def test_the_move_re_points_its_files_and_keeps_the_folder_chosen(moved, db, cap
     assert _paths(db) == after and "moved with its disk" not in caplog.text
 
 
+def test_a_queued_slot_follows_its_file_to_the_new_place(moved, db):
+    """The queue keeps a slot's path beside its media_files id (an output
+    opens the path), and a queue restored at the same start would still
+    name the old point: the re-bind reads the row's path again. A slot whose
+    way in alone names a moved file has its way in re-read."""
+    from playback.queue import QueueItem, file_source, rebind_origins
+    db.execute("SELECT id, track_id::text, file_path, file_format::text AS file_format, cue_start_seconds,"
+               " cue_end_seconds FROM media_files ORDER BY file_path, cue_start_seconds")
+    cols = [c.name for c in db.description]
+    one, image = (dict(zip(cols, r)) for r in db.fetchall()[:2])
+    slots = [QueueItem(track_id=one["track_id"], media_file_id=one["id"], title="One",
+                       source=file_source(one)),
+             QueueItem(track_id=image["track_id"], media_file_id=None, title="Two",
+                       source={"kind": "track"}, play={**file_source(image), "media_file_id": image["id"]})]
+    assert rebind_origins(slots) == [None, None]
+    library_root.apply()
+    first, second = rebind_origins(slots)
+    assert first["source"]["path"] == f"{moved.new}/Music/A/LP/01.flac" and "media_file_id" not in first
+    assert second == {}                                   # its way in is re-read
+    assert rebind_origins([QueueItem(**{**slots[0].__dict__, **first})]) == [None]
+
+
 def test_a_copy_whose_new_place_is_taken_stays_as_it_was(moved, db):
     """An install a scan read at the new place before this release (Q5): the
     old copy stays where it was, away, for its Away row; a copy moves whole

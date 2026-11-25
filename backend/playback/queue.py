@@ -595,13 +595,18 @@ _REBIND_SQL = f"""
                    OR {_AWAY_FILE.format(m='s.mid')}) AS origin_gone,
                s.pmid IS NOT NULL AND (NOT EXISTS (
                    SELECT 1 FROM media_files mf WHERE mf.id = s.pmid)
-                   OR {_AWAY_FILE.format(m='s.pmid')}) AS play_gone
+                   OR {_AWAY_FILE.format(m='s.pmid')}) AS play_gone,
+               EXISTS (SELECT 1 FROM media_files mf
+                       WHERE mf.id = s.mid AND mf.file_path IS DISTINCT FROM s.path) AS origin_moved,
+               EXISTS (SELECT 1 FROM media_files mf
+                       WHERE mf.id = s.pmid AND mf.file_path IS DISTINCT FROM s.ppath) AS play_moved
         FROM (SELECT u.*, COALESCE((SELECT mf.track_id FROM media_files mf WHERE mf.id = u.mid),
                                    u.track_id) AS track
-              FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[])
-                   WITH ORDINALITY AS u(mid, pmid, track_id, album_id, slot)) s
+              FROM unnest(%(mids)s::int[], %(pmids)s::int[], %(tids)s::uuid[], %(aids)s::uuid[],
+                          %(paths)s::text[], %(ppaths)s::text[])
+                   WITH ORDINALITY AS u(mid, pmid, track_id, album_id, path, ppath, slot)) s
     )
-    SELECT q.slot, q.origin_gone, q.track::text AS track,
+    SELECT q.slot, q.origin_gone, q.origin_moved, q.track::text AS track,
            q.track IS DISTINCT FROM q.track_id AS track_moved,
            EXISTS (SELECT 1 FROM tracks t WHERE t.id = q.track) AS track_kept,
            c.id, c.file_path, c.file_format, c.duration_seconds,
@@ -612,12 +617,13 @@ _REBIND_SQL = f"""
                mf.duration_seconds, mf.cue_start_seconds, mf.cue_end_seconds
         FROM media_files mf
         JOIN album_variants av ON av.id = mf.album_variant_id
-        WHERE q.origin_gone AND mf.track_id = q.track
+        WHERE CASE WHEN q.origin_gone THEN mf.track_id = q.track ELSE q.origin_moved AND mf.id = q.mid END
         ORDER BY (NOT {HERE}), (av.album_id = q.album_id) DESC NULLS LAST,
                  {best_rip_order('mf')}
         LIMIT 1
     ) c ON true
-    WHERE q.origin_gone OR q.play_gone OR q.track IS DISTINCT FROM q.track_id
+    WHERE q.origin_gone OR q.play_gone OR q.origin_moved OR q.play_moved
+       OR q.track IS DISTINCT FROM q.track_id
 """
 
 
@@ -629,8 +635,10 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
     output opens whatever copy it reaches, else streams it like any
     phantom); a track that went with its file has left the catalogue, and
     the slot stays under its old name as an inert foreign entry. A slot whose
-    way in (`play`) named a gone file changes nothing else — `{}`, its play
-    is re-read. A slot whose file belongs to another track now (the canon
+    way in (`play`) named a gone file, or a file whose path moved, changes
+    nothing else — `{}`, its play is re-read. A slot whose own file row
+    moved to another path (the same id: library_root's re-point of a disk's
+    old mount point) takes the row's path. A slot whose file belongs to another track now (the canon
     rewrote the uuid) takes that track's uuid, with whatever else it
     changes. None for every other slot."""
     out: list[Optional[dict]] = [None] * len(items)
@@ -646,12 +654,16 @@ def rebind_origins(items: list[QueueItem]) -> list[Optional[dict]]:
         "pmids": [(it.play or {}).get("media_file_id") for _, it in bound],
         "tids": [it.track_id for _, it in bound],
         "aids": [it.album_id for _, it in bound],
+        "paths": [it.source.get("path") if it.source.get("kind") == "file" else None for _, it in bound],
+        "ppaths": [(it.play or {}).get("path") for _, it in bound],
     })
     for r in rows:
         i, it = bound[r["slot"] - 1]
         moved = {"track_id": r["track"]} if r["track_moved"] else {}
         if not r["origin_gone"]:
-            out[i] = moved
+            # A file row moved with its disk (library_root's re-point) keeps
+            # its id; the path an output opens is the row's again
+            out[i] = {**moved, "source": file_source(r)} if r["origin_moved"] else moved
         elif r["id"] is not None:
             change = {**moved, "media_file_id": r["id"], "source": file_source(r)}
             if r["duration_seconds"] is not None:
