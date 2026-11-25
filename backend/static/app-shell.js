@@ -7040,6 +7040,38 @@
     silent: statusToast('hqplayer.silent'),
     rebuilding: statusToast('hqplayer.rebuilding'),
   };
+  // How long a build took or waited, as the person reads it
+  function hqpBuildTook(seconds) {
+    return seconds < 120 ? `${Math.round(seconds)} s` : `${Math.round(seconds / 60)} min`;
+  }
+  // A silent build past this host's usual one (BENCH-GUARD-1, the backend's
+  // `building.long`): what such a build took here, as the Benchmark
+  // measured it — never guessed — how to leave it, and, across rate
+  // families, what avoids it. Words: BENCH-GUARD-1 §4 C4, for the words sitting.
+  const HQP_LEAVE = 'To leave now, restart HQPlayer, then choose a lighter filter before you press Play — HQPlayer comes back on this setting.';
+  function hqpLongBuildText(f) {
+    const own = f.own;
+    const across = f.across || {};
+    let fact = '';
+    if (own && own.ended) fact = ' — this setting ended HQPlayer here before';
+    else if (own && own.slow_start) fact = own.built_s != null
+      ? ` — this setting took ${hqpBuildTook(own.built_s)} here before` : ' — this setting took over a minute here before';
+    else if (own && own.start_s != null) fact = ` — this setting took ${hqpBuildTook(own.start_s)} here before`;
+    else if (across.ended) fact = ' — on this HQPlayer one such filter ended HQPlayer';
+    else if (across.built_s != null) fact = ` — on this HQPlayer one such filter took ${hqpBuildTook(across.built_s)}${
+      across.slow > 1 ? `, and ${across.slow} did not start within a minute` : ''}`;
+    else if (across.slow) fact = ` — on this HQPlayer ${across.slow} such filter${across.slow === 1 ? '' : 's'} did not start within a minute`;
+    if (f.cross) {
+      return `It answers nothing until it is done. From a ${escapeHtml(f.source_name)} source to ${
+        escapeHtml(f.rate_name)} is a change of rate family, and some filters take minutes or hours to build for it here${
+        fact}. ${HQP_LEAVE} With the rate at Auto and Auto rate family on, HQPlayer stays in each source's family and builds none of this.`;
+    }
+    // Within a family, or a change whose setting is not named yet: this
+    // setting's own answer alone (none for a change)
+    const mine = own ? fact : '';
+    return `It answers nothing until it is done — longer than any start the Benchmark measured here (${
+      hqpBuildTook(f.usual_s)})${mine}. ${HQP_LEAVE}`;
+  }
   function outputConditionCopy(data) {
     const b = data.building;
     return {
@@ -7049,7 +7081,12 @@
       },
       building: b && (b.unfinished ? {
         tag: `unfinished:${b.since}`, kind: 'error',
-        title: 'HQPlayer did not finish building the filter', text: 'Restart HQPlayer.',
+        title: 'HQPlayer did not finish building the filter',
+        text: b.long ? `It did not finish in 10 minutes. ${HQP_LEAVE}` : 'Restart HQPlayer.',
+      } : b.long ? {
+        // Long here: a word the person may close — it can stand for half an hour (Q8)
+        tag: `long:${b.since}`,
+        title: 'HQPlayer is still building the filter', text: hqpLongBuildText(b.long),
       } : {
         tag: `building:${b.since}`, passive: true,
         title: 'HQPlayer is building the filter',
@@ -7064,6 +7101,16 @@
       },
     };
   }
+  // HQPlayer went away in a long build (BENCH-GUARD-1 C4d): said once
+  let saidBuildLost = null;
+  function onBuildLost(data) {
+    const lost = data && data.build_lost;
+    if (!lost || lost === saidBuildLost) return;
+    saidBuildLost = lost;
+    notices.toast({ kind: 'error', key: 'hqplayer.build_lost', title: 'HQPlayer went away while it built the filter',
+                    text: 'If it comes back on the same setting, the next Play builds it again — choose a lighter filter before you press Play.' });
+  }
+  document.addEventListener('np-update', (e) => onBuildLost(e.detail));
   function onOutputCondition(data) {
     if (!data) return;
     const copy = outputConditionCopy(data);
@@ -10509,7 +10556,12 @@
     if (!row) return '<td class="hqp-bench-none">—</td>';
     if (row.class === 'refused') return '<td class="hqp-bench-none" title="HQPlayer refuses this combination">⊘</td>';
     if (row.class === 'unstarted') return '<td class="hqp-bench-none" title="HQPlayer never got it going on this host (still building it a minute after Play)">○</td>';
-    if (row.class === 'slow_start') return '<td class="hqp-bench-none" title="Over a minute to start here: HQPlayer answered nothing that long after Play">⊗</td>';
+    if (row.class === 'slow_start') {
+      const took = row.build_s != null ? ` — it took ${fmtAbout(row.build_s).replace('about ', '')}` : '';
+      return `<td class="hqp-bench-none" title="Over a minute to start here: HQPlayer answered nothing that long after Play${took}">⊗</td>`;
+    }
+    // BENCH-GUARD-1: HQPlayer ended, or was restarted, while it built it
+    if (row.class === 'too_heavy') return '<td class="hqp-bench-none" title="Ended HQPlayer here: it ended, or was restarted, while it prepared this — not tested again on this HQPlayer version">✕</td>';
     if (row.speed == null) {
       const title = `${row.class === 'ok' ? 'Keeps up here (faster than' : 'Too slow here (slower than'} at ${fmtRateLabel(row.implied_from)})`;
       return `<td title="${escapeHtml(title)}"><span class="hqp-hr is-${row.class}"><span class="hqp-hr-dot"></span></span></td>`;
@@ -11296,6 +11348,7 @@
     refused: 'HQPlayer refuses it at this setting',
     unstarted: 'HQPlayer never got it going on this computer',
     slow_start: 'Over 1 min to start here',
+    too_heavy: 'Ended HQPlayer here',
   };
   // With the two filter slots apart, `slot` ('1x' | 'nx') is the one the
   // picker chooses for. "your pick · N" (AB-1 §14.5) counts the person's own
@@ -11435,12 +11488,14 @@
           close();
           if (!f) return;
           // A combination that took over a minute to start here on this engine: asked first (Q4)
-          if (refused[f.name] === 'slow_start') {
+          if (refused[f.name] === 'slow_start' || refused[f.name] === 'too_heavy') {
             const cuda = bench.cuda && bench.cuda !== 'off' ? 'on' : 'off';
+            const engine = escapeHtml((state.info && state.info.engine) || '');
             const ok = await window.confirmDestructive({
               title: `Choose ${f.name}?`,
-              message: `This took more than a minute to start here last time (HQPlayer ${
-                escapeHtml((state.info && state.info.engine) || '')}, CUDA ${cuda}), and HQPlayer answers nothing while it prepares. Choose it anyway?`,
+              message: refused[f.name] === 'too_heavy'
+                ? `HQPlayer ended, or was restarted, while it prepared this here last time (HQPlayer ${engine}, CUDA ${cuda}). Choose it anyway?`
+                : `This took more than a minute to start here last time (HQPlayer ${engine}, CUDA ${cuda}), and HQPlayer answers nothing while it prepares. Choose it anyway?`,
               confirmText: 'Choose it',
             });
             if (!ok) return;

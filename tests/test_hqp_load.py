@@ -37,7 +37,8 @@ MIGRATIONS = [Path(__file__).resolve().parent.parent / "desktop" / "migrations" 
                            "040_hqp_run_measured_refused.sql",
                            "041_hqp_run_return_point.sql",
                            "042_hqp_run_point_onset.sql",
-                           "043_hqp_run_point_onset_backfill.sql", "071_hqp_bench_63.sql")]
+                           "043_hqp_run_point_onset_backfill.sql", "071_hqp_bench_63.sql",
+                           "078_hqp_build_end.sql")]
 
 
 def _status(**kw) -> TrackStatus:
@@ -235,12 +236,12 @@ def _schema(conn):
            list(tables)),
         _q(conn, """SELECT t.typname, e.enumlabel FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid
                      WHERE t.typname IN ('hqp_cuda', 'hqp_sample_source', 'hqp_bench_outcome',
-                                         'hqp_point_result')
+                                         'hqp_point_result', 'hqp_build_end')
                      ORDER BY 1, e.enumsortorder"""),
     )
 
 
-def test_033_to_043_and_071_re_apply_and_build_what_001_declares():
+def test_033_to_043_071_and_078_re_apply_and_build_what_001_declares():
     name = "sautium_hqp_load_mig_test"
     admin, nb = _make_db(name)
     try:
@@ -304,6 +305,11 @@ def test_033_to_043_and_071_re_apply_and_build_what_001_declares():
         with conn.cursor() as cur:                 # a node that ran 041 before 042 existed
             cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN measured_from_at")
             cur.execute(MIGRATIONS[9].read_text())
+        assert _schema(conn) == declared
+        with conn.cursor() as cur:                 # a node that ran 071 before 078 existed
+            cur.execute("""ALTER TABLE hqp_benchmark_points DROP COLUMN build_end, DROP COLUMN build_s;
+                           DROP TYPE hqp_build_end""")
+            cur.execute(MIGRATIONS[-1].read_text())
         assert _schema(conn) == declared
         conn.close()
     finally:
@@ -809,6 +815,78 @@ def test_the_engines_own_answers_outlive_the_retention_on_the_same_engine(db):
     assert (22579200, "S") in {(r["rate_out"], r["shaper"]) for r in hqp_load.results(ctx)}
     newer = _ctx(db, engine="6.2.4")
     assert hqp_load.covered(newer) == set() and hqp_load.keeps_up(newer) == {}
+
+
+def test_build_facts_are_this_hosts_measured_builds_never_a_guess(db):
+    """BENCH-GUARD-1 (B-153 (3)): what the word said while HQPlayer builds in
+    silence reads — the usual build, the longest start measured within a
+    rate family (20 s at least); across families the longest start
+    measured, the longest a slow start took once HQPlayer answered, how many
+    slow starts, whether one ended HQPlayer; a named setting's own answer —
+    on the engine build and CUDA state the endpoint holds now."""
+    from playback import hqp_benchmark
+    assert hqp_load.LONG_BUILD_FLOOR_S == hqp_benchmark.LONG_BUILD_S
+    facts = hqp_load.build_facts(db.endpoint_id)
+    assert facts == {"usual_s": 20.0, "across": {"start_s": None, "built_s": None, "slow": 0,
+                                                 "ended": False}, "own": None}
+
+    def bench(init_s, rate_out, **kw):
+        hqp_load.write(_sample(db, 2.0, rate_out=rate_out, source="benchmark", settled=True,
+                               init_s=init_s, settle_s=5.0, dropout=False, **kw))
+    bench(25.1, 11289600)                                  # 256× from 44.1 kHz: within the family
+    bench(3.0, 5644800)
+    bench(40.0, 12288000, shaper="X")                      # 48k × 256 from 44.1 kHz: across
+    run = _run_row(db)
+    with db.cursor() as cur:
+        for rate, shaper, end, took in ((12288000, "A", "answered", 358.0), (12288000, "B", "ended", None),
+                                        (12288000, "C", None, None), (11289600, "D", "answered", 63.0)):
+            cur.execute("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate,
+                             src_channels, result, build_end, build_s)
+                           VALUES (%s, %s, 'poly-sinc-gauss-xla', %s, 44100, 2, 'slow_start', %s, %s)""",
+                        (run, rate, shaper, end, took))
+    facts = hqp_load.build_facts(db.endpoint_id)
+    assert facts["usual_s"] == 25.1
+    assert facts["across"] == {"start_s": 40.0, "built_s": 358.0, "slow": 3, "ended": True}
+    own = hqp_load.build_facts(db.endpoint_id, rate_out=12288000, filter="poly-sinc-gauss-xla",
+                               src_rate=44100)["own"]
+    assert own == {"slow_start": True, "ended": True, "built_s": None}       # its end, first
+    own = hqp_load.build_facts(db.endpoint_id, rate_out=12288000, filter="poly-sinc-gauss-xla",
+                               shaper="A", src_rate=44100)["own"]
+    assert own == {"slow_start": True, "ended": False, "built_s": 358.0}
+    own = hqp_load.build_facts(db.endpoint_id, rate_out=5644800, filter="poly-sinc-gauss-xla",
+                               src_rate=44100)["own"]
+    assert own == {"start_s": 3.0}
+    # another CUDA state on the endpoint now: nothing of this one
+    with db.cursor() as cur:
+        cur.execute("UPDATE hqp_endpoints SET cuda = 'off' WHERE id = %s", (db.endpoint_id,))
+    assert hqp_load.build_facts(db.endpoint_id)["usual_s"] == 20.0
+
+
+def test_a_slow_start_that_ended_hqplayer_reads_too_heavy_where_it_is_shown(db):
+    """BENCH-GUARD-1 Gap 2 (Q2): planning reads the result alone — a slow
+    start that ended HQPlayer is covered and does not keep up — and the
+    readers that show it name it too heavy here; an end is a slow start's."""
+    run = _run_row(db)
+    with db.cursor() as cur:
+        cur.execute("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate,
+                         src_channels, result, build_end, build_s)
+                       VALUES (%s, 11289600, 'poly-sinc-gauss-xla', 'T', 44100, 2, 'slow_start', 'ended',
+                               NULL), (%s, 11289600, 'poly-sinc-gauss-xla', 'W', 44100, 2, 'slow_start',
+                               'answered', 412.0)""", (run, run))
+    ctx = _ctx(db)
+    key = (11289600, "poly-sinc-gauss-xla", "T", 44100, 2)
+    assert key in hqp_load.covered(ctx) and hqp_load.keeps_up(ctx)[key] is False
+    rows = {r["shaper"]: r for r in hqp_load.results(ctx)}
+    assert (rows["T"]["class"], rows["W"]["class"], rows["W"]["build_s"]) == ("too_heavy", "slow_start", 412.0)
+    hr = hqp_load.headroom(ctx, rate_out=11289600, filter="poly-sinc-gauss-xla", shaper="ASDM7ECv3",
+                           src_rate=44100, src_channels=2)
+    assert hr["refused"]["shapers"] == {"T": "too_heavy", "W": "slow_start"}
+    assert "T" in hqp_load.names(ctx)["shapers"]
+    with pytest.raises(psycopg2.IntegrityError):
+        with db.cursor() as cur:
+            cur.execute("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate,
+                             src_channels, result, build_end)
+                           VALUES (%s, 0, 'f', 's', 44100, 2, 'failed', 'ended')""", (run,))
 
 
 def test_a_points_range_rides_its_mark_and_an_earlier_engines_mark_is_only_a_hint(db):

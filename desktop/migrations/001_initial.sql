@@ -121,6 +121,15 @@ DO $$ BEGIN
                                           'unstarted', 'slow_start', 'implied', 'failed');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- How a slow start's silence ended, once the node saw it (BENCH-GUARD-1,
+-- 2026-11-25): 'answered' = HQPlayer came out of the build by itself;
+-- 'ended' = it did not — it went away or was restarted while it prepared
+-- the point (the kernel ending it for memory, or a person out of the
+-- build): too heavy here.
+DO $$ BEGIN
+    CREATE TYPE hqp_build_end AS ENUM ('answered', 'ended');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE cover_source_type AS ENUM ('external', 'embedded', 'sentinel');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -600,7 +609,10 @@ CREATE INDEX IF NOT EXISTS idx_hqp_dsp_samples_sampled_at ON hqp_dsp_samples(sam
 -- of the asked key. 'slow_start': HQPlayer answered nothing past the run's
 -- build limit after its Play — never asked again on that engine, CUDA
 -- state and mode; 'implied': a rung of a ladder never asked, a neighbour
--- answering for it, for the sheet (HQP-BENCH-63).
+-- answering for it, for the sheet (HQP-BENCH-63). A slow start's end, once
+-- seen (BENCH-GUARD-1): `build_end` and `build_s`, the seconds from its Play
+-- to that end — HQPlayer answering, or gone. Planning reads `result` alone;
+-- the readers that show a point read 'ended' as "too heavy here".
 CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     id BIGSERIAL PRIMARY KEY,
     run_id INTEGER NOT NULL REFERENCES hqp_benchmark_runs(id) ON DELETE CASCADE,
@@ -619,8 +631,12 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     -- below it does not)
     implied_from INTEGER,
     implied_ok BOOLEAN,
+    build_end hqp_build_end,
+    build_s REAL,
     CONSTRAINT chk_hqp_benchmark_points_implied CHECK (
-        (result::text = 'implied') = (implied_from IS NOT NULL AND implied_ok IS NOT NULL))
+        (result::text = 'implied') = (implied_from IS NOT NULL AND implied_ok IS NOT NULL)),
+    CONSTRAINT chk_hqp_benchmark_points_build_end CHECK (
+        build_end IS NULL OR result::text = 'slow_start')
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_points_run ON hqp_benchmark_points(run_id);
 

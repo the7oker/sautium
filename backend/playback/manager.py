@@ -1158,10 +1158,11 @@ class PlaybackManager:
         # The HQPlayer output's own words (playback.hqp_backend): the build it
         # is in, a silence no build of ours explains, the outcome of a DSP
         # change that went through a build, where the play press resumes a
-        # stopped HQPlayer, a play press taking the queue to it again, and a
-        # start under way — HQPlayer has yet to sound it.
+        # stopped HQPlayer, a play press taking the queue to it again, a
+        # start under way — HQPlayer has yet to sound it — and a long build
+        # HQPlayer went away in (said once, BENCH-GUARD-1).
         new_data.update({k: s.extra[k] for k in ("building", "not_answering", "dsp_change",
-                                                 "resume", "rebuilding", "starting")
+                                                 "resume", "rebuilding", "starting", "build_lost")
                          if s.extra.get(k) is not None})
         # A Seek of the node's that left a renderer elsewhere (playback.
         # dlna_backend): told once per id, while its load plays

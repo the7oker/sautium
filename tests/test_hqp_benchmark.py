@@ -1547,13 +1547,16 @@ def test_a_point_hqplayer_is_silent_in_past_the_bound_is_a_slow_start_and_ends_t
     another does."""
     st = _silent_past_the_bound(run, monkeypatch)
     assert st["outcome"] == "failed", st
+    # BENCH-GUARD-1 Gap 3: the build outlives the run, and a restart brings
+    # HQPlayer back on the test setting, put back at its first answer
     assert st["note"] == (
         "HQPlayer is still preparing sinc-L at DSD256 from a 44.1 kHz source. Between rate families "
-        "some filters take a very long time to prepare — hours, for some. While your processor stays "
-        "busy, HQPlayer is still working on it; if it sits idle, HQPlayer has stopped. Either way, "
-        "restarting HQPlayer ends it. Sautium puts your filter, rate and volume back as soon as "
-        "HQPlayer answers. This combination is now marked as taking over a minute to start here and "
-        "is not tested again."), st["note"]
+        "some filters take a very long time to prepare — hours, for some — and HQPlayer goes on "
+        "after the run, answering nothing until it is done. While your processor stays busy, it is "
+        "still working on it; if it sits idle, HQPlayer has stopped. Restarting HQPlayer ends it: "
+        "HQPlayer comes back on this test setting, and Sautium puts your filter, rate and volume "
+        "back as soon as it answers, before anything plays. This combination is now marked as "
+        "taking over a minute to start here and is not tested again."), st["note"]
     (note,), = run.q("""SELECT note FROM hqp_benchmark_points
                          WHERE filter = 'sinc-L' AND rate_hz = 11289600 AND result = 'slow_start'""")
     assert note.endswith("s after Play — still preparing it, or stopped"), note
@@ -1590,15 +1593,20 @@ def test_hqplayer_restarted_after_a_hang_is_put_back_whole_over_what_it_saved(ru
     assert fake.settings() == before, (fake.settings(), before)
     assert run.q("SELECT outcome::text, left_at IS NULL, restored_at IS NOT NULL "
                  "FROM hqp_benchmark_runs") == [("interrupted", True, True)]
+    # restarted out of the build it was silent in: too heavy here (BENCH-GUARD-1)
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE result = 'slow_start'") == \
+        [("ended",)]
     restored = _run_restored()
     assert restored["data"]["slow_start"] is True and restored["data"]["volume_left"] is None, restored
 
 
-def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run, monkeypatch):
-    """HQP-BENCH-63 round 1 M4: the person restarts HQPlayer a minute into a
-    silent build: the point is not made again on it
-    (failed, asked again by a later run, no mark), the run ends saying so,
-    and HQPlayer — answering again — is put back at once."""
+def test_hqplayer_restarted_out_of_a_long_silent_build_is_too_heavy_here(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2 (Q3, reversing HQP-BENCH-63 round 1 M4): HQPlayer
+    restarted out of a silent build past LONG_BUILD_S — a person's restart
+    and the kernel's out-of-memory end look alike — is too heavy here: the
+    point is a slow start that ended, not asked again on that engine; the
+    run ends saying so, and HQPlayer — answering again — is put back at
+    once."""
     fake = run.fake
     monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
     monkeypatch.setattr(bench, "LONG_BUILD_S", 0.3)
@@ -1612,13 +1620,107 @@ def test_hqplayer_restarted_out_of_a_long_silent_build_ends_the_run_put_back(run
     fake.restart()
     assert _wait(lambda: not bench.running(), 60)
     st = bench.state()
-    assert st["note"].startswith("HQPlayer was restarted while it prepared sinc-L at DSD256 from a "
-                                 "44.1 kHz source. It answered again, and your filter, rate and volume "
-                                 "were put back."), st["note"]
-    assert run.q("SELECT result::text FROM hqp_benchmark_points WHERE filter = 'sinc-L' "
-                 "AND rate_hz = 11289600") == [("failed",)]
+    assert st["note"].startswith(
+        "HQPlayer ended, or was restarted, while it prepared sinc-L at DSD256 from a 44.1 kHz source. "
+        "This combination is now marked as too heavy here and is not tested again on this HQPlayer "
+        "version. It answered again, and your filter, rate and volume were put back."), st["note"]
+    (end,), = run.q("SELECT result::text || ' ' || build_end::text FROM hqp_benchmark_points "
+                    "WHERE filter = 'sinc-L' AND rate_hz = 11289600")
+    assert end == "slow_start ended", end
     assert run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
     assert fake.settings() == before
+    ctx = {"endpoint_id": run.endpoint_id, "engine": "6.2.3", "cuda": "full",
+           "mode": "SDM (DSD)", "matrix_profile": None, "convolution": False}
+    key = (11289600, "sinc-L", "ASDM7EC", 44100, 2)
+    assert key in hqp_load.covered(ctx)
+    assert [r["class"] for r in hqp_load.results(ctx) if r["filter"] == "sinc-L"
+            and r["rate_out"] == 11289600] == ["too_heavy"]
+
+
+def test_hqplayer_gone_out_of_a_long_silent_build_is_too_heavy_here(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2: HQPlayer gone past the reconnect pauses out of a
+    long silent build — the kernel ended it for memory, and its unit does
+    not restart it (a 16 GB Pi, 2026-11-25) — is too heavy here; the run is
+    lost, and put back whole once HQPlayer is started again."""
+    fake, mgr = run.fake, run.mgr
+    monkeypatch.setattr(bench, "ANSWER_WAIT_S", 0.3)
+    monkeypatch.setattr(bench, "LONG_BUILD_S", 0.3)
+    monkeypatch.setattr(bench, "_RECONNECT_PAUSES", (0.1, 0.1))
+    monkeypatch.setattr(bench, "RESTORE_ANSWER_S", 0.3)
+    before = fake.settings()
+    fake.builds[("sinc-L", 11289600)] = 999.0
+    bench.start()
+    assert _wait(lambda: ((mgr.held or {}).get("progress") or {}).get("point_label", "")
+                 .startswith("HQPlayer is preparing"), 30)
+    time.sleep(0.4)
+    fake.builds.clear()
+    fake.close()                        # the process ended; nothing restarts it
+    assert _wait(lambda: not bench.running(), 60)
+    assert bench.state()["note"].startswith("HQPlayer ended, or was restarted, while it prepared "
+                                            "sinc-L at DSD256"), bench.state()["note"]
+    assert run.q("SELECT result::text, build_end::text FROM hqp_benchmark_points "
+                 "WHERE filter = 'sinc-L' AND rate_hz = 11289600") == [("slow_start", "ended")]
+    assert run.q("SELECT finished_at IS NULL, lost_at IS NOT NULL FROM hqp_benchmark_runs") == \
+        [(True, True)]
+    fake.come_back()
+
+    def closed():
+        mgr.active.poke()
+        return run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert _wait(closed, 30)
+    assert fake.settings() == before
+
+
+def _closed_by_its_answer(run) -> str:
+    """The run's put-back once HQPlayer answers the playback link: its note."""
+    def closed():
+        run.mgr.active.poke()
+        return run.q("SELECT finished_at IS NOT NULL FROM hqp_benchmark_runs") == [(True,)]
+    assert _wait(closed, 30)
+    return run.q("SELECT note FROM hqp_benchmark_runs")[0][0]
+
+
+def test_a_slow_start_that_builds_on_after_the_run_says_how_long_it_took(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2: the run ended at the bound, HQPlayer built on and
+    answered the playback link by itself: the slow start's end is
+    'answered', with the seconds from its Play to that answer."""
+    _silent_past_the_bound(run, monkeypatch, seconds=3.0)
+    note = _closed_by_its_answer(run)
+    (end, took), = run.q("SELECT build_end::text, build_s FROM hqp_benchmark_points "
+                         "WHERE result = 'slow_start'")
+    assert end == "answered" and 2.0 <= took <= 15.0, (end, took)
+    assert "HQPlayer took " in note and "to prepare sinc-L" in note, note
+
+
+def test_a_slow_start_hqplayer_is_restarted_out_of_after_the_run_is_too_heavy_here(run, monkeypatch):
+    """BENCH-GUARD-1 Gap 2: the run ended at the bound and HQPlayer, still
+    building, went away and came back at once — restarted out of the build:
+    'ended'; a connection the hop drops while HQPlayer builds on is not
+    (the next connection meets the same silence) — 'answered'."""
+    fake = run.fake
+    _silent_past_the_bound(run, monkeypatch)
+    fake.builds.clear()
+    fake.restart()
+    note = _closed_by_its_answer(run)
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE result = 'slow_start'") == \
+        [("ended",)]
+    assert "HQPlayer ended, or was restarted, while it prepared sinc-L — marked too heavy here" in note
+
+
+def test_a_flap_while_hqplayer_builds_on_after_the_run_is_no_end(run, monkeypatch):
+    fake = run.fake
+    _silent_past_the_bound(run, monkeypatch, seconds=8.0)
+    assert _wait(lambda: hl.chosen().silent_after is not None, 15)
+    with fake._lock:
+        conns = list(fake._conns)
+    for c in conns:                     # the hop drops them; HQPlayer builds on
+        try:
+            c.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    _closed_by_its_answer(run)
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE result = 'slow_start'") == \
+        [("answered",)]
 
 
 def test_a_cancel_in_a_long_silent_build_marks_hqplayer_lost(run, monkeypatch):

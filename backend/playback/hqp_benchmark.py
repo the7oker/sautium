@@ -57,7 +57,11 @@ start here within it (`slow_start`: between rate families a build can take
 hours, and a long build and a stopped HQPlayer look the same from outside)
 — not asked again on that engine, CUDA state and mode — and the run ends
 at once, says so, and knows it lost HQPlayer: what HQPlayer shows when it
-answers again is a restart's, put back whole (recover). Three points of one source in a row that do not
+answers again is a restart's, put back whole (recover). How the slow start
+ended is kept on its row once the node sees it (BENCH-GUARD-1): HQPlayer
+answering by itself, with how long it took — or gone, or restarted, out of
+the build past LONG_BUILD_S, in the run or after it (the kernel ending it
+for memory and a person's restart look alike): too heavy here. Three points of one source in a row that do not
 play end that source's points; the others go on.
 
 The signals are pink noise at about -20 dBFS, 24-bit stereo FLAC — the
@@ -969,9 +973,22 @@ class _Silenced(_Lost):
     """HQPlayer answered nothing past BUILD_LIMIT_S."""
 
 
-class _Restarted(_Silenced):
+class _Ended(_Silenced):
+    """HQPlayer did not come out of a build it was silent in past
+    LONG_BUILD_S: it went away — it closed, reset or refused the connection
+    past the reconnect pauses — or came back stopped on a new connection
+    (_Restarted). The kernel ending it for memory and a person restarting it
+    out of the build look the same from here: too heavy here (BENCH-GUARD-1
+    Gap 2). `silent_s`: the silence until then."""
+
+    def __init__(self, why: str, silent_s: float):
+        super().__init__(why)
+        self.silent_s = silent_s
+
+
+class _Restarted(_Ended):
     """HQPlayer came back stopped on a new connection after LONG_BUILD_S of
-    silence in a point: the person restarted it out of the build."""
+    silence in a point: restarted out of the build."""
 
 
 class _BuildCancelled(_Lost):
@@ -987,14 +1004,18 @@ class _SlowStartRun(_Lost):
     knowing it lost HQPlayer — what HQPlayer shows when it answers again is
     a restart's, put back whole (_recover), never a person's change. `verb`:
     what HQPlayer was doing ('prepared', 'played', 'started' — the control,
-    again); `marked`: the combination is ledgered `slow_start`."""
+    again); `marked`: the combination is ledgered `slow_start`; `ended`:
+    HQPlayer went away or was restarted out of the build — marked so, it is
+    too heavy here (BENCH-GUARD-1 Gap 2)."""
 
-    def __init__(self, p: "Point", verb: str, *, restarted: bool = False, marked: bool = False):
+    def __init__(self, p: "Point", verb: str, *, restarted: bool = False, marked: bool = False,
+                 ended: bool = False):
         rate_hz, filt, _, src_rate, _ = p.key
         rate = rate_name(rate_hz) if rate_hz else "its automatic rate"
         self.what = (f"{filt} at {rate} from a {rate_name(src_rate)} source"
                      + (" again" if verb == "started" else ""))
         self.verb, self.restarted, self.marked = verb, restarted, marked
+        self.ended = ended or restarted
         super().__init__(self.words(reached=False))
 
     def words(self, *, reached: bool) -> str:
@@ -1004,13 +1025,25 @@ class _SlowStartRun(_Lost):
         later = " Sautium puts your filter, rate and volume back as soon as HQPlayer answers."
         test = (" While your processor stays busy, HQPlayer is still working on it; if it sits "
                 "idle, HQPlayer has stopped. Either way, restarting HQPlayer ends it.")
-        if self.restarted:
-            words = f"HQPlayer was restarted while it {self.verb} {self.what}." + (back if reached else later)
+        if self.ended and self.marked:
+            return (f"HQPlayer ended, or was restarted, while it {self.verb} {self.what}. This "
+                    "combination is now marked as too heavy here and is not tested again on this "
+                    "HQPlayer version." + (back if reached else later))
+        if self.ended:
+            words = (f"HQPlayer ended, or was restarted, while it {self.verb} {self.what}."
+                     + (back if reached else later))
         elif self.verb == "prepared" and reached:
             words = f"HQPlayer took over a minute to prepare {self.what}." + back
         elif self.verb == "prepared":
+            # The build outlives the run (BENCH-GUARD-1 Gap 3): HQPlayer takes
+            # no command until it is done, and a restart brings it back on the
+            # test setting it saved — put back at its first answer (recover)
             words = (f"HQPlayer is still preparing {self.what}. Between rate families some filters take "
-                     "a very long time to prepare — hours, for some." + test + later)
+                     "a very long time to prepare — hours, for some — and HQPlayer goes on after the "
+                     "run, answering nothing until it is done. While your processor stays busy, it is "
+                     "still working on it; if it sits idle, HQPlayer has stopped. Restarting HQPlayer "
+                     "ends it: HQPlayer comes back on this test setting, and Sautium puts your filter, "
+                     "rate and volume back as soon as it answers, before anything plays.")
         elif reached:
             words = f"HQPlayer answered nothing for over a minute while it {self.verb} {self.what}." + back
         else:
@@ -1025,7 +1058,7 @@ class _SlowStartRun(_Lost):
 # limit in it, or was restarted out of a long silence (_SlowStartRun)
 _SLOW_NOTES = ("HQPlayer is still preparing", "HQPlayer took over a minute",
                "HQPlayer answered nothing for over", "HQPlayer stopped answering while",
-               "HQPlayer was restarted while")
+               "HQPlayer ended, or was restarted, while")
 
 
 class _Link:
@@ -1473,6 +1506,8 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
             reached, restore_note, gone, measured_left = _restore(link, pre, own, mute,
                                                                   switched)
             if silenced:
+                if note.marked and not note.ended:
+                    _watch_build(run_id, reached=reached, gone=gone)
                 # its words say what the restore did, or that it is owed
                 note = "; ".join(x for x in (note.words(reached=reached),
                                              restore_note if reached else None) if x)
@@ -1709,8 +1744,9 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
                     return "cancelled", None
                 if again.get("silenced"):
                     # silent past the limit starting the control again, or
-                    # restarted out of it — no mark on either point
-                    raise _SlowStartRun(c, "started", restarted=again.get("restarted", False))
+                    # restarted out of it, or gone — no mark on either point
+                    raise _SlowStartRun(c, "started", restarted=again.get("restarted", False),
+                                        ended=again.get("ended") is not None)
                 if not again.get("started"):
                     raise _Abort(f"HQPlayer stopped starting anything: {c.label} started "
                                  f"earlier in this run and did not start again within "
@@ -1737,12 +1773,19 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
             logger.info(line + result[missed])
             if result.get("silenced"):
                 # never started and silent past the bound: it takes over the
-                # bound to start here; silent once it played, or restarted
-                # out of a long silence: failed, asked again next run
-                marked = missed == "unstarted" and not result.get("restarted")
-                _ledger(run_id, p, "slow_start" if marked else "failed", result[missed])
+                # bound to start here — and HQPlayer ending, or restarted,
+                # out of that silence past LONG_BUILD_S, it is too heavy here
+                # (BENCH-GUARD-1 Gap 2: the kernel's out-of-memory end and a
+                # restart out of the build look alike); silent once it
+                # played: failed, asked again next run
+                marked = missed == "unstarted"
+                ended = result.get("ended")
+                _ledger(run_id, p, "slow_start" if marked else "failed", result[missed],
+                        build_end="ended" if marked and ended is not None else None,
+                        build_s=round(ended, 1) if marked and ended is not None else None)
                 raise _SlowStartRun(p, "played" if missed == "failed" else "prepared",
-                                    restarted=result.get("restarted", False), marked=marked)
+                                    restarted=result.get("restarted", False), marked=marked,
+                                    ended=ended is not None)
             _ledger(run_id, p, missed, result[missed])
             stats[missed] += 1
             if not result.get("outran"):            # that one played
@@ -2015,7 +2058,8 @@ def _play(link: _Link, slot: int, src_rate: Optional[int], entries: int, *,
                 return verdict
     except _Silenced as e:
         return {"failed" if settle.moved else "unstarted": str(e), "silenced": True,
-                "restarted": isinstance(e, _Restarted)}
+                "restarted": isinstance(e, _Restarted),
+                "ended": e.silent_s if isinstance(e, _Ended) else None}
 
 
 def _outlast(link: _Link, settle: Settle,
@@ -2070,11 +2114,22 @@ def _outlast(link: _Link, settle: Settle,
                 continue
             unsay()
             raise
+        except _Lost as e:
+            # Gone past the reconnect pauses out of a long silence: HQPlayer
+            # ended in the build (the kernel's out-of-memory end on a 16 GB Pi
+            # whose unit does not restart it, 2026-11-25)
+            if _cancel.is_set() or not long():
+                raise
+            unsay()
+            silent = time.monotonic() - began
+            raise _Ended(f"HQPlayer went away after {silent:.0f} s of silence building it "
+                         f"({e})", silent) from e
         silent = time.monotonic() - began
         unsay()
         stopped = status is not None and status.state in (PlaybackState.STOPPED, PlaybackState.STOPREQ)
         if stopped and long() and (dropped or link.c.losses > losses):
-            raise _Restarted(f"HQPlayer was restarted after {silent:.0f} s of silence building it")
+            raise _Restarted(f"HQPlayer was restarted after {silent:.0f} s of silence building it",
+                             silent)
         if stopped:
             # Built and stopped, or restarted — a box reset mid-point goes
             # silent the same way, and its stop read as a dropout: made
@@ -2220,25 +2275,95 @@ _FORGOTTEN = "This HQPlayer was forgotten during the run — its measurements we
 
 def _ledger(run_id: int, p: Point, result: str, note: Optional[str] = None,
             sample_id: Optional[int] = None, *, implied_from: Optional[int] = None,
-            implied_ok: Optional[bool] = None) -> None:
+            implied_ok: Optional[bool] = None, build_end: Optional[str] = None,
+            build_s: Optional[float] = None) -> None:
     """The point's outcome by what it asked — for an `implied` rung, the rate
-    of the neighbour on its ladder that answers for it and its answer. The
-    run's row gone means its HQPlayer was forgotten (the rows go with the
-    endpoint's): the run ends."""
+    of the neighbour on its ladder that answers for it and its answer; for a
+    slow start whose end the run saw, how it ended and when (`build_end`).
+    The run's row gone means its HQPlayer was forgotten (the rows go with
+    the endpoint's): the run ends."""
     rate_hz, filt, shaper, src_rate, src_channels = p.key
     row = db_execute("""
         INSERT INTO hqp_benchmark_points
             (run_id, rate_hz, filter, shaper, src_rate, src_channels, result, note, sample_id,
-             implied_from, implied_ok)
+             implied_from, implied_ok, build_end, build_s)
         SELECT r.id, %(rate)s, %(f)s, %(s)s, %(sr)s, %(sc)s, %(r)s::hqp_point_result,
-               %(note)s, %(sample)s, %(from)s, %(ok)s
+               %(note)s, %(sample)s, %(from)s, %(ok)s, %(end)s::hqp_build_end, %(end_s)s
           FROM hqp_benchmark_runs r WHERE r.id = %(run)s
         RETURNING id
     """, {"run": run_id, "rate": rate_hz, "f": filt, "s": shaper, "sr": src_rate,
           "sc": src_channels, "r": result, "note": note, "sample": sample_id,
-          "from": implied_from, "ok": implied_ok})
+          "from": implied_from, "ok": implied_ok, "end": build_end, "end_s": build_s})
     if row is None:
         raise _Abort(_FORGOTTEN)
+
+
+# A run closed on a slow start whose end the run did not see → the playback
+# link's loss count at its close (_watch_build): the end is read at
+# HQPlayer's first answer after it (_build_end_seen). In memory: a node that
+# restarts meanwhile leaves that end unknown, never guessed.
+_watched: Dict[int, int] = {}
+
+
+def _end_point(run_id: int, end: str) -> Optional[dict]:
+    """The run's slow start ended so (BENCH-GUARD-1 Gap 2): 'answered' with
+    the seconds from its Play to now — the row was written at the build
+    limit — 'ended' with none (when HQPlayer went is not known). Its filter
+    and those seconds, or None when no such point waits for its end."""
+    return db_execute("""
+        UPDATE hqp_benchmark_points
+           SET build_end = %(end)s::hqp_build_end,
+               build_s = CASE WHEN %(end)s = 'answered'
+                              THEN round((extract(epoch FROM now() - at) + %(bound)s)::numeric, 1)
+                         END
+         WHERE run_id = %(run)s AND result = 'slow_start' AND build_end IS NULL
+        RETURNING filter, build_s
+    """, {"run": run_id, "end": end, "bound": BUILD_LIMIT_S})
+
+
+def _watch_build(run_id: int, *, reached: bool, gone: bool) -> None:
+    """A run that ended on a slow start: HQPlayer answering the restore came
+    out of the build; going away under it did not; silent through it, its
+    end is read at its first answer to the playback link (_build_end_seen)."""
+    if reached or gone:
+        _end_point(run_id, "answered" if reached else "ended")
+        return
+    from playback import hqp_link
+    try:
+        losses = hqp_link.chosen().client.losses
+    except hqp_link.NotChosen:
+        return
+    with _lock:
+        _watched[run_id] = losses
+
+
+def _build_end_seen(run: dict, link) -> Optional[str]:
+    """HQPlayer answered the put-back of a run that ended on a slow start
+    (_watch_build): it went away and came back — a loss since the run's
+    close, and no silence seen after the last one: the kernel ended it, or a
+    person restarted it, out of the build — or it built on and answered. A
+    flap of the hop is the second: the next connection met the same silence.
+    The recover note's clause for it, or None."""
+    with _lock:
+        losses = _watched.pop(run["id"], None)
+    if losses is None:
+        return None
+    c = link.client
+    ended = c.losses > losses and (link.silent_after is None or link.silent_after < c.losses)
+    row = _end_point(run["id"], "ended" if ended else "answered")
+    if row is None:
+        return None
+    if ended:
+        return (f"HQPlayer ended, or was restarted, while it prepared {row['filter']} — marked "
+                "too heavy here")
+    return f"HQPlayer took {_minutes(row['build_s'])} to prepare {row['filter']}"
+
+
+def _minutes(seconds: float) -> str:
+    """A build's length as a person reads it: seconds under two minutes, else minutes."""
+    if seconds < 120:
+        return f"{seconds:.0f} s"
+    return f"{seconds / 60:.0f} min"
 
 
 def _close_run(run_id: int, outcome: str, note: Optional[str], stats: dict, *,
@@ -2380,6 +2505,9 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
                 try:
                     done = _recover(_OnLink(link), run, gave)
                     if done is not None:
+                        said = _build_end_seen(run, link)
+                        if said is not None:
+                            done["note"] = done["note"].replace("cut short; ", f"cut short; {said}; ", 1)
                         if quiet:
                             # A mark the new run judges at once wakes nobody
                             # — start() says it if it refuses after all, the
@@ -3177,7 +3305,8 @@ def _recover(link: _Link, run: dict,
         unchecked, why = True, f"HQPlayer did not take the selection of {run['mode']} back"
     if whole:
         said = run["note"] or ""
-        how = ("was restarted during the run" if said.startswith("HQPlayer was restarted while")
+        how = ("ended, or was restarted, during the run"
+               if said.startswith("HQPlayer ended, or was restarted, while")
                else "answered nothing past the build limit during the run"
                if said.startswith(_SLOW_NOTES) else "went away under the run")
         note = f"cut short; HQPlayer {how} — its settings were put back when it answered again"

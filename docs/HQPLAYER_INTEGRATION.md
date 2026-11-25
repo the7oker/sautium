@@ -523,7 +523,26 @@ comes after the control port answers again — so neither can end the wait.
   poller says the build instead of asking, and `GET /api/hqplayer/state`
   answers from the watch — the HQPlayer screen keeps what it read last and
   holds its controls, and a toast says "HQPlayer is building the filter" while
-  it lasts (since 2026-11-14; a line on Now Playing before). The build
+  it lasts (since 2026-11-14; a line on Now Playing before). Silent past
+  this host's usual build — the longest start its Benchmark measured within
+  a rate family on this engine and CUDA state, 20 s at least
+  (`hqp_load.build_facts`) — the build is long here (since 2026-11-25,
+  BENCH-GUARD-1): the poller, which waits on the watch, wakes once at that
+  moment (a deadline of its own wait, never a page timer) and the status's
+  `building` carries `long` — the usual build, what the Benchmark measured
+  across rate families (the longest start, how long a slow start took once
+  HQPlayer answered, how many, whether one ended HQPlayer) and, for a
+  start, whose setting and source the held rate check names, whether it is
+  across families and that setting's own answer here. The toast becomes a
+  word the person may close: HQPlayer answers nothing until it is done,
+  what such a build took here (only what was measured), to leave now
+  restart HQPlayer and choose a lighter filter before Play (it comes back
+  on the setting), and across families that Auto rate family avoids the
+  build. A change's build names no setting: the held check reads the one
+  it replaces until it is through. HQPlayer gone in a long build is said
+  once (`build_lost`); nothing of a playback build is ledgered. Embedded,
+  which answers through its builds, gets none of it: whether a change there
+  waits for the build is not measured. The build
   ends where the late answer comes. Past `BUILD_LIMIT_S` it is
   `unfinished` — "HQPlayer did not finish building the filter — restart
   HQPlayer" — until HQPlayer answers a request again: only questions go
@@ -2604,12 +2623,21 @@ cooling — so Sautium measures it instead of predicting it
   between families all but four ≤ 10 s), and the run ends at it: HQPlayer
   answers nothing while it builds. At 20 s of silence the run's line says
   HQPlayer is still preparing that filter at that rate and that between
-  rate families some filters take long to prepare. Restarted by the person
-  out of a silence past those 20 s, HQPlayer is not asked the point again
-  in that run: the run ends there (the point failed, asked again by a
-  later run) and puts HQPlayer back at once; cancelled past them, the run
-  is marked as having lost HQPlayer, so the restart that follows is put
-  back whole.
+  rate families some filters take long to prepare. Restarted out of a
+  silence past those 20 s, or gone past the reconnect pauses, HQPlayer did
+  not come out of the build: the point is a slow start that ended
+  (`build_end = 'ended'`, since 2026-11-25, BENCH-GUARD-1 — the kernel
+  ending it for memory and a person's restart out of the build look alike
+  from here; until then it failed and was asked again), shown as "Ended
+  HQPlayer here" and never asked again on that engine; the run ends there
+  and puts HQPlayer back as soon as it answers. Cancelled past them, the
+  run is marked as having lost HQPlayer, so the restart that follows is
+  put back whole. A run that ended at the bound reads the slow start's end
+  at HQPlayer's first answer after it: answered by itself, the seconds from
+  its Play to that answer (`build_s`, the sheet's "it took …"); gone and
+  back at once — a loss of the connection and no silence since — ended.
+  A connection the hop drops while HQPlayer builds on is no end: the next
+  one meets the same silence (`HqpLink.silent_after`).
   A `slow_start` point is not asked again on that engine, CUDA state and
   mode; the run ends at once and says HQPlayer is still preparing it or has
   stopped — busy cores, still working; idle, stopped; either way a restart
@@ -2770,6 +2798,21 @@ cooling — so Sautium measures it instead of predicting it
 
 Measurements stay on this node: in the `.sbk` backup, not in the life-data
 merge (their endpoint is this node's registry), not in P2P sync.
+
+#### HQPlayer Desktop beside Sautium on one Raspberry Pi
+
+Cap HQPlayer's memory, so that a filter too heavy for the machine ends
+HQPlayer alone and never the node. Raspberry Pi OS starts with the kernel's memory
+controller off (`cgroup_disable=memory`, which leaves a `MemoryMax=`
+without effect): add `cgroup_enable=memory` to the line in
+`/boot/firmware/cmdline.txt` and reboot (a root step), then in
+HQPlayer's unit, under `[Service]`, on a 16 GB Pi: `MemoryMax=10G`,
+`MemorySwapMax=0`, `Restart=on-failure` (HQPlayer builds at Play, not at
+its start, so a restart does not loop; Sautium puts a Benchmark's test
+setting back at its first answer). A fixed output rate across rate
+families is the one setting that ran a 16 GB Pi out of memory (engine
+6.3.3, 2026-11-25: 15.3 GiB, the kernel ended HQPlayer — within a family
+HQPlayer peaked at 4.6 GiB); Auto rate family avoids it.
 
 ### Windows Firewall
 Ensure port 4321 is accessible:
