@@ -217,3 +217,77 @@ def test_a_music_folder_missing_at_the_start_of_an_empty_catalogue_is_armed_by_t
         assert _wait_until(lambda: library_watch.state()["state"] == library_watch.WATCHING, timeout=20)
     finally:
         library_watch.stop()
+
+
+def _pull(source):
+    """What the kernel says to a watch when the file system under it is
+    unmounted, as read under `unshare -rm` on a tmpfs (PI-NODE-2E H9): every
+    watched folder, the newest first and the music folder last, gets
+    IN_UNMOUNT (with IN_ISDIR) and then IN_IGNORED."""
+    i = library_watch._Inotify
+    for wd in sorted(source.paths, reverse=True):
+        source._event(wd, i.IN_UNMOUNT | i.IN_ISDIR, "")
+        source._event(wd, i.IN_IGNORED, "")
+
+
+def test_a_disk_pulled_asks_no_scan_and_its_return_scans_it(
+        cur, library, template, watching, main_module, monkeypatch, tmp_path, caplog):
+    """The box's pull said "Scan refused" twice: each folder's IN_UNMOUNT
+    was read as a mount inside the library gone, and asked for its scan, a
+    first round started at once and the rest merged into a second. The
+    unmount of the music folder's own file system is the watch's loss — a
+    scan is no part of it — and its return scans the library as before."""
+    import logging
+    import os
+    _clean(cur)
+    for album in ("A/LP1", "A/LP2", "B/EP"):
+        _flac(template, library / album / "01.flac", "T", "Aurora", album)
+    assert _settled(main_module, lambda: len(_rows(cur)) == 3)
+    empty, real, pulled = tmp_path / "mount point", os.scandir, [True]
+    empty.mkdir()
+
+    def scandir(path="."):
+        # the mount point the disk leaves behind: an empty folder
+        return real(empty if pulled[0] and os.fspath(path) == str(library) else path)
+    monkeypatch.setattr(os, "scandir", scandir)
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="main"):
+        _pull(library_watch._source)
+        assert _wait_until(lambda: scanner._folder_unreachable, timeout=20)
+        assert _settled(main_module, lambda: True)
+
+    assert [r.getMessage() for r in caplog.records if r.name == "main"] == []
+    assert library_watch.state()["state"] == library_watch.UNREACHABLE
+    assert len(_rows(cur)) == 3
+
+    pulled[0] = False
+    scanner.library_unreachable(wake=True)        # the mount table's wake, the disk back
+    assert _wait_until(lambda: library_watch.state()["state"] == library_watch.WATCHING, timeout=20)
+    assert _settled(main_module, lambda: main_module._scan_state["progress"] == "Scan complete")
+
+
+def test_a_mount_inside_the_library_that_goes_is_its_folder_scanned(library, monkeypatch, cur):
+    """A file system mounted at a folder of the library (a disk's second
+    partition, a share) unmounted alone: that folder is judged whole, once,
+    and the watch stays."""
+    (library / "Local" / "LP").mkdir(parents=True)
+    (library / "Share" / "LP").mkdir(parents=True)
+    asked = []
+    monkeypatch.setattr(library_watch, "mount_kind", lambda root: None)
+    library_watch.start(lambda scopes, **kw: asked.append(scopes))
+    try:
+        source = library_watch._source
+        share = {wd for wd, p in source.paths.items() if "/Share" in p}
+        for wd in share:
+            source.devs[wd] = source.dev + 1            # its own file system
+        asked.clear()
+        i = library_watch._Inotify
+        for wd in sorted(share, reverse=True):           # the kernel's order: Share/LP, then Share
+            source._event(wd, i.IN_UNMOUNT | i.IN_ISDIR, "")
+            source._event(wd, i.IN_IGNORED, "")
+        assert asked == [{"Share": True}]
+        assert library_watch.state()["state"] == library_watch.WATCHING
+        assert all("/Share" not in p for p in source.paths.values())
+    finally:
+        library_watch.stop()
