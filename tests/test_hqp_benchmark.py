@@ -1698,6 +1698,34 @@ def test_a_slow_starts_end_is_read_off_hqplayers_track_serial():
     assert bench._build_end(None, 3) is None and bench._build_end(3, None) is None
 
 
+def test_the_end_the_restore_reads_is_the_one_its_row_and_its_words_hold(run):
+    """Review round 2 M1, L5: the restore reaching HQPlayer reads the end at
+    once — restarted under it, the serial counted afresh: ended, and the
+    run's words say too heavy; not answering that question, the end is
+    read at HQPlayer's next answer instead, never lost."""
+    def slow_run():
+        (rid,), = run.q("""INSERT INTO hqp_benchmark_runs (hqp_endpoint_id, hqp_engine, mode, points_planned,
+                             pre_mode, pre_rate, pre_filter, pre_filter1x, pre_shaper, pre_volume)
+                           VALUES (%s, '6.2.3', 'PCM', 3, 1, 0, 0, 0, 0, -3.0) RETURNING id""", run.endpoint_id)
+        run.q("""INSERT INTO hqp_benchmark_points (run_id, rate_hz, filter, shaper, src_rate, src_channels, result)
+                 VALUES (%s, 768000, 'sinc-L', 'TPDF', 44100, 2, 'slow_start') RETURNING id""", rid)
+        return rid
+    restarted = slow_run()
+    from types import SimpleNamespace
+    assert bench._watch_build(restarted, 5, lambda m: SimpleNamespace(track_serial=0)) == "ended"
+    assert run.q("SELECT build_end::text FROM hqp_benchmark_points WHERE run_id = %s", restarted) == [("ended",)]
+    words = bench._SlowStartRun(bench.Point(4, 768000, 0, 0, 0, "pcm44", "", (768000, "sinc-L", "TPDF", 44100, 2)),
+                                "prepared", marked=True)
+    words.ended = True
+    assert "marked as too heavy here" in words.words(reached=True)
+
+    def silent(method):
+        raise bench._Lost("no answer")
+    unread = slow_run()
+    assert bench._watch_build(unread, 5, silent) is None and bench._watched[unread] == 5
+    bench._watched.pop(unread)
+
+
 def test_a_point_at_auto_playing_across_families_off_hqplayers_list_waits_for_the_ask():
     """Review round 1 L10: at Auto, a rate Auto played that HQPlayer's list
     does not hold is asked as Auto — and where it is of another family than

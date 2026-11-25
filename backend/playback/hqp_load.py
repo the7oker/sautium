@@ -654,7 +654,8 @@ def build_facts(endpoint_id: int, *, rate_out: Optional[int] = None, filter: Opt
     """What this HQPlayer's Benchmark measured of its builds, for the word
     said while HQPlayer builds in silence (BENCH-GUARD-1): its usual build —
     the longest start measured within a rate family, LONG_BUILD_FLOOR_S at
-    least (`measured`: whether a start was measured at all) — and across
+    least (`measured`: whether the usual build is a measured start, not
+    the floor) — and across
     families (a point asked at an automatic rate is no such point) the longest start measured, the longest a
     slow start took once HQPlayer answered (`built_s`), how many slow starts
     there were and whether one ended HQPlayer; and, for a setting named
@@ -700,7 +701,7 @@ def build_facts(endpoint_id: int, *, rate_out: Optional[int] = None, filter: Opt
     elif row["own_s"] is not None:
         own = {"start_s": round(row["own_s"], 1)}
     return {"usual_s": round(max(LONG_BUILD_FLOOR_S, row["within_s"] or 0.0), 1),
-            "measured": row["within_s"] is not None,
+            "measured": row["within_s"] is not None and row["within_s"] >= LONG_BUILD_FLOOR_S,
             "across": {"start_s": None if row["across_s"] is None else round(row["across_s"], 1),
                        "built_s": row["built_s"], "slow": row["slow"], "ended": row["ended"]},
             "own": own}

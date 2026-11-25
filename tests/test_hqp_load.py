@@ -826,13 +826,15 @@ def test_build_facts_are_this_hosts_measured_builds_never_a_guess(db):
     on the engine build and CUDA state the endpoint holds now."""
     from playback import hqp_benchmark
     assert hqp_load.LONG_BUILD_FLOOR_S == hqp_benchmark.LONG_BUILD_S
+    def bench(init_s, rate_out, **kw):
+        hqp_load.write(_sample(db, 2.0, rate_out=rate_out, source="benchmark", settled=True,
+                               init_s=init_s, settle_s=5.0, dropout=False, **kw))
     facts = hqp_load.build_facts(db.endpoint_id)
     assert facts == {"usual_s": 20.0, "measured": False, "across": {"start_s": None, "built_s": None, "slow": 0,
                                                                     "ended": False}, "own": None}
 
-    def bench(init_s, rate_out, **kw):
-        hqp_load.write(_sample(db, 2.0, rate_out=rate_out, source="benchmark", settled=True,
-                               init_s=init_s, settle_s=5.0, dropout=False, **kw))
+    bench(5.0, 2822400)                                    # a start under the floor: no usual build measured
+    assert hqp_load.build_facts(db.endpoint_id)["measured"] is False      # review round 2 L3
     bench(25.1, 11289600)                                  # 256× from 44.1 kHz: within the family
     bench(3.0, 5644800)
     bench(40.0, 12288000, shaper="X")                      # 48k × 256 from 44.1 kHz: across

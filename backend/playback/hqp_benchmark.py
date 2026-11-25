@@ -1518,7 +1518,8 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
                                                                   switched)
             if silenced:
                 if note.marked and not note.ended:
-                    _watch_build(run_id, note.serial, link if reached else None)
+                    # its words name the end its row holds (review round 2 M1)
+                    note.ended = _watch_build(run_id, note.serial, link if reached else None) == "ended"
                 # its words say what the restore did, or that it is owed
                 note = "; ".join(x for x in (note.words(reached=reached),
                                              restore_note if reached else None) if x)
@@ -2349,39 +2350,47 @@ def _build_end(before: Optional[int], now: Optional[int]) -> Optional[str]:
     return None
 
 
-def _watch_build(run_id: int, serial: Optional[int], reached) -> None:
+def _watch_build(run_id: int, serial: Optional[int], reached) -> Optional[str]:
     """A run that ended on a slow start: the restore reached HQPlayer
-    (`reached`, its link) — its answer says now how the silence ended;
-    silent through it, its end is read at HQPlayer's first answer to the
-    playback link (_put_run_back)."""
+    (`reached`, its link) — its answer says now how the silence ended, and
+    the end is returned; silent through it, or not answering this question,
+    its end is read at HQPlayer's first answer to the playback link
+    (_put_run_back)."""
+    status = None
     if reached is not None:
         try:
             status = reached("get_status")
         except (_Reopened, _Lost):
             status = None
-        end = _build_end(serial, status.track_serial if status is not None else None)
+    if status is not None:
+        end = _build_end(serial, status.track_serial)
         if end is not None:
             _end_point(run_id, end)
-        return
+        return end
     with _lock:
         _watched[run_id] = serial
+    return None
 
 
-def _build_end_seen(run: dict, link) -> Optional[str]:
+def _end_read(run: dict, link) -> Optional[str]:
     """HQPlayer answers the put-back of a run that ended on a slow start
     (_watch_build): its first answer — read before anything is put back —
-    says how the silence ended (_build_end). The recover note's clause for
-    it, or None."""
+    says how the silence ended (_build_end). None: no end waits, it cannot
+    tell, or HQPlayer did not answer (raised: silent still, or gone — read
+    at the next answer)."""
     with _lock:
         if run["id"] not in _watched:
             return None
         serial = _watched[run["id"]]
-    status = link("get_status")         # silent still, or gone: raised, read at the next answer
-    if status is None:
-        return None
+    status = link("get_status")
+    return None if status is None else _build_end(serial, status.track_serial)
+
+
+def _end_said(run: dict, end: Optional[str]) -> Optional[str]:
+    """The end read (_end_read) on the point's row once the put-back
+    answered, and the recover note's clause for it, or None."""
     with _lock:
         _watched.pop(run["id"], None)
-    end = _build_end(serial, status.track_serial)
     row = _end_point(run["id"], end) if end is not None else None
     if row is None:
         return None
@@ -2535,9 +2544,10 @@ def _put_run_back(link, run: dict, owed: tuple, again: Callable[[], None],
                 with _lock:
                     _putting.add(run["id"])
                 try:
-                    said = _build_end_seen(run, _OnLink(link))
+                    end = _end_read(run, _OnLink(link))
                     done = _recover(_OnLink(link), run, gave)
                     if done is not None:
+                        said = _end_said(run, end)
                         if said is not None:
                             done["note"] = done["note"].replace("cut short; ", f"cut short; {said}; ", 1)
                         if quiet:
@@ -2723,7 +2733,12 @@ def _take_owed(link: _Link, endpoint_id: int, gave: Callable[[str], bool],
                 _close_owed(run, f"cut short; not put back — {why}: HQPlayer was left as it "
                                  "was set since", theirs=True)
             else:
+                end = _again(lambda: _end_read(run, link))
                 done = _again(lambda: _recover(link, run, gave))
+                if done is not None:
+                    said = _end_said(run, end)
+                    if said is not None:
+                        done["note"] = done["note"].replace("cut short; ", f"cut short; {said}; ", 1)
                 if done is None:
                     raise _Abort("HQPlayer did not report its state")
                 # No notice: the new run reads what HQPlayer holds as the
