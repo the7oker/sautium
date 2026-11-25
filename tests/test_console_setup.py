@@ -2429,6 +2429,7 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
     roots = [str(there), str(empty), str(mounted), str(gone), setup.AUTOMOUNT_BASE]
     table = f"/ ext4 rw\n{mounted} exfat ro,nosuid\n{tmp_path}/plugged/4A21-0000 vfat ro\n"
     lines = setup.root_lines(roots, table, {str(mounted): "Elements <b>", str(gone): "Old"})
+    # each mount under the root it lies under (PI-NODE-2E H6)
     assert lines == [
         f"Music root {there}: there",
         f"Music root {empty}: empty — its disk is not mounted, or the folder was removed. Its albums show as away. "
@@ -2436,10 +2437,11 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
         # a root that is a mount point holds what was mounted there when the node started (§2.5)
         f"Music root {mounted}: a disk mounted at the root itself — Sautium sees it only as it was when Sautium "
         "started",
+        f"  mounted: {mounted} exfat ro,nosuid",
         f"Music root {gone}: gone — its disk is not mounted, or the folder was removed. Its albums show as away. "
         f"To forget it: ./sautium roots --forget {gone}",
         f"Music root {tmp_path}/plugged: plugged disks — the automount is not installed (./sautium shows how)",
-        f"  mounted: {mounted} exfat ro,nosuid", f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
+        f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
     (tmp_path / "plugged").mkdir()                   # installed, no disk plugged in: not a library gone
     assert f"Music root {tmp_path}/plugged: there  (plugged disks)" in setup.root_lines(roots, "", {})
     # An empty root the node never read a copy under is a new folder, not a library that is away

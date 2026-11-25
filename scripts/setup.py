@@ -806,7 +806,8 @@ def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
                stepped: Optional[List[str]] = None, held: Optional[Dict[str, bool]] = None,
                forgotten: Optional[List[str]] = None) -> List[str]:
     """What `status` and `roots` say of each root: there, empty or gone, what
-    is mounted on or under it, its label. A root that is itself a mount point
+    is mounted on or under it (each mount under the root it lies in — the
+    nearest, where one root lies in another), its label. A root that is itself a mount point
     is named as that — the node holds what was mounted there at its start —,
     and `stepped` are the roots the setup has a step for (the line of before
     2026-11-24, whose mount point is the root whether its disk is in or out;
@@ -818,6 +819,7 @@ def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
     (forgotten_old_lines), whose disks never appear in Sautium."""
     mounted = mounts_under(roots, findmnt_rn)
     points = [mount_target(line) for line in mounted]
+    owner = [max((r for r in roots if p == r or p.startswith(r.rstrip("/") + "/")), key=len) for p in points]
     lines = []
     for root in roots:
         state = root_state(root, points)
@@ -835,7 +837,7 @@ def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
         else:
             lines.append(f"Music root {root}: {state} — its disk is not mounted, or the folder was removed. "
                          f"Its albums show as away. To forget it: ./sautium roots --forget {shlex.quote(root)}")
-    lines += ["  mounted: " + printable(line) for line in mounted]
+        lines += ["  mounted: " + printable(line) for line, of in zip(mounted, owner) if of == root]
     return lines + [f"A line of /etc/fstab mounts the disk {OLD_BOOT_MOUNT_POINT.fullmatch(point).group(1)} at "
                     f"{point}, where Sautium does not look: it never appears in Sautium (./sautium shows the step)"
                     for point in forgotten or []]
