@@ -411,9 +411,10 @@ def test_a_slot_the_session_does_not_hold_is_refused(node):
     assert e.value.status_code == 400
 
 
-def test_a_stop_on_a_track_that_plays_as_an_excerpt_now_starts_at_zero(node):
-    """A streamed slot whose demo listen is spent plays as the 30 s clip: a
-    second past it is no place in it."""
+def test_a_stop_on_a_track_that_plays_as_an_excerpt_now_starts_at_zero(node, monkeypatch):
+    """A streamed slot whose demo listen is spent plays as the 30 s clip
+    where the demo channel is all that plays it: a second past it is no
+    place in it. A provider that plays it whole keeps the second."""
     player, cur = node["player"], node["cur"]
     player.play_phantom_album(player.PlayPhantomAlbumRequest(album_id=node["streamed"]))
     _heard(node, 2, 80.0)
@@ -422,8 +423,13 @@ def test_a_stop_on_a_track_that_plays_as_an_excerpt_now_starts_at_zero(node):
     session = cur.fetchone()[0]
     cur.execute("INSERT INTO demo_plays (track_id, provider) VALUES (%s, 'catalog')",
                 (node["phantoms"][1],))
-    player.play_session(player.PlaySessionRequest(
-        session_id=session, start=player.SessionStart(position=1, seconds=80.0)))
+    resume = player.PlaySessionRequest(session_id=session,
+                                       start=player.SessionStart(position=1, seconds=80.0))
+    player.play_session(resume)
+    assert node["out"].starts[-1] == (2, 80.0)          # a full-length provider plays it whole
+    monkeypatch.setattr(_Catalog, "manifest", ProviderManifest(
+        id="catalog", name="Catalog", kind="direct_url", lossless=False, demo_limited=True))
+    player.play_session(resume)
     assert node["out"].starts[-1] == (2, 0.0)
 
 

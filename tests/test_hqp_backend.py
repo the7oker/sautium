@@ -7915,7 +7915,7 @@ def test_a_session_queued_while_hqplayer_builds_is_refused_as_busy(fake, output,
     mgr, b = output
     monkeypatch.setattr(player_router, "manager", mgr)
     monkeypatch.setattr(player_router, "_session_segments",
-                        lambda session_id: ([("owned", [{"id": 9}])], 0))
+                        lambda session_id: ([("owned", [{"id": 9}])], 0, [(0, "t-9")]))
     monkeypatch.setattr(queue_mod, "items_for_owned_rows",
                         lambda rows: [_item("E:/Music/B/09.flac", 9)])
     fake.build("SetFilter", 2.0)

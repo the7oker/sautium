@@ -212,9 +212,9 @@ const out = [];
 
 
 def test_the_session_page_draws_one_dot_and_its_taps_choose_or_jump():
-    out = _node(WIRE % {
-        "view": _function("sessionDotView(slots, positions, playlist, status, stop, chosen)"),
-        "wire": _function("wireSessionDot(screen, d)")})
+    out = _node(WIRE.replace("%(view)s", _function(
+        "sessionDotView(slots, positions, playlist, status, stop, chosen)"))
+        .replace("%(wire)s", _function("wireSessionDot(screen, d)")))
     stop, moved, nothing_sent, playing, sent, back, let_go = out
     assert stop == {"start": 2, "playing": -1, "dur": "1:15 / 3:20", "label": "Resume"}
     assert moved == {"start": 0, "playing": -1, "dur": None, "label": "Play"} and nothing_sent == 0
