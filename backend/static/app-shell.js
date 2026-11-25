@@ -6834,7 +6834,7 @@
                                       window.currentStatus, d.stop, chosen);
     const key = (v) => (v.playing ? 'playing' : JSON.stringify(v.stop));
     const draw = () => {
-      if (!screen.isConnected) return false;
+      if (!screen.isConnected) return;
       const was = key(view);
       view = read();
       if (chosen && key(view) !== was) {
@@ -6856,7 +6856,6 @@
       const label = playBtn && playBtn.querySelector('[data-play-label]');
       const word = view.resume ? 'Resume' : 'Play';
       if (label && label.textContent !== word) label.textContent = word;
-      return true;
     };
     rows.forEach((row, i) => row.addEventListener('click', (e) => {
       if (e.target.closest('.track-add, .track-confirm-bar') || row.classList.contains('is-confirming')) return;
@@ -6890,15 +6889,14 @@
     }));
     // The dot Play starts from, as drawn now (none while the session plays)
     screen.sessionStart = () => (view.dot ? { position: view.dot.position, seconds: view.dot.seconds } : null);
-    const redraw = () => draw();
     const detach = () => {
       if (screen.isConnected) return;
-      document.removeEventListener('np-update', redraw);
-      document.removeEventListener('playlist-loaded', redraw);
+      document.removeEventListener('np-update', draw);
+      document.removeEventListener('playlist-loaded', draw);
       window.removeEventListener('sautium:route', detach);
     };
-    document.addEventListener('np-update', redraw);
-    document.addEventListener('playlist-loaded', redraw);
+    document.addEventListener('np-update', draw);
+    document.addEventListener('playlist-loaded', draw);
     window.addEventListener('sautium:route', detach);
     draw();
   }
