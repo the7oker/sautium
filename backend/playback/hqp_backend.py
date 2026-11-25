@@ -6879,7 +6879,8 @@ class HqpBackend(PlayerBackend):
                     "transcode" if src.get("transcode") else "preview")
         return src["uri"], "foreign"
 
-    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+    def queue_changed(self, kind: str, *, play: bool = False,
+                      start: Optional[tuple] = None) -> None:
         """Every mutation is mirrored in the queue_* hooks, before its commit.
         A re-bind happens under the queue — files left the library
         (PlaybackManager.rebind_files), or what opens here changed
@@ -7117,7 +7118,7 @@ class HqpBackend(PlayerBackend):
             raise Dropped("its track left the queue")
         return self._start_at(index, position, fallback=True, item=start, spends=held)
 
-    def queue_replace(self, items: list, *, play: bool) -> list:
+    def queue_replace(self, items: list, *, play: bool, start: Optional[tuple] = None) -> list:
         """HQPlayer's playlist becomes what it holds of `items` — a new queue
         (intent queue), each slot's way in read for it — and the queue all of
         them (mirror-first): a slot it cannot open, or refuses while it takes
@@ -7143,14 +7144,22 @@ class HqpBackend(PlayerBackend):
         no clear, no add until that slot is known to open — the start waits
         on it in the node, and its landing hands HQPlayer the queue afresh.
         With no other controller a streamed first slot empties the playlist
-        at the tap, as before."""
+        at the tap, as before. `start` — (an item of `items`, a second) —
+        plays from there instead of the first slot (an album from the track
+        chosen, a history session from its stop): the whole queue is
+        handed, the horizon placed from it, and the start goes to it — or to
+        the first slot after it HQPlayer took, from 0 — as a rebuild's
+        resume does (_start_item)."""
         if not items:
             return []
         # Refused before it is numbered or watched: it supersedes nothing
         self._link.refuse_edits()
         self._ways_in(items)
         saved = self._horizon_state()
-        self._place_horizon(items, None)
+        head, second = (start[0], int(start[1])) if start is not None else (items[0], 0)
+        head_slot = next(i for i, it in enumerate(items) if it is head) + 1
+        ahead = items[head_slot - 1:]
+        self._place_horizon(items, head if start is not None else None)
         try:
             layout = self._layout(items)
             # Nothing it holds yet, every slot up to the first one it can open
@@ -7161,8 +7170,13 @@ class HqpBackend(PlayerBackend):
                 self._restore_horizon(saved)
                 raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
             if self._taken() or self._rests_on_another():
-                first = (layout.handed[0] if layout.handed
-                         else next(it for it in items if it.opener().get("kind") == "pending"))
+                handed = {id(it) for it in layout.handed}
+                first = next((it for it in ahead if id(it) in handed
+                              or it.opener().get("kind") == "pending"), None)
+                if first is None:
+                    first = (layout.handed[0] if layout.handed
+                             else next(it for it in items if it.opener().get("kind") == "pending"))
+                at = second if first is head else 0
                 to_come = self._bytes_away(first)
                 if not play or to_come is not None:
                     # Played with its first slot's stream still to come, it
@@ -7173,22 +7187,29 @@ class HqpBackend(PlayerBackend):
                     self._drifted("another controller holds HQPlayer")
                     if play:
                         self._owe_start(None, self._link.item("start", self._link.accept("queue")),
-                                        lambda it: self._park(first, 0, to_come, start=it, press=True))
+                                        lambda it: self._park(first, at, to_come, start=it, press=True))
                     return list(items)
             # From here HQPlayer is stopped before it says whether it opens
             # what it is handed: a file the node can read and HQPlayer refuses
             # (a format it does not open) still answers after the Stop — on
             # an HQPlayer another controller holds too
             uris = [self._uri_for(it) for it in layout.handed]
-            att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
+            given = {id(it) for it in layout.handed}
+            # the attempt's slot is HQPlayer's entry: the first one handed from
+            # the start on (a gap before it — a slot HQPlayer does not hold —
+            # numbers its entries apart from the queue's slots)
+            from_start = {id(a) for a in ahead}
+            entry = next((i + 1 for i, it in enumerate(layout.handed) if id(it) in from_start), 1)
+            att = (self._watch("replace", slot=entry, uris=uris, items=list(layout.handed))
                    if play and uris else None)
             if att is not None:
                 # Played while another controller holds HQPlayer, as a play press
                 # made then (_press): read before its hand-over clears the playlist
                 att.taken_back = self._taken()
                 att.held_paused = att.taken_back and self._held_paused
-            with self._handing(layout.items, stops=True,
-                               base=(layout.handed[0], 0) if layout.handed else None, owes=play,
+            base = next(((it, second if it is head else 0) for it in ahead if id(it) in given),
+                        (layout.handed[0], 0) if layout.handed else None)
+            with self._handing(layout.items, stops=True, base=base, owes=play,
                                intent="queue") as n, self._steps(att):
                 fresh = self._afresh(uris, "queue", number=n)
                 if fresh is None:
@@ -7219,7 +7240,27 @@ class HqpBackend(PlayerBackend):
                     self._link.refusals = []
                     self._took(layout.handed, taken, unsent, "of a new queue")
                     accepted = list(items)
-                    if play and not uris:
+                    took = {id(it) for it, t in zip(layout.handed, taken) if t}
+                    # From a start: the first slot from it HQPlayer took, or
+                    # one still on its way — at the start's second if it is
+                    # the start's own slot
+                    begin = (next((it for it in ahead if id(it) in took
+                                   or it.opener().get("kind") == "pending"), None)
+                             if start is not None else None)
+                    at = second if begin is head else 0
+                    if play and begin is not None and id(begin) in took:
+                        self._owe_start(att, self._link.item("start", n),
+                                        lambda it: self._start_item(begin, at, it),
+                                        spot=(begin, at))
+                    elif play and begin is not None:
+                        # its stream still to come: the start waits on it in
+                        # the node, and the attempt watched for the hand-over
+                        # sent no start — superseded, never a failure to explain
+                        if att is not None:
+                            att.request_end("superseded")
+                        self._owe_start(None, self._link.item("start", n),
+                                        lambda it: self._park(begin, at, _PENDING, start=it))
+                    elif play and not uris:
                         # Its first slot is still on its way: the play waits on it
                         # once the queue commits
                         first = items[0]

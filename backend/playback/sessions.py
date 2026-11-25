@@ -22,6 +22,7 @@ from db_pool import (
     db_execute as _db_execute,
     get_conn as _get_conn,
 )
+from playback import tracker
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +53,17 @@ _ARTIST_LINE_SQL = """
 """
 
 
-def _queue_slots(queue) -> list:
+def _queue_slots(queue) -> tuple[list, Optional[tuple[int, float]]]:
     """(track_id, media_file_id, album_id) slots from the canonical queue —
     phantom (streamed) tracks carry a track UUID with media_file_id None, so
     they land in the session just like owned files. album_id is the album the
     slot was queued from (QueueItem.album_id): a track sits on every album
-    that lists it, and the snapshot keeps the edition the listener pressed."""
-    return [(it.track_id, it.media_file_id, it.album_id)
-            for it in queue.snapshot() if it.track_id]
+    that lists it, and the snapshot keeps the edition the listener pressed.
+    And where the queue's listen stopped among those slots — (index, second),
+    tracker.stop_in — or None."""
+    items = [it for it in queue.snapshot() if it.track_id]
+    return ([(it.track_id, it.media_file_id, it.album_id) for it in items],
+            tracker.stop_in(items))
 
 
 def rotate_session(
@@ -77,9 +81,10 @@ def rotate_session(
     endpoints pass only seed_media_file_id; _archive_and_open_session
     derives seed_track_id from it. `title` is a name the new session keeps —
     a replayed mix's, so the AI does not christen the same tracks anew."""
+    slots, stop = _queue_slots(queue)
     archived_mix_id = _archive_and_open_session(
-        _queue_slots(queue), origin,
-        seed_track_id, seed_media_file_id, origin_album_id, title=title,
+        slots, origin,
+        seed_track_id, seed_media_file_id, origin_album_id, title=title, stop=stop,
     )
     if archived_mix_id is not None:
         _schedule_mix_title(archived_mix_id)
@@ -88,9 +93,10 @@ def rotate_session(
 def close_active_session(queue) -> None:
     """Archive the active session on a natural end-of-queue (the player
     stopped on the last track) WITHOUT opening a new one, so a fully-
-    listened album lands in history without a follow-up play."""
+    listened album lands in history without a follow-up play. It was heard
+    to its end: no stop."""
     archived_mix_id = _archive_and_open_session(
-        _queue_slots(queue), "mix", None, None, None, open_new=False,
+        _queue_slots(queue)[0], "mix", None, None, None, open_new=False,
     )
     if archived_mix_id is not None:
         _schedule_mix_title(archived_mix_id)
@@ -105,12 +111,16 @@ def _archive_and_open_session(
     *,
     title: Optional[str] = None,
     open_new: bool = True,
+    stop: Optional[tuple[int, float]] = None,
 ) -> Optional[str]:
     """Archive the current active session against `old_slots` (track_id,
     media_file_id, album_id) and open a new one — atomically. db_pool connections are
     autocommit, so toggle it off for this multi-statement transaction (mirrors
     db_pool.db_query_with_ef_search). With open_new=False (end-of-queue
     completion) the active session is archived but no new one is opened.
+    `stop` — (index into `old_slots`, second) — is where the queue's listen
+    stopped: kept on that slot, unless the snapshot is not the queue's own
+    (_snapshot_slots_for put the origin's tracks in its place).
     Returns the archived session id IFF it was a mix needing a background
     title (one opened without a name of its own), else None."""
     import psycopg2.extras
@@ -172,6 +182,7 @@ def _archive_and_open_session(
 
                 if active is not None:
                     snapshot = _snapshot_slots_for(cur, active, old_slots)
+                    stop_at = stop if snapshot is old_slots else None
                     if snapshot:
                         # Each reference as its foreign key keeps it. The
                         # snapshot is written after the fact, so a file or an
@@ -184,16 +195,18 @@ def _archive_and_open_session(
                         psycopg2.extras.execute_values(
                             cur,
                             "INSERT INTO session_tracks "
-                            "(session_id, position, track_id, media_file_id, album_id) "
-                            "SELECT v.session_id, v.position, t.id, mf.id, al.id "
+                            "(session_id, position, track_id, media_file_id, album_id, "
+                            " stop_seconds) "
+                            "SELECT v.session_id, v.position, t.id, mf.id, al.id, v.stop "
                             "FROM (VALUES %s) AS v(session_id, position, track_id, "
-                            "                      media_file_id, album_id) "
+                            "                      media_file_id, album_id, stop) "
                             "JOIN tracks t ON t.id = v.track_id "
                             "LEFT JOIN media_files mf ON mf.id = v.media_file_id "
                             "LEFT JOIN albums al ON al.id = v.album_id",
-                            [(active["id"], i, tid, mid, aid)
+                            [(active["id"], i, tid, mid, aid,
+                              stop_at[1] if stop_at is not None and stop_at[0] == i else None)
                              for i, (tid, mid, aid) in enumerate(snapshot)],
-                            template="(%s::uuid, %s, %s::uuid, %s::int, %s::uuid)",
+                            template="(%s::uuid, %s, %s::uuid, %s::int, %s::uuid, %s::numeric)",
                         )
                         title, subtitle, cover_id, cover_url = _compute_session_card(
                             cur, active, snapshot,

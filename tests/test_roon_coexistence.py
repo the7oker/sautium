@@ -6207,6 +6207,56 @@ def test_a_played_queue_takes_a_shared_hqplayer_only_once_its_first_stream_lande
         other.close()
 
 
+@pytest.mark.parametrize("state", ["plays", "rests"])
+def test_a_queue_played_from_a_streamed_slot_takes_a_shared_hqplayer_only_once_that_stream_landed(
+        fake, lane, listens, monkeypatch, state):
+    """PLAYBACK-UI-1's "from here" on a shared HQPlayer: the start is slot 2,
+    a stream still to come. Nothing goes to HQPlayer until slot 2's stream
+    landed — the start waits on that slot, not the first — then the node's
+    own entry plays it."""
+    mgr, b, prov, other, left = _another_controller(fake, lane, monkeypatch, state)
+    try:
+        n = len(fake.received)
+        items = [_streamed(1), _streamed(2)]
+        added, _gen = mgr.replace_queue(items, play=True, start=(items[1], 0.0))
+        assert added == 2 and _wait(lambda: _loading(mgr, 2)), mgr._latest_status
+        _settled(fake)
+        assert _from_node(fake, n, other) == [] and (fake.state, fake.track, list(fake.playlist)) == left
+        prov.land("stream-2")
+        assert _wait(lambda: fake.state == PLAYING and any("/preview/" in u for u in fake.playlist),
+                     timeout=15), (fake.state, fake.playlist)
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("track_index") == 2), mgr._latest_status
+    finally:
+        prov.land("stream-1", "stream-2")
+        b.shutdown()
+        other.close()
+
+
+def test_a_queue_played_from_a_stream_to_come_after_files_waits_on_it_said_as_loading(fake, lane, listens,
+                                                                                    monkeypatch):
+    """"From here" onto a streamed slot behind a file HQPlayer was handed:
+    the start waits on the stream in the node, Now Playing "loading" it —
+    the hand-over's watched attempt sent no start and is no failure: no
+    diagnosis is said meanwhile (review round 1, M1). Its landing starts it."""
+    prov, _proxy = lane
+    mgr = _lane_manager(lane, monkeypatch, [_item("E:/Music/A/01.flac", 1)])
+    b = _attach(mgr)
+    try:
+        items = [_item("E:/Music/A/01.flac", 1), _streamed(2), _streamed(3)]
+        added, _gen = mgr.replace_queue(items, play=True, start=(items[2], 0.0))
+        assert added == 3 and _wait(lambda: _loading(mgr, 3)), mgr._latest_status
+        _settled(fake)
+        assert "diagnosis" not in mgr._latest_status and not mgr._latest_status.get("error")
+        assert fake.playlist == ["file:///E:/Music/A/01.flac"]          # handed up to the horizon
+        prov.land("stream-3")
+        assert _wait(lambda: mgr._latest_status.get("state") == "playing"
+                     and mgr._latest_status.get("track_index") == 3, timeout=15), mgr._latest_status
+    finally:
+        prov.land("stream-2", "stream-3")
+        b.shutdown()
+
+
 def test_with_no_other_controller_a_played_streamed_queue_empties_the_playlist_at_the_tap(fake, lane, listens,
                                                                                          monkeypatch):
     """The node's own music is another question (PI-NODE-2D Q7: shared only):

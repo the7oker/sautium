@@ -152,7 +152,7 @@ class _Elsewhere:
 
     def release(self) -> None:
         return None
-    def queue_changed(self, kind: str, *, play: bool = False) -> None: ...
+    def queue_changed(self, kind: str, *, play: bool = False, start=None) -> None: ...
     def queue_start(self) -> None: ...
     def slot_ready(self, index: int, item=None) -> None: ...
 
@@ -175,7 +175,7 @@ class _Elsewhere:
     def pressing(self) -> None:
         return None
 
-    def queue_replace(self, items, *, play) -> list:
+    def queue_replace(self, items, *, play, start=None) -> list:
         return list(items)
 
     def queue_append(self, items) -> list:

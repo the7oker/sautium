@@ -777,7 +777,9 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
     every primary artist in the snapshot by share (the screen links each),
     and every slot names the album it was queued from, which is what groups
     the tracklist and links a single-album session to its album. Per-slot
-    duration and art prefer that album's listing over any other edition."""
+    duration and art prefer that album's listing over any other edition.
+    Each slot names its `position` (what a replay's start names) and the
+    session its `stop` — where its listen stopped."""
 
     session = db_query_one("""
         SELECT id::text AS id,
@@ -810,7 +812,8 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
     """, {"id": session_id})
 
     session["tracks"] = db_query("""
-        SELECT st.media_file_id,
+        SELECT st.position,
+               st.media_file_id,
                st.track_id::text AS track_id,
                st.album_id::text AS album_id,
                al.title AS album_title,
@@ -835,7 +838,8 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
                            WHERE f.track_id = st.track_id) AS is_phantom,
                af.key,
                af.mode,
-               af.bpm::float AS bpm
+               af.bpm::float AS bpm,
+               st.stop_seconds::float AS stop_seconds
         FROM session_tracks st
         JOIN tracks t ON t.id = st.track_id
         LEFT JOIN albums al ON al.id = st.album_id
@@ -856,6 +860,10 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
     session["total_duration"] = sum(
         t["duration_seconds"] or 0 for t in session["tracks"]
     )
+    # Where its listen stopped (B-158): the slot and its second, or None —
+    # heard to its end, never played, or archived before the stop was kept
+    session["stop"] = next(({"position": t["position"], "seconds": t["stop_seconds"]}
+                            for t in session["tracks"] if t["stop_seconds"] is not None), None)
     if session["source"] == "lastfm":
         # A card generated from the owner's Last.fm history credits it (the
         # Last.fm API terms, 2.7) by linking the library it came from.

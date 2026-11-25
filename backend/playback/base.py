@@ -256,10 +256,13 @@ class PlayerBackend(ABC):
     # Both run under the queue lock; `queue_start` runs once it is let go:
     # a start the mirror left (HQPlayer may build it for minutes).
 
-    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+    def queue_changed(self, kind: str, *, play: bool = False,
+                      start: Optional[tuple] = None) -> None:
         """Post-commit notification: kind ∈ replace|append|insert_next|
-        remove|reorder|clear. Default: nothing to do (HQPlayer acted in the
-        mirror hooks)."""
+        remove|reorder|clear. A replace that plays starts at `start` — (an
+        item of the new queue, its second) — or at the first slot from 0
+        (None). Default: nothing to do (HQPlayer acted in the mirror
+        hooks)."""
 
     def queue_start(self) -> Optional[str]:
         """After a mutation, outside the queue lock: the start its mirror
@@ -322,7 +325,10 @@ class PlayerBackend(ABC):
     # goes, when it moved on past the anchor — and the queue puts the tracks
     # there too.
 
-    def queue_replace(self, items: list, *, play: bool) -> list:
+    def queue_replace(self, items: list, *, play: bool, start: Optional[tuple] = None) -> list:
+        """`start`: where a replace that plays starts — (an item of `items`,
+        its second) — None for the first slot at 0; an output that starts
+        after the commit reads it in queue_changed."""
         return list(items)
 
     def queue_append(self, items: list) -> list:

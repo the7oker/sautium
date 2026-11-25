@@ -85,7 +85,9 @@ code disagree, the code is what this file records and § 14 names the doc.
 - [UI] Radio: a station from the track that is playing; batches of 10 seeded from the track playing at refill time, no track twice in a station; streamed tracks (at most 4, each played whole, never a 30 s excerpt) only while the owner's switch "Radio plays tracks you don't own" (`radio.streamed`, Streaming library; off by default since 2026-11-22) is on, which Play similar follows too — `POST /api/player/radio/start`, `/radio/stop`; `routers/player.py: _radio_build_batch`, `_radio_played`; `playback/manager.py: set_radio_mode`
 - [UI] Similar albums shelf on owned and phantom album pages — `GET /api/albums/{album_id}/similar`; `album_similarity.py: compute_similar`
 - [UI] Home: Favourite artists (listening time, 90-day decay), Recommendations (nearest in sound to the last 60 days of listening, rebuilt when a listen lands), New in my collection, Listening history — `routers/home.py: get_favourite_artists`, `_rank_recommendations`, `get_new_in_library`, `get_listening_history`
-- [UI] A past listening session can be played or queued again: the only restorable list — `POST /api/player/play-session`, `/queue-session`
+- [UI] A past listening session can be played or queued again: the only restorable list — `POST /api/player/play-session`, `/queue-session`; it shows where its listen stopped (a blue dot, the track and its second; since 2026-11-25) and Resume plays it from there, a tap moving the dot — `session_tracks.stop_seconds`; `playback/tracker.py: stop_in`
+- [UI] An album from the chosen track: "▶ From here" in a row's "+" bar on the album page queues the whole album and starts at that track — `start_track_id` on `POST /api/player/play-tracks`, `/play-entities`, `/play-phantom-album`
+- [UI][AI] Previous restarts the track past its first 3 s, else goes to the track before — every output, the lock screen and the assistant alike — `playback/manager.py: PlaybackManager.previous`
 - [UI][AI] Lyrics are searchable by meaning (BGE-M3 over lyric chunks) — `discovery_engine.py: TOOLS["lyrics"]`; `mcp/assistant_server.py: search_lyrics`
 
 ## 4. Streaming library

@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 _PREVIEW_BEHIND = 1   # instant "previous"
 
+# Previous past this many seconds of the track restarts it; within them it
+# goes to the track before (B-157: the common players' line)
+RESTART_AFTER_S = 3.0
+
 # The states in which the output holds a slot open: its way in is its own
 # until it leaves the slot (PlaybackManager._reread_ways_in) — unless all it
 # does there is wait for a stream that has not come (_sounding)
@@ -763,7 +767,11 @@ class PlaybackManager:
             from playback.substitute import streamed
             # every slot whose way in is a stream, whatever it was queued as:
             # an owned track with no file here now streams like any other
-            items = [it for it in self.queue.snapshot() if streamed(it)]
+            # from the slot the play started at: the lane fetches from there
+            # on, so slots before it never fail (a "from here", a Resume)
+            snap = self.queue.snapshot()
+            begin = next((i for i, it in enumerate(snap) if it is run["start"]), 0)
+            items = [it for it in snap[begin:] if streamed(it)]
             failed = [it for it in items if id(it) in run["failed"]]
             firsts = items[:2]
             event = None
@@ -781,12 +789,14 @@ class PlaybackManager:
                                   "album": run["album"], "reason": head or code, **event}
         self._push_status(dict(self._latest_status))
 
-    def _play_started(self, items: list) -> None:
-        """A new queue that plays: its run of streamed slots is watched from
-        its start (_slot_failed), and what the last one said is over."""
+    def _play_started(self, items: list, start: QueueItem) -> None:
+        """A new queue that plays from `start`: its run of streamed slots is
+        watched from there (_slot_failed), and what the last one said is
+        over."""
         with self._slots_lock:
             albums = {it.album for it in items if it.album}
             self._play_run = {"generation": self.queue.generation, "played": False,
+                              "start": start,
                               "failed": {}, "told_first": False, "told_all": False,
                               "album": albums.pop() if len(albums) == 1 else None}
             self._stream_event = None
@@ -1189,6 +1199,15 @@ class PlaybackManager:
                                  holds=bool(s.extra.get("resume")),
                                  corrected=bool(s.extra.get("corrected")),
                                  taken=bool(s.extra.get("taken")))
+        if new_data["state"] == "stopped":
+            # Where the queue's listen stopped, while the queue rests: the
+            # history page draws it as the stop of the session this queue
+            # replays (the archive keeps the same one, tracker.stop_in)
+            slots = self.queue.snapshot()
+            stop = tracker.stop_in(slots)
+            if stop is not None:
+                new_data["heard"] = {"index": stop[0] + 1, "track_id": slots[stop[0]].track_id,
+                                     "position": stop[1]}
         if item is not None and idx:
             self._anchor_item, self._anchor_slot = item, idx
         self._maintain_preview_window(idx, s.extra.get("start_slot"))
@@ -1467,8 +1486,30 @@ class PlaybackManager:
         if isinstance(at, int) and 1 <= at + step <= len(self.queue):
             self.before_start(backend, at + step)
 
+    def previous(self, backend: PlayerBackend) -> bool:
+        """Previous — one rule for every caller (the Now Playing button, the
+        lock screen's control, the assistant) and every output: past the
+        first RESTART_AFTER_S of the track it restarts it, a Seek to 0 that
+        keeps the transport's state (paused stays paused, a spot the output
+        rests on moves without sound); within them, the track before
+        (before_step, then the output's own step). The second is the one the
+        latest status shows — `position` while playing or paused, the held
+        spot's where the output rests on one. A start under way (pressing)
+        has no second of its own yet, and what another controller plays is
+        none of the queue's: the step, as before."""
+        st = self._latest_status
+        if backend.pressing() is None and st.get("source") != "external":
+            state = st.get("state")
+            second = (st.get("position") if state in ("playing", "paused")
+                      else (st.get("resume") or {}).get("position"))
+            if isinstance(second, (int, float)) and second >= RESTART_AFTER_S:
+                return backend.seek(0)
+        self.before_step(backend, -1)
+        return backend.previous()
+
     def replace_queue(self, items: list[QueueItem], *, play: bool,
-                      archive: Optional[Callable[[], None]] = None) -> tuple[int, int]:
+                      archive: Optional[Callable[[], None]] = None,
+                      start: Optional[tuple[QueueItem, float]] = None) -> tuple[int, int]:
         """Replace the queue (and start playback, once the queue lock is let
         go). `archive` — the session rotation a play route starts with — runs
         once the output has taken the queue, under the queue lock, before the
@@ -1478,9 +1519,15 @@ class PlaybackManager:
         none of `items` raises QueueRefused; a queue to play whose first
         file is not there is read after a look at its folder (_first_opens),
         and one of which nothing opens here, on a node that streams nothing,
-        raises NotHere before the output is asked. Returns (added, generation);
-        generation is what background fillers must guard their appends
-        with."""
+        raises NotHere before the output is asked. `start` — an item of
+        `items` and a second — is where the play starts: an album from the
+        track chosen on its page, a history session from where it stopped;
+        what the start reads (the look, the none-opens refusal, the stream
+        lane's anchor) is the queue from it on. None: the first slot at 0.
+        Returns (added, generation); generation is what background fillers
+        must guard their appends with."""
+        head = start[0] if start is not None else (items[0] if items else None)
+        ahead = items[next(i for i, it in enumerate(items) if it is head):] if items else []
         pick = self.backend
         if play:
             # The gate before the queue lock: its scan for a renderer found
@@ -1489,11 +1536,11 @@ class PlaybackManager:
             # more, with no scan
             gated = self.ensure_active()
             pick = lambda: gated if self._active is gated and gated.healthy() else self._gate_once()  # noqa: E731
-            self._first_opens(gated, items)
+            self._first_opens(gated, ahead)
         with self._output_mutation(pick) as backend:
             self._read_ways_in(backend, items)
-            self._refuse_if_none_opens(backend, items)
-            accepted = backend.queue_replace(items, play=play)
+            self._refuse_if_none_opens(backend, ahead)
+            accepted = backend.queue_replace(items, play=play, start=start)
             added = len(accepted)
             if items and not added:
                 # Refused whole: raised under the mutation, so what the
@@ -1507,11 +1554,11 @@ class PlaybackManager:
                     raise
             if added:
                 gen = self.queue.replace(accepted)
-                self._anchor_item, self._anchor_slot = accepted[0], 1
+                self._anchor_item, self._anchor_slot = head, self.queue.index_of(head)
                 if play:
-                    self._play_started(accepted)
+                    self._play_started(accepted, head)
                 self._last_slot = 0   # fresh queue — no resume slot in it
-                backend.queue_changed("replace", play=play)
+                backend.queue_changed("replace", play=play, start=start)
                 self._schedule_persist()
             else:
                 gen = self.queue.generation
