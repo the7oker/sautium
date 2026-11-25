@@ -2478,8 +2478,8 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     assert said.count("Paste into a terminal that may use sudo:") == 1                 # one block
     assert ("The line of /etc/fstab that mounts the music disk at /mnt/sautium-4A21-0000 gives Sautium the\n"
             "mount point itself: a disk pulled or put back while Sautium runs is not seen. This moves it to\n"
-            "/media/sautium/4A21-0000, where Sautium sees it come and go. Its albums will show as away\n"
-            "once and be found again at the new place; nothing is analysed again.\n") in said
+            "/media/sautium/4A21-0000, where Sautium sees it come and go. Sautium finds its albums at the new\n"
+            "place by itself; nothing is read or analysed again.\n") in said
     pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
     undo = pasted.index("P=/media/sautium/4A21-0000")
     assert [line for line in pasted[:undo] if not line.startswith("L=")] == [
@@ -2490,15 +2490,16 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     pieces = [line for line in pasted[:undo] if line.startswith("L=")]
     built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
     assert built == LINE_4A21 and max(len(line) for line in pasted) <= 76
-    assert ("Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n"
-            'and choose "Elements" as the music folder in Sautium (More › Library).\n') in said
+    # the chosen folder moves with its files at the node's next start (PI-NODE-2E §2): nothing to choose
+    assert "Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n\n" in said
+    assert "as the music folder" not in said
     # a line of before the plug option gains it at its move; an older systemd keeps the line it has
     fstab.write_text(at_boot + "\n")
     said = _boot_mount_said(fstab, generated, roots=roots)
     pieces = [line[4:] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\''))]
     assert subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True,
                           text=True).stdout == LINE_4A21
-    assert "T=" not in said and "and choose the disk as the music folder" in said     # no label known: none written
+    assert "T=" not in said and "as the music folder" not in said     # no label known: none written
     said = _boot_mount_said(fstab, generated, systemd=241, roots=roots)
     assert "── The music disk, mounted when the machine starts (optional) ──" in said
     assert " /media/sautium/4A21-0000 exfat " in "".join(
@@ -2600,6 +2601,10 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     said = capsys.readouterr().out
     assert "    P=/mnt/sautium-4A21-0000" in said and '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in said
     assert "from its next start" in said and started == ["start"]          # a stopped node is not started
+    # … and its disk's new line is in: the node finds the albums there at its start (PI-NODE-2E §2)
+    assert ("Sautium finds the albums under /mnt/sautium-4A21-0000 at /media/sautium/4A21-0000 when it starts "
+            "again; nothing is removed.") in said
+    assert "will show as away" not in said and "Choose another folder" not in said
     # … and where its disk has the line at the new point and is not mounted there (the node that held
     # the old mount point held the disk too), that is said
     assert "Its disk is not mounted at /media/sautium/4A21-0000 now: plug it in again" in said
