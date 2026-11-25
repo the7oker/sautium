@@ -2335,6 +2335,30 @@ def _boot_mount_said(fstab, generated, systemd=257, roots=("/srv/music", "/media
     return said.getvalue()
 
 
+def _roots_said(fstab, roots):
+    """say_roots over an fstab of the test's own; nothing is mounted, and
+    the node gives no answer."""
+    import contextlib
+    import io
+    real, saved = setup.run, (setup.held_roots, setup.held_labels, setup.held_by_the_node)
+
+    def run(args, **kw):
+        if args[:2] == ["findmnt", "--fstab"]:
+            return real(args[:2] + ["-F", str(fstab)] + args[2:], **kw)
+        if args[:2] == ["systemctl", "--version"]:
+            return subprocess.CompletedProcess(args, 0, b"systemd 257 (x)\n", b"")
+        return subprocess.CompletedProcess(args, 1, b"", b"")
+    setup.run = run
+    setup.held_roots, setup.held_labels, setup.held_by_the_node = (lambda o: list(roots)), (lambda o: {}), (lambda: None)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            setup.say_roots()
+    finally:
+        setup.run = real
+        setup.held_roots, setup.held_labels, setup.held_by_the_node = saved
+    return said.getvalue().splitlines()
+
+
 @pytest.mark.skipif(shutil.which("findmnt") is None, reason="no findmnt on this system")
 def test_a_boot_mount_line_of_before_is_offered_its_replacement(tmp_path):
     """PI-NODE-2B's line acts at a start of the machine only. The setup that
@@ -2505,8 +2529,20 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     assert " /media/sautium/4A21-0000 exfat " in "".join(
         line[4:].split("'")[1] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\'')))
     assert "device-timeout=10s" in said.replace("'\n    L=\"$L\"'", "")
-    # the root forgotten, its line left in fstab: nothing printed here (`roots --forget` printed its undo)
-    assert _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"]) == ""
+    # the root forgotten, its line left in fstab: its disk never appears in Sautium. Said, with the move
+    # block and no forget after it — the root is gone already, and the node takes the files along (H10)
+    said = _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"])
+    assert ("A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not\n"
+            "look: it never appears in Sautium. The block below mounts it where Sautium sees it.\n"
+            "Sautium finds its albums at the new place by itself; nothing is read or analysed again.\n") in said
+    assert said.count("Paste into a terminal that may use sudo:") == 1 and "--forget" not in said
+    pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
+    assert pasted[:2] == ["P=/mnt/sautium-4A21-0000", 'sudo umount "$P"'] and "U=4A21-0000" in pasted
+    # … and `status` and `roots` say it, where the setup has the step
+    assert _roots_said(fstab, ["/srv/music", "/media/sautium"])[-1] == (
+        "A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not look: "
+        "it never appears in Sautium (./sautium shows the step)")
+    assert not any("A line of /etc/fstab" in line for line in _roots_said(fstab, roots))      # a root names it
     # a line at that point the setup did not write is the person's own: no step — one that names the
     # disk otherwise, and one that would mount it for writing or run what is on it (the node's bind
     # does not make a mount that arrives later read-only)
