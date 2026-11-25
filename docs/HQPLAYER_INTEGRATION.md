@@ -2633,11 +2633,14 @@ cooling — so Sautium measures it instead of predicting it
   and puts HQPlayer back as soon as it answers. Cancelled past them, the
   run is marked as having lost HQPlayer, so the restart that follows is
   put back whole. A run that ended at the bound reads the slow start's end
-  at HQPlayer's first answer after it: answered by itself, the seconds from
-  its Play to that answer (`build_s`, the sheet's "it took …"); gone and
-  back at once — a loss of the connection and no silence since — ended.
-  A connection the hop drops while HQPlayer builds on is no end: the next
-  one meets the same silence (`HqpLink.silent_after`).
+  off HQPlayer's first answer after it, before anything is put back, by
+  its `<Status track_serial>` — one more at each Play, counted afresh when
+  HQPlayer starts: lower than the run last read it, HQPlayer was started
+  again out of the build (ended); as high or higher, it built on and
+  answered — with the seconds from its Play to that answer (`build_s`, the
+  sheet's "it took …"). A connection the hop drops changes no serial;
+  without one (HQPlayer 5), or with nothing ever played, the end is not
+  known and stays unsaid.
   A `slow_start` point is not asked again on that engine, CUDA state and
   mode; the run ends at once and says HQPlayer is still preparing it or has
   stopped — busy cores, still working; idle, stopped; either way a restart
