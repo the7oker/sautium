@@ -10381,6 +10381,7 @@
       hint = `Every ${escapeHtml(est.mode)} setting is measured on this HQPlayer — a run only checks your own setting again.`;
     } else if (est) {
       hint = `Plays test noise${b.volume_control ? " at HQPlayer's lowest volume" : ''} through the ${est.points} ${escapeHtml(est.mode)} settings not measured here yet — ${fmtAbout(est.seconds)}.`;
+      if (est.across) hint += ` ${est.across.points} more across rate families ${est.across.points === 1 ? 'is' : 'are'} left out unless you ask.`;
     } else {
       hint = HQP_BENCH_NO_ESTIMATE[b.no_estimate];
     }
@@ -10414,6 +10415,7 @@
       ? `<button type="button" class="hqp-chip-btn is-danger" data-action="bench-cancel" ${job.cancel_requested ? 'disabled' : ''}><span>${job.cancel_requested ? 'Cancelling…' : 'Cancel'}</span></button>`
       : !s.connected || buildWaits ? ''
       : `${est ? `<button type="button" class="hqp-chip-btn" data-action="bench-run"><span>${run && run.stale ? 'Re-run' : 'Run benchmark'}</span></button>` : ''}
+         ${est && est.across ? '<button type="button" class="hqp-chip-btn" data-action="bench-across"><span>Measure across rate families…</span></button>' : ''}
          ${(b.other_modes || []).map(m => `<button type="button" class="hqp-chip-btn" data-action="bench-other" data-mode="${escapeHtml(m)}"><span>Measure ${escapeHtml(m.toUpperCase())}</span></button>`).join('')}
          ${run ? '<button type="button" class="hqp-chip-btn" data-action="bench-results"><span>Results</span></button>' : ''}`;
     return `
@@ -10433,7 +10435,36 @@
   // `entry`: one picker entry measured alone ({kind, name, src_rate,
   // src_channels} — the source its mark is read for), in the mode HQPlayer
   // is in: the owner's own setting, then that entry with the rest of it.
-  async function runHqpBenchmark(s, mode, entry = null) {
+  // The points across rate families (BENCH-GUARD-1): planned only at the
+  // owner's ask, after a word of what they may cost here and of what avoids
+  // them. Words: BENCH-GUARD-1 §4 C1, for the words sitting.
+  async function runHqpBenchmarkAcross(s) {
+    const b = s.benchmark || {};
+    const across = b.estimate && b.estimate.across;
+    if (!across) return;
+    const conversions = across.conversions.map(c =>
+      `a ${escapeHtml(fmtRateLabel(c.source))} source at ${escapeHtml(fmtRateLabel(c.rate))}`);
+    const which = [...new Set(conversions)].join(' and ');
+    const cost = 'For that conversion HQPlayer prepares some filters for minutes, some for hours, and answers nothing meanwhile; on a machine short of memory one can use it all and end HQPlayer — on a 16 GB Raspberry Pi one took 15 GB.';
+    const lines = across.auto
+      ? [`At Auto, HQPlayer plays ${which} here — another rate family. ${cost}`,
+         `${across.points} setting${across.points === 1 ? ' is' : 's are'} left to measure this way.`,
+         'Turning on Auto rate family in HQPlayer\'s settings keeps each source in its own family, and none of this is built.']
+      : [`Your rate is fixed, so HQPlayer plays ${which} — a conversion into another rate family. ${cost}`,
+         `${across.points} setting${across.points === 1 ? ' is' : 's are'} left to measure this way.`,
+         'With the rate at Auto and Auto rate family on in HQPlayer\'s settings, each source plays in its own family and none of this is built.'];
+    // What every run's own question says, as this one starts the run itself
+    lines.push(`Sautium stops playback and plays test noise through ${escapeProfileHtml(s.label || 'HQPlayer')}${
+      b.volume_control ? ' at its lowest volume' : ''}. Your queue comes back when it is done.`);
+    if (!b.volume_control) lines.push('<b>HQPlayer cannot turn the noise down below your level on this output — turn your amplifier down first.</b>');
+    const ok = await window.confirmDestructive({
+      title: 'Measure across rate families?', message: lines.join('<br><br>'),
+      confirmText: 'Measure them', cancelText: 'Not now', confirmKind: 'primary', focusCancel: true,
+    });
+    if (ok) await runHqpBenchmark(s, null, null, { across: true, asked: true });
+  }
+
+  async function runHqpBenchmark(s, mode, entry = null, { across = false, asked = false } = {}) {
     const b = s.benchmark || {};
     const est = !mode && !entry && b.estimate;
     const what = mode ? `its ${mode.toUpperCase()} settings — HQPlayer switches to ${mode.toUpperCase()} and back`
@@ -10447,7 +10478,8 @@
          'The DAC may click its relays when the rate changes. Your queue comes back when it is done.'];
     if (!b.volume_control) lines.push('<b>HQPlayer cannot turn the noise down below your level on this output — turn your amplifier down first.</b>');
     if (!b.cuda) lines.push('CUDA offload is not known for this HQPlayer: what is measured now is kept apart from runs after you set it.');
-    const ok = await window.confirmDestructive({
+    // Asked across families, the person has just said yes to what it may cost
+    const ok = asked || await window.confirmDestructive({
       title: entry ? `Test the speed of ${entry.name}?` : 'Run the benchmark?', message: lines.join('<br><br>'),
       confirmText: entry ? 'Test speed' : 'Run', confirmKind: 'primary',
     });
@@ -10456,7 +10488,7 @@
     try {
       r = await fetch('/api/hqplayer/benchmark', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ mode: mode || null, entry, fixed_volume_ok: !b.volume_control }),
+        body: JSON.stringify({ mode: mode || null, entry, across, fixed_volume_ok: !b.volume_control }),
       });
       out = await r.json();
     } catch (err) {
@@ -11206,6 +11238,7 @@
 
       const benchActions = {
         'bench-run': () => runHqpBenchmark(s, null),
+        'bench-across': () => runHqpBenchmarkAcross(s),
         'bench-other': (el) => runHqpBenchmark(s, el.dataset.mode),
         'bench-cancel': () => fetch('/api/hqplayer/benchmark/cancel', { method: 'POST' }),
         'bench-results': () => openHqpBenchResults(),

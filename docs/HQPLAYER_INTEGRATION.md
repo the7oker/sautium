@@ -2618,8 +2618,19 @@ cooling — so Sautium measures it instead of predicting it
   HQPlayer's own saved settings — is no one's change, and the run is put
   back whole over it. The points at a
   rate of another family than their source's (only the owner's rate makes
-  one) go after every ladder point, before the closing drift check: every
-  slow build and both ten-minute silences were that conversion. At an automatic output
+  one — a fixed rate, or Auto playing across families where HQPlayer's
+  Auto rate family is off) are planned only when the owner asks for them
+  (since 2026-11-25, BENCH-GUARD-1: the sheet's "Measure across rate
+  families…", its question saying what they may cost and that Auto rate
+  family avoids the build; `{"across": true}`): every slow build and both
+  ten-minute silences were that conversion, and on a 16 GB Raspberry Pi
+  (engine 6.3.3) builds of it ran past 30 minutes and one took HQPlayer's
+  memory whole — 15.3 GiB, the kernel ended it. Asked, they go after every
+  ladder point, before the closing drift check. The owner's own setting is
+  planned whatever its family, and in SDM the filters at a fixed rate of
+  the other family are measured at its twin in the source's family (the
+  rate Auto rate family picks), none where HQPlayer lists no twin. The
+  estimate and the run's note say how many were left out. At an automatic output
   rate the owner's setting plays first on each source, and the rest is
   planned at the rates it played (asked as Auto plays it where HQPlayer's
   list does not hold that rate), so the rows the sheet reads there are

@@ -21,11 +21,15 @@ after weeks of listening takes minutes. The grid (build_grid):
 - the owner's own setting first and again last — the thermal drift check;
   at an automatic rate, the owner's setting on each source first, and the
   rest planned at the rates it played there (build_grid's `played`);
-- a point at a rate of another family than its source's goes after every
-  ladder: an asynchronous conversion — every slow build and both long
-  silences on 6.3.3 were 44.1 kHz → 768 kHz — so a slow start there ends a
-  run that measured
-  everything else;
+- a point at a rate of another family than its source's is planned only
+  when the owner asks for them (`across`, BENCH-GUARD-1): an asynchronous
+  conversion — every slow build and both long silences on 6.3.3 were
+  44.1 kHz → 768 kHz, and on a 16 GB Pi one such build took HQPlayer's
+  memory whole and the kernel ended it — and asked, they go after every
+  ladder, so a slow start there ends a run that measured everything else;
+  the owner's own setting is planned whatever its family, and SDM's filters
+  at a fixed rate of the other family are measured at its twin in the
+  source's family (the rate Auto rate family picks);
 - each modulator (in PCM each filter) on a source is a ladder over the
   rates of its family (LADDER_START): measured from DSD256 (PCM: 8×, 352.8
   or 384 kHz) up while it keeps up, and below that only while the rate
@@ -439,6 +443,9 @@ class Plan:
     # each source the run plays) whose played rates the rest is planned at
     # (_points' replan); 0 at a fixed rate
     probes: int = 0
+    # The points at a rate of another family than their source's this plan
+    # leaves out, not asked for (`across`): (source rate, output rate) of each
+    across_left: Tuple[Tuple[int, int], ...] = ()
 
     def deferred(self, p: Point, known: Dict[tuple, bool]) -> bool:
         """A filter of the sweep while the owner's own setting does not keep
@@ -481,13 +488,14 @@ def _pointer(filters: List[dict], shapers: List[dict], rates: List[dict],
 def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: List[dict],
                current: Dict[str, int], srcs: Dict[str, dict], covered: set,
                keeps_up: Dict[tuple, bool], rng: random.Random,
-               played: Optional[Dict[str, int]] = None) -> Plan:
+               played: Optional[Dict[str, int]] = None, across: bool = False) -> Plan:
     """The points of one run (see the module docstring): the owner's own
     setting first and last; between them the ladders' starts with every
     point of one rate, shuffled, then each step up the ladders and down
-    those whose start already does not keep up, each shuffled, then the
-    points at a rate of another family than their source's — less every key
-    covered and every rung a neighbour already answers for. At an automatic
+    those whose start already does not keep up, each shuffled, then — only
+    `across` — the points at a rate of another family than their source's
+    (the plan's `across_left` otherwise) — less every key covered and every
+    rung a neighbour already answers for. At an automatic
     rate the owner's setting goes first on each source (`probes`), and the
     run plans again once their rates are known (`played`: source → the Hz
     the owner's setting played there), each as the owner's rate there."""
@@ -538,7 +546,19 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
         else:
             singles.append(p)
 
+    def twin(rate: int) -> Optional[int]:
+        """The rate of the 44.1 kHz family at the same multiple as `rate` —
+        the one Auto rate family picks for that source — when HQPlayer lists
+        it."""
+        r = hz.get(rate, 0)
+        if not r or same_family(r, srcs["pcm44"]["rate"]):
+            return rate
+        if not same_family(r, 48000):
+            return None
+        return next((i for i in real_rates if hz[i] == r * 44100 // 48000), None)
+
     sweep: List[Point] = []
+    unswept: List[Point] = []           # the sweep at the owner's rate its twin replaced
     if kind == "pcm":
         for src in ("pcm44", "pcm96"):
             for f in filters:
@@ -548,8 +568,14 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
         for sh in shapers:
             for rate in rates_for("pcm44"):
                 add(rate, nx, x1, sh["index"], "pcm44")
+        # At a fixed rate of the other family the filters are measured at its
+        # twin unless the owner asked across families; none where there is none
+        at = owner_rate("pcm44") if across else twin(owner_rate("pcm44"))
         for f in filters:
-            sweep.append(point(owner_rate("pcm44"), f["index"], f["index"], cur_shaper, "pcm44"))
+            if at is not None:
+                sweep.append(point(at, f["index"], f["index"], cur_shaper, "pcm44"))
+            if at != owner_rate("pcm44"):
+                unswept.append(point(owner_rate("pcm44"), f["index"], f["index"], cur_shaper, "pcm44"))
         singles += sweep
     if "dsd" in srcs:
         for rate in rates_for("dsd"):
@@ -589,7 +615,7 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
     probes = [p for p in probes if p.key not in covered]
     seen = {own.key} | {p.key for p in probes}
     points = [own, *probes]
-    for batch in [steps[n] for n in sorted(steps, key=lambda n: (abs(n), n > 0))] + [cross]:
+    for batch in [steps[n] for n in sorted(steps, key=lambda n: (abs(n), n > 0))] + [cross if across else []]:
         fresh = []
         for p in batch:
             if p.key not in seen:
@@ -597,9 +623,12 @@ def build_grid(kind: str, *, filters: List[dict], shapers: List[dict], rates: Li
                 fresh.append(p)
         rng.shuffle(fresh)
         points += fresh
+    left = () if across else tuple((srcs[p.source]["rate"], p.rate_hz)
+                                   for p in [*cross, *unswept]
+                                   if p.key not in seen and p.key not in covered)
     return Plan(points=[*points, own], rungs=rungs, known=dict(keeps_up),
                 covered=frozenset(covered), sweep=frozenset(p.key for p in sweep),
-                probes=1 + len(probes) if replan else 0)
+                probes=1 + len(probes) if replan else 0, across_left=left)
 
 
 @dataclass(frozen=True)
@@ -1119,10 +1148,10 @@ def pace(endpoint_id: int) -> float:
 
 def plan(endpoint: dict, *, kind: str, mode_name: str, state: dict, filters: List[dict],
          shapers: List[dict], rates: List[dict], srcs: Optional[Dict[str, dict]] = None,
-         rng: Optional[random.Random] = None) -> Plan:
+         rng: Optional[random.Random] = None, across: bool = False) -> Plan:
     """What a run of this mode would measure now — at an automatic rate, at
     the rates the owner's setting played on each source before, where a run
-    asked it there."""
+    asked it there; across rate families only when asked."""
     srcs = srcs if srcs is not None else sources(kind, endpoint.get("hqp_engine"))
     ctx = hqp_load.context(endpoint, mode=mode_name, state=state)
     current = {"rate": state["rate"], "filterNx": state["filterNx"],
@@ -1136,7 +1165,7 @@ def plan(endpoint: dict, *, kind: str, mode_name: str, state: dict, filters: Lis
                                  state["shaper"], src).key)[1:] in at}
     return build_grid(kind, filters=filters, shapers=shapers, rates=rates, current=current,
                       srcs=srcs, covered=hqp_load.covered(ctx), keeps_up=hqp_load.keeps_up(ctx),
-                      rng=rng or random.Random(), played=played)
+                      rng=rng or random.Random(), played=played, across=across)
 
 
 def summary(endpoint: Optional[dict]) -> Dict[str, Any]:
@@ -1159,9 +1188,11 @@ def summary(endpoint: Optional[dict]) -> Dict[str, Any]:
 
 
 def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False,
-          entry: Optional[Entry] = None) -> Dict[str, Any]:
-    """Start a run of `mode` ('pcm' | 'sdm'; None = the mode HQPlayer is in),
-    or of one `entry` alone in the mode HQPlayer is in (entry_grid).
+          entry: Optional[Entry] = None, across: bool = False) -> Dict[str, Any]:
+    """Start a run of `mode` ('pcm' | 'sdm'; None = the mode HQPlayer is in)
+    — with the points across rate families when the owner asked for them
+    (`across`) — or of one `entry` alone in the mode HQPlayer is in
+    (entry_grid).
     Raises BenchmarkRefused with the reason when it cannot start now."""
     from playback.manager import manager
     if running():
@@ -1200,7 +1231,7 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False,
     # again once HQPlayer answers.
     unsaid = recover(ep["id"], link, gave=b.gave, quiet=True)
     try:
-        return _start_run(ep, link, b, mode, fixed_volume_ok, unsaid, entry)
+        return _start_run(ep, link, b, mode, fixed_volume_ok, unsaid, entry, across)
     except BenchmarkRefused:
         if unsaid:
             _notify()       # the mark the run would have judged at once: no run follows
@@ -1208,7 +1239,7 @@ def start(mode: Optional[str] = None, *, fixed_volume_ok: bool = False,
 
 
 def _start_run(ep: dict, link, b, mode: Optional[str], fixed_volume_ok: bool,
-               unsaid: bool, entry: Optional[Entry] = None) -> Dict[str, Any]:
+               unsaid: bool, entry: Optional[Entry] = None, across: bool = False) -> Dict[str, Any]:
     """start() once a run cut short is put back: what HQPlayer answers is the
     precondition, and the run's thread starts — `unsaid`: the put-back left
     a mark for it to judge, said at its end (_run). A run of "the mode
@@ -1259,7 +1290,7 @@ def _start_run(ep: dict, link, b, mode: Optional[str], fixed_volume_ok: bool,
         _state.update(running=True, cancel_requested=False, endpoint_id=ep["id"], mode=kind,
                       point=0, total=0, point_label="Preparing…", eta_s=None,
                       started_at=time.time(), outcome=None, note=None)
-        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave, mode, unsaid, entry),
+        _thread = threading.Thread(target=_run, args=(ep, kind, b.gave, mode, unsaid, entry, across),
                                    daemon=True, name="hqp-benchmark")
         _thread.start()
     return state()
@@ -1307,7 +1338,7 @@ def _why(e: Exception) -> str:
 
 
 def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
-         unsaid: bool, entry: Optional[Entry] = None) -> None:
+         unsaid: bool, entry: Optional[Entry] = None, across: bool = False) -> None:
     """The job's thread. Whatever ends it is recorded where the owner reads
     it (state(), and the run row once there is one); the job is closed
     before the output goes back — the attach that takes it back then finds
@@ -1317,7 +1348,7 @@ def _run(ep: dict, kind: str, gave: Callable[[str], bool], asked: Optional[str],
     try:
         with manager.hold("benchmark", LABEL):
             try:
-                outcome, note = _measure(ep, kind, gave, asked, entry)
+                outcome, note = _measure(ep, kind, gave, asked, entry, across)
             except (_Abort, _Lost) as e:
                 outcome, note = "failed", str(e)
             except Exception as e:      # the job's boundary: recorded, never lost
@@ -1351,7 +1382,8 @@ def _finish(outcome: str, note: Optional[str]) -> None:
 
 
 def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
-             asked: Optional[str], entry: Optional[Entry] = None) -> Tuple[str, Optional[str]]:
+             asked: Optional[str], entry: Optional[Entry] = None,
+             across: bool = False) -> Tuple[str, Optional[str]]:
     """The run proper, inside the hold: put back what a run cut short before
     it still owes (`gave` tells an entry the node gave HQPlayer), read what
     is to be put back, open the run row, measure, and put everything back
@@ -1389,7 +1421,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
         own: Optional[dict] = None
         stats: Dict[str, Any] = {"measured": 0, "dropouts": [], "own": [], "refused": 0,
                                  "unstarted": 0, "failed": 0, "implied": 0, "deferred": 0,
-                                 "stopped": []}
+                                 "stopped": [], "across": 0}
         outcome, note = "failed", None
         silenced = lost_build = False
         try:
@@ -1404,7 +1436,7 @@ def _measure(ep: dict, kind: str, gave: Callable[[str], bool],
 
                 def planned() -> Plan:
                     return plan(ep, kind=kind, mode_name=mode_name, state=st, filters=filters,
-                                shapers=shapers, rates=rates, srcs=srcs)
+                                shapers=shapers, rates=rates, srcs=srcs, across=across)
                 grid, replan = planned(), planned
             else:
                 srcs = {"signal": {"rate": entry.src_rate, "channels": entry.src_channels}}
@@ -1759,6 +1791,7 @@ def _points(link: _Link, grid: Plan, slots: Dict[str, int], uris: Dict[str, str]
             imply([p.ladder])
         if not known[p.key]:
             step_down(p)
+    stats["across"] = len(grid.across_left)
     return "done", _tally(stats)
 
 
@@ -1781,6 +1814,10 @@ def _tally(stats: dict) -> Optional[str]:
         parts.append(f"{stats['deferred']} filter{'s' if stats['deferred'] != 1 else ''} left "
                      "for later — your own setting does not keep up here; they are measured "
                      "with one that does")
+    if stats["across"]:
+        n = stats["across"]
+        parts.append(f"{n} more setting{'s' if n != 1 else ''} across rate families "
+                     f"{'are' if n != 1 else 'is'} left out unless you ask")
     for src, why in stats["stopped"]:
         parts.append(f"{SOURCE_WORDS.get(src, 'One source')}'s points stopped: HQPlayer did not "
                      f"play them three times in a row ({why}). The rest went on")

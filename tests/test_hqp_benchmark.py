@@ -221,21 +221,84 @@ def test_at_auto_the_rest_is_planned_at_the_rates_the_owners_setting_played():
     assert {p.rate_hz for p in plan.points if p.source == "pcm44"} == {0, 352800, 705600}
 
 
-def test_points_at_another_family_than_their_source_go_after_every_ladder():
+_PCM_SHAPERS = [{"index": 0, "name": "none", "value": 0}, {"index": 1, "name": "LNS15", "value": 1}]
+_PCM_RATES = [{"index": 0, "rate": 0}, {"index": 1, "rate": 352800}, {"index": 2, "rate": 384000},
+              {"index": 3, "rate": 705600}, {"index": 4, "rate": 768000}]
+
+
+def _pcm_grid(rate=4, **kw):
+    """A PCM plan at the owner's `rate` slot (4: a fixed 768 kHz) over both signals."""
+    d, cur = _lists("desktop_sdm.json")
+    current = {"rate": rate, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1}
+    srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
+    args = dict(filters=d["filters"], shapers=_PCM_SHAPERS, rates=_PCM_RATES, current=current,
+                srcs=srcs, covered=set(), keeps_up={}, rng=random.Random(5))
+    args.update(kw)
+    return d, srcs, bench.build_grid("pcm", **args)
+
+
+def test_no_point_across_rate_families_is_planned_unless_asked():
+    """BENCH-GUARD-1 (B-153 (a)): the points at a rate of another family than
+    their source's — the only class that ran away, on the lab machine and on
+    a 16 GB Pi (one build ended HQPlayer for memory) — are planned only at
+    the owner's ask; the owner's own setting stays first and last whatever
+    its family, and the plan says what it left out."""
+    from hqp_rate_check import same_family
+    d, srcs, plan = _pcm_grid()
+    pts = plan.points
+    assert pts[0].own and pts[-1].own and pts[0].key[0] == 768000
+    assert [p for p in pts[1:-1] if not same_family(p.rate_hz, srcs[p.source]["rate"])] == []
+    assert len(plan.across_left) == len(d["filters"]) - 1        # 44.1 kHz → 768 kHz, but the owner's
+    assert set(plan.across_left) == {(44100, 768000)}
+    # what is covered already is not counted as left out
+    first = next(p for p in _pcm_grid(across=True)[2].points[1:-1] if p.rate_hz == 768000
+                 and p.source == "pcm44")
+    assert len(_pcm_grid(covered={first.key})[2].across_left) == len(d["filters"]) - 2
+    # within each source's family nothing is left out
+    assert _pcm_grid(rate=0)[2].across_left == ()
+
+
+def test_at_auto_playing_across_families_those_points_wait_for_the_ask():
+    """At Auto with HQPlayer's Auto rate family off, Auto plays a 44.1 kHz
+    source at the default rate of the other family: the rest planned there
+    is across families and left out unless asked."""
+    d, srcs, plan = _pcm_grid(rate=0, played={"pcm44": 768000, "pcm96": 768000})
+    assert {(p.source, p.rate_hz) for p in plan.points[1:-1] if p.source == "pcm44"} <= \
+        {("pcm44", 352800), ("pcm44", 705600)}
+    assert set(plan.across_left) == {(44100, 768000)}
+    asked = _pcm_grid(rate=0, played={"pcm44": 768000, "pcm96": 768000}, across=True)[2]
+    assert ("pcm44", 768000) in {(p.source, p.rate_hz) for p in asked.points} and asked.across_left == ()
+
+
+def test_sdm_filters_at_a_fixed_rate_of_the_other_family_are_measured_at_its_twin():
+    """BENCH-GUARD-1 Q5: every filter at the owner's DSD rate with the owner's
+    modulator — at a 48k-family rate, at the 44.1k-family rate of the same
+    multiple (the one Auto rate family picks), no build across families;
+    none where HQPlayer lists no twin; the owner's rate itself when asked."""
+    rates = [{"index": 0, "rate": 0}] + [{"index": i + 1, "rate": r} for i, r in enumerate(
+        (2822400, 3072000, 5644800, 6144000, 11289600, 12288000))]
+    current = {"rate": 6, "filterNx": 53, "filter1x": 49, "shaper": 21}     # 48k × 256
+    d, _, grid = _grid("desktop_sdm.json", rates=rates, current=current, seed=5)
+    swept = {p.key[1] for p in grid.points[1:-1] if p.key in grid.sweep}
+    assert {p.rate_hz for p in grid.points[1:-1] if p.key in grid.sweep} == {11289600}
+    assert swept == {f["name"] for f in d["filters"]}
+    assert {r for _, r in grid.across_left} == {12288000}
+    _, _, asked = _grid("desktop_sdm.json", rates=rates, current=current, seed=5, across=True)
+    assert {p.rate_hz for p in asked.points[1:-1] if p.key in asked.sweep} == {12288000}
+    assert asked.across_left == ()
+    no_twin = [r for r in rates if r["rate"] != 11289600]
+    _, _, grid = _grid("desktop_sdm.json", rates=no_twin, current=current, seed=5)
+    assert not [p for p in grid.points[1:-1] if p.key in grid.sweep and not p.own]
+
+
+def test_points_at_another_family_than_their_source_go_after_every_ladder_when_asked():
     """HQP-BENCH-63 §3.6 (F6): every slow build and both hangs on 6.3.3 were
     44.1 kHz → 768 kHz — the owner's rate for a source of the other family.
-    Those points go after every ladder point and before the drift check; the
-    owner's own setting stays first."""
+    Asked for (BENCH-GUARD-1), those points go after every ladder point and
+    before the drift check; the owner's own setting stays first."""
     from hqp_rate_check import same_family
-    d, cur = _lists("desktop_sdm.json")
-    shapers = [{"index": 0, "name": "none", "value": 0}, {"index": 1, "name": "LNS15", "value": 1}]
-    rates = [{"index": 0, "rate": 0}, {"index": 1, "rate": 352800}, {"index": 2, "rate": 384000},
-             {"index": 3, "rate": 705600}, {"index": 4, "rate": 768000}]
-    current = {"rate": 4, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1}
-    srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
-    pts = bench.build_grid("pcm", filters=d["filters"], shapers=shapers, rates=rates,
-                           current=current, srcs=srcs, covered=set(), keeps_up={},
-                           rng=random.Random(5)).points
+    d, srcs, plan = _pcm_grid(across=True)
+    pts = plan.points
     assert pts[0].own and pts[-1].own and pts[0].key[0] == 768000
     cross = [i for i, p in enumerate(pts[1:-1], 1)
              if not same_family(p.rate_hz, srcs[p.source]["rate"])]
@@ -256,7 +319,7 @@ def test_a_pcm_source_is_never_asked_below_its_own_rate():
     srcs = {**SRC44, "pcm96": {"rate": 96000, "channels": 2}}
     plan = bench.build_grid("pcm", filters=d["filters"], shapers=shapers, rates=rates,
                             current=current, srcs=srcs, covered=set(), keeps_up={},
-                            rng=random.Random(3))
+                            rng=random.Random(3), across=True)
 
     def rungs(src):
         return {p.rate_hz for lid, r in plan.rungs.items() if lid[3] == src for p in r}
@@ -1163,6 +1226,36 @@ def test_the_screen_says_where_one_entry_can_be_measured(run):
     assert not bench.running()
 
 
+def test_the_estimate_leaves_the_points_across_families_out_and_the_ask_brings_them(run, monkeypatch):
+    """BENCH-GUARD-1: the sheet's estimate counts what a run asks — none of
+    the points across rate families — and says what it leaves out, the
+    conversions they are and whether the owner's rate is Auto; the sheet's
+    ask reaches the run (`across`)."""
+    import hqp_library
+    from playback import hqp_benchmark
+    from routers import hqplayer as hqp_router
+    monkeypatch.setattr(hqp_library, "local_cuda", lambda: (False, None))
+    ep = hqp_library.endpoint_by_address("127.0.0.1", run.fake.port)
+    d, cur = _lists("desktop_sdm.json")
+    lists = {"modes": [{"index": 1, "name": "PCM", "value": 0}], "rates": _PCM_RATES,
+             "filters": d["filters"], "shapers": _PCM_SHAPERS}
+    state = {"mode": 1, "rate": 4, "filterNx": cur["filterNx"], "filter1x": cur["filter1x"], "shaper": 1,
+             "volume": -3.0}
+    est = hqp_router._benchmark_block(ep, state, lists, None)["estimate"]
+    assert est["across"] == {"points": len(d["filters"]) - 1, "auto": False,
+                             "conversions": [{"source": 44100, "rate": 768000}]}
+    planned = hqp_benchmark.plan(ep, kind="pcm", mode_name="PCM", state=state, filters=d["filters"],
+                                 shapers=_PCM_SHAPERS, rates=_PCM_RATES)
+    assert est["points"] == planned.asks()
+    assert "across" not in hqp_router._benchmark_block(ep, {**state, "rate": 0}, lists, None)["estimate"]
+    asked = {}
+    monkeypatch.setattr(hqp_benchmark, "start", lambda mode, **kw: asked.update(kw) or {})
+    hqp_router.start_benchmark(hqp_router.BenchmarkRequest(across=True))
+    assert asked["across"] is True
+    hqp_router.start_benchmark(hqp_router.BenchmarkRequest())
+    assert asked["across"] is False
+
+
 def test_while_held_nothing_else_drives_the_output(run, monkeypatch):
     fake, mgr = run.fake, run.mgr
     fake.jitter = 0.2                                          # never settles: points take the cap
@@ -1263,7 +1356,7 @@ def test_three_failures_of_one_source_end_its_points_and_the_run_goes_on(run, tm
     _owner_dsd(run, tmp_path, monkeypatch)
     _pcm_owner_at(fake, [0, 88200, 176400, 352800, 705600, 1411200, 2822400], 3)
     fake.misplays = {3}                  # the DSD file's slot: HQPlayer plays entry 1 for it
-    bench.start()
+    bench.start(across=True)             # the 96 kHz signal's points are all across families
     assert _wait(lambda: not bench.running(), 120)
     st = bench.state()
     assert st["outcome"] == "done", st["note"]
