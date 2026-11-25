@@ -2395,6 +2395,30 @@ def _boot_mount_said(fstab, generated, systemd=257, roots=("/srv/music", "/media
     return said.getvalue()
 
 
+def _roots_said(fstab, roots):
+    """say_roots over an fstab of the test's own; nothing is mounted, and
+    the node gives no answer."""
+    import contextlib
+    import io
+    real, saved = setup.run, (setup.held_roots, setup.held_labels, setup.held_by_the_node)
+
+    def run(args, **kw):
+        if args[:2] == ["findmnt", "--fstab"]:
+            return real(args[:2] + ["-F", str(fstab)] + args[2:], **kw)
+        if args[:2] == ["systemctl", "--version"]:
+            return subprocess.CompletedProcess(args, 0, b"systemd 257 (x)\n", b"")
+        return subprocess.CompletedProcess(args, 1, b"", b"")
+    setup.run = run
+    setup.held_roots, setup.held_labels, setup.held_by_the_node = (lambda o: list(roots)), (lambda o: {}), (lambda: None)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            setup.say_roots()
+    finally:
+        setup.run = real
+        setup.held_roots, setup.held_labels, setup.held_by_the_node = saved
+    return said.getvalue().splitlines()
+
+
 @pytest.mark.skipif(shutil.which("findmnt") is None, reason="no findmnt on this system")
 def test_a_boot_mount_line_of_before_is_offered_its_replacement(tmp_path):
     """PI-NODE-2B's line acts at a start of the machine only. The setup that
@@ -2465,6 +2489,7 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
     roots = [str(there), str(empty), str(mounted), str(gone), setup.AUTOMOUNT_BASE]
     table = f"/ ext4 rw\n{mounted} exfat ro,nosuid\n{tmp_path}/plugged/4A21-0000 vfat ro\n"
     lines = setup.root_lines(roots, table, {str(mounted): "Elements <b>", str(gone): "Old"})
+    # each mount under the root it lies under (PI-NODE-2E H6)
     assert lines == [
         f"Music root {there}: there",
         f"Music root {empty}: empty — its disk is not mounted, or the folder was removed. Its albums show as away. "
@@ -2472,10 +2497,11 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
         # a root that is a mount point holds what was mounted there when the node started (§2.5)
         f"Music root {mounted}: a disk mounted at the root itself — Sautium sees it only as it was when Sautium "
         "started",
+        f"  mounted: {mounted} exfat ro,nosuid",
         f"Music root {gone}: gone — its disk is not mounted, or the folder was removed. Its albums show as away. "
         f"To forget it: ./sautium roots --forget {gone}",
         f"Music root {tmp_path}/plugged: plugged disks — the automount is not installed (./sautium shows how)",
-        f"  mounted: {mounted} exfat ro,nosuid", f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
+        f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
     (tmp_path / "plugged").mkdir()                   # installed, no disk plugged in: not a library gone
     assert f"Music root {tmp_path}/plugged: there  (plugged disks)" in setup.root_lines(roots, "", {})
     # An empty root the node never read a copy under is a new folder, not a library that is away
@@ -2538,8 +2564,8 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     assert said.count("Paste into a terminal that may use sudo:") == 1                 # one block
     assert ("The line of /etc/fstab that mounts the music disk at /mnt/sautium-4A21-0000 gives Sautium the\n"
             "mount point itself: a disk pulled or put back while Sautium runs is not seen. This moves it to\n"
-            "/media/sautium/4A21-0000, where Sautium sees it come and go. Its albums will show as away\n"
-            "once and be found again at the new place; nothing is analysed again.\n") in said
+            "/media/sautium/4A21-0000, where Sautium sees it come and go. Sautium finds its albums at the new\n"
+            "place by itself; nothing is read or analysed again.\n") in said
     pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
     undo = pasted.index("P=/media/sautium/4A21-0000")
     assert [line for line in pasted[:undo] if not line.startswith("L=")] == [
@@ -2550,22 +2576,35 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     pieces = [line for line in pasted[:undo] if line.startswith("L=")]
     built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
     assert built == LINE_4A21 and max(len(line) for line in pasted) <= 76
-    assert ("Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n"
-            'and choose "Elements" as the music folder in Sautium (More › Library).\n') in said
+    # the chosen folder moves with its files at the node's next start (PI-NODE-2E §2): nothing to choose
+    assert "Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n\n" in said
+    assert "as the music folder" not in said
     # a line of before the plug option gains it at its move; an older systemd keeps the line it has
     fstab.write_text(at_boot + "\n")
     said = _boot_mount_said(fstab, generated, roots=roots)
     pieces = [line[4:] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\''))]
     assert subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True,
                           text=True).stdout == LINE_4A21
-    assert "T=" not in said and "and choose the disk as the music folder" in said     # no label known: none written
+    assert "T=" not in said and "as the music folder" not in said     # no label known: none written
     said = _boot_mount_said(fstab, generated, systemd=241, roots=roots)
     assert "── The music disk, mounted when the machine starts (optional) ──" in said
     assert " /media/sautium/4A21-0000 exfat " in "".join(
         line[4:].split("'")[1] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\'')))
     assert "device-timeout=10s" in said.replace("'\n    L=\"$L\"'", "")
-    # the root forgotten, its line left in fstab: nothing printed here (`roots --forget` printed its undo)
-    assert _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"]) == ""
+    # the root forgotten, its line left in fstab: its disk never appears in Sautium. Said, with the move
+    # block and no forget after it — the root is gone already, and the node takes the files along (H10)
+    said = _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"])
+    assert ("A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not\n"
+            "look: it never appears in Sautium. The block below mounts it where Sautium sees it.\n"
+            "Sautium finds its albums at the new place by itself; nothing is read or analysed again.\n") in said
+    assert said.count("Paste into a terminal that may use sudo:") == 1 and "--forget" not in said
+    pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
+    assert pasted[:2] == ["P=/mnt/sautium-4A21-0000", 'sudo umount "$P"'] and "U=4A21-0000" in pasted
+    # … and `status` and `roots` say it, where the setup has the step
+    assert _roots_said(fstab, ["/srv/music", "/media/sautium"])[-1] == (
+        "A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not look: "
+        "it never appears in Sautium (./sautium shows the step)")
+    assert not any("A line of /etc/fstab" in line for line in _roots_said(fstab, roots))      # a root names it
     # a line at that point the setup did not write is the person's own: no step — one that names the
     # disk otherwise, and one that would mount it for writing or run what is on it (the node's bind
     # does not make a mount that arrives later read-only)
@@ -2660,6 +2699,10 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     said = capsys.readouterr().out
     assert "    P=/mnt/sautium-4A21-0000" in said and '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in said
     assert "from its next start" in said and started == ["start"]          # a stopped node is not started
+    # … and its disk's new line is in: the node finds the albums there at its start (PI-NODE-2E §2)
+    assert ("Sautium finds the albums under /mnt/sautium-4A21-0000 at /media/sautium/4A21-0000 when it starts "
+            "again; nothing is removed.") in said
+    assert "will show as away" not in said and "Choose another folder" not in said
     # … and where its disk has the line at the new point and is not mounted there (the node that held
     # the old mount point held the disk too), that is said
     assert "Its disk is not mounted at /media/sautium/4A21-0000 now: plug it in again" in said

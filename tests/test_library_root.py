@@ -29,11 +29,16 @@ mount_watch.py; PI-NODE-2B §4.3).
   two words for a volume no one filesystem is found on; an empty root is
   lost only where the library holds copies from it, else new; a folder's
   listing names the disk it lies on. Real mounts: test_roots_real_mounts.py.
+- Since PI-NODE-2E (§2): the disk the setup's line of before mounted at the
+  root /mnt/sautium-<id> is the disk mounted at <the disks' folder>/<id>; at
+  the node's start every stored path moves with it, the folder stays
+  chosen, the scan reads nothing again and sets nothing away.
 On a real PostgreSQL where a row is read or written; skipped without one.
 """
 
 import json
 import os
+import re
 import select
 import sys
 from pathlib import Path
@@ -737,3 +742,197 @@ def test_the_start_says_which_root_is_gone_and_how_to_forget_it(tree, db, monkey
     said = [(r.levelname, r.getMessage()) for r in caplog.records if "is empty" in r.getMessage()]
     assert said == [("WARNING", f"music root {gone} is empty: its disk is not mounted, or the folder was removed; "
                                 f"its albums are away. Forget it on the machine: ./sautium roots --forget {gone}")]
+
+
+# -- the move re-points its files (PI-NODE-2E §2) ---------------------------------------------------
+
+OLD = "/mnt/sautium-B269-E281"
+
+
+@pytest.fixture
+def moved(tmp_path, db, monkeypatch):
+    """A node whose disk the setup's line of before 2026-11-24 mounted at the
+    root /mnt/sautium-B269-E281 — its files, a CUE image's two slices, its
+    copy, a cover of each source form, the folder chosen there — after the
+    move block and the forget: the one root is the disks' folder."""
+    import uuid
+    disks = tmp_path / "media" / "sautium"
+    (disks / ".names").mkdir(parents=True)
+    for table in ("media_files", "album_variants", "albums", "tracks"):
+        db.execute(f"DELETE FROM {table}")
+    db.execute("DELETE FROM covers WHERE source_type <> 'sentinel'")
+    album, track, image = (str(uuid.uuid4()) for _ in range(3))
+    db.execute("INSERT INTO albums (id, title) VALUES (%s, 'LP')", (album,))
+    db.execute("INSERT INTO tracks (id, title) VALUES (%s, 'One'), (%s, 'Two')", (track, image))
+    db.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
+               (album, f"{OLD}/Music/A/LP"))
+    variant = db.fetchone()[0]
+    db.execute("""INSERT INTO media_files (track_id, album_variant_id, file_path, cue_start_seconds, cue_end_seconds,
+                                           stat_mtime_ns, stat_ctime_ns)
+                  VALUES (%(t)s, %(v)s, %(p)s || '/Music/A/LP/01.flac', NULL, NULL, 1, 2),
+                         (%(i)s, %(v)s, %(p)s || '/Music/A/LP/image.flac', 0, 180, 3, 4),
+                         (%(i)s, %(v)s, %(p)s || '/Music/A/LP/image.flac', 180, NULL, 3, 4)""",
+               {"t": track, "i": image, "v": variant, "p": OLD})
+    db.execute("""INSERT INTO covers (id, content_hash, source_type, source_path, width, height, data, bytes)
+                  VALUES (gen_random_uuid(), '\\x01', 'external', %(p)s || '/Music/A/LP/cover.jpg', 1, 1, '', 0),
+                         (gen_random_uuid(), '\\x02', 'embedded', 'flac:' || %(p)s || '/Music/A/LP/01.flac#0',
+                          1, 1, '', 0),
+                         (gen_random_uuid(), '\\x03', 'embedded', 'mp3:/srv/other/a.mp3#0', 1, 1, '', 0)""",
+               {"p": OLD})
+    db.execute("INSERT INTO library_roots (mount, subpath, chosen_at) VALUES (%s, 'Music', now() - interval '1 day')",
+               (OLD,))
+    monkeypatch.setattr(settings, "sautium_library_roots", str(disks))
+    monkeypatch.setattr(settings, "music_library_path", "")
+    monkeypatch.setattr(library_root, "_mounts", lambda: {})
+    return type("Moved", (), {"disks": disks, "new": f"{disks}/B269-E281", "album": album, "variant": variant})
+
+
+def _paths(db) -> dict:
+    db.execute("SELECT file_path, cue_start_seconds FROM media_files ORDER BY file_path, cue_start_seconds")
+    files = db.fetchall()
+    db.execute("SELECT directory_path, absent_since FROM album_variants ORDER BY directory_path")
+    variants = db.fetchall()
+    db.execute("SELECT source_path FROM covers WHERE source_type <> 'sentinel' ORDER BY content_hash")
+    covers = [r[0] for r in db.fetchall()]
+    db.execute("SELECT mount, subpath, chosen_at FROM library_roots ORDER BY mount, subpath")
+    return {"files": files, "variants": variants, "covers": covers, "roots": db.fetchall()}
+
+
+def test_the_move_re_points_its_files_and_keeps_the_folder_chosen(moved, db, caplog):
+    """The disk the old line mounted at /mnt/sautium-<id> is the disk the
+    new line mounts at /media/sautium/<id>: the UUID both names carry. At
+    the node's start every stored path moves with it, the folder stays
+    chosen, nothing is away — and a second start finds nothing to do."""
+    before = _paths(db)
+    caplog.set_level("INFO")
+    library_root.apply()
+    after = _paths(db)
+    new = moved.new
+    assert after["files"] == [(f"{new}/Music/A/LP/01.flac", None), (f"{new}/Music/A/LP/image.flac", 0.0),
+                              (f"{new}/Music/A/LP/image.flac", 180.0)]
+    assert after["variants"] == [(f"{new}/Music/A/LP", None)]
+    assert after["covers"] == [f"{new}/Music/A/LP/cover.jpg", f"flac:{new}/Music/A/LP/01.flac#0",
+                               "mp3:/srv/other/a.mp3#0"]
+    assert after["roots"] == [(str(moved.disks), "B269-E281/Music", before["roots"][0][2])]
+    assert settings.music_library_path == f"{new}/Music" == library_root.chosen()
+    db.execute("SELECT stat_mtime_ns, stat_ctime_ns FROM media_files ORDER BY id")
+    assert db.fetchall() == [(1, 2), (3, 4), (3, 4)]                 # the stat stays: nothing is read again
+    assert f"music folder moved with its disk: 3 files from {OLD} to {new}" in caplog.text
+    caplog.clear()
+    library_root.apply()
+    assert _paths(db) == after and "moved with its disk" not in caplog.text
+
+
+def test_a_copy_whose_new_place_is_taken_stays_as_it_was(moved, db):
+    """An install a scan read at the new place before this release (Q5): the
+    old copy stays where it was, away, for its Away row; a copy moves whole
+    or not at all. The chosen folder moves all the same."""
+    db.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
+               (moved.album, f"{moved.new}/Music/A/LP"))
+    there = db.fetchone()[0]
+    db.execute("""INSERT INTO media_files (track_id, album_variant_id, file_path)
+                  SELECT track_id, %s, %s FROM media_files WHERE cue_start_seconds IS NULL""",
+               (there, f"{moved.new}/Music/A/LP/01.flac"))
+    db.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (moved.variant,))
+    before = _paths(db)
+    library_root.apply()
+    after = _paths(db)
+    assert after["files"] == before["files"] and after["variants"] == before["variants"]
+    assert after["roots"][0][:2] == (str(moved.disks), "B269-E281/Music")
+    # … and the copy's place alone taken (its files' are free): it stays whole too
+    db.execute("DELETE FROM media_files WHERE album_variant_id = %s", (there,))
+    db.execute("INSERT INTO library_roots (mount, subpath) VALUES (%s, 'Music')", (OLD,))
+    library_root.apply()
+    assert _paths(db)["files"] == [f for f in before["files"] if f[0].startswith(OLD + "/")]
+
+
+def test_nothing_is_re_pointed_while_the_old_point_is_still_a_root(moved, db):
+    before = _paths(db)
+    for given in (f"{moved.disks}:{OLD}", OLD):
+        settings.sautium_library_roots = given
+        library_root.apply()
+        assert _paths(db) == before
+
+
+def test_nothing_is_re_pointed_where_no_root_is_the_disks_folder(moved, db, tmp_path):
+    (moved.disks / ".names").rmdir()
+    before = _paths(db)
+    library_root.apply()
+    assert _paths(db) == before and settings.music_library_path == ""
+    # … nor a folder that only looks like the old point
+    (moved.disks / ".names").mkdir()
+    db.execute("UPDATE library_roots SET mount = '/mnt/sautium-B269-E281/x'")
+    library_root.apply()
+    db.execute("SELECT count(*) FROM media_files WHERE file_path ^@ %s", (OLD + "/",))
+    assert db.fetchone()[0] == 3
+
+
+def test_a_place_chosen_at_both_points_is_one_row_with_the_newer_choice(moved, db):
+    db.execute("INSERT INTO library_roots (mount, subpath, chosen_at) VALUES (%s, 'B269-E281/Music', "
+               "now() - interval '2 days'), (%s, '', now() - interval '3 days')", (str(moved.disks), "/srv/music"))
+    db.execute("SELECT chosen_at FROM library_roots WHERE mount = %s", (OLD,))
+    newer = db.fetchone()[0]
+    library_root.apply()
+    db.execute("SELECT mount, subpath, chosen_at FROM library_roots ORDER BY chosen_at")
+    assert db.fetchall()[1:] == [(str(moved.disks), "B269-E281/Music", newer)]
+    db.execute("SELECT count(*) FROM library_roots")
+    assert db.fetchone()[0] == 2
+
+
+@pytest.fixture
+def scanning(db, scratch_dsn, monkeypatch):
+    """The scanner on this module's scratch database, its process state as at
+    a start."""
+    import subprocess
+    if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode:
+        pytest.skip("no ffmpeg")
+    database = pytest.importorskip("database")
+    scanner = pytest.importorskip("scanner")
+    from sqlalchemy.orm import sessionmaker
+    engine = database.make_engine(scratch_dsn)
+    monkeypatch.setattr(database, "SessionLocal", sessionmaker(autocommit=False, autoflush=False, bind=engine))
+    for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0),
+                        ("_look_given_up", False), ("_look_wakes_wanted", False)):
+        monkeypatch.setattr(scanner, name, value)
+    for table in ("listening_history", "media_files", "album_variants", "albums", "tracks"):
+        db.execute(f"DELETE FROM {table}")
+    yield scanner
+    engine.dispose()
+
+
+def test_the_scan_after_the_move_finds_every_file_where_it_was_left(scanning, db, tmp_path, monkeypatch, caplog):
+    """The disk read at the old point, then mounted at the new one (the same
+    files, the same stat): the start re-points, and its scan reads nothing
+    again and sets no copy away."""
+    import subprocess
+    old = tmp_path / "mnt" / "sautium-B269-E281"
+    disks = tmp_path / "media" / "sautium"
+    (disks / ".names").mkdir(parents=True)
+    for n in (1, 2):
+        path = old / "Music" / "Aurora" / "LP" / f"0{n}.flac"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                        "-ar", "44100", "-sample_fmt", "s16", "-metadata", f"title=Song {n}",
+                        "-metadata", "artist=Aurora", "-metadata", "album=LP", "-metadata", f"track={n}",
+                        str(path)], check=True)
+    monkeypatch.setattr(library_root, "OLD_BOOT_MOUNT_POINT",
+                        re.compile(re.escape(str(tmp_path / "mnt")) + r"/sautium-([0-9A-Za-z-]{4,40})"))
+    monkeypatch.setattr(settings, "sautium_library_roots", f"{old}:{disks}")
+    monkeypatch.setattr(settings, "music_library_path", "")
+    monkeypatch.setattr(library_root, "_mounts", lambda: {})
+    library_root.choose(str(old / "Music"))
+    library_root.apply()
+    assert scanning.LibraryScanner().scan_and_import()["added"] == 2
+    # the move block and the forget: the disk at the new point, the old root gone
+    os.rename(old, disks / "B269-E281")
+    monkeypatch.setattr(settings, "sautium_library_roots", str(disks))
+    library_root.apply()
+    assert settings.music_library_path == str(disks / "B269-E281" / "Music")
+    caplog.set_level("INFO")
+    found = scanning.LibraryScanner()
+    stats = found.scan_and_import()
+    assert (stats["added"], stats["reread"], stats["skipped"]) == (0, 0, 2)
+    assert "No new or changed files to process" in caplog.text
+    assert scanning.set_aside_missing(None, found.last_disk_paths, found.last_unread, found.last_gone) == 0
+    db.execute("SELECT count(*), count(*) FILTER (WHERE absent_since IS NOT NULL) FROM album_variants")
+    assert db.fetchone() == (1, 0)

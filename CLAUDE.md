@@ -716,7 +716,10 @@ See:
   keeps its path whoever mounts it, and a disk added later changes no
   override. An install whose line mounts at `/mnt/sautium-<UUID>` (that point
   its root) is named by `status` and `roots` and offered the move as one
-  block; a `--music` folder that is someone's own mount point is taken as
+  block, and since 2026-11-25 (PI-NODE-2E) the node re-points its files at
+  its next start (`library_root.apply`: the stored paths, copies, covers and
+  the chosen folder under the old point move to the new one by the UUID both
+  carry — nothing read again, nothing away); a `--music` folder that is someone's own mount point is taken as
   named and said — never its parent, which the person did not name; the
   setup's own line is offered only for a disk a person pulls (USB storage, a
   card in the slot, by `machine_tier.storage_medium`) that nobody set up a
