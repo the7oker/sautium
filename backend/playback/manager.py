@@ -1708,7 +1708,7 @@ class PlaybackManager:
             if not moved and not reread:
                 return
             if moved:
-                logger.info("%d queued slot(s) re-bound: their file left the library",
+                logger.info("%d queued slot(s) re-bound: their file left the library, or moved with its disk",
                             len(moved))
                 self._schedule_persist()
             self._rebound(backend)

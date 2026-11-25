@@ -2621,7 +2621,8 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     said = _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"])
     assert ("A line of /etc/fstab still mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000 as well as at\n"
             "/media/sautium/4A21-0000, where Sautium sees it: the block takes the old line out.") in said
-    assert "tee -a /etc/fstab" not in said.split("To undo it later:")[0]
+    before, undo = said.split("To undo it later:")
+    assert "tee -a /etc/fstab" not in before and max(len(line[4:]) for line in undo.splitlines()) <= 76
     fstab.write_text(at_boot + "\n")
     # a line at that point the setup did not write is the person's own: no step — one that names the
     # disk otherwise, and one that would mount it for writing or run what is on it (the node's bind

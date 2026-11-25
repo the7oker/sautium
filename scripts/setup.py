@@ -1843,7 +1843,7 @@ def boot_mount_steps(roots: List[str], labels: Dict[str, str], shown: Optional[s
               f"A line of /etc/fstab still mounts the disk {old['uuid']} at {point} as well as at\n"
               f"{AUTOMOUNT_BASE}/{old['uuid']}, where Sautium sees it: the block takes the old line out.",
               boot_mount_undo(point),
-              [f"sudo mkdir -p {shlex.quote(point)}", f"L={shlex.quote(line)}",
+              [f"sudo mkdir -p {shlex.quote(point)}", *in_pieces(line),
                "printf '\\n%s\\n' \"$L\" | sudo tee -a /etc/fstab", "sudo systemctl daemon-reload"])
     for root in roots:
         if root == AUTOMOUNT_BASE:
