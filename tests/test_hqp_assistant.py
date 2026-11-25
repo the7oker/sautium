@@ -367,10 +367,39 @@ def test_host_fit_groups_this_hosts_rows_by_source_and_names_no_source_in_a_row(
         "    DSD256 · DMX5: refused by HQPlayer when the Benchmark asked it",
         "  From a 48 kHz source with 1 channel:",
         "    DSD128 · DMX5: runs at 3.00× (2 samples) — keeps up here (from 1.25×)",
+        "  A 48 kHz source with 1 channel at DSD128 is a conversion across rate families. At Auto with "
+        "HQPlayer's Auto rate family on, this source plays in its own family and no such filter is built.",
         "These speeds are this HQPlayer's own, measured while it played and by its Benchmark."]
     assert not any("source" in line for line in text if line.startswith("    "))
     more = _say("host_fit", _read(host={**host, "total": 30}), name="demo-sinc-a").split("\n")
     assert more[-2] == "  … and 24 more."
+
+
+def test_host_fit_says_a_build_that_ended_hqplayer_how_long_a_slow_start_took_and_what_avoids_it():
+    """BENCH-GUARD-1 (B-153 (2)): a combination HQPlayer ended in, or was
+    restarted out of, is too heavy here; a slow start HQPlayer came out of
+    says how long it took; a source whose rows cross rate families is told,
+    once, that Auto rate family avoids that build — the measured facts
+    alone."""
+    rows = [_host_row(44100, 705600, "LNS15", "ok", 14.6, 3),
+            _host_row(44100, 768000, "LNS15", "too_heavy"),
+            {**_host_row(44100, 768000, "TPDF", "slow_start"), "build_s": 358.0},
+            _host_row(96000, 768000, "LNS15", "ok", 15.0, 3)]
+    host = {"context": {"engine": "6.3.3", "cuda": "off", "mode": "PCM", "matrix_profile": None,
+                        "convolution": False},
+            "knob": "filter", "thresholds": _TH, "rows": rows, "total": len(rows)}
+    text = _say("host_fit", _read(host=host), name="demo-sinc-a").split("\n")
+    assert text[1:7] == [
+        "  From a 44.1 kHz source:",
+        "    705.6 kHz · LNS15: runs at 14.60× (3 samples) — keeps up here (from 1.25×)",
+        "    768 kHz · LNS15: HQPlayer ended, or was restarted, while it prepared it when the Benchmark "
+        "asked it — too heavy here; not asked again on this engine",
+        "    768 kHz · TPDF: did not start within a minute when the Benchmark asked it — HQPlayer took 6 min "
+        "to prepare it; not asked again on this engine",
+        "  A 44.1 kHz source at 768 kHz is a conversion across rate families. At Auto with HQPlayer's Auto "
+        "rate family on, this source plays in its own family and no such filter is built.",
+        "  From a 96 kHz source:"]
+    assert not any("across rate families" in line for line in text[7:])
 
 
 def test_host_fit_says_why_it_has_nothing():
