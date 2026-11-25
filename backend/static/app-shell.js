@@ -102,9 +102,13 @@
     if (st.state === 'buffering') {
       return st.progress != null ? `Buffering ${Math.round(st.progress * 100)} %` : 'Buffering…';
     }
-    // a station's own file, not here now: no stream was asked for it
-    // (playback.substitute._stream_play) — it is passed until its file is back
-    if (st.state === 'failed' && st.reason === 'not_here') return 'Its file is not here now';
+    // the owner's own copy, not here now: no stream was asked for it — where
+    // nothing streams, said as the album page says it (`why`: the disk out,
+    // the copy away); a station's own file, passed until it is back, has none
+    // (playback.substitute._stream_play)
+    if (st.state === 'failed' && st.reason === 'not_here') {
+      return st.why ? notHereWords(st.why).title : 'Its file is not here now';
+    }
     if (st.state === 'failed') return `Doesn't stream here — ${streamReason(st.reason)}`;
     return '';
   }
@@ -2058,7 +2062,7 @@
       this.tracks.forEach((t, idx) => {
         const st = states.get(`${idx + 1}|${t.track_id}`);
         if (!st || !t.stream) return;
-        t.stream = { state: st.state, progress: st.progress, reason: st.reason };
+        t.stream = { state: st.state, progress: st.progress, reason: st.reason, why: st.why };
         if (!this.isOpen) return;
         const row = this.list.querySelector(`.q-row[data-index="${idx + 1}"]`);
         const line = row && row.querySelector('.q-stream');

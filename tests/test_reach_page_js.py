@@ -100,6 +100,32 @@ def test_an_album_partly_out_reads_each_row_by_its_own_file_and_keeps_play():
     assert streams["rows"] == ["stream", "file"] and streams["out"]["noPlay"] is False
 
 
+LINE = "\n".join([
+    _block("const STREAM_REASONS = {", "\n  };\n"),
+    _block("function streamReason(code) {"),
+    _block("function streamLine(st) {"),
+    WORDS,
+])
+
+
+def test_a_queue_row_of_his_copy_that_is_not_here_says_the_album_pages_words():
+    """H1: a queued slot of his own copy that nothing here can play says what
+    the album page says of it — never words of a stream; a not-owned slot
+    where nothing streams says streaming's own; a fill's gap with no `why`
+    keeps its line."""
+    lines = _node(LINE + """
+console.log(JSON.stringify([
+  { state: 'failed', reason: 'not_here', why: 'away' },
+  { state: 'failed', reason: 'not_here', why: 'disk' },
+  { state: 'failed', reason: 'not_here' },
+  { state: 'failed', reason: 'off' },
+  { state: 'waiting' },
+].map(streamLine)));
+""")
+    assert lines == ["Your copy is away", "On a disk that is not connected", "Its file is not here now",
+                     "Doesn't stream here — streaming is off on this node", "Waiting"]
+
+
 ROWS = WORDS + "\n" + _block("function albumOutRow(t, rowKind, albumId, lines) {") + r"""
 const escapeHtml = s => String(s).replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const fmtDuration = s => `${s}s`;

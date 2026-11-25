@@ -3078,11 +3078,8 @@ def _gone() -> list:
 # cannot read: it has rows, not bytes), a provider told nothing but title,
 # artist and length. Where this node streams nothing the track is left out
 # with why, and a request none of whose slots opens is refused before the
-# queue or the output is touched (_not_here).
-
-# Why a row of an owned track names no file that opens: its copies are away
-# (a Rescan set them aside), or lie under a folder that does not answer.
-_WHY = not_here_why("{f}")
+# queue or the output is touched (_not_here). Why a row names no file that
+# opens is sql_queries.not_here_why.
 
 _NOT_HERE_UNTIL = {"disk": "its disk is connected", "away": "its files are back"}
 
@@ -3114,7 +3111,7 @@ def _album_rows(album_id: str) -> list[dict]:
             SELECT DISTINCT ON (f.track_id)
                    f.id, f.location::text AS location, f.track_id::text AS track_id,
                    f.disc_number, f.track_number, t.title,
-                   a.name AS artist, al.title AS album, f.here, {_WHY.format(f='f')} AS why
+                   a.name AS artist, al.title AS album, f.here, {not_here_why('f')} AS why
             FROM ({ALBUM_FILES}) f
             JOIN tracks t ON t.id = f.track_id
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
@@ -3286,7 +3283,7 @@ def _entity_segments(refs: list) -> tuple[list, list, list]:
             # none here now, or none at all → a stream.
             row = _db_query_one(f"""
                 SELECT CASE WHEN f.here THEN f.id END AS id, f.location::text AS location,
-                       %(tid)s AS track_id, {_WHY.format(f='f')} AS why,
+                       %(tid)s AS track_id, {not_here_why('f')} AS why,
                        (SELECT t.title FROM tracks t WHERE t.id = %(tid)s::uuid) AS title
                 FROM ({TRACK_FILES}) f
                 WHERE f.location = 'local'
