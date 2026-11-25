@@ -674,18 +674,81 @@ def test_a_file_back_before_the_yes_keeps_its_rows(cur, library, main_module, mo
     assert _files(cur) == ["A/01.flac", "A/02.flac"]
 
 
-def test_a_yes_with_the_folder_gone_removes_nothing(cur, library, main_module, monkeypatch):
+def _the_drive_leaves(library):
+    (library / "A" / "01.flac").unlink()
+    (library / "A").rmdir()
+
+
+def test_a_yes_with_the_folder_gone_is_refused_and_the_question_waits(
+        cur, library, main_module, monkeypatch):
+    """Refused where the scan is, before the plan is taken: the question is
+    still true once the disk is back (PI-NODE-2E F23, Q6)."""
+    from fastapi import HTTPException
     _a_file_missing_beside(cur, library)
     state = _rescan(main_module, monkeypatch)
-    (library / "A" / "01.flac").unlink()
-    (library / "A").rmdir()                       # the drive left with the dialog open
+    plan_id = state["prune_plan"]["id"]
+    _the_drive_leaves(library)                    # with the dialog open
 
-    _answer(main_module, state["prune_plan"]["id"], True)
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(main_module.scan_prune(plan_id=plan_id, remove=True))
+
+    assert refused.value.status_code == 409
+    assert refused.value.detail == scanner.unreachable_words()
+    assert state["running"] is False
+    assert state["prune_plan"]["id"] == plan_id
+    assert _files(cur) == ["A/01.flac", "A/02.flac"]
+
+
+def test_a_drive_that_leaves_after_the_yes_removes_nothing_and_says_so(
+        cur, library, main_module, monkeypatch, caplog):
+    """The race the route cannot see: the folder answers at the yes and is
+    gone when the removal looks. An expected state, said at WARNING, and the
+    result carries the refusal for the page to say (PI-NODE-2E F23)."""
+    import logging
+    _a_file_missing_beside(cur, library)
+    state = _rescan(main_module, monkeypatch)
+    plan_id = state["prune_plan"]["id"]
+    real = scanner.prune_missing_files
+
+    def gone_then(*a, **kw):
+        _the_drive_leaves(library)
+        return real(*a, **kw)
+    monkeypatch.setattr(scanner, "prune_missing_files", gone_then)
+    caplog.clear()                                # what the Rescan said is not the yes's
+
+    with caplog.at_level(logging.WARNING, logger="scanner"):
+        _answer(main_module, plan_id, True)
 
     assert state["result"]["prune"]["pruned"] == 0
+    assert state["result"]["prune"]["refused"] == scanner.unreachable_words()
+    assert state["result"]["plan_id"] == plan_id
     assert state["progress"] == ("Nothing removed: the music folder is empty or not mounted. "
                                  "Reconnect it, then Rescan")
+    said = [r for r in caplog.records if r.name == "scanner"]
+    assert [(r.levelname, r.getMessage()) for r in said] == [
+        ("WARNING", "Prune aborted at the yes: the music folder is unreachable")]
     assert _files(cur) == ["A/01.flac", "A/02.flac"]
+    # the Library's snapshot carries it: the page says it once
+    lib = asyncio.run(settings_router._library_state())
+    assert lib["scan"]["result"] == state["result"]
+
+
+def test_removing_the_albums_away_is_refused_while_the_folder_is_gone(
+        cur, library, main_module, heard):
+    """The Away row's Remove, refused as a scan is: the same 409 and the
+    same sentence, and no plan made (PI-NODE-2E F23)."""
+    from fastapi import HTTPException
+    _owned_file(cur)
+    cur.execute("UPDATE album_variants SET absent_since = now()")
+
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(settings_router.remove_away())
+
+    assert refused.value.status_code == 409
+    assert refused.value.detail == scanner.unreachable_words()
+    assert main_module._scan_state["running"] is False
+    assert main_module._scan_state["prune_plan"] is None
+    assert heard() == ["sautium_notices"]         # the look's news
 
 
 def test_a_yes_judges_a_file_as_the_plan_did(cur, library, main_module, monkeypatch, tmp_path):

@@ -18629,6 +18629,22 @@
     return lines.join(' ');
   }
   let _prunePlanOpen = false;
+  // The yeses this tab sent (plan id → kind) until the run that answers one
+  // ends: a removal the node refused when it looked — the folder gone
+  // between the yes and the removal — is said once, here, where yes was
+  // said. Kept before the yes is sent: the run can end before its answer.
+  const _pruneYesSent = new Map();
+  function _sayPruneRefused(scan) {
+    const r = scan && scan.result;
+    if (!r || !_pruneYesSent.has(r.plan_id)) return;
+    const kind = _pruneYesSent.get(r.plan_id);
+    _pruneYesSent.delete(r.plan_id);
+    if (r.prune && r.prune.refused) {
+      notices.toast({ kind: 'error', key: 'library.prune',
+                      title: kind === 'away' ? 'Albums away' : 'Rescan',
+                      text: escapeProfileHtml(r.prune.refused) });
+    }
+  }
   async function _askPrunePlan(plan) {
     // One question at a time: a plan that arrives while one is open (another
     // device's Rescan, a yes that had to ask again) waits for the render that
@@ -18644,6 +18660,7 @@
       focusCancel: true,
     }).finally(() => { _prunePlanOpen = false; });
     let detail = null, waiting = false;
+    if (remove) _pruneYesSent.set(plan.id, plan.kind);
     try {
       const r = await fetch('/api/settings/library/scan/prune?plan_id='
         + encodeURIComponent(plan.id) + '&remove=' + remove, { method: 'POST' });
@@ -18659,6 +18676,7 @@
       waiting = true;
     }
     if (detail) {
+      _pruneYesSent.delete(plan.id);
       notices.toast({ kind: 'error', key: 'library.prune',
                       title: plan.kind === 'away' ? 'Albums away' : 'Rescan',
                       text: escapeProfileHtml(detail) });
@@ -18701,9 +18719,10 @@
     sub.hidden = !line;
   }
   // The Library screen under the notice library.mount_missing (`missing`):
-  // the Music path row's sentence, and — a scan of a folder that does not
-  // answer is refused by the node — "Scan for new" and "Rescan" waiting for
-  // the folder under it; both come back with the notice's end. Whether this
+  // the Music path row's sentence, and — a scan or a removal of a folder
+  // that does not answer is refused by the node — "Scan for new", "Rescan"
+  // and the Away row's Remove waiting for the folder under it, the notice's
+  // own sentence under Remove; all come back with the notice's end. Whether this
   // node streams meanwhile is asked once a stretch (GET /api/player/reach).
   let _nodeStreams = null;        // null: not known for this stretch
   let _nodeStreamsAsked = false;
@@ -18714,9 +18733,15 @@
       row.dataset.musicStreams = _nodeStreams ? '1' : '';
       paintMusicPathRow(row, missing);
     }
-    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"]').forEach(btn => {
-      if (btn.disabled !== missing) btn.disabled = missing;
-    });
+    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"], [data-action="remove-away"]')
+      .forEach(btn => { if (btn.disabled !== missing) btn.disabled = missing; });
+    const awayWhy = document.querySelector('[data-away-why]');
+    if (awayWhy) {
+      const n = missing && notices.get('library.mount_missing');
+      const line = n ? NOTICE_COPY['library.mount_missing'](n).text : '';
+      if (awayWhy.dataset.line !== line) { awayWhy.innerHTML = line; awayWhy.dataset.line = line; }
+      awayWhy.hidden = !line;
+    }
     if (missing && row && !_nodeStreamsAsked) {
       _nodeStreamsAsked = true;
       fetch('/api/player/reach').then(r => (r.ok ? r.json() : null)).then(body => {
@@ -18997,7 +19022,8 @@
       ${scanRunning ? '' : `
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="remove-away">Remove albums that are away</button>
-      </div>`}
+      </div>
+      <div class="helper-line" data-away-why hidden></div>`}
     `;
 
     // No ML runtime → no button: the run would be a no-op there (analysis
@@ -19157,8 +19183,8 @@
       const r = await fetch('/api/settings/library/away/remove', { method: 'POST' });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        await window.notifyDialog({ title: 'Nothing removed', kind: 'error',
-          message: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+        notices.toast({ kind: 'error', key: 'library.prune', title: 'Albums away',
+                        text: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
       }
       render();
     }));
@@ -19323,6 +19349,7 @@
       }
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.present_tracks);
+      _sayPruneRefused(lib.scan);
       _askPrunePlan(lib.scan && lib.scan.prune_plan);
 
       // The screen is drawn again only where its structure no longer says

@@ -2077,23 +2077,26 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
             plan["file_ids"], plan["counts"], progress_cb=progress,
             cancel_check=lambda: state["cancel_requested"],
         )
-        if stats.pop("unreachable", False):
-            state["result"] = {"prune": stats}
+        # The result names the plan it answers: the page that said yes says
+        # a refusal (`prune.refused`) once
+        if stats.get("refused"):
+            state["result"] = {"prune": stats, "plan_id": plan["id"]}
             state["progress"] = ("Nothing removed: the music folder is empty or not mounted. "
                                  "Reconnect it, then Rescan")
         elif stats.pop("grew", False):
             again = _new_prune_plan(stats.pop("file_ids"), stats, plan["kind"])
-            state["result"] = {"prune": stats, "prune_plan": _prune_plan_counts(again)}
+            state["result"] = {"prune": stats, "prune_plan": _prune_plan_counts(again),
+                               "plan_id": plan["id"]}
             state["progress"] = ("The library changed since the question — "
                                  f"{_plan_said(again)} wait for your answer")
         else:
-            state["result"] = {"prune": stats}
+            state["result"] = {"prune": stats, "plan_id": plan["id"]}
             state["progress"] = f"Removal complete — {stats['pruned']} file(s) removed"
         logger.info(f"Prune results: {stats}")
     except Exception as e:
         logger.error(f"Prune failed: {e}", exc_info=True)
         state["progress"] = f"Removal failed: {str(e)[:200]}"
-        state["result"] = {"prune_error": str(e)}
+        state["result"] = {"prune_error": str(e), "plan_id": plan["id"]}
     finally:
         with _scan_lock:
             state["prune_plan"] = again
@@ -2101,6 +2104,17 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
         notify_library_subscribers()
         _announce_done()
         resume_scans()
+
+
+async def _refuse_if_unreachable() -> None:
+    """A route's refusal of what would read the music folder while it does
+    not answer (a scan, a removal): 409 with the scan's own sentence."""
+    from scanner import LibraryUnreachable, refuse_if_unreachable
+    try:
+        # off the event loop: a scandir of a dead network mount can stall
+        await asyncio.to_thread(refuse_if_unreachable)
+    except LibraryUnreachable as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @app.post("/scan/start")
@@ -2112,17 +2126,13 @@ async def scan_start(
     """Queue a scan (request_scan): started at once, or after the job that
     runs. Its progress is pushed on the Library stream; /scan/status reads it."""
     from playback import hqp_benchmark
-    from scanner import LibraryUnreachable, refuse_if_unreachable, scope_admitted
+    from scanner import scope_admitted
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
     scope = (subpath or "").replace("\\", "/").strip("/")
     if scope and not await asyncio.to_thread(scope_admitted, settings.music_library_path, scope):
         raise HTTPException(status_code=400, detail="That folder is not inside the music folder")
-    try:
-        # off the event loop: a scandir of a dead network mount can stall
-        await asyncio.to_thread(refuse_if_unreachable)
-    except LibraryUnreachable as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    await _refuse_if_unreachable()
     queued = request_scan({scope: True}, prune=prune, reread=not skip_existing)
     return {"success": True, "queued": queued,
             "message": "Scan queued" if queued else "Scan started"}
@@ -2165,6 +2175,7 @@ async def scan_away() -> Dict[str, Any]:
     from routers.settings import notify_library_subscribers
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
+    await _refuse_if_unreachable()
     with _scan_lock:
         if _scan_state["running"]:
             raise HTTPException(status_code=409, detail="Scan already running")
@@ -2186,6 +2197,9 @@ async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
     from playback import hqp_benchmark
     if remove and hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
+    if remove:
+        # before the plan is taken: it waits, still true once the disk is back
+        await _refuse_if_unreachable()
     with _scan_lock:
         if remove and _scan_state["running"]:
             # the plan waits for the scan in flight; its yes is taken after

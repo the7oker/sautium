@@ -858,6 +858,9 @@ async def _library_state() -> Dict[str, Any]:
         "cancel_requested":  bool(_scan_state.get("cancel_requested")),
         "progress":          _scan_state.get("progress"),
         "stats":             _scan_state.get("stats"),
+        # the last run's outcome: a removal refused when it looked
+        # (result.prune.refused) is said by the page that said yes
+        "result":            _scan_state.get("result"),
         "prune_plan":        (_prune_plan_counts(_scan_state["prune_plan"])
                               if _scan_state.get("prune_plan") else None),
     }
