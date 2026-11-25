@@ -6607,6 +6607,45 @@
     return d.toLocaleDateString('en-GB', opts);
   }
 
+  // What a Listening history session's rows read of his tracks with no file
+  // here now (home.py: each track's `here` by the album route's rule, the
+  // session's `streams`): null while every one is here, else whether those
+  // rows stream — albumOut's answer for the rows alone, since a session's
+  // Play is the session's own (a refusal is its toast).
+  function sessionOut(d) {
+    return (d.tracks || []).some(t => t.here === false) ? { streams: !!d.streams } : null;
+  }
+
+  // One row of the session, row `n`. His track with no file here now is the
+  // album page's out row (albumRowKind, albumOutRow): it streams by track
+  // uuid under the slot's album, or waits, dimmed. Otherwise a phantom
+  // (streamed) row carries is-phantom-track + data-track-id so the shared
+  // handlers route it (click → play-phantom-track, [+] → queue); an owned
+  // row keeps data-media-file-id. data-album-id is the album the slot was
+  // queued from, so a click plays THIS edition of the track. `lines`: the
+  // row's lines under its title.
+  function sessionTrackRow(t, n, out, lines) {
+    const outRow = albumOutRow({ ...t, track_number: n, duration: t.duration_seconds },
+                               albumRowKind(t, out), t.album_id || '', lines);
+    if (outRow) return outRow;
+    const attrs = t.is_phantom
+      ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+        + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
+      : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
+    return `
+          <button ${attrs} type="button">
+            <span class="track-rank">${n}</span>
+            <div class="track-info">
+              <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+              ${lines}
+              ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
+            </div>
+            <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
+            <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+          </button>
+        `;
+  }
+
   // Listening-history session detail. Modelled on renderAlbum's
   // .detail-screen — the same hero / title / artist / meta / actions /
   // tracklist anatomy — but the context comes from the snapshot's CONTENT,
@@ -6688,6 +6727,7 @@
     const sessionArtist = (top && top.track_count * 2 >= tracksList.length)
       ? { id: top.id, name: top.name } : null;
 
+    const out = sessionOut(d);
     const trackParts = [];
     let n = 0;
     for (const g of groups) {
@@ -6714,27 +6754,8 @@
           t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
           t.bpm ? Math.round(t.bpm) + ' bpm' : null,
         ].filter(Boolean).join(' · ');
-        // Phantom (streamed) rows carry is-phantom-track + data-track-id so the
-        // shared handlers route them (click → play-phantom-track, [+] → queue);
-        // owned rows keep data-media-file-id. data-album-id is the album the
-        // slot was queued from, so a click plays THIS edition of the track.
-        const attrs = t.is_phantom
-          ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
-            + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
-          : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`;
-        trackParts.push(`
-          <button ${attrs} type="button">
-            <span class="track-rank">${n}</span>
-            <div class="track-info">
-              <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-              ${artistLine}
-              ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
-              ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
-            </div>
-            <span class="track-dur">${fmtDuration(t.duration_seconds)}</span>
-            <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
-          </button>
-        `);
+        trackParts.push(sessionTrackRow(t, n, out,
+          `${artistLine}${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}`));
       }
     }
 

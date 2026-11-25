@@ -27,7 +27,7 @@ from desktop.p2p.mb_slice_queries import BANDCAMP_PAGE
 from genre_queries import album_genre_chips
 from playback import substitute
 from playback.manager import active_hqp_endpoint
-from sql_queries import ALBUM_FILES, album_away, best_rip_order, owned_rank, rip_quality
+from sql_queries import ALBUM_FILES, album_away, best_rip_order, not_here_why, owned_rank, rip_quality
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
@@ -46,9 +46,7 @@ _PICKED_FILES = f"""
     SELECT DISTINCT ON (f.track_id)
            f.id, f.location, f.track_id, f.album_variant_id, f.is_lossless,
            f.sample_rate, f.bit_depth, f.duration_seconds,
-           f.disc_number, f.track_number, f.here,
-           CASE WHEN f.here THEN NULL WHEN f.absent_since IS NOT NULL THEN 'away'
-                ELSE 'disk' END AS why
+           f.disc_number, f.track_number, f.here, {not_here_why('f')} AS why
     FROM ({ALBUM_FILES}) f
     WHERE (%(vid)s::int IS NULL OR f.album_variant_id = %(vid)s::int)
     ORDER BY f.track_id, {owned_rank('f')}, (f.absent_since IS NOT NULL), {best_rip_order('f')}

@@ -1400,6 +1400,39 @@ def test_the_album_payloads_variants_say_which_copy_is_away_and_which_is_not_con
     assert variants() == {node["variant"]: (True, False), other: (False, True)}
 
 
+def test_a_sessions_tracks_say_what_is_here_by_the_album_pages_rule(node):
+    """PI-NODE-2E H5: a Listening history session's owned tracks carry
+    `here` and `why` as the album payload's rows do — the track's best copy
+    across every copy — and the session whether this node streams; a track
+    never owned says neither."""
+    from routers import home
+    cur = node["cur"]
+    cur.execute("INSERT INTO listening_sessions (origin, track_count, ended_at) "
+                "VALUES ('mix', 3, now()) RETURNING id::text")
+    session = cur.fetchone()[0]
+    slots = [(node["tracks"][0], node["files"][0], node["owned"]),
+             (node["tracks"][1], node["files"][1], node["owned"]),
+             (node["phantoms"][0], None, node["streamed"])]
+    for n, (track, file, album) in enumerate(slots):
+        cur.execute("INSERT INTO session_tracks (session_id, position, track_id, media_file_id, album_id) "
+                    "VALUES (%s, %s, %s, %s, %s)", (session, n, track, file, album))
+
+    def said() -> tuple:
+        d = home.get_listening_session(session)
+        return [(t["here"], t["why"]) for t in d["tracks"]], d["streams"]
+
+    assert said() == ([(True, None), (True, None), (None, None)], True)
+    node["gone"](True)
+    assert said() == ([(False, "disk"), (False, "disk"), (None, None)], True)
+    node["copy"](0, "Elsewhere/01.flac")               # another copy of the first track opens
+    assert said()[0][:2] == [(True, None), (False, "disk")]
+    node["gone"](False)
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    assert said()[0][:2] == [(True, None), (False, "away")]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    assert said()[1] is False
+
+
 def test_the_pages_ask_whether_this_node_streams(node):
     player = node["player"]
     assert player.reach() == {"streams": True}
