@@ -146,6 +146,28 @@ def test_the_album_screen_draws_a_row_that_streams_as_a_not_owned_tracks_and_one
     assert _rows({**payload, "away_part": None, "tracks": [{**track, "here": True}]}) == [None]
 
 
+VARIANTS = WORDS + "\n" + _block("function variantLabel(v) {") + r"""
+console.log(JSON.stringify(VARIANTS.map(variantLabel)));
+"""
+
+
+def test_the_variant_picker_names_a_copy_that_is_away_or_not_connected():
+    """PI-NODE-2E H2: two copies a move left with the same specs and the
+    same folder names read apart by their state, in the album page's
+    words; a copy that is here reads as before."""
+    rip = {"variant_id": 1, "sample_rate": 44100, "bit_depth": 16, "file_format": "FLAC",
+           "location": "local", "directory_path": "/music/Mamanet/Frisson"}
+    said = _node(VARIANTS.replace("VARIANTS.map", json.dumps([
+        {**rip, "away": False, "here": True},
+        {**rip, "away": True, "here": False},
+        {**rip, "away": False, "here": False},
+        rip,                                                   # a payload of before the fields
+        {**rip, "location": "hqplayer", "hqp_label": "Box", "away": False, "here": True},
+    ]) + ".map"))
+    base = "44.1 kHz · 16-bit · FLAC · Mamanet/Frisson"
+    assert said == [base, f"{base} · away", f"{base} · not connected", base, f"{base} · at Box"]
+
+
 TOAST = WORDS + "\n" + _block("async function reportPlaybackResult(resp, body, word) {") + r"""
 const toasts = [];
 const notices = { toast: t => toasts.push(t) };

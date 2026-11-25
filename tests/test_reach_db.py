@@ -1378,6 +1378,28 @@ def test_the_album_payload_says_what_is_here_and_whether_this_node_streams_it(no
     assert away["away_part"] == {"why": "away", "streams": False}
 
 
+def test_the_album_payloads_variants_say_which_copy_is_away_and_which_is_not_connected(node):
+    """PI-NODE-2E H2: each variant the picker offers carries `away` (its
+    copy set aside by a Rescan) and `here` (a file of it opens now — the
+    album's own rule, sql_queries.album_away, over that copy alone)."""
+    from routers import albums
+    cur = node["cur"]
+    cur.execute("SELECT album_variant_id FROM media_files WHERE id = %s",
+                (node["copy"](0, "Elsewhere/01.flac"),))
+    other = cur.fetchone()[0]
+
+    def variants() -> dict:
+        return {v["variant_id"]: (v["away"], v["here"])
+                for v in albums.get_album(node["owned"], variant_id=None)["variants"]}
+
+    assert variants() == {node["variant"]: (False, True), other: (False, True)}
+    node["gone"](True)                                 # the music folder's disk is out
+    assert variants() == {node["variant"]: (False, False), other: (False, True)}
+    node["gone"](False)
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    assert variants() == {node["variant"]: (True, False), other: (False, True)}
+
+
 def test_the_pages_ask_whether_this_node_streams(node):
     player = node["player"]
     assert player.reach() == {"streams": True}

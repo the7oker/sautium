@@ -515,7 +515,9 @@ def get_album(
     # The variants offered for picking follow the output: when the HQPlayer
     # that is the output holds this album, its copies are the choice (one,
     # usually — the pill then has nothing to pick); otherwise the local rips,
-    # never a copy at an HQPlayer that is not playing.
+    # never a copy at an HQPlayer that is not playing. Each says whether it
+    # is away (a Rescan found none of its files) and whether a file of it
+    # opens here now — the album's own rule over that copy alone.
     album["variants"] = db_query(f"""
         WITH here AS (
             SELECT 1 FROM album_variants
@@ -530,6 +532,8 @@ def get_album(
                av.is_lossless,
                av.directory_path,
                av.arrived_at,
+               av.absent_since IS NOT NULL AS away,
+               {album_away('av.album_id', 'av.id')} IS NULL AS here,
                (SELECT mf.id FROM media_files mf
                 WHERE mf.album_variant_id = av.id
                 ORDER BY mf.disc_number, mf.track_number

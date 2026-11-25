@@ -6067,7 +6067,11 @@
     const base = specs && tail ? `${specs} · ${tail}` : (specs || tail || ('Variant ' + v.variant_id));
     // Where the copy lives: a rip held at an HQPlayer names it; a local rip
     // says nothing, as before.
-    return v.location === 'hqplayer' ? `${base} · at ${v.hqp_label || 'HQPlayer'}` : base;
+    const at = v.location === 'hqplayer' ? `${base} · at ${v.hqp_label || 'HQPlayer'}` : base;
+    // A copy that does not open here now says why, in the album page's word
+    // (albums.py: `away`, `here`) — two copies a move left alike read apart.
+    const out = v.away ? 'away' : v.here === false ? 'disk' : null;
+    return out ? `${at} · ${notHereWords(out).mark}` : at;
   }
 
   const ALL_VARIANTS_LABEL = 'All variants · best per track';
