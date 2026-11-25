@@ -38,7 +38,7 @@ MIGRATIONS = [Path(__file__).resolve().parent.parent / "desktop" / "migrations" 
                            "041_hqp_run_return_point.sql",
                            "042_hqp_run_point_onset.sql",
                            "043_hqp_run_point_onset_backfill.sql", "071_hqp_bench_63.sql",
-                           "078_hqp_build_end.sql")]
+                           "077_hqp_build_end.sql")]
 
 
 def _status(**kw) -> TrackStatus:
@@ -241,7 +241,7 @@ def _schema(conn):
     )
 
 
-def test_033_to_043_071_and_078_re_apply_and_build_what_001_declares():
+def test_033_to_043_071_and_077_re_apply_and_build_what_001_declares():
     name = "sautium_hqp_load_mig_test"
     admin, nb = _make_db(name)
     try:
@@ -306,7 +306,7 @@ def test_033_to_043_071_and_078_re_apply_and_build_what_001_declares():
             cur.execute("ALTER TABLE hqp_benchmark_runs DROP COLUMN measured_from_at")
             cur.execute(MIGRATIONS[9].read_text())
         assert _schema(conn) == declared
-        with conn.cursor() as cur:                 # a node that ran 071 before 078 existed
+        with conn.cursor() as cur:                 # a node that ran 071 before 077 existed
             cur.execute("""ALTER TABLE hqp_benchmark_points DROP COLUMN build_end, DROP COLUMN build_s;
                            DROP TYPE hqp_build_end""")
             cur.execute(MIGRATIONS[-1].read_text())

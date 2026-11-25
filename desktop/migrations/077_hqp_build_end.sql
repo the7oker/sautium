@@ -1,4 +1,4 @@
--- 078 — BENCH-GUARD-1 (2026-11-25): the same DDL as 001_initial.sql's
+-- 077 — BENCH-GUARD-1 (2026-11-25): the same DDL as 001_initial.sql's
 -- blocks, for nodes that ran the earlier files. Idempotent: a no-op on the
 -- schema 001 just created.
 --
