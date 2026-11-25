@@ -121,7 +121,7 @@ class LocalBackend(PlayerBackend):
                       start: Optional[tuple] = None) -> None:
         if kind == "replace":
             if play and len(self._queue) and start is not None:
-                self._engine.post("select", index=self._queue.index_of(start[0]) or 1,
+                self._engine.post("select", index=self._queue.index_of(start[0]),
                                   seconds=start[1])
             elif play and len(self._queue):
                 self._engine.post("select", index=1)

@@ -8457,8 +8457,8 @@ def _build_after_the_commit(monkeypatch, b, seconds):
     a DSP change set off as the manager commits the replace."""
     changed = b.queue_changed
 
-    def commit(kind, *, play=False):
-        changed(kind, play=play)
+    def commit(kind, *, play=False, start=None):
+        changed(kind, play=play, start=start)
         if kind == "replace":
             fake_build_once.append(hb.change_dsp({"filter": "f57", "filter1x": "f57"}))
     fake_build_once: list = []
@@ -9089,8 +9089,8 @@ def test_a_start_left_to_a_backend_detached_before_it_goes_is_dropped_quietly(fa
     mgr, b, play, rotations = play_route
     changed = b.queue_changed
 
-    def detach_after(kind, *, play=False):
-        changed(kind, play=play)
+    def detach_after(kind, *, play=False, start=None):
+        changed(kind, play=play, start=start)
         if kind == "replace":
             b.shutdown()
     monkeypatch.setattr(b, "queue_changed", detach_after)

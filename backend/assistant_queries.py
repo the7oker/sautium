@@ -186,7 +186,7 @@ _HQP_TRANSPORT = {"play": ("start playback", "Playback started."),
                   "pause": ("pause", "Playback paused."),
                   "stop": ("stop", "Playback stopped."),
                   "next": ("skip", "Skipped to next track."),
-                  "previous": ("go back", "Went to previous track."),
+                  "previous": ("go back", "Went back: past the first 3 seconds to the track's start, else to the track before."),
                   "volume/up": ("change volume", "Volume increased."),
                   "volume/down": ("change volume", "Volume decreased."),
                   "volume": ("set volume", "Volume set to {level}.")}

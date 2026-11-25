@@ -2974,7 +2974,7 @@ class DlnaBackend(PlayerBackend):
                 if start is not None:
                     # at the start's second: the load's own Seek once the
                     # renderer plays (_seek_on_start)
-                    self._call_async(self._load_and_play(self._queue.index_of(start[0]) or 1,
+                    self._call_async(self._load_and_play(self._queue.index_of(start[0]),
                                                          start_at=start[1]))
                 else:
                     self._call_async(self._load_and_play(1))

@@ -7111,14 +7111,19 @@ class HqpBackend(PlayerBackend):
             # (a format it does not open) still answers after the Stop — on
             # an HQPlayer another controller holds too
             uris = [self._uri_for(it) for it in layout.handed]
-            att = (self._watch("replace", slot=head_slot, uris=uris, items=list(layout.handed))
+            given = {id(it) for it in layout.handed}
+            # the attempt's slot is HQPlayer's entry: the first one handed from
+            # the start on (a gap before it — a slot HQPlayer does not hold —
+            # numbers its entries apart from the queue's slots)
+            from_start = {id(a) for a in ahead}
+            entry = next((i + 1 for i, it in enumerate(layout.handed) if id(it) in from_start), 1)
+            att = (self._watch("replace", slot=entry, uris=uris, items=list(layout.handed))
                    if play and uris else None)
             if att is not None:
                 # Played while another controller holds HQPlayer, as a play press
                 # made then (_press): read before its hand-over clears the playlist
                 att.taken_back = self._taken()
                 att.held_paused = att.taken_back and self._held_paused
-            given = {id(it) for it in layout.handed}
             base = next(((it, second if it is head else 0) for it in ahead if id(it) in given),
                         (layout.handed[0], 0) if layout.handed else None)
             with self._handing(layout.items, stops=True, base=base, owes=play,
@@ -7165,6 +7170,11 @@ class HqpBackend(PlayerBackend):
                                         lambda it: self._start_item(begin, at, it),
                                         spot=(begin, at))
                     elif play and begin is not None:
+                        # its stream still to come: the start waits on it in
+                        # the node, and the attempt watched for the hand-over
+                        # sent no start — superseded, never a failure to explain
+                        if att is not None:
+                            att.request_end("superseded")
                         self._owe_start(None, self._link.item("start", n),
                                         lambda it: self._park(begin, at, _PENDING, start=it))
                     elif play and not uris:

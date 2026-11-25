@@ -767,7 +767,11 @@ class PlaybackManager:
             from playback.substitute import streamed
             # every slot whose way in is a stream, whatever it was queued as:
             # an owned track with no file here now streams like any other
-            items = [it for it in self.queue.snapshot() if streamed(it)]
+            # from the slot the play started at: the lane fetches from there
+            # on, so slots before it never fail (a "from here", a Resume)
+            snap = self.queue.snapshot()
+            begin = next((i for i, it in enumerate(snap) if it is run["start"]), 0)
+            items = [it for it in snap[begin:] if streamed(it)]
             failed = [it for it in items if id(it) in run["failed"]]
             firsts = items[:2]
             event = None
@@ -785,12 +789,14 @@ class PlaybackManager:
                                   "album": run["album"], "reason": head or code, **event}
         self._push_status(dict(self._latest_status))
 
-    def _play_started(self, items: list) -> None:
-        """A new queue that plays: its run of streamed slots is watched from
-        its start (_slot_failed), and what the last one said is over."""
+    def _play_started(self, items: list, start: QueueItem) -> None:
+        """A new queue that plays from `start`: its run of streamed slots is
+        watched from there (_slot_failed), and what the last one said is
+        over."""
         with self._slots_lock:
             albums = {it.album for it in items if it.album}
             self._play_run = {"generation": self.queue.generation, "played": False,
+                              "start": start,
                               "failed": {}, "told_first": False, "told_all": False,
                               "album": albums.pop() if len(albums) == 1 else None}
             self._stream_event = None
@@ -1549,7 +1555,7 @@ class PlaybackManager:
                 gen = self.queue.replace(accepted)
                 self._anchor_item, self._anchor_slot = head, self.queue.index_of(head)
                 if play:
-                    self._play_started(accepted)
+                    self._play_started(accepted, head)
                 self._last_slot = 0   # fresh queue — no resume slot in it
                 backend.queue_changed("replace", play=play, start=start)
                 self._schedule_persist()

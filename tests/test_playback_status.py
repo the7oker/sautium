@@ -71,7 +71,7 @@ def test_only_a_slot_of_the_queue_sounding_ends_what_a_play_said_of_its_failures
     slot = QueueItem(track_id="t-1", media_file_id=None, source={"kind": "track"}, title="One",
                      play={"kind": "unplayable", "reason": "x", "code": "unknown", "lane": True})
     mgr.queue.replace([slot])
-    mgr._play_started([slot])
+    mgr._play_started([slot], slot)
     mgr._slot_failed(slot, 1, "unknown")
     said = mgr.latest_status["stream_event"]
     assert (said["kind"], said["all"]) == ("not_streamable", True)
@@ -81,6 +81,29 @@ def test_only_a_slot_of_the_queue_sounding_ends_what_a_play_said_of_its_failures
         assert mgr.latest_status.get("stream_event") == said, extra
     out._emit(PlaybackStatus(state="playing", position=1.0, length=200.0, queue_index=1))
     assert "stream_event" not in mgr.latest_status
+
+
+def test_a_play_from_a_slot_is_said_when_its_streams_fail_from_there_on(monkeypatch):
+    """A queue played from its third slot (PLAYBACK-UI-1's "from here", a
+    Resume): the lane fetches from there on, the slots before it never fail.
+    Its first two streams failing — the third's and the fourth's — is said,
+    and every one from the start on failing is "all"."""
+    from playback import tracker
+    monkeypatch.setattr(tracker, "track_play_event", lambda *a, **k: None)
+    mgr = PlaybackManager()
+    mgr.lane.maintain = lambda: None
+    mgr._active = _Stub(mgr._on_backend_status)
+    slots = [QueueItem(track_id=f"t-{n}", media_file_id=None, source={"kind": "track"},
+                       title=f"T{n}", play={"kind": "pending"}) for n in (1, 2, 3, 4, 5)]
+    mgr.queue.replace(slots)
+    mgr._play_started(slots, slots[2])
+    mgr._slot_failed(slots[2], 3, "region")
+    assert "stream_event" not in mgr.latest_status
+    mgr._slot_failed(slots[3], 4, "region")
+    said = mgr.latest_status["stream_event"]
+    assert (said["all"], said["reason"]) == (False, "region")
+    mgr._slot_failed(slots[4], 5, "region")
+    assert mgr.latest_status["stream_event"]["all"] is True
 
 
 def test_renderer_online_is_decided_by_the_first_address_that_answers():

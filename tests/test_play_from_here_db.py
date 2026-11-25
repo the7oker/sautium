@@ -342,7 +342,7 @@ def test_a_queue_never_played_or_heard_out_keeps_no_stop(node):
 
 def test_a_queue_that_played_out_is_archived_with_no_stop(node):
     _album(node)
-    _heard(node, 4, 190.0)
+    _heard(node, 4, 120.0)        # far from its end: only the play-out keeps it from a stop
     node["mgr"]._on_backend_status(node["out"], PlaybackStatus(state="stopped", queue_index=4))
     node["cur"].execute("SELECT count(*) FROM session_tracks st JOIN listening_sessions ls "
                         "ON ls.id = st.session_id WHERE ls.ended_at IS NOT NULL")

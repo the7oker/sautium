@@ -6703,11 +6703,15 @@
         // data-position is the slot (what a replay's start names), whatever
         // the row is: a tap here chooses where Play starts (B-158), on every
         // kind of row alike.
+        // A slot of his own with no file id (held at the HQPlayer, its file
+        // gone since, or streamed for want of it) is a held row: its "+"
+        // queues the track by uuid, the backend picking the copy.
         const attrs = (t.is_phantom
           ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
             + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
-          : `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id || ''))}"`
-            + ` data-track-id="${escapeHtml(String(t.track_id || ''))}"`)
+          : t.media_file_id
+            ? `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id))}"`
+            : `class="track-row is-held-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`)
           + ` data-position="${escapeHtml(String(t.position))}"`;
         trackParts.push(`
           <button ${attrs} type="button">
@@ -6765,7 +6769,7 @@
         </div>
       </div>
       <div class="album-actions${singleAlbumId ? ' has-album' : ''}">
-        <button class="btn-primary" type="button" data-action="play-session"${count ? '' : ' disabled'}>${SVG_PLAY} Play</button>
+        <button class="btn-primary" type="button" data-action="play-session"${count ? '' : ' disabled'}>${SVG_PLAY} <span data-play-label>Play</span></button>
         ${singleAlbumId ? `
           <button class="btn-secondary album-open-btn" type="button" data-album-id="${escapeHtml(singleAlbumId)}">
             <span class="btn-icon">${SVG_DISC}</span><span class="btn-label">Album</span>
@@ -6849,15 +6853,19 @@
           : dur.dataset.dur;
         if (dur.innerHTML !== html) dur.innerHTML = html;
       });
-      if (playBtn) {
-        const label = `${SVG_PLAY} ${view.resume ? 'Resume' : 'Play'}`;
-        if (playBtn.innerHTML !== label) playBtn.innerHTML = label;
-      }
+      const label = playBtn && playBtn.querySelector('[data-play-label]');
+      const word = view.resume ? 'Resume' : 'Play';
+      if (label && label.textContent !== word) label.textContent = word;
       return true;
     };
     rows.forEach((row, i) => row.addEventListener('click', (e) => {
       if (e.target.closest('.track-add, .track-confirm-bar') || row.classList.contains('is-confirming')) return;
       e.stopPropagation();
+      if (view.playing && view.at === i + 1) {
+        // its own playing row: pause / play, as the queue sheet's
+        if (typeof window.togglePlayPause === 'function') window.togglePlayPause();
+        return;
+      }
       if (view.playing) {
         onceInFlight(row, async () => {
           const resp = await fetch('/api/player/jump', {
@@ -6882,12 +6890,16 @@
     }));
     // The dot Play starts from, as drawn now (none while the session plays)
     screen.sessionStart = () => (view.dot ? { position: view.dot.position, seconds: view.dot.seconds } : null);
-    const redraw = () => { if (!draw()) {
+    const redraw = () => draw();
+    const detach = () => {
+      if (screen.isConnected) return;
       document.removeEventListener('np-update', redraw);
       document.removeEventListener('playlist-loaded', redraw);
-    } };
+      window.removeEventListener('sautium:route', detach);
+    };
     document.addEventListener('np-update', redraw);
     document.addEventListener('playlist-loaded', redraw);
+    window.addEventListener('sautium:route', detach);
     draw();
   }
 
@@ -8030,7 +8042,7 @@
       ? row.getAttribute('data-phantom-tid') : null;
     const mfId = phantomTid ? null : parseInt(
       row.getAttribute('data-media-file-id')
-        || row.getAttribute('data-track-id'),
+        || (row.classList.contains('np-sim-row') ? row.getAttribute('data-track-id') : null),
       10,
     );
     if (!phantomTid && !mfId) return;

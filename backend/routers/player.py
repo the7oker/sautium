@@ -3327,7 +3327,7 @@ def _push_segment(segments: list, kind: str, items: list) -> None:
         segments.append((kind, list(items)))
 
 
-def _entity_segments(refs: list) -> tuple[list, list, list]:
+def _entity_segments(refs: list) -> tuple[list, list, list, list]:
     """Expand canonical refs into consecutive ('owned', [file rows]) /
     ('phantom', [TrackQuery]) segments, preserving the caller's order. An
     album is read per track: a file row where a copy opens here now, the
@@ -3393,6 +3393,16 @@ def _segment_items(segments: list, left: Optional[list] = None, *,
     return items, left
 
 
+def _excerpt_only(track_id: str) -> bool:
+    """A streamed track that will play as the 30 s excerpt: its demo listen
+    spent, and no provider here plays it whole beyond the demo channel (a
+    bring-your-own full-length provider never is limited)."""
+    from streaming import demo, service as streaming_service
+    whole = any(not p.manifest.demo_limited and not p.manifest.excerpt
+                for p in streaming_service.providers_preferred())
+    return not whole and bool(demo.consumed([track_id]))
+
+
 def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = True,
                    fill: bool = False, start: Optional[tuple] = None) -> list:
     """Replace the queue with these segments, every slot at once (and start
@@ -3419,10 +3429,8 @@ def _play_segments(segments: list, *, archive: Callable[[], None], play: bool = 
             raise HTTPException(status_code=404, detail=_NOTHING_FROM_HERE)
         if head.track_id != tids[at]:
             second = 0.0
-        elif second and head.media_file_id is None:
-            from streaming import demo
-            if demo.consumed([head.track_id]):
-                second = 0.0        # it plays as the 30 s excerpt now: a second past it is none
+        elif second and head.source.get("kind") == "track" and _excerpt_only(head.track_id):
+            second = 0.0        # it plays as the 30 s excerpt now: a second past it is none
         begin = (head, second)
     added, _gen = manager.replace_queue(items, play=play, archive=archive, start=begin)
     if not added:
@@ -3539,7 +3547,7 @@ def play_entities(req: QueueEntitiesRequest):
 # slot and could not replay an all-streamed track session at all.)
 
 
-def _session_segments(session_id: str) -> tuple[list, int]:
+def _session_segments(session_id: str) -> tuple[list, int, list]:
     """('owned', [media rows]) / ('phantom', [TrackQuery]) segments for a
     session snapshot, in slot order, plus the count of slots nothing can
     play. An owned slot plays the copy the ACTIVE output opens natively

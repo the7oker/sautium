@@ -561,7 +561,7 @@ class BrowserBackend(PlayerBackend):
         if kind == "replace":
             if play and len(self._queue):
                 if start is not None:
-                    self._start_at(self._queue.index_of(start[0]) or 1, play=True,
+                    self._start_at(self._queue.index_of(start[0]), play=True,
                                    position=start[1])
                 else:
                     self._start_at(1, play=True)

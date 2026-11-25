@@ -143,3 +143,82 @@ def test_play_sends_the_dot_drawn_and_the_session_rows_choose():
     # and the generic amber pass leaves the session page to its own
     hl = _function("updatePlayingHighlight()")
     assert hl.count(".detail-screen:not([data-session-id])") == 3
+
+
+# -- B-158: the page's own wiring, on a DOM of stand-ins ---------------------------
+
+WIRE = r"""
+'use strict';
+const listeners = { doc: {}, win: {} };
+const on = (where) => (type, fn) => ((listeners[where][type] = listeners[where][type] || []).push(fn));
+const off = (where) => (type, fn) => {
+  listeners[where][type] = (listeners[where][type] || []).filter(f => f !== fn); };
+const document = { addEventListener: on('doc'), removeEventListener: off('doc') };
+const window = { addEventListener: on('win'), removeEventListener: off('win'),
+                 currentPlaylist: [], currentStatus: { state: 'stopped' },
+                 togglePlayPause: () => sent.push(['toggle']) };
+const fire = (where, type) => (listeners[where][type] || []).slice().forEach(f => f());
+const sent = [];
+const fetch = (url, opts) => { sent.push([url, JSON.parse(opts.body)]);
+  return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) }); };
+const onceInFlight = (el, fn) => fn();
+const reportPlaybackResult = async () => true;
+const answerSays = () => false;
+const notices = { toast() {} };
+const escapeHtml = s => String(s);
+const SVG_PLAY = '<svg/>';
+const fmtDuration = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+%(view)s
+%(wire)s
+const classes = () => { const set = new Set(); return {
+  toggle: (c, on) => (on ? set.add(c) : set.delete(c)), contains: c => set.has(c), has: c => set.has(c) }; };
+const ids = ['a', 'b', 'c', 'd'];
+const rows = ids.map((t, i) => {
+  const dur = { dataset: { dur: '3:20' }, innerHTML: '3:20' };
+  const row = { dataset: { position: String(i), trackId: t }, classList: classes(), handlers: [],
+                querySelector: () => dur, dur,
+                addEventListener: (type, fn) => row.handlers.push(fn) };
+  return row;
+});
+const label = { textContent: 'Play' };
+const screen = { isConnected: true, querySelectorAll: () => rows,
+                 querySelector: () => ({ querySelector: () => label }) };
+const tap = (i) => rows[i].handlers.forEach(f => f({ target: { closest: () => null }, stopPropagation() {} }));
+const look = () => ({ start: rows.findIndex(r => r.classList.has('is-start')),
+                      playing: rows.findIndex(r => r.classList.has('is-playing')),
+                      dur: rows.map(r => r.dur.innerHTML.replace(/<[^>]+>/g, '')).find(h => h !== '3:20') || null,
+                      label: label.textContent });
+const out = [];
+(async () => {
+  wireSessionDot(screen, { tracks: ids.map((t, i) => ({ track_id: t, position: i })),
+                           stop: { position: 2, seconds: 75 } });
+  out.push(look());                                   // 0: the stop
+  tap(0); out.push(look()); out.push(sent.length);    // 1: a tap moves it, 2: nothing sent
+  window.currentPlaylist = ids.map(t => ({ track_id: t }));
+  window.currentStatus = { state: 'playing', track_index: 2 };
+  fire('doc', 'np-update'); out.push(look());         // 3: playing: the amber dot alone
+  tap(3); await new Promise(r => setTimeout(r, 0));
+  tap(1); out.push(sent.slice());                     // 4: a jump, then its own row toggles
+  window.currentPlaylist = [{ track_id: 'x' }];
+  window.currentStatus = { state: 'stopped' };
+  fire('doc', 'np-update'); out.push(look());         // 5: the choice gave way: the stop again
+  screen.isConnected = false;
+  fire('win', 'sautium:route');
+  out.push([(listeners.doc['np-update'] || []).length, (listeners.doc['playlist-loaded'] || []).length,
+            (listeners.win['sautium:route'] || []).length]);   // 6: let go with its screen
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+def test_the_session_page_draws_one_dot_and_its_taps_choose_or_jump():
+    out = _node(WIRE % {
+        "view": _function("sessionDotView(slots, positions, playlist, status, stop, chosen)"),
+        "wire": _function("wireSessionDot(screen, d)")})
+    stop, moved, nothing_sent, playing, sent, back, let_go = out
+    assert stop == {"start": 2, "playing": -1, "dur": "1:15 / 3:20", "label": "Resume"}
+    assert moved == {"start": 0, "playing": -1, "dur": None, "label": "Play"} and nothing_sent == 0
+    assert playing == {"start": -1, "playing": 1, "dur": None, "label": "Play"}
+    assert sent == [["/api/player/jump", {"index": 4, "track_id": "d"}], ["toggle"]]
+    assert back == stop
+    assert let_go == [0, 0, 0]
