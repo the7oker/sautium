@@ -27,7 +27,7 @@ from desktop.p2p.mb_slice_queries import BANDCAMP_PAGE
 from genre_queries import album_genre_chips
 from playback import substitute
 from playback.manager import active_hqp_endpoint
-from sql_queries import ALBUM_FILES, album_away, best_rip_order, owned_rank, rip_quality
+from sql_queries import ALBUM_FILES, album_away, best_rip_order, not_here_why, owned_rank, rip_quality
 
 
 router = APIRouter(prefix="/api/albums", tags=["albums"])
@@ -46,9 +46,7 @@ _PICKED_FILES = f"""
     SELECT DISTINCT ON (f.track_id)
            f.id, f.location, f.track_id, f.album_variant_id, f.is_lossless,
            f.sample_rate, f.bit_depth, f.duration_seconds,
-           f.disc_number, f.track_number, f.here,
-           CASE WHEN f.here THEN NULL WHEN f.absent_since IS NOT NULL THEN 'away'
-                ELSE 'disk' END AS why
+           f.disc_number, f.track_number, f.here, {not_here_why('f')} AS why
     FROM ({ALBUM_FILES}) f
     WHERE (%(vid)s::int IS NULL OR f.album_variant_id = %(vid)s::int)
     ORDER BY f.track_id, {owned_rank('f')}, (f.absent_since IS NOT NULL), {best_rip_order('f')}
@@ -515,7 +513,9 @@ def get_album(
     # The variants offered for picking follow the output: when the HQPlayer
     # that is the output holds this album, its copies are the choice (one,
     # usually — the pill then has nothing to pick); otherwise the local rips,
-    # never a copy at an HQPlayer that is not playing.
+    # never a copy at an HQPlayer that is not playing. Each says whether it
+    # is away (a Rescan found none of its files) and whether a file of it
+    # opens here now — the album's own rule over that copy alone.
     album["variants"] = db_query(f"""
         WITH here AS (
             SELECT 1 FROM album_variants
@@ -530,6 +530,8 @@ def get_album(
                av.is_lossless,
                av.directory_path,
                av.arrived_at,
+               av.absent_since IS NOT NULL AS away,
+               {album_away('av.album_id', 'av.id')} IS NULL AS here,
                (SELECT mf.id FROM media_files mf
                 WHERE mf.album_variant_id = av.id
                 ORDER BY mf.disc_number, mf.track_number

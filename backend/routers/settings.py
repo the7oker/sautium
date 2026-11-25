@@ -2636,6 +2636,9 @@ def _hardware_state() -> Dict[str, Any]:
     # A node a restart policy holds (the image) can be restarted from here
     from claude_code_runner import IN_DOCKER
     state["restartable"] = IN_DOCKER
+    # Whether an offline database is here: More's list and the pointers to
+    # it offer a Nano node the screen only then
+    state["dumps_held"] = _dumps_held(mb_job.section(), lb_job.section())
     return state
 
 
@@ -3225,7 +3228,16 @@ def get_databases() -> Dict[str, Any]:
     screen wakes on every load-progress tick. A new dump family is a key
     here and an entry in the UI's DUMP_FAMILIES."""
     # `nano`: the screen says why the dumps are not offered there
-    return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section(), "nano": _nano()}
+    mb, lb = mb_job.section(), lb_job.section()
+    return {"musicbrainz": mb, "listenbrainz": lb, "nano": _nano(), "dumps_held": _dumps_held(mb, lb)}
+
+
+def _dumps_held(*sections: Dict[str, Any]) -> bool:
+    """A dump family loaded, or its load on the way (a running job's
+    progress is the screen's to show): what a Nano node is offered the
+    Offline databases screen for — a restore, an owner who loaded one
+    before. `sections`: DumpJob.section() of each family."""
+    return any(s["loaded"] or s["update"]["running"] for s in sections)
 
 
 # ============================================================

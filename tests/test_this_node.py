@@ -109,6 +109,33 @@ def test_the_block_reads_what_the_install_carries_and_what_runs(db, tmp_path, mo
     assert settings_router.get_hardware_profile()["birth_preset"] == "nano"
 
 
+def test_the_block_says_whether_the_node_holds_an_offline_database(db, monkeypatch):
+    """PI-NODE-2E §5: `dumps_held` — either dump family loaded or loading —
+    on the hardware answer the More list reads, and on the Offline databases
+    screen's own answer, one rule for both."""
+    settings_router = pytest.importorskip("routers.settings")
+    monkeypatch.setattr(hardware_profile, "resolve", lambda: _profile("off"))
+
+    def held() -> tuple:
+        return (settings_router.get_hardware_profile()["dumps_held"],
+                settings_router.get_databases()["dumps_held"])
+
+    assert held() == (False, False)
+    # a load on its way is held: its screen shows the progress
+    monkeypatch.setitem(settings_router.lb_job.state, "running", True)
+    assert held() == (True, True)
+    monkeypatch.setitem(settings_router.lb_job.state, "running", False)
+    db.execute("INSERT INTO mb_artist (id, gid, name, sort_name) "
+               "VALUES (1, gen_random_uuid(), 'Sade', 'Sade')")
+    db.execute("ANALYZE mb_artist")
+    try:
+        assert held() == (True, True)
+    finally:
+        db.execute("DELETE FROM mb_artist")
+        db.execute("ANALYZE mb_artist")
+    assert held() == (False, False)
+
+
 # -- the restart ---------------------------------------------------------------------------------
 
 def test_a_restart_ends_the_process_only_after_its_answer_and_only_in_the_image(monkeypatch):
@@ -317,10 +344,16 @@ CASES = {
 }
 
 
+FULL_NODE = ("Offline databases (the MusicBrainz catalogue, 7.5 GB) are offered on a full node: "
+             "turning the AI models on makes this one.")
+
+
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_blocks_rows_say_each_state_in_its_words():
-    fns = "\n".join(_block(head) for head in (
-        "function hwProfileName(hw) {", "function hwModelsRow(hw) {", "function hwSoftwareRow(hw, host) {"))
+    fns = "\n".join([_block("const DUMPS_ON_A_FULL_NODE = ", ";\n"), "let _hardware = null;",
+                     *(_block(head) for head in (
+                         "function dumpsOffered(hw = _hardware) {", "function hwProfileName(hw) {",
+                         "function hwModelsRow(hw) {", "function hwSoftwareRow(hw, host) {"))])
     profiles = [{"nano": True, "profile": "lite"}, {"nano": False, "profile": "lite"},
                 {"nano": False, "profile": "full"}]
     models = {
@@ -330,6 +363,13 @@ def test_the_blocks_rows_say_each_state_in_its_words():
         "absent in an image": {"models": "absent", "restartable": True},
         "absent on a node born Nano": {"models": "absent", "restartable": True, "birth_preset": "nano"},
         "absent on a machine": {"models": "absent", "restartable": False},
+        # PI-NODE-2E §5: a Nano node holding no offline database is told where they are offered
+        "off on a Nano node": {"models": "off", "models_switch": False, "restart_required": False,
+                               "nano": True, "dumps_held": False},
+        "absent on a Nano node": {"models": "absent", "restartable": True, "birth_preset": "nano",
+                                  "nano": True, "dumps_held": False},
+        "a Nano node holding one": {"models": "off", "models_switch": False, "restart_required": False,
+                                    "nano": True, "dumps_held": True},
     }
     driver = DRIVER % {"fns": fns, "profiles": json.dumps(profiles), "models": json.dumps(models),
                        "cases": json.dumps(CASES)}
@@ -350,6 +390,13 @@ def test_the_blocks_rows_say_each_state_in_its_words():
             "machine instead, run on it: ./sautium setup --preset full (it downloads about 10 GB, and needs "
             "25 GB of free disk and 8 GB of memory to work well)."),
         "absent on a machine": "AI models Not available: no AI models exist for this machine.",
+        "off on a Nano node": f"AI models Off on this machine Turn on {FULL_NODE}",
+        "absent on a Nano node": (
+            "AI models Off — this node was set up as Nano, without the AI models: sound features arrive "
+            "from other Sautium nodes, and nothing is missing from your library. To analyse music on this "
+            "machine instead, run on it: ./sautium setup --preset full (it downloads about 10 GB, and needs "
+            f"25 GB of free disk and 8 GB of memory to work well). {FULL_NODE}"),
+        "a Nano node holding one": "AI models Off on this machine Turn on",
     }
     said = {name: case["text"] for name, case in out["software"].items()}
     head = "Sautium 0.3.0"
@@ -376,6 +423,132 @@ def test_the_blocks_rows_say_each_state_in_its_words():
     # The version is what a person reads; the commit is support's and rides in the value's title
     assert "0.3.0" in said["never checked"] and "4f2a91c0e7b3" not in said["never checked"]
     assert 'title="4f2a91c0e7b3"' in out["software"]["never checked"]["raw"]
+
+
+# -- Nano's More (PI-NODE-2E §5) ------------------------------------------------------------------
+
+NANO = {"nano": True, "dumps_held": False}
+NANO_HOLDING = {"nano": True, "dumps_held": True}
+FULL = {"nano": False, "dumps_held": False}
+
+
+def _method(head: str) -> str:
+    start = SOURCE.index(f"\n    {head}") + 1
+    return SOURCE[start:SOURCE.index("\n    },\n", start) + len("\n    }")]
+
+
+MORE_DRIVER = r"""
+'use strict';
+let _hardware = null, _hardwareAsk = null;
+%(fns)s
+const answers = %(answers)s;
+let asked = 0;
+const fetch = url => {
+  if (url !== '/api/settings/hardware') throw new Error(url);
+  const a = answers[asked++];
+  return a === 'fail' ? Promise.reject(new Error('down'))
+                      : Promise.resolve({ ok: true, json: () => Promise.resolve(a) });
+};
+const log = console.log;
+console.warn = () => {};
+const row = { hidden: false };
+const drawer = { el: { querySelector: sel => {
+    if (sel !== '[data-go="more/databases"]') throw new Error(sel); return row; } },
+  %(method)s };
+(async () => {
+  const seen = [];
+  await drawer._syncDatabasesRow(false); seen.push([row.hidden, asked]);   // the drawer's build
+  await drawer._syncDatabasesRow(false); seen.push([row.hidden, asked]);   // the answer shared
+  for (let i = 1; i < answers.length; i++) {                               // each open asks again
+    const painted = drawer._syncDatabasesRow(true);
+    const before = row.hidden;                                            // drawn from the answer held
+    await painted; seen.push([before, row.hidden, asked]);
+  }
+  log(JSON.stringify(seen));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_more_list_draws_offline_databases_only_where_the_node_offers_them():
+    """A Nano node holding no dump has no "Offline databases" row; one that
+    holds one, and every other node, has it. Read from the hardware answer:
+    once at the drawer's build, shared, and again at each open — drawn at
+    once from the answer the page holds, so the row does not blink."""
+    fns = "\n".join([_block("function nodeHardware(fresh = false) {"),
+                     _block("function dumpsOffered(hw = _hardware) {")])
+    answers = [NANO, NANO_HOLDING, FULL, "fail", NANO]
+    out = subprocess.run([NODE, "-e", MORE_DRIVER % {
+        "fns": fns, "answers": json.dumps(answers),
+        "method": _method("async _syncDatabasesRow(fresh) {")}],
+        capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == [
+        [True, 1], [True, 1],
+        [True, False, 2],        # it came to hold a dump
+        [False, False, 3],       # a full node
+        [False, False, 4],       # the ask failed: the answer held stands
+        [False, True, 5],
+    ]
+    # the drawer reads it at its build and at each open; the route stays, with its own words
+    at = SOURCE.index("\n  const moreDrawer = {")
+    drawer = SOURCE[at:SOURCE.index("\n  };\n", at)]
+    assert drawer.count("this._syncDatabasesRow(false);") == 1
+    assert drawer.count("this._syncDatabasesRow(true);") == 1
+    assert "['databases',    root => renderDatabases(root)]," in SOURCE
+
+
+WORDS_DRIVER = r"""
+'use strict';
+let _aiCanonShown = [];
+const canonRowHtml = () => '';
+const escapeProfileHtml = s => String(s);
+%(fns)s
+const text = html => html.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').replace(/&amp;/g, '&').trim();
+const canon = { canonization: { available: true, enabled: true, free: true, mb_dump: false, job: {} } };
+const out = {};
+for (const offered of [true, false]) {
+  out[offered] = {
+    off: text(mbScopeWords('off', offered)),
+    searching: text(mbScopeWords('searching', offered)),
+    none: text(mbScopeWords('none', offered)),
+    cooldown: mbCooldownWords(12, offered),
+    canon: text(_renderAiCanon(canon, offered)).match(/Needs the local.*?(?= Run now)/)[0],
+  };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_pointers_to_offline_databases_name_the_network_alone_where_none_is_offered():
+    """Discovery's MusicBrainz chip (its three states), the rate-limit line
+    and the AI canonization's need: on a Nano node holding no dump none of
+    them sends the person to a screen that offers nothing."""
+    fns = "\n".join(_block(head) for head in (
+        "function mbScopeWords(state, offered) {", "function mbCooldownWords(seconds, offered) {",
+        "function _renderAiCanon(ai, offered) {"))
+    out = subprocess.run([NODE, "-e", WORDS_DRIVER % {"fns": fns}],
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    said = json.loads(out.stdout)
+    assert all("Offline databases" in words for words in said["true"].values())
+    assert said["false"] == {
+        "off": ("P2P sharing is off, so this node asks no other node about artists. Turn it on in "
+                "More → Sync & P2P, and it searches the network's catalog nodes."),
+        "searching": "Looking for MusicBrainz catalog nodes on the network — give it a minute.",
+        "none": "No MusicBrainz catalog nodes are reachable right now.",
+        "cooldown": "Network search is rate-limited (shared volunteer nodes) — retry in ~12s.",
+        "canon": "Needs the local MusicBrainz catalogue — canonization resolves names against it.",
+    }
+    # each place asks the one rule, from the answer the page holds
+    assert "mbScopeWords(chip.dataset.mbState, dumpsOffered())" in SOURCE
+    assert "mbCooldownWords(data.cooldown, dumpsOffered())" in SOURCE
+    assert "_renderAiCanon(ai, dumpsOffered(hw))" in SOURCE
+    assert "if (!dumpsOffered(data)) {" in SOURCE
+    # the route says why; the way to a full node is said on Profile
+    nano_words = _block("const DUMPS_NOT_ON_NANO = ", "';\n")
+    assert "Profile" not in nano_words and "AI models" not in nano_words
 
 
 # -- the trail's three new marks (§4.1) ---------------------------------------------------------

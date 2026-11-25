@@ -41,7 +41,8 @@ from playback.queue import resolved_artwork as _resolved_artwork
 from playback.queue import resolved_durations as _resolved_durations
 from playback.sessions import _SESSION_ORIGINS
 from serving import EventStream
-from sql_queries import ALBUM_FILES, HERE, TRACK_FILES, best_rip_order, here, owned_rank, rip_quality
+from sql_queries import (ALBUM_FILES, HERE, TRACK_FILES, best_rip_order, here, not_here_why, owned_rank,
+                         rip_quality)
 
 logger = logging.getLogger(__name__)
 
@@ -3081,7 +3082,7 @@ def _gone() -> list:
 
 # Why a row of an owned track names no file that opens: its copies are away
 # (a Rescan set them aside), or lie under a folder that does not answer.
-_WHY = "CASE WHEN {f}.here THEN NULL WHEN {f}.absent_since IS NOT NULL THEN 'away' ELSE 'disk' END"
+_WHY = not_here_why("{f}")
 
 _NOT_HERE_UNTIL = {"disk": "its disk is connected", "away": "its files are back"}
 

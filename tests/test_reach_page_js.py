@@ -146,6 +146,82 @@ def test_the_album_screen_draws_a_row_that_streams_as_a_not_owned_tracks_and_one
     assert _rows({**payload, "away_part": None, "tracks": [{**track, "here": True}]}) == [None]
 
 
+VARIANTS = WORDS + "\n" + _block("function variantLabel(v) {") + r"""
+console.log(JSON.stringify(VARIANTS.map(variantLabel)));
+"""
+
+
+def test_the_variant_picker_names_a_copy_that_is_away_or_not_connected():
+    """PI-NODE-2E H2: two copies a move left with the same specs and the
+    same folder names read apart by their state, in the album page's
+    words; a copy that is here reads as before."""
+    rip = {"variant_id": 1, "sample_rate": 44100, "bit_depth": 16, "file_format": "FLAC",
+           "location": "local", "directory_path": "/music/Mamanet/Frisson"}
+    said = _node(VARIANTS.replace("VARIANTS.map", json.dumps([
+        {**rip, "away": False, "here": True},
+        {**rip, "away": True, "here": False},
+        {**rip, "away": False, "here": False},
+        rip,                                                   # a payload of before the fields
+        {**rip, "location": "hqplayer", "hqp_label": "Box", "away": False, "here": True},
+    ]) + ".map"))
+    base = "44.1 kHz · 16-bit · FLAC · Mamanet/Frisson"
+    assert said == [base, f"{base} · away", f"{base} · not connected", base, f"{base} · at Box"]
+
+
+SESSION_ROWS = r"""
+const escapeHtml = s => String(s).replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const fmtDuration = s => `${s}s`;
+const SVG_PLUS = '+';
+const d = %(payload)s;
+const out = sessionOut(d);
+console.log(JSON.stringify(d.tracks.map((t, i) => {
+  const html = sessionTrackRow(t, i + 1, out, '<i>lines</i>').replace(/\s+/g, ' ').trim();
+  return { open: html.slice(0, html.indexOf('>') + 1), lines: html.includes('<i>lines</i>'),
+           rank: (html.match(/track-rank">([^<]*)</) || [])[1],
+           dur: (html.match(/track-dur-num">([^<]*)</) || html.match(/track-dur">([^<]*)</) || [])[1],
+           add: html.includes('aria-label="Add to queue"') }; })));
+"""
+
+
+def _session_rows(payload: dict) -> list:
+    fns = "\n".join([WORDS] + [_block(head) for head in (
+        "function albumOutRow(t, rowKind, albumId, lines) {", "function sessionOut(d) {",
+        "function sessionTrackRow(t, n, out, lines) {")])
+    return _node(fns + SESSION_ROWS.replace("%(payload)s", json.dumps(payload)))
+
+
+def test_a_sessions_rows_draw_his_track_with_no_file_here_as_the_album_page_does():
+    """PI-NODE-2E H5: in a Listening history session his own track with no
+    file here now is the album page's out row — dimmed, no tap, no [+]
+    where nothing streams; by track uuid under the slot's album where the
+    node streams — and every other row is drawn as before."""
+    owned = {"track_id": "t-1", "media_file_id": 7, "album_id": "al-1", "title": "One",
+             "duration_seconds": 200, "is_phantom": False}
+    phantom = {"track_id": "t-9", "media_file_id": None, "album_id": "al-2", "title": "Nine",
+               "duration_seconds": 180, "is_phantom": True, "here": None, "why": None}
+    here = {**owned, "here": True, "why": None}
+    out = {**owned, "here": False, "why": "disk"}
+    waits = _session_rows({"streams": False, "tracks": [here, out, phantom]})
+    assert waits == [
+        {"open": '<button class="track-row" data-media-file-id="7" type="button">', "lines": True,
+         "rank": "1", "dur": "200s", "add": True},
+        {"open": '<div class="track-row is-out-track">', "lines": True, "rank": "2", "dur": "200s",
+         "add": False},
+        {"open": '<button class="track-row is-phantom-track" data-track-id="t-9" data-album-id="al-2" '
+                 'type="button">', "lines": True, "rank": "3", "dur": "180s", "add": True},
+    ]
+    streams = _session_rows({"streams": True, "tracks": [here, out]})
+    assert streams[0] == waits[0]
+    assert streams[1] == {
+        "open": '<div class="track-row is-phantom-track" data-track-id="t-1" data-album-id="al-1">',
+        "lines": True, "rank": "2", "dur": "200s", "add": True}
+    # every row here, or a payload of before the fields: the session as it was
+    assert _session_rows({"tracks": [{**owned}, phantom]})[0] == waits[0]
+    assert _session_rows({"streams": True, "tracks": [here]}) == [waits[0]]
+    # the screen draws its rows by the function
+    assert "trackParts.push(sessionTrackRow(t, n, out," in SOURCE
+
+
 TOAST = WORDS + "\n" + _block("async function reportPlaybackResult(resp, body, word) {") + r"""
 const toasts = [];
 const notices = { toast: t => toasts.push(t) };
