@@ -524,6 +524,76 @@ def test_the_shape_rule_and_the_generational_suffix(cur, library, templates):
     assert _credits(cur)["Clair de lune"] == ["Claude Debussy"]
 
 
+def test_the_last_ampersand_of_a_comma_list_is_the_lists(cur, library, templates):
+    """B-136 (CANON-TRACKS-1 §4): inside a comma list the last part's "&" /
+    "and" joins the list, an Oxford comma's too; a value without a comma is
+    a team; a last part the node knows whole stays one name; the "&" says a
+    list before the shape rule does. Red before: `Klaus Badelt & Lisa
+    Gerrard` was one composer, and a dump-less node kept `Björk, Guy
+    Sigsworth & Mark Bell` as one name."""
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    _flac(templates, library / "SG" / "Bookends" / "01.flac", "Mrs. Robinson", "Simon & Garfunkel",
+          "Bookends", ["Paul Simon"], 1)
+    for i, (title, value) in enumerate((("Now We Are Free", "Hans Zimmer, Klaus Badelt & Lisa Gerrard"),
+                                        ("Hidden Place", "Björk, Guy Sigsworth & Mark Bell"),
+                                        ("Oxford", "Ann Writer, Bob Writer, and Cy Writer"),
+                                        ("Yesterday", "Lennon & McCartney"),
+                                        ("Oklahoma!", "Rodgers and Hammerstein"),
+                                        ("Cover", "Paul Simon, Simon & Garfunkel")), 1):
+        _flac(templates, library / "V" / "Mix" / f"0{i}.flac", title, "Someone", "Mix", [value], i)
+    _scan()
+    credits = _credits(cur)
+    assert credits["Now We Are Free"] == ["Hans Zimmer", "Klaus Badelt", "Lisa Gerrard"]
+    assert credits["Hidden Place"] == ["Björk", "Guy Sigsworth", "Mark Bell"]
+    assert credits["Oxford"] == ["Ann Writer", "Bob Writer", "Cy Writer"]
+    assert credits["Yesterday"] == ["Lennon & McCartney"]
+    assert credits["Oklahoma!"] == ["Rodgers and Hammerstein"]
+    assert credits["Cover"] == ["Paul Simon", "Simon & Garfunkel"]       # the performer's row
+    assert _artist_id(cur, "Klaus Badelt & Lisa Gerrard") is None
+    _dump(cur, True)                                                      # the shape rule's other side
+    assert _rederive() == 0
+    _dump(cur, False)
+
+
+def test_the_release_derives_the_last_ampersand_once_and_sweeps_what_it_left(
+        cur, library, templates, scratch_dsn, monkeypatch):
+    """db_migrate's composer_commas_v2 on a database the old rule credited:
+    the `X & Y` composer row is gone after the start, its two writers
+    credited; a performing artist of such a name is kept; a second start
+    does nothing."""
+    import db_migrate
+    import seed_import
+    from config import settings
+    from urllib.parse import urlparse
+    _clean(cur)
+    cur.execute("DELETE FROM mb_artist")
+    _flac(templates, library / "Z" / "Z" / "01.flac", "Now We Are Free", "Someone", "Z",
+          ["Hans Zimmer, Klaus Badelt & Lisa Gerrard"], 1)
+    _scan()
+    cur.execute("DELETE FROM track_credits")
+    for pos, name in enumerate(("Hans Zimmer", "Klaus Badelt & Lisa Gerrard")):
+        cur.execute("INSERT INTO artists (id, name, name_latin) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                    (str(artist_uuid(name)), name, name.lower()))
+        cur.execute("""INSERT INTO track_credits (track_id, role, artist_id, source, position)
+                       SELECT id, 'composer', %s, 'tag', %s FROM tracks WHERE title = 'Now We Are Free'""",
+                    (str(artist_uuid(name)), pos))
+    url = urlparse(scratch_dsn)
+    for key, value in dict(postgres_host=url.hostname, postgres_port=url.port,
+                           postgres_user=url.username, postgres_password=url.password,
+                           postgres_db=url.path.lstrip("/")).items():
+        monkeypatch.setattr(settings, key, value)
+    cur.execute("DELETE FROM _schema_migrations WHERE filename = 'composer_commas_v2'")
+    marked = db_migrate._marked
+    monkeypatch.setattr(db_migrate, "_marked", lambda c, name: (
+        marked(c, name) if name == "composer_commas_v2" else True))
+    monkeypatch.setattr(seed_import, "bundle_info", lambda: None)
+    assert db_migrate.apply_pending()["composer_commas_v2"] == 1
+    assert _credits(cur) == {"Now We Are Free": ["Hans Zimmer", "Klaus Badelt", "Lisa Gerrard"]}
+    assert _artist_id(cur, "Klaus Badelt & Lisa Gerrard") is None
+    assert "composer_commas_v2" not in db_migrate.apply_pending()
+
+
 def test_a_canon_run_after_the_last_slice_row_dropped_derives_the_written_form(
         cur, library, templates, main_module):
     """The whole canon pass the slice cycle, the launcher's endpoint and a

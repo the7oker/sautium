@@ -1136,9 +1136,10 @@ def fold_credit_duplicates(dry_run: bool = True, artist_ids: list = None) -> dic
     slots. Evidence: the rows never share a variant (a folder holding
     "X (feat. A)" and "X (feat. B)" holds two tracks), and a file of each
     sits at the same slot or within a few seconds of length — a guest
-    version of a different length stays its own track. Keeper: a row with
-    a file here, else one bound to a recording, else the older. Per-album
-    commit; artist_ids scopes to those primary artists."""
+    version of a different length stays its own track. Keeper: the one rule
+    of both folds (_keeper) — never which row came first, which differs from
+    node to node. Per-album commit; artist_ids scopes to those primary
+    artists."""
     st = {"groups": 0, "merged": 0, "vetoed": 0, "unproven": 0}
     scope = ""
     params: dict = {"pat": _FEAT_PATTERN, "tol": _CREDIT_LENGTH_TOLERANCE}
@@ -1186,11 +1187,8 @@ def fold_credit_duplicates(dry_run: bool = True, artist_ids: list = None) -> dic
             tracks: dict = {}
             for r in files:
                 tracks.setdefault(r["track_id"], []).append(r)
-            def rank(tid):
-                fs = tracks[tid]
-                return (any(r["location"] == "local" for r in fs), fs[0]["bound"],
-                        -fs[0]["created_at"].timestamp(), tid)
-            keeper = max(tracks, key=rank)
+            keeper = _keeper({t: fs[0]["title"] for t, fs in tracks.items()},
+                             _recording_names(list(tracks)))
             for loser, lfiles in tracks.items():
                 if loser == keeper:
                     continue
@@ -1222,6 +1220,170 @@ def fold_credit_duplicates(dry_run: bool = True, artist_ids: list = None) -> dic
                     logger.error("credit fold failed for track %s: %s", loser, e)
     finally:
         db.close()
+    return st
+
+
+def _folded(title: str) -> str:
+    """A title as the keeper compares it with MusicBrainz's name: the
+    identity's normalize over the accents taken off."""
+    t = unicodedata.normalize("NFKD", title or "")
+    return normalize("".join(ch for ch in t if not unicodedata.combining(ch)))
+
+
+def _recording_names(track_ids) -> set:
+    """MusicBrainz's names of the recordings the tracks' files are bound to
+    (the dump's rows or a slice's): what the keeper rule reads."""
+    if not track_ids:
+        return set()
+    return {r["name"] for r in db_query("""
+        WITH g AS (SELECT DISTINCT x.recording_mbid AS gid
+                     FROM (SELECT track_id, recording_mbid FROM media_files
+                           UNION ALL SELECT track_id, recording_mbid FROM hqp_library_files) x
+                    WHERE x.track_id = ANY(%(t)s::uuid[]) AND x.recording_mbid IS NOT NULL)
+        SELECT r.name FROM g JOIN mb_recording r ON r.gid = g.gid""", {"t": list(track_ids)})}
+
+
+def _keeper(titles: dict, names: set) -> str:
+    """Which of tracks folded into one keeps its id ({track id: title},
+    MusicBrainz's names of their recordings) — the one rule of every fold
+    (CANON-TRACKS-1 §3.2, F2), the same on every node that holds them: the
+    one track whose title is a name of its recording ("Music for 18
+    Musicians: Section I" over the box's "Section I"), else, where none is
+    or two are, the smallest uuid. Never which row came first: a node's
+    created_at is its own."""
+    wanted = {_folded(n) for n in names}
+    named = [t for t, title in titles.items() if _folded(title) in wanted]
+    return named[0] if len(named) == 1 else min(titles)
+
+
+# Two owned tracks are one performance (CANON-TRACKS-1 §3.1, B-134) when a
+# file of each is one material with the other (lengths within 2 s, and their
+# own prints alike) and a word says they are the same thing: MusicBrainz's —
+# a file of each bound to one recording — or the album's — a file of each at
+# one position of two copies of one album, their titles alike once folded
+# (canon.occurrence.titled_alike). A print alone is no such word: a vocal
+# and an instrumental edition of one album are one material at two of their
+# positions. Two positions of one copy never fold.
+_TWIN_LENGTH_TOLERANCE = 2.0
+
+_TWIN_PAIRS_SQL = """
+    WITH f AS (
+        SELECT x.track_id, x.album_variant_id AS v, av.album_id,
+               coalesce(x.disc_number, 1) AS d, x.track_number AS n,
+               x.duration_seconds::float AS dur, x.recording_mbid AS rec
+          FROM (SELECT track_id, album_variant_id, disc_number, track_number, duration_seconds,
+                       recording_mbid FROM media_files
+                UNION ALL
+                SELECT track_id, album_variant_id, disc_number, track_number, duration_seconds,
+                       recording_mbid FROM hqp_library_files) x
+          JOIN album_variants av ON av.id = x.album_variant_id
+         WHERE av.absent_since IS NULL AND x.duration_seconds IS NOT NULL),
+    a AS (SELECT * FROM f
+           WHERE (%(tracks)s::uuid[] IS NULL OR f.track_id = ANY(%(tracks)s::uuid[]))
+             AND (%(artists)s::uuid[] IS NULL OR f.track_id IN (
+                  SELECT ta.track_id FROM track_artists ta
+                   WHERE ta.role = 'primary' AND ta.artist_id = ANY(%(artists)s::uuid[]))))
+    SELECT least(a.track_id, b.track_id)::text AS ta, greatest(a.track_id, b.track_id)::text AS tb,
+           bool_or(a.rec = b.rec) AS one_recording,
+           bool_or(a.album_id = b.album_id AND a.d = b.d AND a.n = b.n) AS one_place
+      FROM a JOIN f b ON b.track_id <> a.track_id AND b.v <> a.v
+       AND abs(a.dur - b.dur) <= %(tol)s
+       AND (a.rec = b.rec OR (a.album_id = b.album_id AND a.d = b.d AND a.n = b.n))
+     GROUP BY 1, 2
+"""
+
+
+def fold_copy_twins(dry_run: bool = False, artist_ids: list = None, track_ids: list = None) -> dict:
+    """Fold the owned tracks that are one performance (above) into one — a
+    copy of a box's disc beside its album, a compilation of the same master
+    beside the album — by _update_track_uuid (files, listens, slots,
+    bindings, the better analysis), the keeper by _keeper. Scoped to the
+    tracks of `artist_ids` (the canon's pass) or to `track_ids` (the sonic
+    pass that just gave them a print); neither, the whole library (the data
+    step). A pair one side of which holds no print of its own waits for its
+    analysis; a group that would put two positions of one copy on one track
+    is left as it is (canon.occurrence). Idempotent: a folded pair is one
+    track. Per group commit."""
+    from canon.occurrence import titled_alike
+    from desktop.p2p.material import same_material
+    st = {"pairs": 0, "groups": 0, "merged": 0, "apart": 0, "waiting": 0, "vetoed": 0}
+    if (artist_ids is not None and not artist_ids) or (track_ids is not None and not track_ids):
+        return st
+    pairs = db_query(_TWIN_PAIRS_SQL, {
+        "tracks": [str(t) for t in track_ids] if track_ids is not None else None,
+        "artists": [str(a) for a in artist_ids] if artist_ids is not None else None,
+        "tol": _TWIN_LENGTH_TOLERANCE})
+    if not pairs:
+        return st
+    st["pairs"] = len(pairs)
+    involved = sorted({p["ta"] for p in pairs} | {p["tb"] for p in pairs})
+    titles = {r["id"]: r["title"] for r in db_query(
+        "SELECT id::text AS id, title FROM tracks WHERE id = ANY(%(t)s::uuid[])", {"t": involved})}
+    prints: dict = {}
+    for r in db_query("""SELECT track_id::text AS track_id, chromaprint, duration_seconds
+                           FROM analysis_sources
+                          WHERE NOT imported AND track_id = ANY(%(t)s::uuid[])""", {"t": involved}):
+        prints.setdefault(r["track_id"], []).append((r["chromaprint"], r["duration_seconds"]))
+    copies: dict = {}
+    for r in db_query("""SELECT track_id::text AS track_id, album_variant_id AS v FROM media_files
+                          WHERE track_id = ANY(%(t)s::uuid[])
+                         UNION SELECT track_id::text, album_variant_id FROM hqp_library_files
+                          WHERE track_id = ANY(%(t)s::uuid[])""", {"t": involved}):
+        copies.setdefault(r["track_id"], set()).add(r["v"])
+    root = {t: t for t in involved}
+
+    def find(t):
+        while root[t] != t:
+            root[t] = root[root[t]]
+            t = root[t]
+        return t
+
+    for p in pairs:
+        a, b = p["ta"], p["tb"]
+        if not (p["one_recording"] or (p["one_place"] and titled_alike(titles[a], titles[b]))):
+            st["apart"] += 1
+            continue
+        if a not in prints or b not in prints:
+            st["waiting"] += 1
+            continue
+        if not any(same_material(x[0], x[1], y[0], y[1]) for x in prints[a] for y in prints[b]):
+            st["apart"] += 1
+            continue
+        root[find(a)] = find(b)
+    groups: dict = {}
+    for t in involved:
+        groups.setdefault(find(t), []).append(t)
+    db = SessionLocal()
+    try:
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            st["groups"] += 1
+            held = [v for t in members for v in copies.get(t, ())]
+            if len(held) != len(set(held)):
+                st["vetoed"] += 1
+                logger.info("copy twins %s: two of them in one copy — left apart", members)
+                continue
+            keeper = _keeper({t: titles[t] for t in members}, _recording_names(members))
+            losers = [t for t in members if t != keeper]
+            for loser in losers:
+                logger.info("%strack %s %r is one performance with %s %r — folded",
+                            "[dry] " if dry_run else "", loser, titles[loser], keeper, titles[keeper])
+            if dry_run:
+                st["merged"] += len(losers)
+                continue
+            try:
+                for loser in losers:
+                    _update_track_uuid(db, loser, keeper)
+                db.commit()
+                st["merged"] += len(losers)
+            except Exception as e:
+                db.rollback()
+                logger.error("copy twins: the fold of %s into %s failed: %s", losers, keeper, e)
+    finally:
+        db.close()
+    if st["merged"]:
+        logger.info("copy twins folded: %s", st)
     return st
 
 
@@ -2503,7 +2665,17 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=(),
         apply_editions(dry_run=False, artist_ids=editions_for, waiting=waiting,
                        take_arriving=take_arriving)
     if done:
+        # a copy held in part reads the positions it lacks off the medium its
+        # files are now bound to (canon.occurrence)
+        from canon.occurrence import complete_copies
+        with SessionLocal() as db:
+            complete_copies(db, [r["v"] for r in db_query("""
+                SELECT DISTINCT mf.album_variant_id AS v FROM owned_files mf
+                  JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
+                 WHERE ta.artist_id = ANY(%(ids)s::uuid[])""", {"ids": done})])
+            db.commit()
         fold_credit_duplicates(dry_run=False, artist_ids=done)   # one track read from two copies
+        fold_copy_twins(dry_run=False, artist_ids=done)          # one performance in two copies
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)
         db_execute("UPDATE artists SET last_mb_sync = now() WHERE id::text = ANY(%(ids)s)",

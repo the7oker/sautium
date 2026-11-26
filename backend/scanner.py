@@ -35,10 +35,12 @@ from models import (
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one
 from sql_queries import ARTIST_UNCREDITED
-from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, normalize, is_lossless as check_lossless
+from uuid_utils import (artist_uuid, track_uuid, album_uuid, genre_uuid, normalize, song_key,
+                        is_lossless as check_lossless)
 import file_stat
 from album_identity import assign_dir_albums, dir_disc, group_key
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
+from canon.occurrence import ordinals, settle_copies
 from credits import derive_composers, lock_credits, split_names
 from provenance import ANALYSIS_KINDS, relink_returned_files
 import cue_sheet
@@ -443,6 +445,33 @@ def _classify_dirs(entries, sink: FileSink):
     return batch, existing
 
 
+def _batch_places(entries, dir_albums) -> Dict[str, int]:
+    """{file path: its place among the positions of its copy that carry its
+    title} over the batch's own files (canon.occurrence): a copy is the
+    folder's album as the folder rule groups it, a position (disc, track,
+    cue start). A file with no track number is no position (the first)."""
+    copies: Dict[tuple, list] = defaultdict(list)
+    for dir_path, md in entries:
+        title = md.get("title")
+        artist = md.get("artist") or md.get("album_artist")
+        album_title, album_artist, track_ov, disc_ov = dir_albums.get(
+            md.get("file_path"), (None, None, None, None))
+        number = track_ov if track_ov is not None else md.get("track_number")
+        if not title or not artist or number is None or album_title is None:
+            continue
+        disc = disc_ov if disc_ov is not None else (md.get("disc_number") or 1)
+        pos = (disc or 1, number, float(md["cue_start_seconds"])
+               if md.get("cue_start_seconds") is not None else -1.0)
+        copies[(dir_path, group_key(album_title, album_artist))].append(
+            (md["file_path"], pos, song_key(title, artist)))
+    out: Dict[str, int] = {}
+    for files in copies.values():
+        places = ordinals((pos, key) for _p, pos, key in files)
+        for path, pos, key in files:
+            out[path] = places[(pos, key)]
+    return out
+
+
 class _Albums:
     """Which album a file's assignment (title, credit) belongs to — the
     folder rule (LIBRARY-WATCH-DESIGN §3.4 a, §15.1). The folder, not the
@@ -595,6 +624,10 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     for dir_path, md in entries:
         ov = dir_albums.get(md.get("file_path"), (None, None, None, None))[3]
         batch_discs[dir_path].add(ov if ov is not None else (md.get("disc_number") or 1))
+    # Two positions of one copy are two tracks (canon.occurrence): each file
+    # is minted at its title's place among the batch's files of its copy;
+    # settle_copies, at the end, puts right what the batch could not see.
+    places = _batch_places(entries, dir_albums)
 
     with get_db_context() as db:
         lock_credits(db)
@@ -647,13 +680,14 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             db.flush()
                         pending_cache.append(("artist", a_uid, artist))
                     # ── Track ──
-                    t_uid = track_uuid(metadata["title"], track_artist_name)
+                    occurrence = places.get(file_path, 1)
+                    t_uid = track_uuid(metadata["title"], track_artist_name, occurrence)
                     if t_uid in caches["track"]:
                         track = caches["track"][t_uid]
                     else:
                         track = db.query(Track).filter(Track.id == t_uid).first()
                         if not track:
-                            track = Track(id=t_uid, title=metadata["title"])
+                            track = Track(id=t_uid, title=metadata["title"], occurrence=occurrence)
                             db.add(track)
                             db.flush()
                         pending_cache.append(("track", t_uid, track))
@@ -857,6 +891,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                 logger.error(f"Error processing {file_path}: {e}")
                 stats["errors"] += 1
         derive_composers(db, derive_due)
+        settle_copies(db, [v.id for v in caches["variant"].values()])
         db.commit()
 
 
@@ -1170,6 +1205,9 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                 logger.error(f"Error reading {md['file_path']} again: {e}", exc_info=True)
                 stats["errors"] += 1
         derive_composers(db, derive_due)
+        # a title or a track number changed may leave two positions of one
+        # copy on one track (canon.occurrence)
+        settle_copies(db, [row.album_variant_id for _d, _md, row in entries])
         db.commit()
 
 

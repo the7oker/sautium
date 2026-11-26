@@ -43,6 +43,15 @@ _LIST_COMMA = re.compile(r"\s*,\s+")
 # never a writer of its own.
 _SUFFIX = re.compile(r"(?:jr|sr|ii|iii|iv)\.?", re.IGNORECASE)
 
+# Inside a comma list the last part's "&" / "and" is the list's own joiner
+# ("Hans Zimmer, Klaus Badelt & Lisa Gerrard" is three writers; B-136): an
+# English list ends so, and an inverted personal name never carries one
+# after its given name. A value without a comma keeps it ("Lennon &
+# McCartney" is how a team is credited), and so does a last part the node
+# knows whole ("Simon & Garfunkel").
+_LAST_JOINER = re.compile(r"\s+(?:&|and)\s+", re.IGNORECASE)
+_OXFORD_JOINER = re.compile(r"(?:&|and)\s+", re.IGNORECASE)
+
 # "Last, First" is a Latin-script habit, among others; a name in these
 # scripts is written without spaces, so its one "word" says nothing of an
 # inversion ("坂本龍一, 細野晴臣" is two writers).
@@ -159,11 +168,22 @@ def _known_whole(db: Session, values: Set[str]) -> Set[str]:
         {"v": vs, "i": [str(artist_uuid(v)) for v in vs]}).scalars())
 
 
-def _parts(value: str) -> List[str]:
-    """A comma value's parts, a generational suffix joined to the part
-    before it."""
+def _last_part(value: str) -> str:
+    """A comma value's last part, an Oxford comma's joiner taken off."""
+    last = _LIST_COMMA.split(value)[-1].strip()
+    m = _OXFORD_JOINER.match(last)
+    return last[m.end():] if m else last
+
+
+def _parts(value: str, known: Set[str] = frozenset()) -> List[str]:
+    """A comma value's parts: the last one split at its "&" / "and" unless
+    it is `known` whole, a generational suffix joined to the part before
+    it."""
+    split = [p.strip() for p in _LIST_COMMA.split(value)]
+    last = _last_part(value)
+    split[-1:] = [last] if last in known else [p.strip() for p in _LAST_JOINER.split(last)]
     parts: List[str] = []
-    for p in (p.strip() for p in _LIST_COMMA.split(value)):
+    for p in split:
         if parts and _SUFFIX.fullmatch(p):
             parts[-1] = f"{parts[-1]}, {p}"
         else:
@@ -195,7 +215,9 @@ def _names_of(db: Session, written: Set[str]) -> Dict[str, List[str]]:
     named = _named_by_mb(db, written)
     lists = {w for w in written if w not in named and _LIST_COMMA.search(w)}
     whole = _known_whole(db, lists)
-    parts_of = {w: _parts(w) for w in lists - whole}
+    lasts = {_last_part(w) for w in lists - whole}
+    known_lasts = _known_whole(db, {p for p in lasts if _LAST_JOINER.search(p)})
+    parts_of = {w: _parts(w, known_lasts) for w in lists - whole}
     out: Dict[str, List[str]] = {}
     for w in written:
         if w in named:

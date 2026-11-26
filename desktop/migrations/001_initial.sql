@@ -227,6 +227,12 @@ CREATE TABLE IF NOT EXISTS tracks (
     id UUID PRIMARY KEY,
     title VARCHAR(500) NOT NULL,
     title_latin TEXT,                       -- Latin transliteration of title for cross-script fuzzy search (Phase 0a); TEXT not VARCHAR(500) — transliteration can exceed the source length
+    -- The place of this title among the positions of one tracklist that
+    -- carry it (CANON-TRACKS-1 §2): an input of the id as the title is
+    -- (uuid_utils.track_uuid — the k-th is `song:…#k`), so a rule that
+    -- recomputes an id from the row (the identity re-normalization, an
+    -- artist's rename) keeps two movements titled alike apart.
+    occurrence SMALLINT NOT NULL DEFAULT 1 CHECK (occurrence >= 1),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );

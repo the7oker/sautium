@@ -740,6 +740,9 @@ class AudioEmbeddingGenerator:
                     "because this node's own analysis made vectors that are not unit vectors — a "
                     "fault of its model or code, not of the files (each is named above)")
 
+        # a print is what a pair of copy twins waited for (CANON-TRACKS-1 §3.1)
+        from canon.content import fold_copy_twins
+        fold_copy_twins(track_ids=sorted({str(r.track_id) for r in rows}))
         return stats
 
     def _plan_track(self, db: Session, row, model, force: bool):
