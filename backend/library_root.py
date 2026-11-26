@@ -231,7 +231,10 @@ def folder_name(folder: Dict[str, Any]) -> str:
     for root in roots():
         if _disks_folder(root) and _under(path, root) and path != root:
             point, _, under = path[len(root.rstrip("/")) + 1:].partition("/")
-            disk = folder.get("label") or "USB disk"
+            # the label kept with the row; a row the start carried over from
+            # before has none yet — the label the setup's block or the
+            # automount left beside the disks says it (seen on the box)
+            disk = folder.get("label") or _label(root, point) or "USB disk"
             return f"{disk} · {under}" if under else disk
     return path
 
