@@ -20405,6 +20405,16 @@
     // The sign-in just made said this account's password is under a year
     // of one GPU, the first time it was estimated (device_auth.told_once):
     // said once, here, and kept nowhere
+    // The account made in the Web UI on a launcher's node: its window makes
+    // the key (draft words for the owner's words review)
+    if (window.Sautium.auth.takeKeyInLauncher()) {
+      window.notifyDialog({
+        title: 'Restart Sautium to finish',
+        kind: 'info',
+        message: "Your account is made. Restart Sautium on the computer that runs it: its window " +
+          'makes the key — it asks for the password once — and sharing, chat and friends start then.',
+      });
+    }
     const told = window.Sautium.auth.takePasswordTold();
     if (told) {
       window.notifyDialog({

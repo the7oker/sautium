@@ -306,6 +306,13 @@
       setPinPending(true);
     } else if (!pinned && unborn && token) {
       throw new NodeChanged("");
+    } else if (pinned && unborn && !settingUp) {
+      // A node made anew, its key not made yet: the browser that knew the
+      // earlier identity is asked, as a node that changed — then set up
+      throw new NodeChanged("");
+    } else if (pinned && unborn && settingUp) {
+      pinNode("");
+      setPinPending(true);
     } else if (!creating) {
       // A node with an account always signs: an answer without is no node
       // this browser can sign in to
@@ -465,6 +472,11 @@
         // knew: pinned at its key's first signed answer
         pinNode("");
         setPinPending(true);
+        // A launcher's node makes the key in its own window: said once, by
+        // the page that loads next
+        if (r.data.key === "interrupted") {
+          try { sessionStorage.setItem(KEY_IN_LAUNCHER, "1"); } catch (_) { /* not said */ }
+        }
         return true;
       }
       if (r.status === 409) return "This node already has an account — reload.";
@@ -1107,6 +1119,15 @@
   window.Sautium.auth.resumeKey = (password) =>
     window.Sautium.auth.boxed("/api/auth/resume-key", {}, { password });
   const PASSWORD_TOLD_KEY = "sautium.password_told";
+  const KEY_IN_LAUNCHER = "sautium.key_in_launcher";
+  window.Sautium.auth.takeKeyInLauncher = () => {
+    let said = false;
+    try {
+      said = sessionStorage.getItem(KEY_IN_LAUNCHER) === "1";
+      sessionStorage.removeItem(KEY_IN_LAUNCHER);
+    } catch (_) { /* no storage: nothing to say */ }
+    return said;
+  };
   window.Sautium.auth.takePasswordTold = () => {
     let told = null;
     try {

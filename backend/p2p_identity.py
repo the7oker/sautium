@@ -207,11 +207,11 @@ def master_refusal(settings) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Identity documents on disk: certificate + proof
 # ---------------------------------------------------------------------------
-# The Docker node derives its KEY in memory, but the certificate (a Worker
-# fact) and the proof (minutes of mining) are worth keeping: p2p_identity_dir
-# is a bind mount (./data/node_identity), so both survive container
-# recreation and the node never re-mines. Same file names as the launcher —
-# the export/import bundle moves between the two unchanged.
+# The certificate (a Worker fact) and the proof (minutes of mining) live
+# beside the key in p2p_identity_dir, a bind mount (./data/node_identity) on
+# a Docker node, so they survive container recreation and the node never
+# re-mines. Same file names as the launcher — the identity file
+# (desktop/identity_file) moves them between the two unchanged.
 
 
 def identity_dir(settings):

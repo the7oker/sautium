@@ -876,6 +876,10 @@ def _random_account(d, username: str, email: str, held: bool) -> dict:
         raise ValueError(RESERVED_REFUSAL)
     write_account(d, account)
     _account_written(account)
+    if not births_here():
+        # A launcher's node: its window makes the key (a random one, at once)
+        logger.info("The account is made; the launcher makes its random key at its next start")
+        return {"username": username, "key": "interrupted"}
     if held:
         _held = {"key": key, "account": account, "weak": None}
         _publish_birth({"status": "another_identity", "weak": None})

@@ -894,8 +894,8 @@ below bind with or without it.
    the node and outlast "Sign out everywhere" — the account email, an
    invite link with rights or any widening of a link, the AI key, an
    agent's sign-in — take the
-   account's password through it (on an anonymous launcher account the
-   host's pairing code), `routers/auth.step_up`. Signing
+   account's password through it (on an account with no password, on any
+   node, the host's pairing code), `routers/auth.step_up`. Signing
    itself never needed the transport — the token never travels. Do
    not add a self-signed listener back "for security": it adds a
    warning and no protection the box does not give. TLS for the Web

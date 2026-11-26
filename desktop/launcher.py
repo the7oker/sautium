@@ -717,20 +717,79 @@ class LauncherApp(ctk.CTk):
 
     def make_key(self, username: str, password: str) -> bool:
         """The account's key, derived in the background and placed beside its
-        account file (Tk thread). False when one is being made already."""
-        return self._birth.start(username, password, purpose="create", done=self._key_derived,
-                                 said=lambda state: self.ui_call(lambda: self._key_said(state)),
-                                 failed=lambda e: self.ui_call(lambda: self._key_failed(e)))
+        account file (Tk thread). False when one is being made already. The
+        password's edge is read now, while it is in hand: a key that turns
+        out another identity than the records name is made only on the
+        owner's word, and not from a password under the setup's edge."""
+        from desktop import node_identity, password_strength
+        account = node_identity.read_account(node_identity._identity_dir())
+        verdict = password_strength.verdict(password, (username, account.get("email") or ""))
+        weak = verdict if (verdict["zone"] == "refused"
+                           or (verdict["zone"] == "word" and not account.get("kept"))) else None
+        return self._birth.start(
+            username, password, purpose="create",
+            done=lambda seed: self._key_derived(node_identity.key_from_seed(seed), weak),
+            said=lambda state: self.ui_call(lambda: self._key_said(state)),
+            failed=lambda e: self.ui_call(lambda: self._key_failed(e)))
 
-    def _key_derived(self, seed: bytes) -> None:
-        """The worker's end, in its thread: the key placed, then the node
-        settles on it — the backend told (a launcher's backend makes no key
-        of its own, and its notary and records wait for this one), P2P
-        started by the check's ready."""
+    def _key_derived(self, key, weak) -> None:
+        """A key's end, in the worker's thread (or a random key's): placed —
+        unless the database names another identity as this node's, which is
+        the owner's question first (_ask_another) — then the node settles on
+        it: the backend told (a launcher's backend makes no key of its own,
+        and its notary and records wait for this one), P2P started by the
+        check's ready."""
         from desktop import node_identity
         d = node_identity._identity_dir()
-        node_identity.place_account_key(d, node_identity.key_from_seed(seed), node_identity.read_account(d))
+        if node_identity.another_identity_at(self._get_local_db_dsn(),
+                                             node_identity.public_hex(key)):
+            self.ui_call(lambda: self._ask_another(key, weak))
+            return
+        node_identity.place_account_key(d, key, node_identity.read_account(d))
         self.ui_call(self._key_placed)
+
+    def _ask_another(self, key, weak):
+        """The key made is not the identity this node's database names: made
+        on the owner's word (the records the lost one signed become another
+        author's), or the account taken back — the identity notice offers
+        the ways in again. Draft words for the owner's words review."""
+        from desktop import node_identity
+        self._key_words = ""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Another identity")
+        dialog.geometry("560x420")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        body = ctk.CTkTextbox(dialog, wrap="word")
+        body.pack(fill="both", expand=True, padx=18, pady=(16, 6))
+        body.insert("1.0", (
+            "The key this nickname and password make is an identity other than the one this node "
+            "signed with: a typo, another nickname, a password changed since, or an identity made "
+            "before this version of Sautium, which no password makes again.\n\n" + NEW_IDENTITY_COSTS
+            + ("\n\n" + weak["door"] + " A new identity is not made from it: set up again with "
+               "another." if weak else "")))
+        body.configure(state="disabled")
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(fill="x", padx=18, pady=(4, 14))
+
+        def again():
+            dialog.destroy()
+            (node_identity._identity_dir() / node_identity.ACCOUNT_FILENAME).unlink(missing_ok=True)
+            self._identity.check()
+
+        def make():
+            dialog.destroy()
+            d = node_identity._identity_dir()
+            node_identity.place_account_key(d, key, node_identity.read_account(d))
+            logger.warning("A new identity was made on the owner's word, over records the identity "
+                           "of record signed")
+            self._key_placed()
+
+        ctk.CTkButton(btns, text="Set up again", width=140, command=again).pack(side="right")
+        if weak is None:
+            ctk.CTkButton(btns, text="Make a new identity", width=170, command=make,
+                          fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", again)
 
     def _key_placed(self):
         self._key_words = ""
@@ -766,10 +825,19 @@ class LauncherApp(ctk.CTk):
 
     def _identity_unborn(self):
         """The account is here and its key is not: being made in this
-        process (its words are said), or its making was stopped — then the
-        password is asked once a start, checked by the account's sign-in
-        hash, and the key made again (SEC-S5 Q5)."""
+        process (its words are said), or its making was stopped, or the Web
+        UI's setup made the account (a launcher's backend makes no key) —
+        then the password is asked once a start, checked by the account's
+        sign-in hash, and the key made (SEC-S5 Q5); an account with no
+        password gets its random key at once."""
+        from desktop import node_identity
         if self._node_down or self._birth.state() is not None:
+            return
+        if node_identity.read_account(node_identity._identity_dir()).get("anonymous"):
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            key = Ed25519PrivateKey.generate()
+            threading.Thread(target=self._key_derived, args=(key, None), daemon=True,
+                             name="key-random").start()
             return
         if not self._key_asked:
             self._key_asked = True

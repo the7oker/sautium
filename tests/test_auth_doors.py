@@ -223,6 +223,7 @@ ctx.window.fetch = async (input, init) => {
       eph: Buffer.from(server.publicKey).toString('base64'), expires, node_pubkey: nodePubkey,
       sig: cfg.unsigned ? '' : hex(nacl.sign.detached(signed, identity.secretKey)), tag }));
   }
+  if (path === '/api/auth/status') return new Response(JSON.stringify(cfg.status || {}));
   const queue = (cfg.replies || {})[path];
   if (!queue) return new Response('{}');
   const sentHeaders = new Headers((init && init.headers) || {});
@@ -1678,3 +1679,21 @@ def test_a_node_with_no_password_door_counts_no_wrong_password(monkeypatch):
     monkeypatch.setattr(device_auth, "_record_failure", lambda *a: pytest.fail("counted"))
     assert asyncio.run(device_auth.password_tried("a guess")) is False
     assert device_auth._doors["login"]["failures"] == 0
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_browser_that_knew_the_node_before_it_was_made_anew_is_asked_not_refused():
+    """Review round 3: pinned to an earlier identity, the node's unsigned
+    answer while its new key is made is the question of a node that changed —
+    and once the person says set it up, it signs in."""
+    known = {**_SIGNED_IN, "sautium.node_pubkey": "cd" * 32}
+    status = "await window.Sautium.auth.status(); "
+    out = _page(status + "return await window.Sautium.auth.login('x')", unsigned=True, store=dict(known),
+                status={"key": "deriving"}, replies={"/api/auth/login": [[200]]})
+    assert out["thrown"] == "NodeChanged: node identity changed"
+    assert "/api/auth/login" not in out["asked"]
+    out = _page(status + "window.Sautium.auth.acceptNode(''); return await window.Sautium.auth.login('x')",
+                unsigned=True, store=dict(known), status={"key": "deriving"},
+                replies={"/api/auth/login": [[200]]})
+    assert out["result"] is True and "sautium.node_pubkey" not in out["store"]
+    assert out["store"]["sautium.pin_pending"] == "1"

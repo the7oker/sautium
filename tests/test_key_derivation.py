@@ -264,3 +264,22 @@ def test_a_random_key_not_placed_before_a_stop_is_made_again_at_the_start(unborn
     device_auth.say_key_at_start()
     assert unborn.said == [{"status": "another_identity", "weak": None}]
     assert device_auth._held is not None and not (unborn.folder / "node_ed25519.key").exists()
+
+
+def test_no_random_identity_is_minted_beside_an_account_waiting_for_its_key(tmp_path, monkeypatch):
+    """Review round 3: the launcher's "make a new identity" over an account
+    file would leave a key its password does not make."""
+    monkeypatch.setattr(ni, "_identity_dir", lambda: tmp_path)
+    ni.write_account(tmp_path, ni.new_account("owner", "a made-up one", source="form"))
+    with pytest.raises(FileExistsError):
+        ni.generate_identity()
+    assert not (tmp_path / "node_ed25519.key").exists()
+
+
+def test_a_launchers_backend_leaves_even_a_random_key_to_the_launcher(unborn, monkeypatch):
+    (unborn.folder / "account.json").unlink()
+    monkeypatch.setattr(device_auth, "launcher_mode", lambda: True)
+    made = device_auth._random_account(unborn.folder, "owner", "", False)
+    assert made == {"username": "owner", "key": "interrupted"}
+    assert ni.read_account(unborn.folder)["anonymous"] is True
+    assert not (unborn.folder / "node_ed25519.key").exists() and unborn.arrived == []

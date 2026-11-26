@@ -471,6 +471,10 @@ def generate_identity(dsn: Optional[str] = None) -> str:
     (replaced-<when>/), not written over."""
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required for identity generation")
+    if read_account(_identity_dir()) is not None:
+        # An account waiting for its key: a random key beside it would be one
+        # its password does not make (SEC-S5)
+        raise FileExistsError(str(_identity_dir() / ACCOUNT_FILENAME))
 
     private_key = Ed25519PrivateKey.generate()
     pub_raw = private_key.public_key().public_bytes(
