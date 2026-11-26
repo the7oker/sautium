@@ -66,7 +66,7 @@ def _changed() -> None:
     # A disk plugged in: its folders take the label it carries now, and a
     # disk the library never had is counted, to be offered for one tap
     library_root.refresh_labels()
-    if library_root.count_new_disks():
+    if library_root.count_new_disks(plugged=True):
         db_execute("NOTIFY sautium_notices")
     notify_library_subscribers()
 

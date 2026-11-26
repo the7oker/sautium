@@ -1691,9 +1691,12 @@ def _notice_items() -> List[Dict[str, Any]]:
     # A disk plugged in that the library never had and that holds music
     # (library_root.new_disks): offered for one tap while it is in, its
     # onset the first derivation that saw it — gone with the disk, and new
-    # again at its next plug (nothing of one passed over is stored, Q8).
+    # again at its next plug (nothing of one passed over is stored, Q8). A
+    # toast only for a disk the running node saw plugged in: one there at
+    # the start, or offered again after a Forget, has its row in Settings ›
+    # Library alone (the owner, on the box).
     keys = set()
-    for disk in library_root.new_disks():
+    for disk in (d for d in library_root.new_disks() if d["plugged"]):
         key = f"disk.new.{disk['uuid']}"
         keys.add(key)
         items.append({"key": key, "kind": "info", "since": _derived(key, True), "until": None,

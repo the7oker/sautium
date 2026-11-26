@@ -798,20 +798,26 @@ def _new_points() -> List[tuple]:
             if point is not None and not any(_under(path, f) or _under(f, path) for f in folders_)]
 
 
-def count_new_disks() -> bool:
+def count_new_disks(plugged: bool = False) -> bool:
     """Count the audio of every disk plugged in that the library never had,
-    once a mount. Returns whether a count changed what new_disks says."""
+    once a mount. `plugged`: this count follows the mount table's change
+    under the running node — a disk counted by it was plugged in now, and
+    only such a disk is said by a toast (new_disks' `plugged`); one counted
+    at the start or after a folder was forgotten is offered by its row
+    alone (the owner, on the box: a toast after a Forget reads as a stick
+    someone just put in). Returns whether a count changed what new_disks
+    says."""
     if not picks():
         return False
     with _counting:
-        return _count_new_disks()
+        return _count_new_disks(plugged)
 
 
 # one count at a time: the start's and the mount watch's never cross
 _counting = threading.Lock()
 
 
-def _count_new_disks() -> bool:
+def _count_new_disks(plugged: bool) -> bool:
     changed = False
     points = _new_points()
     keys = {(path, _device(path)) for path, _root, _point in points}
@@ -820,7 +826,7 @@ def _count_new_disks() -> bool:
         with _counted_lock:
             if key in _counted:
                 continue
-        count = _count_audio(path)
+        count = {**_count_audio(path), "plugged": plugged}
         with _counted_lock:
             _counted[key] = count
         changed = changed or count["audio_files"] > 0
@@ -847,7 +853,7 @@ def offer_again() -> None:
 def new_disks() -> List[Dict[str, Any]]:
     """The disks plugged in that the library never had and that hold music
     (the counts count_new_disks made): {path, uuid, label, size_bytes,
-    audio_files, capped}. A disk with no audio file is not offered: a stick
+    audio_files, capped, plugged — the running node saw it plugged in}. A disk with no audio file is not offered: a stick
     of documents says nothing. Nothing of a disk passed over is stored — it
     is offered again at its next plug (the owner, Q8)."""
     if not picks():

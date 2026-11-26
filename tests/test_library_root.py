@@ -622,14 +622,22 @@ def test_a_disk_the_library_never_had_is_counted_once_and_offered_for_one_tap(tr
     monkeypatch.setattr(settings_router, "_derived_since", {})
     disk = str(tree.disks / "4A21-0000")
     assert library_root.new_disks() == []                    # never counted on a page's read
-    assert library_root.count_new_disks() is True             # the mount watch's own thread counts
+    # counted at the start (or after a Forget): offered by its row alone, no toast
+    assert library_root.count_new_disks() is True
+    assert [d["plugged"] for d in library_root.new_disks()] == [False]
+    assert not any(k.startswith("disk.new.") for k in (n["key"] for n in settings_router._notice_items()))
+    # pulled, then plugged in under the running node: the mount watch's own thread counts it, and says it
+    monkeypatch.setattr(library_root, "_mounts", lambda: {})
+    library_root.count_new_disks(plugged=True)
+    monkeypatch.setattr(library_root, "_mounts", lambda: {disk: True})
+    assert library_root.count_new_disks(plugged=True) is True
     assert library_root.new_disks() == [{"path": disk, "uuid": "4A21-0000", "label": "Elements <b>",
                                          "size_bytes": library_root._size(disk), "audio_files": 1,
-                                         "capped": False}]
+                                         "capped": False, "plugged": True}]
     walked = []
     real = library_root._count_audio
     monkeypatch.setattr(library_root, "_count_audio", lambda f: walked.append(f) or real(f))
-    assert library_root.count_new_disks() is False and walked == []     # once a mount
+    assert library_root.count_new_disks(plugged=True) is False and walked == []     # once a mount
     notice = {n["key"]: n for n in settings_router._notice_items()}["disk.new.4A21-0000"]
     assert (notice["kind"], notice["data"]) == ("info", {"path": disk, "label": "Elements <b>",
                                                          "audio_files": 1, "capped": False})
