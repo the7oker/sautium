@@ -1052,10 +1052,16 @@ def born(pid: int) -> Optional[str]:
 
 
 def image_built(state: dict, env: Dict[str, str]) -> bool:
-    """Whether the image this commit and .env's choices make is built and
-    still there: a run again builds nothing."""
-    return state.get("built") == image_key(env) and bool(out(run(
-        ["docker", "image", "inspect", "--format", "{{.Id}}", agent.image_of(ROOT)])))
+    """Whether the image this commit and these choices make is built and
+    still there: a run again builds nothing. Built by this setup (its own
+    record), or by the host agent's update, which names its image
+    `<release>-<commit12>` in .env and builds what .env's choices say."""
+    image = agent.image_of(ROOT)
+    by_setup = state.get("built") == image_key(env)
+    held = agent.read_env(ROOT / ".env")
+    by_agent = (image.endswith(f"-{agent.head(ROOT)[:12]}")
+                and all(held.get(key, "1") == env.get(key, "1") for _, key in agent.IMAGE_ARGS))
+    return (by_setup or by_agent) and bool(out(run(["docker", "image", "inspect", "--format", "{{.Id}}", image])))
 
 
 def build_refusal(state: dict, env: Dict[str, str]) -> Optional[str]:

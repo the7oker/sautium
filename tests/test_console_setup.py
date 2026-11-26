@@ -2195,6 +2195,13 @@ def test_a_board_too_small_to_build_the_image_is_told_before_anything_is_asked_o
     assert setup.build_refusal({"built": setup.image_key(env)}, env) is None
     other = {**env, "SAUTIUM_IMAGE_ASSISTANT_CLI": "1"}                 # another image is another build
     assert setup.build_refusal({"built": setup.image_key(env)}, other) is not None
+    # An image the host agent's update built for this commit, from these choices, is built too
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:v0.4.0-cccccccccccc")
+    (checkout / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()))
+    assert setup.build_refusal({}, env) is None
+    assert setup.build_refusal({}, other) is not None
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:v0.3.0-bbbbbbbbbbbb")
+    assert setup.build_refusal({}, env) is not None
     monkeypatch.setattr(setup.machine_tier, "machine_memory_kib", lambda: int(2.8 * 1024 ** 2))
     assert setup.build_refusal({}, env) is None
     assert setup.machine_tier.image_build_refusal(None) is None
