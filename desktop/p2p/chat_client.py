@@ -1204,6 +1204,24 @@ class ChatClient:
 
     def _seed_master_contact(self) -> bool:
         with self.store.db_conn().cursor() as cur:
+            # The Support row carries the pin: a row of another key is the
+            # master's before a release moved it (SEC-S5: its key changed with
+            # the cost) — it takes the pin, its thread kept, never a second
+            # row beside it. The pin's authority is the signed release's.
+            cur.execute("""
+                UPDATE friends SET previous_public_key_hex = public_key_hex,
+                                   public_key_hex = %s, invite_code = %s,
+                                   key_fingerprint = %s
+                 WHERE id = (SELECT id FROM friends WHERE source = 'master'
+                                AND public_key_hex NOT IN (%s, %s) ORDER BY id LIMIT 1)
+                   AND NOT EXISTS (SELECT 1 FROM friends WHERE public_key_hex = %s)
+            """, (master_node.MASTER_PUBKEY_HEX, master_node.MASTER_INVITE_CODE,
+                  bytes.fromhex(chat_wire.key_fingerprint(master_node.MASTER_PUBKEY_HEX)),
+                  master_node.MASTER_PUBKEY_HEX, f"pending:{master_node.MASTER_INVITE_CODE}",
+                  master_node.MASTER_PUBKEY_HEX))
+            if cur.rowcount:
+                logger.info("The Support contact takes the master's key of this release (%s)",
+                            master_node.MASTER_INVITE_CODE)
             cur.execute(
                 "SELECT 1 FROM friends WHERE public_key_hex IN (%s, %s)"
                 " OR invite_code = %s",

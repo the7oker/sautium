@@ -1,20 +1,22 @@
 """
-P2P identity for Docker backend.
+P2P identity for the backend — the key this node signs with, and the identity
+dict every reader resolves.
 
-Derives deterministic Ed25519 keypair from username+password using the same
-Argon2id algorithm as the desktop launcher. This makes the Docker backend
-a regular P2P peer with a stable identity and invite code.
-
-Identity is derived in-memory at startup (no files saved).
+The key is never derived here (SEC-S5): the launcher and a Web-UI account keep
+theirs in the identity folder (node_ed25519.key), and the env road
+(P2P_USERNAME/P2P_PASSWORD: the master, a hand-made .env) keeps its own after
+its one derivation (node_identity.ENV_KEY_FILENAME), made by
+desktop/identity_birth on device_auth's orders. Until a key is there, every
+reader here says None, which each already reads as "no identity yet".
 """
 
 import hashlib
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 
-from desktop.node_identity import (ARGON2_HASH_LEN, ARGON2_MEMORY_COST, ARGON2_PARALLELISM,
-                                   ARGON2_TIME_COST, CERT_FILENAME, validate_username)
+from desktop.node_identity import CERT_FILENAME, ENV_KEY_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -48,73 +50,8 @@ def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
     return digest.hex().upper() == hash_part
 
 
-def derive_identity(username: str, password: str, email: str = "") -> dict:
-    """
-    Derive P2P identity from username + password.
-
-    Returns: {node_id, public_key_hex, username, invite_code}
-    """
-    from argon2.low_level import hash_secret_raw, Type
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives import serialization
-
-    validate_username(username)
-
-    # Derive seed (same algorithm as desktop)
-    salt = f"{username}:sautium".encode("utf-8")
-    seed = hash_secret_raw(
-        secret=password.encode("utf-8"),
-        salt=salt,
-        time_cost=ARGON2_TIME_COST,
-        memory_cost=ARGON2_MEMORY_COST,
-        parallelism=ARGON2_PARALLELISM,
-        hash_len=ARGON2_HASH_LEN,
-        type=Type.ID,
-    )
-
-    # Generate Ed25519 keypair from seed
-    private_key = Ed25519PrivateKey.from_private_bytes(seed)
-    pub_raw = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    node_id = pub_raw.hex()
-
-    invite_code = make_invite_code(username, pub_raw)
-
-    logger.info(f"P2P identity: {username} ({invite_code})")
-    return {
-        "node_id": node_id,
-        "public_key_hex": node_id,
-        "username": username,
-        "invite_code": invite_code,
-        "email": email,
-    }
-
-
-def derive_private_key(username: str, password: str):
-    """The Ed25519 private key for this account — same Argon2id derivation as
-    derive_identity, exposed for signing (enrichment records, requests)."""
-    from argon2.low_level import hash_secret_raw, Type
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    salt = f"{username}:sautium".encode("utf-8")
-    seed = hash_secret_raw(
-        secret=password.encode("utf-8"),
-        salt=salt,
-        time_cost=ARGON2_TIME_COST,
-        memory_cost=ARGON2_MEMORY_COST,
-        parallelism=ARGON2_PARALLELISM,
-        hash_len=ARGON2_HASH_LEN,
-        type=Type.ID,
-    )
-    return Ed25519PrivateKey.from_private_bytes(seed)
-
-
-# Cached on success only: identity sources are fixed for the process
-# lifetime, but a web-first-run account can appear mid-process — a cached
-# None would then hide it until restart. Argon2id costs ~1-2 s per
-# derivation, so uncached per-call use is not an option.
+# Cached on success only: a key can appear mid-process (an account's key
+# derived in the background), and a cached None would hide it.
 _signing_key_cache = None
 _identity_cache = None
 _identity_cache_mtime = None
@@ -152,11 +89,47 @@ def forget_cached() -> None:
     _identity_cache_mtime = None
 
 
-def load_signing_key(settings):
-    """The node's Ed25519 signing key — desktop PEM or docker-derived — or
-    None when no identity is configured."""
-    from pathlib import Path
+def _env_key_path(settings) -> Optional[Path]:
+    """The env road's kept key, when this node's account is the
+    environment's: P2P_USERNAME and P2P_PASSWORD set, and no key of the
+    folder's own account (node_ed25519.key — that account wins, as it always
+    did) nor an account file of another road."""
+    from desktop.node_identity import read_account
+    if not (settings.p2p_username and settings.p2p_password and settings.p2p_identity_dir):
+        return None
+    d = Path(settings.p2p_identity_dir)
+    if (d / "node_ed25519.key").exists():
+        return None
+    account = read_account(d)
+    if account is not None and (account.get("source") != "env"
+                                or account.get("username") != settings.p2p_username):
+        return None
+    return d / ENV_KEY_FILENAME
 
+
+def env_road(settings) -> bool:
+    """Whether this node's account is the environment's (_env_key_path)."""
+    return _env_key_path(settings) is not None
+
+
+def env_configured(settings) -> bool:
+    """Whether a start is to settle the env road (settle_env): P2P_USERNAME
+    and P2P_PASSWORD set, and the identity folder holding no account of
+    another road — the name in the account file may still be another pair's."""
+    from desktop.node_identity import read_account
+    if not (settings.p2p_username and settings.p2p_password and settings.p2p_identity_dir):
+        return False
+    d = Path(settings.p2p_identity_dir)
+    if (d / "node_ed25519.key").exists():
+        return False
+    account = read_account(d)
+    return account is None or account.get("source") == "env"
+
+
+def load_signing_key(settings):
+    """The node's Ed25519 signing key — the folder's account key, else the
+    env road's kept one — or None while there is none (no account, or its
+    key not derived yet). Never derives."""
     from cryptography.hazmat.primitives import serialization
 
     global _signing_key_cache
@@ -169,29 +142,26 @@ def load_signing_key(settings):
             _signing_key_cache = serialization.load_pem_private_key(
                 key_path.read_bytes(), password=None)
             return _signing_key_cache
-    if settings.p2p_username and settings.p2p_password:
-        _signing_key_cache = derive_private_key(
-            settings.p2p_username, settings.p2p_password)
+    env_key = _env_key_path(settings)
+    if env_key is not None and env_key.exists():
+        _signing_key_cache = serialization.load_pem_private_key(env_key.read_bytes(), password=None)
     return _signing_key_cache
 
 
 def resolve_identity(settings) -> Optional[dict]:
-    """The node's account identity dict — node_info.json (desktop mode)
-    first, env-derived (Docker mode) second, None without either. The
-    single resolution point mirrored by main.py's lifespan and
+    """The node's account identity dict — node_info.json (an account of the
+    folder's) first, the env road's kept key second, None without either.
+    The single resolution point mirrored by main.py's lifespan and
     routers/p2p._get_identity."""
-    import json
-    from pathlib import Path
-
     global _identity_cache, _identity_cache_mtime
 
     if settings.p2p_identity_dir:
-        # Desktop mode: node_info.json is written by the launcher AND by
-        # this backend (email changes) while we run — the cache is keyed
-        # on the file's mtime, so an edit is seen on the next call and a
-        # stale copy can never claim "no email configured" after one was
-        # just saved (the bug this replaced: two independent caches, one
-        # invalidated, the other not).
+        # node_info.json is written by the launcher AND by this backend
+        # (email changes) while we run — the cache is keyed on the file's
+        # mtime, so an edit is seen on the next call and a stale copy can
+        # never claim "no email configured" after one was just saved (the
+        # bug this replaced: two independent caches, one invalidated, the
+        # other not).
         info_path = Path(settings.p2p_identity_dir) / "node_info.json"
         if info_path.exists():
             try:
@@ -213,10 +183,59 @@ def resolve_identity(settings) -> Optional[dict]:
                 logger.warning(f"Failed to read node_info.json: {e}")
     if _identity_cache is not None:
         return _identity_cache
-    if settings.p2p_username and settings.p2p_password:
-        _identity_cache = derive_identity(
-            settings.p2p_username, settings.p2p_password, settings.p2p_email)
+    if env_road(settings):
+        key = load_signing_key(settings)
+        if key is not None:
+            from desktop.node_identity import public_hex
+            pubkey = public_hex(key)
+            _identity_cache = {
+                "node_id": pubkey,
+                "public_key_hex": pubkey,
+                "username": settings.p2p_username,
+                "invite_code": make_invite_code(settings.p2p_username, bytes.fromhex(pubkey)),
+                "email": settings.p2p_email,
+            }
     return _identity_cache
+
+
+def settle_env(settings) -> bool:
+    """At a start on the env road, before anything reads the key: True when
+    its kept key is this environment's — the account file names
+    P2P_USERNAME, its hash takes P2P_PASSWORD (one check, about a second)
+    and the kept key is the one the file names; False when the key is to be
+    derived (device_auth.derive_env_key). A first start writes the account
+    file; another pair in .env is another account — the files the previous
+    pair kept are moved whole aside (replaced-<when>/), as the folder's
+    other replaced files are."""
+    from cryptography.hazmat.primitives import serialization
+
+    from desktop.node_identity import (_move_aside, new_account, public_hex, read_account,
+                                       signin_matches, write_account)
+    d = Path(settings.p2p_identity_dir)
+    account = read_account(d)
+    same = (account is not None and account.get("username") == settings.p2p_username
+            and account.get("signin") and signin_matches(account["signin"], settings.p2p_password))
+    if same:
+        key_path = d / ENV_KEY_FILENAME
+        if account.get("pubkey") and key_path.exists():
+            held = public_hex(serialization.load_pem_private_key(key_path.read_bytes(), password=None))
+            if held == account["pubkey"]:
+                return True
+            logger.error("The env road's kept key (%s…) is not the one its account file names "
+                         "(%s…): it is moved aside and the key derived again", held[:16],
+                         account["pubkey"][:16])
+            aside = _move_aside(d, ENV_KEY_FILENAME)
+            logger.warning("The env road's key moved to %s", aside.name)
+        return False
+    for name in ("account.json", ENV_KEY_FILENAME):
+        aside = _move_aside(d, name)
+        if aside is not None:
+            logger.warning("P2P_USERNAME/P2P_PASSWORD are not the pair that made %s: moved to %s",
+                           name, aside.name)
+    write_account(d, new_account(settings.p2p_username, settings.p2p_password, source="env",
+                                 email=settings.p2p_email or ""))
+    forget_cached()
+    return False
 
 
 def _recorded_signing_key() -> Optional[str]:

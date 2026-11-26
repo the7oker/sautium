@@ -103,6 +103,7 @@ ASSISTANT_ROLE = "sautium_assistant_" + SESSION_DATABASE.removeprefix("sautium_"
 def pytest_configure(config):
     config.addinivalue_line("markers", "models_switch: the test reads the owner's switch "
                                        '"AI models on this machine" from its own database')
+    config.addinivalue_line("markers", "real_key_cost: the product's Argon2 constants, unpatched")
 
 
 @pytest.fixture(autouse=True)
@@ -188,3 +189,25 @@ def scratch_dsn(request):
     conn.close()
     yield f"postgresql://{PG['user']}:{PG['password']}@{PG['host']}:{PG['port']}/{name}"
     _recreate(name, create=False)
+
+
+@pytest.fixture(autouse=True)
+def cheap_key_cost(request, monkeypatch):
+    """Every test derives at a cost of a few milliseconds: the product's
+    t=8000 over 128 MiB is minutes a key (desktop/node_identity), and the
+    sign-in hash a second. One module holds the constants every road reads
+    (node_identity: the key, the sign-in hash, identity_birth's estimate), so
+    patching it covers both runtimes; the password estimate keeps the
+    product's rate. A test that reads the product's own
+    values asks for them by `@pytest.mark.real_key_cost`."""
+    if request.node.get_closest_marker("real_key_cost"):
+        return
+    from desktop import node_identity, password_strength
+    # The estimate a door holds a password to stays the product's: what the
+    # tests pass or refuse is what a node passes or refuses
+    rate = password_strength.guesses_per_second()
+    monkeypatch.setattr(password_strength, "guesses_per_second", lambda: rate)
+    monkeypatch.setattr(node_identity, "ARGON2_TIME_COST", 1)
+    monkeypatch.setattr(node_identity, "ARGON2_MEMORY_COST", 8 * 1024)
+    monkeypatch.setattr(node_identity, "SIGNIN_TIME_COST", 1)
+    monkeypatch.setattr(node_identity, "SIGNIN_MEMORY_COST", 8 * 1024)

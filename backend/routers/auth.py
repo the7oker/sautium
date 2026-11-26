@@ -157,6 +157,14 @@ async def step_up(req: StepUp) -> None:
     except device_auth.WrongPin:
         raise HTTPException(status_code=403, detail=HOST_CODE_NEEDED,
                             headers={"X-Sautium-Auth-Error": "step-up"})
+    except device_auth.OlderIdentity:
+        raise _older()
+
+
+def _older() -> HTTPException:
+    """An identity made before SEC-S5: its password can no longer be checked."""
+    return HTTPException(status_code=409, detail=device_auth.OlderIdentity.WORDS,
+                         headers={"X-Sautium-Auth-Error": "older-identity"})
 
 
 @router.get("/handshake")
@@ -174,12 +182,22 @@ async def auth_status() -> dict:
     pairing PIN is currently outstanding."""
     configured = device_auth.account_configured()
     onboarding = not configured and not device_auth.identity_key_on_disk()
+    older = device_auth.older_identity()
     return {
         # An anonymous account (wizard, random password nobody has seen) is
         # configured and still has no password door. Reporting one sent the
         # UI to a prompt that could never be satisfied, on the very nodes the
-        # PIN exists for.
-        "password_login": configured and not device_auth.account_anonymous(),
+        # PIN exists for. Nor has an identity made before SEC-S5: nothing
+        # checks its password
+        "password_login": configured and not device_auth.account_anonymous() and not older,
+        # Where the account's key stands (device_auth.key_state): "ready",
+        # "deriving", "another_identity", "interrupted", or None. Before the
+        # key the node answers its handshake unsigned, and a browser signs in
+        # all the same — it pins the node when the key is there
+        "key": device_auth.key_state(),
+        # Who makes an interrupted key: this node at a sign-in, or its launcher
+        "key_here": device_auth.births_here(),
+        "older_identity": older,
         # No account yet: the node cannot be signed into at all, so the UI
         # offers to create one. The window closes for good the moment it is
         # — and is never open over a key on disk, named or not.
@@ -249,9 +267,11 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
     turns on sync, chat and analysis signing, which stay dark without one.
 
     On a node that lost its key (`identity_missing` in the status) the setup
-    brings that identity back from its nickname and password; a pair that
-    makes another is a 409 marked `another-identity`, and is made only with
-    `new_identity`, which the page sends after saying what it costs."""
+    brings that identity back from its nickname and password. Whether the
+    pair makes that identity is known when its key is made, minutes later:
+    a pair that makes another waits for the owner's word (status `key`
+    "another_identity", POST /new-identity) — or is made at once with
+    `new_identity`, the page's "a new one" said before."""
     req, reply = opened
     try:
         # The check lives inside create_account, under its lock — testing it
@@ -262,11 +282,6 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
         return reply(_weak(e))
     except device_auth.AccountExists:
         raise HTTPException(status_code=409, detail="account already exists")
-    except device_auth.AnotherIdentity:
-        raise HTTPException(status_code=409, detail="That nickname and password make another "
-                                                    "identity than the one this node's records "
-                                                    "were signed with",
-                            headers={"X-Sautium-Auth-Error": "another-identity"})
     except device_auth.WrongSetupCode:
         raise HTTPException(status_code=403, detail="That is not this node's setup code: the node writes a "
                                                     "new one at each start, to its log and its identity folder")
@@ -279,29 +294,31 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
     except Exception as e:
         logger.error(f"account creation failed: {e}")
         raise HTTPException(status_code=500, detail="could not create account")
-    # The node has an account from now on: its chat client starts (the
-    # Support contact, the handshakes, the outbox), its identity worker
-    # (the certificate, the proof), and its peer surface answers under the
-    # new key (p2p_identity.changed), with no restart.
-    import p2p_chat
-    from desktop.p2p import master_node
-    from routers import p2p as p2p_router
-    # The role follows the identity this process now holds (its start decided
-    # it on none): the master's own account made here builds no client and
-    # seeds no Support contact to itself, and its routes answer as the
-    # master's at once; what the start arms — the mailbox, the warrants'
-    # dispatch, the relay announce — waits for the next start.
-    if master_node.decide(info["public_key_hex"]):
-        logger.info("The master's account is made: restart the backend to arm its mailbox, "
-                    "its warrants' dispatch and its relay announce")
-    p2p_chat.soon(p2p_chat.start_client())
-    p2p_chat.soon(p2p_router.start_identity_worker())
-    import p2p_identity
-    p2p_chat.soon(p2p_identity.changed())
+    # The account exists from now on, and this browser is signed in to it;
+    # its key is made in the background, and what speaks for the node — the
+    # chat client, the identity worker, the peer surface under the key — is
+    # started when it lands (device_auth._key_arrived), with no restart.
     return reply({"token": device_auth.current_token(_secret()),
-                  "invite_code": info.get("invite_code"),
-                  "username": info.get("username"),
-                  "public_key_hex": info.get("public_key_hex")})
+                  "username": info["username"], "key": info["key"]})
+
+
+class NewIdentityRequest(BaseModel):
+    make: bool
+
+
+@router.post("/new-identity")
+async def new_identity(req: NewIdentityRequest) -> dict:
+    """The owner's word on the key the setup made, which is not the identity
+    this node's records were signed with (status `key`:
+    "another_identity"): make it the node's — those records are another
+    author's from then on — or take the account back and set up again. A
+    signed route: the browser the setup signed in asks."""
+    try:
+        return await device_auth.decide_new_identity(req.make)
+    except device_auth.NothingHeld:
+        raise HTTPException(status_code=409, detail="no key waits for that answer")
+    except device_auth.WeakPassword as e:
+        return _weak(e)
 
 
 def _weak(e: "device_auth.WeakPassword") -> dict:
@@ -399,6 +416,8 @@ async def login(opened=boxed(LoginRequest)) -> dict:
         raise _shut(e)
     except device_auth.Busy:
         raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
+    except device_auth.OlderIdentity:
+        raise _older()
     if not ok:
         raise HTTPException(status_code=401, detail="invalid credentials")
     # The first sign-in of this key's password since S2: its time, said
@@ -458,10 +477,19 @@ async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
         raise HTTPException(status_code=403, detail="This node has no password: open this page from the "
                                                     "computer that runs Sautium, or scan its QR code, "
                                                     "and change it within a few minutes")
+    except device_auth.OlderIdentity:
+        raise _older()
+    except device_auth.KeyBeingMade:
+        raise HTTPException(status_code=409, detail="This node's key is being made: change it once that is done")
     except ValueError as e:                       # username shape / same pair
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
+    if info.get("key") == "deriving":
+        # The new key is made in the background; the old identity signs in
+        # with the old password until it lands, and then every browser — this
+        # one too — signs in again with the new one (the epoch's bump)
+        return reply({"username": info["username"], "key": "deriving"})
     from config import settings
     from routers.p2p import EMAIL_FLOW_SECONDS
     return reply({

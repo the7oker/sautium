@@ -416,10 +416,24 @@ async def _requesters_follow_identity() -> None:
     await asyncio.to_thread(db_execute, "NOTIFY sautium_sync_request")
 
 
+async def _notary_follows_identity() -> None:
+    """The sealing owner, which a start with no key left off: started on the
+    key, and woken whole — what the passes wrote before the key (the sonic
+    pass runs from the account's first second) is sealed now, as the startup
+    wake seals what was left unsealed while the backend was down."""
+    import notary
+    if await asyncio.to_thread(notary.start):
+        notary.wake("identity", full=True)
+        notary.start_witness_listener()
+
+
 # What the start decided on the identity it had then, decided again when the
 # identity appears or changes (p2p_identity.on_change; registered at start)
 _IDENTITY_FOLLOWERS = (_peer_surface_follows_identity, _announce_user, _gate_follows_identity,
-                       _requesters_follow_identity)
+                       _requesters_follow_identity, _notary_follows_identity)
+# settle_env_identity's word at the start: "derive" — the env road's key is
+# made in the background once the followers are in place
+_env_birth: Optional[str] = None
 
 
 def _upnp_heuristic():
@@ -643,6 +657,12 @@ async def lifespan(app: FastAPI):
     # every restart refuses again (B-113). The process ends at once: uvicorn
     # logs an exception out of a lifespan with its traceback, and a refusal is
     # a state, not a crash; nothing has started that would need a stop.
+    # The env road's key (P2P_USERNAME/P2P_PASSWORD) checked against the
+    # environment, and on a node meant to be the master derived here when it
+    # is not kept — its refusal below reads the key; any other env node's is
+    # derived in the background once the start is up (SEC-S5)
+    global _env_birth
+    _env_birth = await asyncio.to_thread(device_auth.settle_env_identity)
     from p2p_identity import master_refusal
     refusal = await asyncio.to_thread(master_refusal, settings)
     if refusal:
@@ -961,6 +981,8 @@ async def lifespan(app: FastAPI):
     import p2p_identity
     for follower in _IDENTITY_FOLLOWERS:
         p2p_identity.on_change(follower)
+    if _env_birth == "derive":
+        device_auth.start_env_birth()
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
         _start_host_network()
     if settings.p2p_sync_port:
