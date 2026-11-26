@@ -129,8 +129,13 @@ def test_the_block_says_whether_the_node_holds_an_offline_database(db, monkeypat
                "VALUES (1, gen_random_uuid(), 'Sade', 'Sade')")
     db.execute("ANALYZE mb_artist")
     try:
+        # rows a slice brought are no dump: every node that asks for slices holds some (the box's
+        # evening, 2026-11-26: a Nano node's More kept the row) — the full load's marker is the dump
+        assert held() == (False, False)
+        db.execute("INSERT INTO user_settings (key, value) VALUES ('musicbrainz.db_version', '\"20261122\"')")
         assert held() == (True, True)
     finally:
+        db.execute("DELETE FROM user_settings WHERE key = 'musicbrainz.db_version'")
         db.execute("DELETE FROM mb_artist")
         db.execute("ANALYZE mb_artist")
     assert held() == (False, False)
