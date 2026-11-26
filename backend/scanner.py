@@ -322,7 +322,7 @@ def check_folder(path: Optional[str] = None, wait: bool = False) -> None:
             if wait:
                 # a look under way began before this miss: the one after it
                 after = look.done + (1 if look.looking else 0)
-                look.cond.wait_for(lambda: look.done > after, timeout=LOOK_PATIENCE_S)
+                look.cond.wait_for(lambda: look.done > after or look.dropped, timeout=LOOK_PATIENCE_S)
 
 
 def folders_unreachable_now() -> Dict[str, bool]:
@@ -345,8 +345,10 @@ def folders_unreachable_now() -> Dict[str, bool]:
     for look, done, started in asked:
         with look.cond:
             remaining = started + LOOK_PATIENCE_S - time.monotonic()
-            if remaining > 0 and look.cond.wait_for(lambda: look.done != done, timeout=remaining):
-                answer = look.unreachable
+            if look.dropped:
+                answer = False      # it left the library meanwhile: nothing of it to say
+            elif remaining > 0 and look.cond.wait_for(lambda: look.done != done or look.dropped, timeout=remaining):
+                answer = look.unreachable and not look.dropped
             elif look.recorded > look.look_ticket:
                 answer = look.unreachable
             else:

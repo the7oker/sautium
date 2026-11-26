@@ -19038,7 +19038,9 @@
   // holds, its disk out or in (LIBRARY-FOLDERS-1 §4.4), or the copies under
   // no folder ("Elsewhere"). Drafts for the words sitting.
   function _prunePlanTitle(p) {
-    if (p.kind === 'folder') return p.elsewhere ? 'Forget the albums elsewhere?' : `Forget ${p.name} and its albums?`;
+    // a folder that is no disk goes by its path, said as the folder list says it
+    if (p.kind === 'folder') return p.elsewhere ? 'Forget the albums elsewhere?'
+      : `Forget ${p.disk ? p.name : fmtPathForDisplay(p.name)} and its albums?`;
     if (p.kind === 'away') return 'Remove albums that are away?';
     return p.files ? 'Remove missing files?' : 'Remove the old copies?';
   }

@@ -1864,7 +1864,7 @@ def _merge_scopes(into: Dict[str, bool], scopes: Dict[str, bool]) -> None:
     import library_root
     for rel, recursive in scopes.items():
         rel = library_root._norm(rel) if rel else ""
-        if any(rec and (r == "" or library_root._under(rel, r)) for r, rec in into.items()):
+        if any(rec and (r == "" or (rel and library_root._under(rel, r))) for r, rec in into.items()):
             continue
         if recursive:
             for r in [r for r in into if rel == "" or library_root._under(r, rel)]:
