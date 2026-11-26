@@ -42,7 +42,7 @@ image from `nvidia/cuda` (the CUDA runtime image, NVIDIA's licence; `ubuntu`
 for arm64) with Ubuntu 22.04 packages — ffmpeg and Chromaprint's `fpcalc`
 (run as separate processes) and libsndfile (loaded by `soundfile`), each
 under its own licence —
-Python 3.11 from the deadsnakes PPA (PSF-2.0), `postgresql-client-18` from
+CPython 3.11 built from python.org's source (PSF-2.0), `postgresql-client-18` from
 the PostgreSQL project's repository (PostgreSQL License), and Node.js and
 Deno at pinned versions, as above. The compose files run the database from
 `pgvector/pgvector:pg18` (PostgreSQL License). Nothing of it is distributed

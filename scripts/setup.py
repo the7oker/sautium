@@ -1067,7 +1067,8 @@ def build(state: dict, env: Dict[str, str]) -> None:
         running = {"key": key, "pid": child.pid, "born": born(child.pid)}
         state["build"] = running
         save_state(state)
-        say(f"Building Sautium's image (several minutes; its log: {log}) …")
+        say(f"Building Sautium's image (its first build compiles Python: most of an hour on a small board; "
+            f"its log: {log}) …")
     else:
         say(f"A build is under way (its log: {log}) …")
     wait_for(running["pid"])
