@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 import device_auth
-from auth_hmac import ensure_secret
+from auth_hmac import ensure_secret, secret_path
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +36,9 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 def _secret() -> bytes:
-    from main import _API_SECRET_PATH
-    return ensure_secret(_API_SECRET_PATH)
+    # The same file main's middleware signs with (auth_hmac.secret_path),
+    # read without importing the app: every handshake reads it now (its tag)
+    return ensure_secret(secret_path())
 
 
 class LoginRequest(BaseModel):

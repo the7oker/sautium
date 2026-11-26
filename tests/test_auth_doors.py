@@ -1366,7 +1366,8 @@ def test_the_door_asks_about_another_identity_when_its_key_is_made(lost_key, fre
     r = answer(True, "a different one amber lanterns ford")
     assert r.status_code == 200 and set(r.json()) == {"nonce", "box"}      # the answer sealed
     assert (fresh_node / "node_ed25519.key").exists() and lost_key.arrived
-    assert answer(True, "a different one amber lanterns ford").status_code == 409
+    with pytest.raises(device_auth.NothingHeld):                         # nothing waits any more
+        asyncio.run(device_auth.decide_new_identity(True))
 
 
 def _disk_full(*_a):

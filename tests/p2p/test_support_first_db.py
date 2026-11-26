@@ -408,7 +408,7 @@ def test_a_resolved_support_row_of_an_earlier_pin_takes_the_pin_with_its_thread(
     asyncio.run(_client(scratch_dsn)._ensure_master_contact())
     [(row_id, pub, invite, previous, fingerprint, _token)] = _master_row(conn)
     assert (row_id, pub, invite, previous) == (fid, MASTER.pub, master, EARLIER_MASTER.pub)
-    assert fingerprint == cc.chat_wire.key_fingerprint(MASTER.pub)
+    assert fingerprint == cc.chat_wire.key_fingerprint(MASTER.pub).lower()
     assert _rows(conn, "SELECT count(*) FROM p2p_messages WHERE friend_id = %s", (fid,)) == [(1,)]
 
 
@@ -428,5 +428,5 @@ def test_a_waiting_support_row_of_an_earlier_pin_waits_for_the_new_code_and_its_
     asyncio.run(_client(scratch_dsn)._ensure_master_contact())
     [(row_id, pub, invite, _previous, fingerprint, token)] = _master_row(conn)
     assert (row_id, pub, invite) == (fid, f"pending:{master}", master)
-    assert fingerprint == cc.chat_wire.key_fingerprint(MASTER.pub)
+    assert fingerprint == cc.chat_wire.key_fingerprint(MASTER.pub).lower()
     assert token == master_node.MASTER_TOKEN_ID
