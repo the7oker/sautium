@@ -171,8 +171,10 @@ def _older() -> HTTPException:
 async def handshake() -> dict:
     """The server half of one credential exchange, signed by the node's
     identity key so a browser that knows this node can tell it from something
-    answering in its place. Unsigned while the node has no identity yet."""
-    return device_auth.open_channel()
+    answering in its place. Unsigned while the node has no identity yet; its
+    `tag` is the same under the device token, for a browser that holds one
+    and pinned nothing yet (device_auth.open_channel)."""
+    return device_auth.open_channel(_secret)
 
 
 @router.get("/status")
@@ -189,7 +191,7 @@ async def auth_status() -> dict:
         # UI to a prompt that could never be satisfied, on the very nodes the
         # PIN exists for. Nor has an identity made before SEC-S5: nothing
         # checks its password
-        "password_login": configured and not device_auth.account_anonymous() and not older,
+        "password_login": device_auth.password_door(),
         # Where the account's key stands (device_auth.key_state): "ready",
         # "deriving", "another_identity", "interrupted", or None. Before the
         # key the node answers its handshake unsigned, and a browser signs in
@@ -306,23 +308,38 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
                   "username": info["username"], "key": info["key"]})
 
 
-class NewIdentityRequest(BaseModel):
+class NewIdentityRequest(StepUp):
     make: bool
 
 
 @router.post("/new-identity")
-async def new_identity(req: NewIdentityRequest) -> dict:
+async def new_identity(opened=boxed(NewIdentityRequest)) -> dict:
     """The owner's word on the key the setup made, which is not the identity
     this node's records were signed with (status `key`:
     "another_identity"): make it the node's — those records are another
-    author's from then on — or take the account back and set up again. A
-    signed route: the browser the setup signed in asks."""
+    author's from then on — or take the account back and set up again. Who
+    the node is changes only on the person's own word: boxed, with the
+    account's password (step_up), and the answer sealed — a refusal of a
+    weak password says something of the password."""
+    req, reply = opened
+    await step_up(req)
     try:
-        return await device_auth.decide_new_identity(req.make)
+        return reply(await device_auth.decide_new_identity(req.make))
     except device_auth.NothingHeld:
         raise HTTPException(status_code=409, detail="no key waits for that answer")
     except device_auth.WeakPassword as e:
-        return _weak(e)
+        return reply(_weak(e))
+
+
+@router.post("/resume-key")
+async def resume_key(opened=boxed(StepUp)) -> dict:
+    """The account's password, asked by the page when its key's making was
+    stopped (the identity line's "interrupted", device_auth.say_key_at_start):
+    checked at the signed door, and the key is made again (password_tried's
+    resume). 403 marked `step-up` for a wrong one, as every step-up."""
+    req, reply = opened
+    await step_up(req)
+    return reply({"key": device_auth.key_state()})
 
 
 def _weak(e: "device_auth.WeakPassword") -> dict:
@@ -491,7 +508,9 @@ async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
         # The new key is made in the background; the old identity signs in
         # with the old password until it lands, and then every browser — this
         # one too — signs in again with the new one (the epoch's bump)
-        return reply({"username": info["username"], "key": "deriving"})
+        from config import settings
+        return reply({"username": info["username"], "key": "deriving",
+                      "restart_required": not settings.p2p_listen_port})
     from config import settings
     from routers.p2p import EMAIL_FLOW_SECONDS
     return reply({

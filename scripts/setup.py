@@ -2447,14 +2447,15 @@ def answer(result: subprocess.CompletedProcess) -> dict:
 
 
 def out_path(given: Optional[str]) -> Path:
-    """Where the export is written: the file named, else one in the current folder —
-    new, and never in a folder a container writes."""
-    path = Path(given or f"sautium-identity-{time.strftime('%Y%m%d')}{IDENTITY_SUFFIX}").absolute()
+    """Where the export is written: the file named, else one in the home folder —
+    new, and never inside the checkout: a private key one `git add` from the
+    public tree (its containers' folders are inside it too)."""
+    path = Path(given or Path.home() / f"sautium-identity-{time.strftime('%Y%m%d')}{IDENTITY_SUFFIX}").absolute()
     parent = path.parent.resolve()
-    for folder in CONTAINER_WRITES:
-        theirs = (ROOT / folder).resolve()
-        if parent == theirs or theirs in parent.parents:
-            raise Stop(f"{path.parent} is a folder the node's containers write: name a file of your own elsewhere")
+    checkout = ROOT.resolve()
+    if parent == checkout or checkout in parent.parents:
+        raise Stop(f"{path.parent} is inside Sautium's own folder: name a file of your own elsewhere "
+                   "(the identity file holds this node's key)")
     if os.path.lexists(path):
         raise Stop(f"{path} is there already: name another file")
     return path
@@ -2604,7 +2605,7 @@ def main(argv: List[str]) -> int:
     action = identity.add_subparsers(dest="action", required=True)
     export = action.add_parser("export", help="write this node's identity to a file")
     export.add_argument("--no-passphrase", action="store_true", help="the file unlocked: whoever holds it is this node")
-    export.add_argument("--out", metavar="FILE", help="the file to write (default: one in this folder)")
+    export.add_argument("--out", metavar="FILE", help="the file to write (default: one in your home folder)")
     action.add_parser("import", help="make this node the identity a file holds").add_argument("file", metavar="FILE")
     sub.add_parser("update", help="move to the newest signed release")
     remove = sub.add_parser("remove", help="take Sautium off this machine")

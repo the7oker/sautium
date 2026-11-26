@@ -4,11 +4,13 @@ account before its key — its file, the sign-in hash, the token's id; the
 worker that makes the key once, in the background; the identity folder the
 only place an identity comes from."""
 
+import asyncio
 import json
 import sys
 import threading
 import unicodedata
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -171,3 +173,79 @@ def test_the_identity_is_the_identity_folders_alone(tmp_path, monkeypatch):
         assert p2p_identity.resolve_identity(settings)["invite_code"] == info["invite_code"]
     finally:
         p2p_identity.forget_cached()
+
+
+# --- the key's making, stopped and followed (review round 1) -------------------
+
+@pytest.fixture
+def unborn(tmp_path, births, monkeypatch):
+    """A Docker node whose account is made and whose key is not."""
+    from routers import p2p as p2p_router
+    monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    monkeypatch.setattr(device_auth, "_holds_identity", lambda pubkey=None: False)
+    monkeypatch.setattr(device_auth, "_expected_pubkey",
+                        lambda: ni.pubkey_on_disk(tmp_path) if (tmp_path / "node_ed25519.key").exists() else None)
+    monkeypatch.setattr(device_auth, "_record_signing_key", lambda pubkey: None)
+    monkeypatch.setattr(device_auth, "launcher_mode", lambda: False)
+    monkeypatch.setattr(device_auth, "_held", None)
+    said, arrived = [], []
+    monkeypatch.setattr(p2p_router, "_publish_identity_state", said.append)
+    monkeypatch.setattr(device_auth, "_key_arrived", arrived.append)
+    ni.write_account(tmp_path, ni.new_account("owner", "a made-up one amber", source="form"))
+    return SimpleNamespace(folder=tmp_path, births=births, said=said, arrived=arrived)
+
+
+def test_a_start_says_a_key_whose_making_stopped_and_a_sign_in_makes_it_again(unborn, monkeypatch):
+    device_auth.say_key_at_start()
+    assert unborn.said == [{"status": "interrupted", "purpose": "resume"}]
+
+    async def signed_in():
+        return device_auth.resume_birth("a made-up one amber")
+    assert asyncio.run(signed_in()) is True
+    assert [b["purpose"] for b in unborn.births] == ["resume"]
+    unborn.births.finish()
+    assert unborn.arrived == [_pubkey("owner", "a made-up one amber")]
+    assert ni.read_account(unborn.folder)["pubkey"] == unborn.arrived[0]
+
+
+def test_a_launchers_backend_resumes_no_key_and_says_nothing_of_it(unborn, monkeypatch):
+    monkeypatch.setattr(device_auth, "launcher_mode", lambda: True)
+    device_auth.say_key_at_start()
+
+    async def signed_in():
+        return device_auth.resume_birth("a made-up one amber")
+    assert asyncio.run(signed_in()) is False and unborn.said == [] and unborn.births == []
+
+
+def test_a_key_the_launcher_made_is_followed_once(tmp_path, monkeypatch):
+    key = {"pub": None}
+    arrived = []
+    monkeypatch.setattr(device_auth, "_expected_pubkey", lambda: key["pub"])
+    monkeypatch.setattr(device_auth, "_record_signing_key", lambda pubkey: None)
+    monkeypatch.setattr(device_auth, "_key_arrived", arrived.append)
+    monkeypatch.setattr(device_auth, "_followed", None)
+    device_auth._born_elsewhere()                      # the listener's first connect: no key yet
+    key["pub"] = "ab" * 32
+    device_auth._born_elsewhere([object()])            # the launcher's NOTIFY
+    device_auth._born_elsewhere()                      # a reconnect: the same key
+    assert arrived == ["ab" * 32]
+
+
+def test_the_handshake_is_vouched_for_by_the_device_token(tmp_path, monkeypatch):
+    """A browser that holds the token takes a handshake only the node that
+    issued it makes (auth.js pins on it); with no account, no tag."""
+    import hashlib
+    import hmac as hmac_mod
+    import base64
+    monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    monkeypatch.setattr(device_auth, "_account_id_cache", None)
+    monkeypatch.setattr(device_auth, "_epoch_cache", 1)
+    monkeypatch.setattr(p2p_identity, "load_signing_key", lambda settings: None)
+    assert device_auth.open_channel(lambda: b"secret")["tag"] == ""
+    ni.write_account(tmp_path, ni.new_account("owner", "a made-up one", source="form"))
+    hs = device_auth.open_channel(lambda: b"secret")
+    signed = (b"sautium-pair:v1" + base64.b64decode(hs["eph"]) + hs["expires"].to_bytes(8, "big")
+              + hs["node_pubkey"].encode())
+    token = device_auth.current_token(b"secret").encode()
+    assert hs["tag"] == hmac_mod.new(token, signed, hashlib.sha256).hexdigest()
+    assert hs["tag"] != hmac_mod.new(b"another token", signed, hashlib.sha256).hexdigest()

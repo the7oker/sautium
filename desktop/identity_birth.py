@@ -5,9 +5,9 @@ The key costs minutes (node_identity.ARGON2_TIME_COST: about 5 on a desktop,
 for it: the account exists from its first second (node_identity's account
 file), and only what speaks for the node — P2P, the notary's seals, the
 email's code — waits for the key. One worker makes it, on every road: the Web
-UI's setup and a change of identity (backend/device_auth), the env road's
-first start (backend/p2p_identity), the launcher's wizard and its window
-(desktop/wizard, desktop/launcher).
+UI's setup, a sign-in that finds its making stopped and a change of identity
+(backend/device_auth), the launcher's wizard and its window (desktop/wizard,
+desktop/launcher).
 
 One at a time in a process: a start while one runs is refused (False). A
 thread, not a process — argon2-cffi releases the GIL, so the event loop and
@@ -16,8 +16,8 @@ the process ends it, and the account file says so (no `pubkey`): the next
 sign-in, its password checked by the hash, starts it again.
 
 Its progress is one estimate said at the start and one event at its end —
-Argon2 has no callback in between, and a tick would be a timer: the page
-draws its own clock from `started_at` and `expected_s`.
+Argon2 has no callback in between, and a tick would be a timer: the page says
+the estimate and the start's time, once.
 """
 
 import datetime
@@ -104,15 +104,19 @@ class Birth:
                 finally:
                     if slot is not None:
                         slot.release()
-                with self._lock:
-                    self._state = None
+                # The state stays "deriving" through the key's placement: a
+                # sign-in meanwhile must not take the account for one whose
+                # making stopped, and start a second derivation
                 done(seed)
             except BaseException as e:
-                with self._lock:
-                    self._state = None
                 logger.error("The account's key could not be made (%s): %s", purpose, e,
                              exc_info=True)
+                with self._lock:
+                    self._state = None
                 failed(e)
+            else:
+                with self._lock:
+                    self._state = None
 
         threading.Thread(target=run, name="identity-birth", daemon=True).start()
         return True

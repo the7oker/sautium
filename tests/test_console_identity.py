@@ -105,10 +105,13 @@ def test_the_export_is_written_by_the_host_0600_and_never_where_a_container_writ
     assert all("tundra" not in " ".join(a) for a, _ in asked)
     assert asked[-1] == (["export"], b"tundra-maple-orbit-kettle\n")
     assert not _theirs(checkout, opened)
+    # Never inside the checkout: its containers' folders, nor one `git add` from the public tree
     for inside in (checkout / "data" / "node_identity" / "x", checkout / "backend" / "data" / "x",
-                   checkout / "run" / "x"):
-        with pytest.raises(setup.Stop, match="containers write"):
+                   checkout / "run" / "x", checkout / ("x" + setup.IDENTITY_SUFFIX)):
+        with pytest.raises(setup.Stop, match="inside Sautium's own folder"):
             setup.out_path(str(inside))
+    assert setup.out_path(None).parent.resolve() == Path.home().resolve()
+    assert "*.sautium-identity" in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
     with pytest.raises(setup.Stop, match="there already"):
         setup.out_path(str(out))
 

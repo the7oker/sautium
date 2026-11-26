@@ -58,7 +58,8 @@ IDENTITY_MISSING = (
     "interface (Open Web UI): the same pair is the same identity. If you changed the nickname "
     "or password before, the record of the identities it replaced comes back only with a copy "
     "of the folder or a backup; without it, what they signed is another author's here. It asks "
-    "for the setup code, in setup_code.txt in that folder. Then restart Sautium;\n"
+    "for the setup code, in setup_code.txt in that folder; its key is then made in the "
+    "background for some minutes — restart Sautium once the web interface says it is ready;\n"
     "Once the identity is back, a backup of it (Settings & Tools › Backup & Restore) opens "
     "and restores its database, the current one kept beside it; a backup never brings an "
     "identity itself.\n"
@@ -136,6 +137,9 @@ class LauncherApp(ctk.CTk):
         from desktop.identity_birth import Birth
         self._birth = Birth()
         self._key_asked = False       # the password asked once a start for a key not made
+        # The key's words while it is made: said where the window shows them,
+        # and by the window it builds after the wizard (_build_ui)
+        self._key_words = ""
         # Held by a P2P start from "not quitting?" through P2PManager.start(),
         # and by the quit's P2P stop: the start either finished before the
         # stop and is stopped, or sees the quit and does not begin.
@@ -330,6 +334,8 @@ class LauncherApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
         )
         self._progress_text.pack(pady=(5, 0))
+        if self._key_words:
+            self._progress_text.configure(text=self._key_words)
 
         # Quit button
         ctk.CTkButton(
@@ -727,7 +733,9 @@ class LauncherApp(ctk.CTk):
         self.ui_call(self._key_placed)
 
     def _key_placed(self):
-        self._progress_text.configure(text="")
+        self._key_words = ""
+        if hasattr(self, "_progress_text"):
+            self._progress_text.configure(text="")
         if not self._services_ready:
             return                     # the services' next start settles it
         threading.Thread(target=self._tell_backend_key, daemon=True, name="key-born").start()
@@ -745,13 +753,16 @@ class LauncherApp(ctk.CTk):
 
     def _key_said(self, state: dict):
         minutes = max(1, round((state.get("expected_s") or 0) / 60))
-        self._progress_text.configure(
-            text=f"Making your identity's key — about {minutes} min on this machine. "
-                 "Sautium plays and scans meanwhile; sharing and chat start when it is ready.")
+        self._key_words = (f"Making your identity's key — about {minutes} min on this machine. "
+                           "Sautium plays and scans meanwhile; sharing and chat start when it is ready.")
+        if hasattr(self, "_progress_text"):            # the main window, once the wizard has gone
+            self._progress_text.configure(text=self._key_words)
 
     def _key_failed(self, error):
-        self._set_status("error", "Your identity's key could not be made")
-        self._progress_text.configure(text=str(error)[:200])
+        self._key_words = f"Your identity's key could not be made: {str(error)[:160]}"
+        if hasattr(self, "_status_text"):
+            self._set_status("error", "Your identity's key could not be made")
+            self._progress_text.configure(text=self._key_words)
 
     def _identity_unborn(self):
         """The account is here and its key is not: being made in this

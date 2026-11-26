@@ -14,10 +14,10 @@ once, by proving one of two things:
     over 128 MiB with a salt of its own), never by deriving the key again:
     the key costs minutes (SEC-S5), and a stolen disk holds the key or the
     password already, so the hash makes the password no cheaper to find.
-  * possession of a pairing code the launcher hands over as a QR code or a
-    link (it is never shown as text, and a Docker node has no surface for
-    one), for the anonymous accounts the wizard creates with a random
-    password its owner has never seen.
+  * possession of a pairing code its host hands over as a QR code or a link
+    — the launcher's window, a Docker node's console (`./sautium pair`,
+    `python -m pairing`), the QR's value printed under it — for the
+    accounts with no password, whose key is random.
 
 THE PASSWORD ITSELF. The key is derived from the nickname and the password,
 and an invite code fixes it: whoever holds one tests guesses at home, unseen
@@ -353,8 +353,11 @@ def older_identity() -> bool:
     """A key in the identity folder with an account's name beside it and no
     account file: an identity made by a Sautium before SEC-S5, whose key at
     the old cost nothing here reproduces or checks (the owner's word, SEC-S5
-    §15). Its password signs nothing in; the node's account is made anew."""
-    return identity_key_on_disk() and _account() is None and bool(_info().get("username"))
+    §15). Its password signs nothing in; the node's account is made anew.
+    One with no password anyone knows is not this: its door is the host's
+    code, as before."""
+    return (identity_key_on_disk() and _account() is None and bool(_info().get("username"))
+            and not account_anonymous())
 
 
 class OlderIdentity(Exception):
@@ -382,8 +385,9 @@ def account_username() -> Optional[str]:
 
 def account_configured() -> bool:
     """True when this node has an account at all: its account file — from
-    its first second, before its key — or an older identity's key."""
-    return _account() is not None or older_identity()
+    its first second, before its key — or a key with an account's name
+    beside it (an identity made before SEC-S5)."""
+    return _account() is not None or (identity_key_on_disk() and bool(_info().get("username")))
 
 
 def key_ready() -> bool:
@@ -424,6 +428,15 @@ def account_anonymous() -> bool:
     if "anonymous" in info:
         return bool(info["anonymous"])
     return bool(re.fullmatch(r"anonymous-[0-9a-f]{4}", info.get("username") or ""))
+
+
+def password_door() -> bool:
+    """Whether a password signs this node in: its account file holds a
+    sign-in hash. An account with no password (a random key) has none, nor
+    one an identity file with no passphrase brought (the file carries no
+    test of the password) — its host's pairing code is their door."""
+    account = _account()
+    return account is not None and bool(account.get("signin"))
 
 
 def identity_key_on_disk() -> bool:
@@ -477,8 +490,9 @@ def record_identity_state() -> None:
     resolves (the identity folder's or the environment's), as its signing key
     of record; with none, whether the database says the node had one
     (OWN_SEALS_SQL), for the status to say once per start."""
-    global _identity_missing
+    global _identity_missing, _followed
     pubkey = _expected_pubkey()
+    _followed = pubkey
     if pubkey is not None:
         _record_signing_key(pubkey)
         return
@@ -613,11 +627,16 @@ def _publish_birth(state: dict) -> None:
 
 def _start_birth(username: str, password: str, purpose: str, done) -> bool:
     """identity_birth's worker for this account, in one of the memory slots
-    for its whole run; `done(seed)` in its thread. False when one runs."""
+    for its whole run; `done(seed)` in its thread. False when one runs. A
+    first key's start and failure are the identity line's (the node has no
+    identity until it lands); a rotation's are not — the old identity stands
+    meanwhile, and the change's own sheet said what is being made."""
     def failed(error: BaseException) -> None:
-        _publish_birth({"status": "failed", "detail": "key", "purpose": purpose})
+        if purpose != "rotate":
+            _publish_birth({"status": "failed", "detail": "key", "purpose": purpose})
 
-    return _birth.start(username, password, purpose=purpose, done=done, said=_publish_birth,
+    said = _publish_birth if purpose != "rotate" else (lambda state: None)
+    return _birth.start(username, password, purpose=purpose, done=done, said=said,
                         failed=failed, slot=_memory_slots)
 
 
@@ -677,10 +696,11 @@ def _born_elsewhere(_notifies=None) -> None:
 
 def start_born_listener() -> None:
     """Launcher mode, at the start (on the loop): the launcher's key followed."""
-    global _born_listener, _followed, _loop
+    global _born_listener, _loop
     from db_pool import Listener
     _loop = asyncio.get_running_loop()
-    _followed = _expected_pubkey()
+    # `_followed` is the key the start found (record_identity_state): one
+    # placed since is followed at the listener's first connect
     _born_listener = Listener("identity-born", ("sautium_identity_born",),
                               on_notify=_born_elsewhere, on_connect=_born_elsewhere)
     _born_listener.start()
@@ -853,6 +873,19 @@ async def decide_new_identity(make: bool) -> dict:
     return {"key": "ready", "invite_code": info["invite_code"], "public_key_hex": pubkey}
 
 
+def say_key_at_start() -> None:
+    """At a start, after record_identity_state: an account whose key is not
+    in place and which this process makes (births_here) is said
+    "interrupted" on the identity line's channel — what a stop before the
+    key's end left there ("deriving", or the owner's question, whose held
+    key went with the process) is not the truth any more — and the page
+    asks for the password to make it again (POST /api/auth/resume-key)."""
+    if births_here() and key_state() == "interrupted":
+        logger.warning("The account's key was not made before the node stopped: the next "
+                       "sign-in with its password makes it again")
+        _publish_birth({"status": "interrupted", "purpose": "resume"})
+
+
 def resume_birth(password: str) -> bool:
     """A sign-in whose password the hash just took, on an account whose key
     was not made (a stop came first): its making starts again, on this
@@ -864,7 +897,13 @@ def resume_birth(password: str) -> bool:
         return False
     _loop = asyncio.get_running_loop()
     logger.info("The account's key was not made before a stop: its making starts again")
-    return _start_birth(account["username"], password, "resume", _born(account, _holds_identity(), None))
+    from desktop import password_strength
+    verdict = password_strength.verdict(password, (account["username"], account.get("email") or ""))
+    # A password the setup took only because the identity of record comes
+    # back whatever its password: another identity made from it is refused
+    weak = verdict if verdict["zone"] == "refused" else None
+    return _start_birth(account["username"], password, "resume",
+                        _born(account, _holds_identity(), weak))
 
 
 class WrongPassword(Exception):
@@ -917,7 +956,9 @@ async def rotate_identity(username: str, password: str, current_password: str = 
         if older_identity():
             _refuse_older()
         account = _account()
-        if key_state() != "ready":
+        if account is None:
+            _refuse_older()               # an identity made before SEC-S5, anonymous: nothing here rotates it
+        if key_state() != "ready" or _birth.state() is not None:
             raise KeyBeingMade()
         await step_up(current_password, pin)
         check_rotation_name(d, username)
@@ -956,9 +997,10 @@ async def step_up(password: str, pin: str) -> None:
     has seen, so its host vouches instead, by the pairing code it shows now
     (a wrong one is told). WrongPassword / WrongPin otherwise — a node with
     no account has nobody to vouch."""
-    if account_configured() and account_anonymous():
-        # No code at all is a page that was not opened from the host: it
-        # costs the code the host shows nothing
+    if account_configured() and (account_anonymous() or not password_door()) and not older_identity():
+        # No password signs this account in: its host vouches by the code it
+        # shows. No code at all is a page that was not opened from the host:
+        # it costs the code the host shows nothing
         if not pin or not await redeem_pin(pin):
             raise WrongPin()
     elif not await password_tried(password, signed=True):
@@ -1010,6 +1052,10 @@ def _after_rotation(pubkey: str) -> None:
     import p2p_identity
     from db_pool import db_execute
     from routers import p2p as p2p_router
+    # First: a token names the account's id, which a rotation keeps — the
+    # epoch's bump is what ends every browser the old password signed in,
+    # and nothing below may fail before it
+    bump_epoch()
     p2p_identity.forget_cached()
     p2p_router.forget_identity()
     p2p_chat.forget_service()
@@ -1029,9 +1075,6 @@ def _after_rotation(pubkey: str) -> None:
     # get to it, or never (a key with no certificate yet)
     db_execute("UPDATE user_profile SET email_verified = FALSE WHERE id = 1")
     db_execute("NOTIFY sautium_identity")
-    # Tokens are bound to the public key, so every paired browser is out
-    # already; the epoch bump makes that an explicit, logged event.
-    bump_epoch()
     db_execute("NOTIFY sautium_identity_rotated")
 
 
@@ -1062,6 +1105,11 @@ async def verify_password(password: str, *, signed: bool = False) -> bool:
         _refuse_older()
     account = _account()
     if not account or not account.get("signin") or not password or account_anonymous():
+        return False
+    held = _expected_pubkey()
+    if account.get("pubkey") and held is not None and account["pubkey"] != held:
+        logger.error("The account file's hash was made for the key %s…, and the identity folder "
+                     "holds %s…: it checks no password", account["pubkey"][:16], held[:16])
         return False
     from desktop.node_identity import signin_matches
     try:
@@ -1346,10 +1394,16 @@ def padded(obj: dict) -> bytes:
     return json.dumps({**obj, "_pad": " " * (-len(plain) % BOX_BUCKET)}).encode("utf-8")
 
 
-def open_channel() -> dict:
+def open_channel(server_secret: Optional[Callable[[], bytes]] = None) -> dict:
     """Mint the server half of one exchange. The browser answers with a box
     to `eph`; `sig` is the identity key's signature over
-    context || eph || expires (big-endian seconds), empty without identity."""
+    context || eph || expires (big-endian seconds), empty without identity.
+    `tag` (`server_secret` the node's secret, read only for an account):
+    the same bytes and the node's public key under the device token
+    (HMAC-SHA256) — what a browser that holds the token, and pinned nothing
+    yet, authenticates the answer by: while the account's key is being made
+    the answer is unsigned, and the first signed one is pinned only when the
+    token vouches for it (SEC-S5; nobody without the token makes the tag)."""
     from nacl.public import PrivateKey
 
     from config import settings
@@ -1367,11 +1421,17 @@ def open_channel() -> dict:
         _channels[pub] = (key, expires)
     signing_key = load_signing_key(settings)
     signed = _CHANNEL_CONTEXT + pub + expires.to_bytes(8, "big")
+    node_pubkey = _expected_pubkey() or ""
+    tag = ""
+    if server_secret is not None and account_configured():
+        tag = hmac.new(current_token(server_secret()).encode(), signed + node_pubkey.encode(),
+                       "sha256").hexdigest()
     return {
         "eph": base64.b64encode(pub).decode("ascii"),
         "expires": expires,
-        "node_pubkey": _expected_pubkey() or "",
+        "node_pubkey": node_pubkey,
         "sig": signing_key.sign(signed).hex() if signing_key is not None else "",
+        "tag": tag,
     }
 
 

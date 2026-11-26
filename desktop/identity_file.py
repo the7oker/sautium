@@ -57,10 +57,11 @@ in a container of the backend's image, on the node's own files, and the host
 reaches them only through its stdin and stdout (scripts/setup.py,
 `./sautium identity`). On a Windows host (Docker Desktop), by hand — the
 file written in the container and copied out, so no shell's redirection
-touches its bytes:
+touches its bytes — into the home folder, never the checkout (one `git add`
+from the public tree):
 
     docker exec -it -u agent sautium-backend python -m desktop.identity_file export --out /tmp/identity.sautium-identity
-    docker cp sautium-backend:/tmp/identity.sautium-identity .
+    docker cp sautium-backend:/tmp/identity.sautium-identity "$HOME"   # PowerShell: $env:USERPROFILE
     docker exec -u agent sautium-backend rm /tmp/identity.sautium-identity
 
 (`export --no-passphrase` for the plain file). On a node with no identity,
@@ -80,6 +81,7 @@ It prints the invite code and the public key, for the pins.
 """
 
 import datetime
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -113,12 +115,11 @@ SALT_LEN = 16
 NONCE_LEN = 24
 KEY_LEN = 32
 CHECK_LEN = 16
-# A header's cost is taken only inside these: a file locked by a later
-# release at a higher cost still opens, a doctored one cannot ask for hours
-# or for more memory than a small board has
-TIME_MAX = 100_000
-MEMORY_MIN, MEMORY_MAX = 8 * 1024, 1024 * 1024        # KiB
-PARALLELISM_MAX = 16
+# A header's cost is taken only up to this release's own key's (read at the
+# call — node_identity's constants): a doctored file cannot ask for more time
+# or memory than the key's own derivation, and a file locked at a lower cost
+# (an older release's) still opens
+MEMORY_MIN = 8 * 1024                                  # KiB
 CHECK_CONTEXT = b"sautium-identity:v1:check"
 
 KEY_FILENAME = "node_ed25519.key"
@@ -127,7 +128,7 @@ DOCUMENTS = (CERT_FILENAME, PROOF_FILENAME)
 ARCHIVE_NAMES = (KEY_FILENAME, "node_ed25519.pub", INFO_FILENAME, CERT_FILENAME,
                  PROOF_FILENAME, ROTATION_FILENAME)
 _HEX64 = re.compile(r"[0-9a-f]{64}")
-_PHC = re.compile(r"\$argon2id\$v=19\$m=\d{1,8},t=\d{1,6},p=\d{1,3}\$[A-Za-z0-9+/]{16,64}\$[A-Za-z0-9+/]{16,128}")
+_PHC = re.compile(r"\$argon2id\$v=19\$m=(\d{1,8}),t=(\d{1,6}),p=(\d{1,3})\$[A-Za-z0-9+/]{16,64}\$[A-Za-z0-9+/]{16,128}")
 EMAIL_MAX = 320
 
 # The words beside the export (level C drafts, for the words review)
@@ -264,9 +265,9 @@ def _account(value, username: Optional[str]) -> Optional[dict]:
     signin, anonymous, email = value["signin"], value["anonymous"], value["email"]
     if value["username"] != username or not isinstance(anonymous, bool):
         raise Damaged("the file's account is not its identity's")
-    if anonymous != (signin is None):
+    if anonymous and signin is not None:
         raise Damaged("the file's account has a sign-in hash only when it has a password")
-    if signin is not None and not (isinstance(signin, str) and _PHC.fullmatch(signin)):
+    if signin is not None and not _signin_bounded(signin):
         raise Damaged("the file's sign-in hash is not one")
     if not isinstance(email, str) or len(email) > EMAIL_MAX:
         raise Damaged("the file's email is not one")
@@ -392,6 +393,15 @@ def check_passphrase(passphrase: str, user_inputs: tuple, keep: bool) -> dict:
     return verdict
 
 
+def _signin_bounded(signin) -> bool:
+    """A sign-in hash, at no more than this release's own sign-in cost:
+    every sign-in runs at the parameters it names."""
+    m = _PHC.fullmatch(signin) if isinstance(signin, str) else None
+    return m is not None and (1 <= int(m.group(1)) <= node_identity.SIGNIN_MEMORY_COST
+                              and 1 <= int(m.group(2)) <= node_identity.SIGNIN_TIME_COST
+                              and 1 <= int(m.group(3)) <= node_identity.SIGNIN_PARALLELISM)
+
+
 def opening_seconds(data: bytes) -> Optional[float]:
     """About how long opening the file takes on this machine (its lock's
     one derivation), None for a file with no passphrase."""
@@ -476,6 +486,13 @@ def export(identity_dir: Path, passphrase: Optional[str], *, keep: bool = False)
     if passphrase is not None:
         check_passphrase(passphrase, (contents.username or "", (contents.account or {}).get("email", "")),
                          keep)
+    elif contents.account is not None and contents.account["signin"] is not None:
+        # The plain file carries no sign-in hash: beside the key it would be a
+        # test of the account's password a thousand times cheaper than the
+        # key's — a password that may open more than this node. Imported, the
+        # node is signed into by its host's pairing code until its password
+        # is set again (Profile › Change identity).
+        contents = dataclasses.replace(contents, account={**contents.account, "signin": None})
     header = {"created_at": _now(), "identity": _header_identity(contents), "passphrase": None}
     body = _canonical(_body(contents))
     if passphrase is not None:
@@ -548,8 +565,9 @@ def _split(data: bytes) -> Tuple[dict, bytes, bytes]:
         if not (isinstance(lock, dict) and set(lock) == {"alg", "salt", "check", *ints}
                 and lock["alg"] == "argon2id"
                 and all(isinstance(lock[k], int) and not isinstance(lock[k], bool) for k in ints)
-                and 1 <= lock["t"] <= TIME_MAX and MEMORY_MIN <= lock["m"] <= MEMORY_MAX
-                and 1 <= lock["p"] <= PARALLELISM_MAX
+                and 1 <= lock["t"] <= node_identity.ARGON2_TIME_COST
+                and MEMORY_MIN <= lock["m"] <= node_identity.ARGON2_MEMORY_COST
+                and 1 <= lock["p"] <= node_identity.ARGON2_PARALLELISM
                 and isinstance(lock["salt"], str) and re.fullmatch(r"[0-9a-f]{32}", lock["salt"])
                 and isinstance(lock["check"], str) and re.fullmatch(r"[0-9a-f]{32}", lock["check"])):
             raise Damaged("This identity file's lock is malformed.")

@@ -274,22 +274,34 @@
     const hs = await r.json();
     const eph = unb64(hs.eph);
     const pinned = pinnedNode();
+    const expires = new Uint8Array(8);
+    new DataView(expires.buffer).setBigUint64(0, BigInt(hs.expires));
+    const signed = new Uint8Array([...enc.encode("sautium-pair:v1"), ...eph, ...expires]);
+    // The device token's word on this answer (device_auth.open_channel's
+    // tag): only the node that issued the token makes it
+    const token = storedToken();
+    const vouched = !!token && typeof hs.tag === "string" && hs.tag.length > 0 &&
+      toHex(hmacSha256(enc.encode(token),
+                       new Uint8Array([...signed, ...enc.encode(hs.node_pubkey || "")]))) === hs.tag;
     if (hs.node_pubkey) {
       if (!KEY_FORM.test(hs.node_pubkey)) throw new Error("handshake identity malformed");
-      const expires = new Uint8Array(8);
-      new DataView(expires.buffer).setBigUint64(0, BigInt(hs.expires));
-      const signed = new Uint8Array([
-        ...enc.encode("sautium-pair:v1"), ...eph, ...expires]);
       if (!nacl.sign.detached.verify(signed, unhex(hs.sig), unhex(hs.node_pubkey))) {
         throw new Error("handshake signature invalid");
       }
       // A pinned identity the answer does not carry is the case the pin
       // exists for
       if (pinned && pinned !== hs.node_pubkey) throw new NodeChanged(hs.node_pubkey);
-      // The first signed answer of a node this browser signed in to before its key
-      if (!pinned && pinPending()) { pinNode(hs.node_pubkey); setPinPending(false); }
+      // The first signed answer of a node this browser signed in to before
+      // its key: pinned on the token's word, never on being first
+      if (!pinned && pinPending()) {
+        if (token && !vouched) throw new NodeChanged(hs.node_pubkey);
+        pinNode(hs.node_pubkey);
+        setPinPending(false);
+      }
     } else if (unborn && !pinned) {
-      // An account whose key is being made answers unsigned, as at its setup
+      // An account whose key is being made answers unsigned, as at its
+      // setup; a browser that holds its token takes only the node's answer
+      if (token && !vouched) throw new NodeChanged("");
       setPinPending(true);
     } else if (!creating) {
       // A node with an account always signs: an answer without is no node
@@ -461,6 +473,8 @@
       return errorDetail(r, "Could not create the account.");
     },
     async pair(code) {
+      // Whether the node's key is still being made: its answer is unsigned then
+      await window.Sautium.auth.status();
       const r = await boxedPost("/api/auth/pair", { code });
       if (!r.ok) return failure(r);
       setToken(r.data.token);
@@ -503,6 +517,10 @@
           : await errorDetail(r, `HTTP ${r.status}`) };
       }
       if (r.data.password) return { ok: false, weak: r.data.password };
+      // A new password's key is made in the background: the old identity
+      // stands, and this browser stays signed in to it, until it lands —
+      // then every browser signs in again with the new password
+      if (r.data.key === "deriving") return { ok: true, deriving: true, ...r.data };
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
       return { ok: true, ...r.data };
@@ -1046,38 +1064,15 @@
   }
 
   // The key the setup made is not the identity this node's records name
-  // (the status's and the identity event's "another_identity"): asked once
-  // it is made, minutes after the setup, by the page then open (app-shell.js)
-  // — a new identity, said for what it costs, or the account taken back and
-  // the setup offered again. Draft words for the owner's words review.
-  let askingAnother = false;
-  window.Sautium.auth.askAnotherIdentity = async () => {
-    if (askingAnother) return;
-    askingAnother = true;
-    try {
-      const make = await window.confirmDestructive({
-        title: "Another identity",
-        message: "The key that nickname and password make is an identity other than the one this " +
-          "node signed with: a typo, another nickname, or a password changed since — or that " +
-          "identity never had a nickname and password, and only its identity file brings it " +
-          "back.<br><br>" + NEW_IDENTITY_COSTS,
-        confirmText: "Make a new identity", cancelText: "Set up again",
-        focusCancel: true,
-      });
-      const r = await fetch("/api/auth/new-identity", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ make }),
-      });
-      if (!make) { setToken(""); location.reload(); return; }
-      const data = r.ok ? await r.json() : {};
-      if (data.password) {
-        window.notifyDialog({ title: "This password can be found", kind: "info",
-                              message: data.password.door + " Set the node up again with another." });
-      }
-    } finally {
-      askingAnother = false;
-    }
-  };
+  // (the status's and the identity event's "another_identity"), or the
+  // key's making was stopped ("interrupted"): asked by the page then open
+  // (app-shell.js), with the account's password — who the node is changes
+  // only on the person's own word. `make`: the owner's answer to the first.
+  window.Sautium.auth.NEW_IDENTITY_COSTS = NEW_IDENTITY_COSTS;
+  window.Sautium.auth.decideNewIdentity = (make, password) =>
+    window.Sautium.auth.boxed("/api/auth/new-identity", { make }, { password });
+  window.Sautium.auth.resumeKey = (password) =>
+    window.Sautium.auth.boxed("/api/auth/resume-key", {}, { password });
   const PASSWORD_TOLD_KEY = "sautium.password_told";
   window.Sautium.auth.takePasswordTold = () => {
     let told = null;

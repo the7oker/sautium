@@ -709,6 +709,7 @@ async def lifespan(app: FastAPI):
     # The key this node signs with on record — or, with none, whether the
     # database says it had one (the account setup's question)
     await asyncio.to_thread(device_auth.record_identity_state)
+    await asyncio.to_thread(device_auth.say_key_at_start)
 
     # Resolve the hardware profile (full/standard/lite — HARDWARE-TIERS.md).
     # Drives the pre-warm set below plus pool sizes, phantom minting and

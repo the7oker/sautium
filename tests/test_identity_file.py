@@ -55,9 +55,39 @@ def test_a_plain_file_round_trips_the_identity(tmp_path):
         assert (dst / name).read_bytes() == (src / name).read_bytes()
     account = ni.read_account(dst)
     assert account["pubkey"] == pubkey and account["username"] == "alex"
-    assert ni.signin_matches(account["signin"], PASSWORD)
+    # A plain file carries no sign-in hash: a test of the password a
+    # thousand times cheaper than the key's. The node is signed into by its
+    # host's code until its password is set again
+    assert account["signin"] is None and account["anonymous"] is False
+    assert PASSWORD.encode() not in data and b"argon2id$" not in data
     assert account["source"] == "file" and account["email"] == "a@example.org"
     assert not (dst / "node_ed25519.key").stat().st_mode & 0o077
+
+
+def test_a_locked_file_carries_the_sign_in_hash(tmp_path):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    _account(src)
+    data = idf.export(src, "tundra maple orbit kettle", keep=True)
+    idf.import_(dst, data, "tundra maple orbit kettle")
+    assert ni.signin_matches(ni.read_account(dst)["signin"], PASSWORD)
+
+
+def test_a_header_or_a_hash_asks_no_more_than_this_release_s_own_cost(tmp_path, monkeypatch):
+    """A doctored file cannot ask its import for more time or memory than the
+    key's own derivation, nor leave a sign-in hash every login runs dearer."""
+    import dataclasses
+    import pytest as _pytest
+    src = tmp_path / "src"
+    _account(src)
+    contents = idf._gather(src)
+    dear = ni.signin_hash("x").replace(f"m={ni.SIGNIN_MEMORY_COST}", "m=99999999")
+    with _pytest.raises(idf.Damaged):
+        idf._account({**contents.account, "signin": dear}, "alex")
+    assert dataclasses.is_dataclass(contents)
+    data = idf.export(src, "tundra maple orbit kettle", keep=True)
+    monkeypatch.setattr(ni, "ARGON2_TIME_COST", 0)        # this release's key now cheaper than the lock
+    with _pytest.raises(idf.Damaged):
+        idf.summary(data)
 
 
 def test_the_account_id_is_the_new_machine_s_own(tmp_path):

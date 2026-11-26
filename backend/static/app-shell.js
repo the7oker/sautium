@@ -8528,7 +8528,8 @@
     _saidWaiting: false,
     waiting() {
       const s = this.state;
-      return !!(s && ['deriving', 'mining', 'paused', 'needs_email'].includes(s.status));
+      return !!(s && ['deriving', 'interrupted', 'another_identity', 'mining', 'paused',
+                      'needs_email'].includes(s.status));
     },
     supportOnly() {
       const s = this.state;
@@ -8537,7 +8538,7 @@
     apply(d) {
       const was = this.state;
       this.state = d;
-      if (d.status === 'another_identity') window.Sautium.auth.askAnotherIdentity();
+      if (d.status === 'another_identity' || d.status === 'interrupted') askAboutTheKey(d.status);
       if (d.status === 'ready') {
         this._saidWaiting = false;
         if (!d.initial && was && was.status && was.status !== 'ready') {
@@ -15181,6 +15182,17 @@
       }
       if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
       close();
+      if (result.deriving) {
+        // Draft words for the owner's words review
+        await notifyDialog({
+          title: 'Your new key is being made',
+          kind: 'info',
+          message: 'It takes some minutes on this machine. Until it is ready this node is still its old ' +
+            'identity, and you stay signed in. Then every device signs in again with the new password' +
+            (result.restart_required ? '; restart the backend once then, for its admission gate to sign with the new key.' : '.'),
+        });
+        return;
+      }
       if (result.restart_required) {
         // Where the node's image holds it, the restart is one tap here
         let restartable = false;
@@ -17425,6 +17437,65 @@
   // (user_settings 'p2p.identity', desktop/p2p/identity_proof.py). The proof
   // is a background lottery, so progress is the odds so far, not a percent
   // of work done.
+  // The account's key, asked about once it is made or stopped (the identity
+  // event): another identity than the node's records name — make it, or set
+  // up again — or a making a stop cut short, made again on the password. Both
+  // on the person's own word, the account's password through the box
+  // (routers/auth: new-identity, resume-key). Closing the sheet decides
+  // nothing: the next load asks again. Draft words for the owner's words review.
+  let keySheetOpen = false;
+  async function askAboutTheKey(status) {
+    if (keySheetOpen) return;
+    keySheetOpen = true;
+    const another = status === 'another_identity';
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">${another ? 'Another identity' : 'Finish your identity'}</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">${another
+            ? 'The key that nickname and password make is an identity other than the one this node signed with: ' +
+              'a typo, another nickname, or a password changed since — or that identity never had a nickname and ' +
+              'password, and only its identity file brings it back.<br><br>' + window.Sautium.auth.NEW_IDENTITY_COSTS
+            : "This node's key was not finished: it stopped before the key was made. Type the account's password " +
+              'to make it now — it takes some minutes, and Sautium plays and scans meanwhile.'}</p>
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">The account's password</span>
+            ${window.Sautium.auth.passwordField('', '', 'current-password', 'data-key-pass')}
+          </label>
+          <button class="profile-btn primary" data-go>${another ? 'Set up again' : 'Make the key'}</button>
+          ${another ? '<button class="profile-btn destructive" data-make>Make a new identity</button>' : ''}
+          <div data-line style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const line = overlay.querySelector('[data-line]');
+    const pass = overlay.querySelector('[data-key-pass]');
+    const close = () => { keySheetOpen = false; overlay.remove(); };
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const act = async (button, call) => {
+      if (!pass.value) { line.textContent = "Type the account's password."; return; }
+      button.disabled = true;
+      const r = await call(pass.value);
+      button.disabled = false;
+      if (!r.ok) { line.textContent = r.error || 'That did not go through — try again.'; return; }
+      if (r.data && r.data.password) { line.textContent = r.data.password.door + ' Set the node up again with another.'; return; }
+      close();
+      if (another && r.data && r.data.key === null) { window.Sautium.auth.forget(); location.reload(); }
+    };
+    const go = overlay.querySelector('[data-go]');
+    go.addEventListener('click', () => act(go, another
+      ? (pw) => window.Sautium.auth.decideNewIdentity(false, pw)
+      : (pw) => window.Sautium.auth.resumeKey(pw)));
+    const make = overlay.querySelector('[data-make]');
+    if (make) make.addEventListener('click', () => act(make, (pw) => window.Sautium.auth.decideNewIdentity(true, pw)));
+  }
+
   // The key's making in words: its estimate and when it began, said once —
   // Argon2 has no progress to tell, and a clock here would be a timer.
   // Draft words for the owner's words review.
@@ -17439,6 +17510,7 @@
     // one estimate at its start, the page's own clock beside it
     if (st.status === 'deriving') return keyBirthWords(st);
     if (st.status === 'another_identity') return 'the key made is another identity — asked';
+    if (st.status === 'interrupted') return 'its key was not finished — your password makes it';
     if (st.status === 'ready') return st.detail === 'email' ? 'email-verified' : 'proof ready';
     if (st.status === 'checking') return 'checking proof…';
     if (st.status === 'mining') {

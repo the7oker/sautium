@@ -386,13 +386,18 @@ KDF inputs, so either change is a new key; the old one is kept:
    wizard.
 2. `POST /api/auth/change-identity` (signed; an account with a password has
    it typed again in the box, checked before anything is derived — since
-   2026-11-03) runs it under the account lock,
-   drops the process caches, bumps the token epoch, hands the caller a fresh
-   token (the epoch ends every other: a token names the account's id, not its key) and `NOTIFY sautium_identity_rotated`.
-   The launcher restarts its P2P manager on the notify; a Docker node reports
-   `restart_required` — its peer surface's certificate and request check
-   follow the new key at once (since 2026-11-23, `p2p_identity.changed`), its
-   admission gate keeps the key the start built it on.
+   2026-11-03) runs it under the account lock. A new password's key is made
+   in the background (since 2026-11-26): the request answers at once, the old
+   identity stands until the key lands, and then the rotation bumps the token
+   epoch first (a token names the account's id, which a rotation keeps: the
+   epoch is what signs every browser out), drops the process caches and
+   `NOTIFY sautium_identity_rotated`; every browser signs in again with the
+   new password. A change to no password is a random key at once, and its
+   reply hands the caller a fresh token.
+   The launcher restarts its P2P manager on the notify; a Docker node's peer
+   surface's certificate and request check follow the new key at once (since
+   2026-11-23, `p2p_identity.changed`), its admission gate keeps the key the
+   start built it on until the backend restarts (`restart_required`).
 3. `friends.bound_identity` (delta 014) records which of OUR keys each
    friend binds our invite code to — set by `add_friend` on both surfaces,
    advanced when a notice is accepted. `_deliver_rotation_notices` runs on

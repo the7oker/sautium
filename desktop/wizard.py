@@ -1994,9 +1994,26 @@ class SetupWizard(ctk.CTkToplevel):
         With one: the account's file at once — its name, its sign-in hash,
         its id — and its key derived by the launcher in the background
         (desktop/identity_birth: minutes, beside the installation and after
-        it); the window never derives."""
+        it); the window never derives. A Finish tried again (the
+        installation failed, the step was changed) takes the account the
+        first try made when it is the same one, and makes another only
+        while no key of the first is placed or being made."""
         from desktop import node_identity
         d = node_identity._identity_dir()
+        made = node_identity.read_account(d)
+        if made is not None:
+            same = made["username"] == account["username"] and (
+                made.get("anonymous") if account["anonymous"]
+                else bool(made.get("signin")) and node_identity.signin_matches(made["signin"],
+                                                                              account["password"]))
+            if same:
+                if not account["anonymous"] and not node_identity.has_identity():
+                    self.ui_call(lambda: self.master.make_key(account["username"], account["password"]))
+                return
+            if node_identity.has_identity() or self.master._birth.state() is not None:
+                raise RuntimeError(f"This machine holds the identity {made['username']} already, from the "
+                                   "first try: go on with it, or start Sautium's setup over")
+            (d / node_identity.ACCOUNT_FILENAME).unlink()
         if account["anonymous"]:
             progress("Creating account identity...")
             info = node_identity.anonymous_account(d, account["username"], source="wizard",
@@ -2009,9 +2026,8 @@ class SetupWizard(ctk.CTkToplevel):
                 logger.warning("Birth certificate fetch failed (offline?) — will retry at P2P start")
             return
         progress("Creating account...")
-        made = node_identity.new_account(account["username"], account["password"], source="wizard",
-                                         email=account.get("email", ""))
-        node_identity.write_account(d, made)
+        node_identity.write_account(d, node_identity.new_account(
+            account["username"], account["password"], source="wizard", email=account.get("email", "")))
         self.ui_call(lambda: self.master.make_key(account["username"], account["password"]))
         logger.info("Account created: %s — its key is made in the background", account["username"])
 

@@ -71,8 +71,9 @@ def on_change(follower) -> None:
 
 
 async def changed() -> None:
-    """Said by the two places that make or change the identity
-    (routers/auth.create_account, device_auth._after_rotation)."""
+    """Said where the identity's key lands or changes under a running
+    process: device_auth._key_arrived (a key made, here or by the launcher)
+    and device_auth._after_rotation."""
     for follower in list(_followers):
         try:
             await follower()

@@ -35,6 +35,7 @@ _HOLDS_IDENTITY = device_auth._holds_identity
 def _no_identity(monkeypatch):
     monkeypatch.setattr(p2p_identity, "load_signing_key", lambda settings: None)
     monkeypatch.setattr(device_auth, "_derive_in_flight", 0)
+    monkeypatch.setattr(device_auth, "_epoch_cache", 0)       # the handshake's tag reads it
     device_auth._channels.clear()
 
 
@@ -142,10 +143,12 @@ def _seal(handshake: dict, payload: dict) -> dict:
 
 
 @pytest.fixture
-def doors():
+def doors(monkeypatch):
     """The auth routes on one loop for the whole test, as uvicorn's: a key
-    made in the background is followed on it."""
+    made in the background is followed on it. The node's secret is the
+    test's (the handshake's tag and the tokens are made under it)."""
     from routers import auth
+    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     app = FastAPI()
     app.include_router(auth.router)
     with TestClient(app) as client:
@@ -211,10 +214,14 @@ ctx.window.fetch = async (input, init) => {
     const expires = 4102444800;
     const eb = Buffer.alloc(8); eb.writeBigUInt64BE(BigInt(expires));
     const signed = Buffer.concat([Buffer.from('sautium-pair:v1'), Buffer.from(server.publicKey), eb]);
+    const nodePubkey = cfg.unsigned ? '' : hex(identity.publicKey);
+    // The node's word under the device token it issued (device_auth.open_channel's tag)
+    const issued = cfg.issued === undefined ? store['sautium.device_token'] : cfg.issued;
+    const tag = issued ? require('node:crypto').createHmac('sha256', issued)
+      .update(Buffer.concat([signed, Buffer.from(nodePubkey)])).digest('hex') : '';
     return new Response(JSON.stringify({
-      eph: Buffer.from(server.publicKey).toString('base64'), expires,
-      node_pubkey: cfg.unsigned ? '' : hex(identity.publicKey),
-      sig: cfg.unsigned ? '' : hex(nacl.sign.detached(signed, identity.secretKey)) }));
+      eph: Buffer.from(server.publicKey).toString('base64'), expires, node_pubkey: nodePubkey,
+      sig: cfg.unsigned ? '' : hex(nacl.sign.detached(signed, identity.secretKey)), tag }));
   }
   const queue = (cfg.replies || {})[path];
   if (!queue) return new Response('{}');
@@ -416,6 +423,18 @@ def test_the_same_name_and_password_are_this_identity_already(rotations, births,
     r = change(username="owner", password="the right one", current_password="the right one")
     assert r.status_code == 400 and "this identity already" in r.json()["detail"]
     assert births == []
+
+
+def test_no_change_is_made_while_a_new_key_is_being_made(rotations, births, monkeypatch):
+    """A change to no password after a change to a new one, its key still
+    being made: refused — never a random key now and the first key's
+    rotation over it minutes later."""
+    change, _done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth._birth, "state", lambda: {"status": "deriving", "purpose": "rotate"})
+    r = change(username="second", password="", current_password="the right one")
+    assert r.status_code == 409 and "being made" in r.json()["detail"]
+    assert change.rotated == []
 
 
 def test_a_change_to_no_password_is_a_random_key_at_once(rotations, births, monkeypatch):
@@ -773,11 +792,16 @@ def test_a_node_with_no_identity_signs_no_browser_in_and_pins_nothing():
     assert out["result"] is True and "sautium.node_pubkey" not in out["store"]
     assert out["store"]["sautium.pin_pending"] == "1"
     assert out["sent"]["/api/auth/create-account"][0]["setup_code"] == "AAAA-BBBB-CCCC"
-    # The key made: the first signed answer is pinned
+    # The key made: the first signed answer is pinned — on the token's word
     out = _page("return await window.Sautium.auth.login('x')", store={**_SIGNED_IN, "sautium.pin_pending": "1"},
                 replies={"/api/auth/login": [[200]]})
     assert out["result"] is True and out["store"]["sautium.node_pubkey"] == out["node"]
     assert "sautium.pin_pending" not in out["store"]
+    # Something answering in the node's place, which never saw the token: not pinned
+    out = _page("return await window.Sautium.auth.login('x')", store={**_SIGNED_IN, "sautium.pin_pending": "1"},
+                issued="", replies={"/api/auth/login": [[200]]})
+    assert out["thrown"].startswith("NodeChanged") and "sautium.node_pubkey" not in out["store"]
+    assert "/api/auth/login" not in out["asked"]
     known = {**_SIGNED_IN, "sautium.node_pubkey": "cd" * 32}
     out = _page(create, unsigned=True, store=known, replies={"/api/auth/create-account": [[200]]})
     assert out["thrown"] == "NodeChanged: node identity changed"
@@ -1334,9 +1358,21 @@ def test_the_door_asks_about_another_identity_when_its_key_is_made(lost_key, fre
     status = doors.get("/api/auth/status").json()
     assert status["key"] == "another_identity" and status["onboarding"] is False
     assert not (fresh_node / "node_ed25519.key").exists()
-    assert doors.post("/api/auth/new-identity", json={"make": True}).json()["key"] == "ready"
+    monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
+                                              for name in ("login", "signed")})
+    monkeypatch.setattr(device_auth, "_record_failure", lambda _key, n=1: n)
+
+    def answer(make, password):
+        return doors.post("/api/auth/new-identity", json=_seal(doors.get("/api/auth/handshake").json(),
+                                                               {"make": make, "password": password}))
+    # Only on the account's own password: who the node is changes on the person's word
+    assert answer(True, "a guess").status_code == 403
+    assert answer(True, None).status_code in (403, 422)
+    assert not (fresh_node / "node_ed25519.key").exists()
+    r = answer(True, "a different one amber lanterns ford")
+    assert r.status_code == 200 and set(r.json()) == {"nonce", "box"}      # the answer sealed
     assert (fresh_node / "node_ed25519.key").exists() and lost_key.arrived
-    assert doors.post("/api/auth/new-identity", json={"make": True}).status_code == 409
+    assert answer(True, "a different one amber lanterns ford").status_code == 409
 
 
 def _disk_full(*_a):
