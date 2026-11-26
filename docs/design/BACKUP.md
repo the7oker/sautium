@@ -585,8 +585,9 @@ launcher helpers); the database half is `python -m backup selftest`.
 - `desktop/settings.py` — the Settings & Tools dialog: General (ports) and
   Backup & Restore (node backup status line, "Create backup…" / "Cancel
   backup", "Restore from backup…"; "Merge from backup…"; the share export /
-  import; the identity certificate transfer), `PasswordDialog`,
-  `ExportDialog`.
+  import; "Export identity…" / "Import identity…", the identity file of
+  `desktop/identity_file.py` since 2026-11-26), `PasswordDialog`,
+  `ExportDialog`, `IdentityExportDialog`, `IdentityImportDialog`.
 - `backend/main.py` — wires `PlaybackSignal` to the load meter's samples.
   No router, no Web UI.
 - `backend/share.py` — Product B: the JSON-lines file (writer, reader,

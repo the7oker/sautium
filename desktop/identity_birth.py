@@ -35,19 +35,22 @@ logger = logging.getLogger(__name__)
 CALIBRATION_TIME_COST = 8
 
 
-def expected_seconds() -> float:
+def expected_seconds(cost: Optional[tuple] = None) -> float:
     """About how long the key's derivation takes on this machine now: a
     short one at the same memory, scaled by the passes. Measured, not a
     constant: the same board was 1.9× slower under a memory cap (PI-NODE-2B
-    §8.15)."""
+    §8.15). `cost`: another derivation's (time, memory, parallelism) — an
+    identity file's, whose header keeps the cost it was locked at."""
     from argon2.low_level import Type, hash_secret_raw
+    time_cost, memory_cost, parallelism = cost or (
+        node_identity.ARGON2_TIME_COST, node_identity.ARGON2_MEMORY_COST,
+        node_identity.ARGON2_PARALLELISM)
     t0 = time.monotonic()
     hash_secret_raw(secret=b"calibration", salt=b"sautium-calibration",
-                    time_cost=CALIBRATION_TIME_COST, memory_cost=node_identity.ARGON2_MEMORY_COST,
-                    parallelism=node_identity.ARGON2_PARALLELISM,
-                    hash_len=node_identity.ARGON2_HASH_LEN, type=Type.ID)
+                    time_cost=CALIBRATION_TIME_COST, memory_cost=memory_cost,
+                    parallelism=parallelism, hash_len=node_identity.ARGON2_HASH_LEN, type=Type.ID)
     took = time.monotonic() - t0
-    return took * node_identity.ARGON2_TIME_COST / CALIBRATION_TIME_COST
+    return took * time_cost / CALIBRATION_TIME_COST
 
 
 def _now() -> str:

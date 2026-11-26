@@ -1338,7 +1338,7 @@ def test_a_picture_that_is_not_only_blocks_is_not_shown(monkeypatch):
         asked.append((args, kw.get("stdin")))
         return subprocess.CompletedProcess(args, 0, drawn.encode(), b"")
     monkeypatch.setattr(setup, "run", fake)
-    drawn = "██▀▄  \n▄▄██  \n"
+    drawn = "██▀▄  \n▄▄██  \n\nhttp://192.0.2.10:8800/#setup=D889-VPL4\n"
     assert setup.qr("http://192.0.2.10:8800/#setup=D889-VPL4") == drawn
     args, stdin = asked[0]
     # The text goes in on stdin, never on the command line; the container sees nothing
@@ -1346,7 +1346,9 @@ def test_a_picture_that_is_not_only_blocks_is_not_shown(monkeypatch):
     for flag in ("--network", "none", "--read-only", "--cap-drop", "ALL"):
         assert flag in args
     assert "-v" not in args and "--volume" not in args and "--mount" not in args
-    drawn = "██ \x1b]0;evil\x07\n"
+    drawn = "██ \x1b]0;evil\x07\n\nx\n"
+    assert setup.qr("x") is None
+    drawn = "██▀▄  \n\nhttp://elsewhere/\n"                # only the text sent is the QR's value
     assert setup.qr("x") is None
 
 
