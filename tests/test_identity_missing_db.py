@@ -300,6 +300,7 @@ class _Launcher:
         self.settling = node_identity.IdentitySettling(
             lambda: dsn, self.threads.append, self.queue.append, lambda: self.closing,
             ready=lambda: self.said.append("ready"),
+            unborn=lambda: self.said.append("unborn"),
             missing=lambda: self.said.append("missing"),
             unsettled=lambda e: self.said.append(("unsettled", type(e).__name__)),
             failed=lambda e: self.said.append(("failed", type(e).__name__)))
@@ -310,6 +311,18 @@ class _Launcher:
     def drain(self):
         while self.queue:
             self.queue.pop(0)()
+
+
+def test_an_account_whose_key_is_not_made_is_never_minted_over(conn, scratch_dsn, folder):
+    """The wizard's account, its key still being made or its making stopped:
+    the check says so (unborn) and makes nothing — no random key over it."""
+    node_identity.write_account(folder, node_identity.new_account("owner", "a made-up one",
+                                                                  source="wizard"))
+    node = _Launcher(scratch_dsn)
+    assert node.settling.check()
+    node.thread()
+    node.drain()
+    assert node.said == ["unborn"] and not (folder / "node_ed25519.key").exists()
 
 
 def test_a_backend_start_while_the_owners_choice_is_made_checks_nothing(conn, scratch_dsn, folder):
@@ -659,7 +672,8 @@ def _launcher(dsn):
     node = _Launcher(dsn)
     node.settling = app._identity = node_identity.IdentitySettling(
         lambda: app.dsn, node.threads.append, node.queue.append, lambda: app._shutting_down,
-        ready=app._identity_ready, missing=app._identity_missing,
+        ready=app._identity_ready, unborn=lambda: node.said.append("unborn"),
+        missing=app._identity_missing,
         unsettled=app._identity_unsettled, failed=app._identity_failed)
     return app, node
 

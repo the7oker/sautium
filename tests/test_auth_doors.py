@@ -1325,7 +1325,7 @@ def test_the_door_asks_about_another_identity_when_its_key_is_made(lost_key, fre
     key, and nothing is placed until the owner answers."""
     lost_key.signed_by(_key_of("owner", "the right one"))
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "the wrong one", "setup_code": lost_key.code}))
+        "username": "owner", "password": "a different one amber lanterns ford", "setup_code": lost_key.code}))
     assert r.status_code == 200
     lost_key.births.finish()
     status = doors.get("/api/auth/status").json()
@@ -1396,7 +1396,8 @@ def test_a_key_that_lands_meanwhile_is_the_one_on_record(lost_key, fresh_node, m
                                              serialization.NoEncryption()))
         real(tmp, key, pem)
     monkeypatch.setattr(node_identity, "_link_exclusive", another_process_first)
-    _bring_back(lost_key, "first", "a first password amber lanterns ford")
+    asyncio.run(device_auth.create_account("first", "a first password amber lanterns ford", lost_key.code))
+    lost_key.births.finish()
     assert lost_key.record() == landed_pub and lost_key.arrived == []
 
 

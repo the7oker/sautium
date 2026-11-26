@@ -965,6 +965,8 @@ async def lifespan(app: FastAPI):
     import p2p_identity
     for follower in _IDENTITY_FOLLOWERS:
         p2p_identity.on_change(follower)
+    if device_auth.launcher_mode():
+        device_auth.start_born_listener()
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
         _start_host_network()
     if settings.p2p_sync_port:
@@ -1356,7 +1358,7 @@ async def lifespan(app: FastAPI):
         _stop_playback, _stop_load_meter, notary.stop, stop_gear_research_worker,
         stop_files_listener, stop_chat_listener, stop_sync_listener,
         stop_gear_state_listener, stop_mb_sources_listener, stop_recommendations_listener,
-        notary.stop_witness_listener)]
+        notary.stop_witness_listener, device_auth.stop_born_listener)]
     if _mailbox_stop:
         _mailbox_stop.set()
     from routers.p2p import close_identity_worker

@@ -210,31 +210,6 @@ class SetupWizard(ctk.CTkToplevel):
 
     def _validate_step(self) -> bool:
         if self._step_name() == "_step_account":
-            # Phase 2: verify email code (the Worker holds the expected
-            # value — registration happens right here, with the birth
-            # certificate attached by register_verified_email)
-            if getattr(self, "_account_verify_phase", False):
-                code = self._verify_code.get().strip().upper()
-                if not code:
-                    self._account_error.configure(text="Enter the code from email")
-                    return False
-                self._account_error.configure(
-                    text="Verifying code...", text_color="gray"
-                )
-                self.update()
-                from desktop.p2p.email_verify import register_verified_email
-                acct = self.config["_account"]
-                if not register_verified_email(
-                    self._account_email_val, code,
-                    acct["username"], acct["password"],
-                ):
-                    self._account_error.configure(text="Invalid or expired code")
-                    return False
-                self.config["_account"]["email"] = self._account_email_val
-                self.config["_account"]["email_verified"] = True
-                self._account_verify_phase = False
-                return True
-
             if self._restore:
                 # The account is the backup's: its password opened the file,
                 # so the pair derives the key the data is signed with.
@@ -302,65 +277,17 @@ class SetupWizard(ctk.CTkToplevel):
             # Every path yields a real account: without one `_get_identity()`
             # returns None downstream, which hides the invite code and leaves
             # Friends / chat / P2P sync silently broken. `anonymous` names the
-            # property device_auth reads — the password was minted, nobody can
-            # type it, the pairing PIN is the only door — and a chosen name
-            # over a minted password has exactly that property.
-            minted = self._minted_credentials()
+            # property device_auth reads — no password, a random key, the
+            # pairing code the only door — and a chosen name with no
+            # password has exactly that property.
             self.config["_account"] = {
-                "username": username or minted["username"],
-                "password": password or minted["password"],
+                "username": username or self._minted_username(),
+                "password": password,
                 "anonymous": not password,
+                # Kept on the account until its key is made: its code is
+                # sent then (Profile's Email row; SEC-S5 Q6)
+                "email": email,
             }
-            username = self.config["_account"]["username"]
-            password = self.config["_account"]["password"]
-
-            # An email is verified for whichever identity the pair yields —
-            # an anonymous account with a verified mailbox is a method:email
-            # identity like any other.
-            if email:
-                self._account_error.configure(
-                    text="Checking email...", text_color="gray"
-                )
-                self.update()
-
-                from desktop.p2p.email_verify import (
-                    send_verification_email,
-                    is_email_already_verified,
-                )
-
-                # Skip verification if email was already verified for this identity
-                if is_email_already_verified(email, username, password):
-                    self.config["_account"]["email"] = email
-                    self.config["_account"]["email_verified"] = True
-                    self._account_error.configure(
-                        text="Email already verified!", text_color="green"
-                    )
-                    self.update()
-                    return True
-
-                self._account_error.configure(
-                    text="Sending verification code...", text_color="gray"
-                )
-                self.update()
-
-                sent = send_verification_email(
-                    to_email=email,
-                    username=username,
-                    password=password,
-                    from_username=username,
-                )
-                if sent:
-                    self._account_verify_phase = True
-                    self._show_step()  # re-render as phase 2
-                    return False  # don't advance step
-                else:
-                    self._account_error.configure(
-                        text="Failed to send email. Proceeding without verification.",
-                        text_color="orange",
-                    )
-                    self.config["_account"]["email"] = email
-                    self.config["_account"]["email_verified"] = False
-
             return True
 
         if self._step_name() == "_step_provider":
@@ -531,15 +458,12 @@ class SetupWizard(ctk.CTkToplevel):
             ).pack(fill="x", padx=24,
                    pady=(1, 14 if index == len(items) - 1 else 6))
 
-    def _minted_credentials(self) -> dict:
-        """The name and password this node gets when the human types none.
-        Minted once per wizard and reused across re-renders, so the identity
-        that receives an email code is the one that redeems it."""
+    def _minted_username(self) -> str:
+        """The name this node gets when the human types none — its key is a
+        random one (no password makes it). Minted once per wizard and reused
+        across re-renders, so the placeholder shown is the name made."""
         if self._minted is None:
-            self._minted = {
-                "username": "anonymous-" + secrets.token_hex(2),
-                "password": secrets.token_urlsafe(32),
-            }
+            self._minted = "anonymous-" + secrets.token_hex(2)
         return self._minted
 
     def _restore_text(self) -> str:
@@ -556,11 +480,6 @@ class SetupWizard(ctk.CTkToplevel):
         RestoreDialog(self, on_ready=ready, confirm_replace=False)
 
     def _step_account(self):
-        # Two-phase step: phase 1 = fields, phase 2 = email verification
-        if getattr(self, "_account_verify_phase", False):
-            self._step_account_verify()
-            return
-
         ctk.CTkLabel(
             self.content_frame,
             text="Identity",
@@ -616,8 +535,7 @@ class SetupWizard(ctk.CTkToplevel):
         label(0, "Nickname (what friends see)")
         self._account_user = entry(
             1, getattr(self, "_account_user_val", ""),
-            placeholder_text=f"{self._minted_credentials()['username']} "
-                             "if left empty")
+            placeholder_text=f"{self._minted_username()} if left empty")
         # The alphabet is stated where the typing happens: a human name in
         # Cyrillic is the natural thing to try, and "letters" in an error
         # afterwards reads as a contradiction.
@@ -760,66 +678,6 @@ class SetupWizard(ctk.CTkToplevel):
             self.content_frame, text="", text_color="red",
         )
         self._account_error.pack()
-
-    def _step_account_verify(self):
-        """Phase 2: email verification code input."""
-        email = self._account_email_val
-
-        ctk.CTkLabel(
-            self.content_frame,
-            text="Email Verification",
-            font=ctk.CTkFont(size=22, weight="bold"),
-        ).pack(pady=(20, 5))
-
-        ctk.CTkLabel(
-            self.content_frame,
-            text=f"Verification code sent to:\n{email}",
-            justify="center",
-        ).pack(pady=10)
-
-        fields_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        fields_frame.pack(fill="x", padx=40, pady=10)
-
-        ctk.CTkLabel(fields_frame, text="Enter code from email:").pack(anchor="w")
-        # Widget-owned, like the phase-1 fields: a textvariable would hide
-        # the placeholder.
-        self._verify_code = ctk.CTkEntry(
-            fields_frame,
-            width=200,
-            placeholder_text="e.g. X7K9M2",
-            font=ctk.CTkFont(size=18, family="Consolas"),
-        )
-        self._verify_code.pack(anchor="w", pady=(0, 10))
-
-        self._account_error = ctk.CTkLabel(
-            self.content_frame, text="", text_color="red",
-        )
-        self._account_error.pack()
-
-        skip_frame = ctk.CTkFrame(self.content_frame, fg_color="transparent")
-        skip_frame.pack(pady=10)
-        ctk.CTkButton(
-            skip_frame,
-            text="Skip verification",
-            width=150,
-            fg_color="gray",
-            command=self._skip_email_verify,
-        ).pack()
-
-        ctk.CTkLabel(
-            self.content_frame,
-            text="Check your inbox (and spam folder).",
-            text_color="gray",
-            font=ctk.CTkFont(size=12),
-        ).pack(pady=(5, 0))
-
-    def _skip_email_verify(self):
-        """Skip email verification and proceed."""
-        self.config["_account"]["email"] = self._account_email_val
-        self.config["_account"]["email_verified"] = False
-        self._account_verify_phase = False
-        self.current_step += 1
-        self._show_step()
 
     def _step_provider(self):
         ctk.CTkLabel(
@@ -2064,30 +1922,7 @@ class SetupWizard(ctk.CTkToplevel):
                     # backup, once the database exists to restore into.
                     pass
                 elif account_data:
-                    progress("Creating account identity...")
-                    from desktop.node_identity import create_account
-                    info = create_account(
-                        account_data["username"],
-                        account_data["password"],
-                        email=account_data.get("email", ""),
-                        email_verified=account_data.get("email_verified", False),
-                        anonymous=account_data.get("anonymous", False),
-                    )
-                    logger.info(
-                        f"Account created: {info['invite_code']}"
-                    )
-
-                    # Email registration already happened at code entry
-                    # (register_verified_email in phase 2). Fetch the birth
-                    # certificate — idempotent, so a recreated account gets
-                    # its original date back.
-                    progress("Fetching birth certificate...")
-                    from desktop.p2p.birth_cert import ensure_certificate
-                    if ensure_certificate() is None:
-                        logger.warning(
-                            "Birth certificate fetch failed (offline?) — "
-                            "will retry at P2P start"
-                        )
+                    self._make_account(account_data, progress)
 
                 # Initialize database
                 from desktop.db_init import full_init
@@ -2138,6 +1973,33 @@ class SetupWizard(ctk.CTkToplevel):
                 self.ui_call(lambda: self.btn_back.configure(state="normal"))
 
         threading.Thread(target=_init_thread, daemon=True).start()
+
+    def _make_account(self, account: dict, progress) -> None:
+        """The account step's identity, in the installation's thread. With
+        no password: a random key, at once (nothing would derive it again).
+        With one: the account's file at once — its name, its sign-in hash,
+        its id — and its key derived by the launcher in the background
+        (desktop/identity_birth: minutes, beside the installation and after
+        it); the window never derives."""
+        from desktop import node_identity
+        d = node_identity._identity_dir()
+        if account["anonymous"]:
+            progress("Creating account identity...")
+            info = node_identity.anonymous_account(d, account["username"], source="wizard",
+                                                   email=account.get("email", ""))
+            logger.info(f"Account created: {info['invite_code']}")
+            # Idempotent: a recreated account gets its original date back
+            progress("Fetching birth certificate...")
+            from desktop.p2p.birth_cert import ensure_certificate
+            if ensure_certificate() is None:
+                logger.warning("Birth certificate fetch failed (offline?) — will retry at P2P start")
+            return
+        progress("Creating account...")
+        made = node_identity.new_account(account["username"], account["password"], source="wizard",
+                                         email=account.get("email", ""))
+        node_identity.write_account(d, made)
+        self.ui_call(lambda: self.master.make_key(account["username"], account["password"]))
+        logger.info("Account created: %s — its key is made in the background", account["username"])
 
     def _offer_report(self, error: str):
         """Initialization failed before anything listens — no backend, no

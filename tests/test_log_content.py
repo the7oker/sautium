@@ -274,22 +274,6 @@ def test_no_agent_runner_logs_the_text_of_a_message():
     assert [hit for path in runners for hit in _message_text_logged(path)] == []
 
 
-def test_verifying_an_email_logs_no_address(monkeypatch, caplog):
-    from desktop.p2p import email_verify
-    monkeypatch.setattr(email_verify, "_identity_ctx", lambda username, password: {
-        "invite_code": "someone#AAAA-BBBB-CCCC", "public_key_hex": "ab" * 32,
-        "sign": lambda data: b"\x00" * 64})
-    monkeypatch.setattr(email_verify, "_born", lambda ctx: {"pubkey": ctx["public_key_hex"]})
-    monkeypatch.setattr(email_verify, "_post_worker",
-                        lambda path, payload: {"status": "sent", "verified": True})
-    monkeypatch.setattr(email_verify, "_get_worker",
-                        lambda path, params: {"verified": True})
-    with caplog.at_level(logging.INFO, logger=email_verify.logger.name):
-        assert email_verify.send_verification_email("someone.private@example.com")
-        assert email_verify.is_email_already_verified("someone.private@example.com")
-    assert caplog.records and not [r for r in caplog.records if "private" in r.getMessage()]
-
-
 def test_a_saved_report_names_no_address_or_path(tmp_path, monkeypatch):
     from desktop import diag_bundle
     monkeypatch.setattr(diag_bundle, "system_facts", lambda config, **kw: {})

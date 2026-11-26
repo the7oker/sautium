@@ -124,8 +124,15 @@ class LauncherApp(ctk.CTk):
             self._get_local_db_dsn,
             lambda work: threading.Thread(target=work, daemon=True, name="node-identity").start(),
             self.ui_call, lambda: self._shutting_down,
-            ready=self._identity_ready, missing=self._identity_missing,
+            ready=self._identity_ready, unborn=self._identity_unborn, missing=self._identity_missing,
             unsettled=self._identity_unsettled, failed=self._identity_failed)
+        # The account's key, made in this process (desktop/identity_birth):
+        # by the wizard's account step, or by this window when a stop came
+        # before it was made. One process makes a node's key — in launcher
+        # mode its backend makes none (device_auth.births_here).
+        from desktop.identity_birth import Birth
+        self._birth = Birth()
+        self._key_asked = False       # the password asked once a start for a key not made
         # Held by a P2P start from "not quitting?" through P2PManager.start(),
         # and by the quit's P2P stop: the start either finished before the
         # stop and is stopped, or sees the quit and does not begin.
@@ -145,6 +152,7 @@ class LauncherApp(ctk.CTk):
         self._scan_active = False     # a Library wake is only ours while a scan we started runs
         self._qr_timer = None
         self._node_down = False       # _show_node_down's panel holds the QR block
+        self._services_ready = False  # _on_services_ready has run, and the node did not go down since
         self._session_start = None    # (data_dir, previous session) until node.started is recorded
         self._jobs: dict = {}         # kind ("backup" | "export" | "import") -> desktop/backup_task.CliRun
         self._job_listeners: list = []  # Settings & Tools windows watching those jobs (Tk thread)
@@ -485,6 +493,7 @@ class LauncherApp(ctk.CTk):
         if self._shutting_down:
             return
         self._node_down = False
+        self._services_ready = True
         port = self.config.get("ports", {}).get("web", 8000)
 
         # Check GPU status via backend Python (torch is in python312, not launcher)
@@ -696,6 +705,108 @@ class LauncherApp(ctk.CTk):
             self._set_status("running", "All services running")
             self._progress_text.configure(text="")
         self._start_p2p()
+
+    def make_key(self, username: str, password: str) -> bool:
+        """The account's key, derived in the background and placed beside its
+        account file (Tk thread). False when one is being made already."""
+        return self._birth.start(username, password, purpose="create", done=self._key_derived,
+                                 said=lambda state: self.ui_call(lambda: self._key_said(state)),
+                                 failed=lambda e: self.ui_call(lambda: self._key_failed(e)))
+
+    def _key_derived(self, seed: bytes) -> None:
+        """The worker's end, in its thread: the key placed, then the node
+        settles on it — the backend told (a launcher's backend makes no key
+        of its own, and its notary and records wait for this one), P2P
+        started by the check's ready."""
+        from desktop import node_identity
+        d = node_identity._identity_dir()
+        node_identity.place_account_key(d, node_identity.key_from_seed(seed), node_identity.read_account(d))
+        self.ui_call(self._key_placed)
+
+    def _key_placed(self):
+        self._progress_text.configure(text="")
+        if not self._services_ready:
+            return                     # the services' next start settles it
+        threading.Thread(target=self._tell_backend_key, daemon=True, name="key-born").start()
+        self._identity.check()
+
+    def _tell_backend_key(self) -> None:
+        import psycopg2
+        conn = psycopg2.connect(self._get_local_db_dsn(), connect_timeout=10)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("NOTIFY sautium_identity_born")
+        finally:
+            conn.close()
+
+    def _key_said(self, state: dict):
+        minutes = max(1, round((state.get("expected_s") or 0) / 60))
+        self._progress_text.configure(
+            text=f"Making your identity's key — about {minutes} min on this machine. "
+                 "Sautium plays and scans meanwhile; sharing and chat start when it is ready.")
+
+    def _key_failed(self, error):
+        self._set_status("error", "Your identity's key could not be made")
+        self._progress_text.configure(text=str(error)[:200])
+
+    def _identity_unborn(self):
+        """The account is here and its key is not: being made in this
+        process (its words are said), or its making was stopped — then the
+        password is asked once a start, checked by the account's sign-in
+        hash, and the key made again (SEC-S5 Q5)."""
+        if self._node_down or self._birth.state() is not None:
+            return
+        if not self._key_asked:
+            self._key_asked = True
+            self._ask_key_password()
+
+    def _ask_key_password(self):
+        from desktop import node_identity
+        account = node_identity.read_account(node_identity._identity_dir())
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Finish your identity")
+        dialog.geometry("480x260")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        ctk.CTkLabel(dialog, wraplength=430, justify="left", text=(
+            f"The key of your identity ({account['username']}) was not finished: Sautium stopped "
+            "before it was made. Type your password to make it now — it takes a few minutes, "
+            "and Sautium plays and scans meanwhile. (Signing in to the Web UI with it does the "
+            "same.)")).pack(padx=20, pady=(18, 8))
+        field = ctk.CTkEntry(dialog, show="*", placeholder_text="password", width=300)
+        field.pack(pady=4)
+        caption = ctk.CTkLabel(dialog, text="", text_color="gray", wraplength=430)
+        caption.pack()
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(pady=10)
+
+        def checked(password: str, ok: bool):
+            if not dialog.winfo_exists():
+                return
+            if not ok:
+                go.configure(state="normal")
+                caption.configure(text="That is not this account's password.")
+                return
+            dialog.destroy()
+            self.make_key(account["username"], password)
+
+        def finish():
+            password = field.get()
+            if not password:
+                return
+            go.configure(state="disabled")
+            caption.configure(text="Checking…")
+            threading.Thread(target=lambda: (lambda ok: self.ui_call(lambda: checked(password, ok)))(
+                node_identity.signin_matches(account["signin"], password)), daemon=True,
+                name="key-password").start()
+
+        go = ctk.CTkButton(btns, text="Make the key", width=140, command=finish)
+        go.pack(side="right", padx=4)
+        ctk.CTkButton(btns, text="Later", width=100, command=dialog.destroy,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=4)
+        field.bind("<Return>", lambda _e: finish())
+        field.focus()
 
     def _identity_missing(self):
         """No identity, while the database says this node had one: nothing is
@@ -993,6 +1104,7 @@ class LauncherApp(ctk.CTk):
         if self._shutting_down:
             return
         self._node_down = True
+        self._services_ready = False
         # Out of the tray: a node that went down while the window was put
         # away (the watchdog gave up, a restart failed) is seen, with its way out.
         self.deiconify()

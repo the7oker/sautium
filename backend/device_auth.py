@@ -669,6 +669,43 @@ def _key_arrived(pubkey: str) -> None:
     _on_loop(follow)
 
 
+# In launcher mode the launcher's process makes the account's key and says
+# so (NOTIFY sautium_identity_born): this process follows it as it follows a
+# key made here — its notary, its records, its role. On every (re)connect the
+# folder is read once more: a key that landed while the listener was down.
+_born_listener = None
+_followed: Optional[str] = None
+
+
+def _born_elsewhere(_notifies=None) -> None:
+    global _followed
+    import p2p_identity
+    p2p_identity.forget_cached()
+    pubkey = _expected_pubkey()
+    if pubkey is None or pubkey == _followed:
+        return
+    _followed = pubkey
+    logger.info("The account's key made by the launcher is in place: followed")
+    _record_signing_key(pubkey)
+    _key_arrived(pubkey)
+
+
+def start_born_listener() -> None:
+    """Launcher mode, at the start (on the loop): the launcher's key followed."""
+    global _born_listener, _followed, _loop
+    from db_pool import Listener
+    _loop = asyncio.get_running_loop()
+    _followed = _expected_pubkey()
+    _born_listener = Listener("identity-born", ("sautium_identity_born",),
+                              on_notify=_born_elsewhere, on_connect=_born_elsewhere)
+    _born_listener.start()
+
+
+def stop_born_listener() -> None:
+    if _born_listener is not None:
+        _born_listener.stop()
+
+
 def _born(account: dict, held: bool, weak: Optional[dict]):
     """The end of a creation's derivation (`seed` in the worker's thread)."""
     def done(seed: bytes) -> None:
