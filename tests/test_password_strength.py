@@ -70,17 +70,19 @@ def test_the_lists_load_only_under_their_digests(tmp_path, monkeypatch):
         ps._read("phrases.txt")
 
 
+@pytest.mark.real_key_cost
 def test_the_time_follows_the_key_s_cost_alone(monkeypatch):
-    today = ps.estimate("Sunshine1!")
-    assert today.zone == "refused" and ps.guesses_per_second() == 300
-    monkeypatch.setattr(node_identity, "ARGON2_TIME_COST", 4000)      # S5's cost
-    later = ps.estimate("Sunshine1!")
-    assert later.guesses == today.guesses
-    assert later.seconds == pytest.approx(today.seconds * 1000)
-    assert later.zone == "word"
-    monkeypatch.setattr(node_identity, "ARGON2_MEMORY_COST", 131072)  # 128 MiB, t doubled
-    monkeypatch.setattr(node_identity, "ARGON2_TIME_COST", 8000)
-    assert ps.guesses_per_second() == pytest.approx(0.3)
+    """At S5's cost (t=8000 over 128 MiB) one GPU makes 0.3 guesses a
+    second; at the first release's (t=4 over 256 MiB), the rate it was
+    measured at, 300 — the same guesses, a thousandth of the time."""
+    now = ps.estimate("Sunshine1!")
+    assert now.zone == "word" and ps.guesses_per_second() == pytest.approx(0.3)
+    monkeypatch.setattr(node_identity, "ARGON2_MEMORY_COST", 262144)
+    monkeypatch.setattr(node_identity, "ARGON2_TIME_COST", 4)
+    before = ps.estimate("Sunshine1!")
+    assert before.guesses == now.guesses and ps.guesses_per_second() == 300
+    assert now.seconds == pytest.approx(before.seconds * 1000)
+    assert before.zone == "refused"
 
 
 def test_the_zones_edges():
@@ -147,7 +149,10 @@ def test_the_module_logs_nothing():
 @pytest.mark.parametrize("typed", ["harry potter and the philosopher's stone", "ocean's eleven",
                                    "Schindler's List", "make-america-great-again!"])
 def test_a_title_typed_with_its_apostrophe_or_its_punctuation_is_the_listed_title(typed):
-    assert ps.estimate(typed).zone == "refused"
+    """Read as the listed title: under a year of one GPU at the key's cost
+    (refused or the person's word), where a random string of its length is
+    beyond it."""
+    assert ps.estimate(typed).zone != "clear"
 
 
 def test_the_estimate_reads_words_as_the_list_was_folded():
@@ -190,21 +195,12 @@ def test_a_crafted_l33t_string_costs_a_bounded_time():
 
 
 def test_every_surface_says_the_node_s_sentences():
-    v = ps.verdict("qmzvhwkt")
-    assert v["meter"] == ("One GPU would find it in about 3 days — measured on an RTX 4090 Laptop GPU and "
+    v = ps.verdict("Sunshine1!")
+    assert v["meter"] == ("One GPU would find it in about 1 day — measured on an RTX 4090 Laptop GPU and "
                           "counted for a faster card; more or faster cards take less. It is yours to keep.")
-    assert v["door"].startswith("One GPU would find this password in about 3 days — and with it")
+    assert v["door"].startswith("One GPU would find this password in about 1 day — and with it")
     offer = ps.phrase_offer()
     assert offer["count"] == "4 words from 7,776, more than ten thousand years for one GPU."
     assert offer["note"] == ps.PASSWORD_NOTE
 
 
-def test_the_backend_derives_the_key_it_derived_before_the_constants_were_shared():
-    """§2.4: p2p_identity reads node_identity's Argon2 constants now — the
-    same key for the same pair (a value derived at 05fcd1a1)."""
-    import sys
-    sys.path.insert(0, str(ps._LISTS.parent.parent / "backend"))
-    import p2p_identity
-    assert p2p_identity.ARGON2_TIME_COST is node_identity.ARGON2_TIME_COST
-    assert (p2p_identity.derive_identity("kat-owner", "tangerine volcano quiet")["public_key_hex"]
-            == "510a8132c8511bee2fe2709fd701d4978ab8fb8aa94e8c8db19068ffca9ff5d9")

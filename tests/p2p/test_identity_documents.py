@@ -139,8 +139,7 @@ def test_the_docker_writer_keeps_the_master_s_certificate(tmp_path, caplog):
     (tmp_path / "node_info.json").write_text(json.dumps({
         "node_id": mine, "public_key_hex": mine, "username": "Sautium", "invite_code": "Sautium#X"}))
     masters = _write(tmp_path, CERT, certificate(_key()))
-    settings = SimpleNamespace(p2p_identity_dir=str(tmp_path), p2p_username="", p2p_password="",
-                               p2p_email="")
+    settings = SimpleNamespace(p2p_identity_dir=str(tmp_path))
     p2p_identity.forget_cached()
     try:
         assert p2p_identity.save_certificate(settings, certificate(mine, method="pow"))

@@ -300,9 +300,8 @@ def check_new_password(password: str, username: str, email: str, keep: bool) -> 
 def account_email() -> str:
     """The email the account names, one of the words an attacker tries first
     against its password: its info's, else the one typed at its creation
-    (kept in its file until the key), else the environment's."""
-    from config import settings
-    return (_info().get("email") or (_account() or {}).get("email") or settings.p2p_email or "")
+    (kept in its file until the key)."""
+    return _info().get("email") or (_account() or {}).get("email") or ""
 
 
 def told_once(password: str) -> Optional[dict]:
@@ -317,36 +316,7 @@ def told_once(password: str) -> Optional[dict]:
     from desktop import password_strength
     verdict = password_strength.verdict(password, (account_username() or "", account_email()))
     _write(PASSWORD_ESTIMATED_KEY, pubkey)
-    if verdict["zone"] == "clear":
-        return None
-    # An account from the node's environment changes its password there
-    d = _identity_dir()
-    return {**verdict, "env": d is None or not (d / "node_info.json").exists()}
-
-
-def env_password_refusal() -> Optional[str]:
-    """At start, beside reserved_name_refusal and with its narrowing: the
-    words a node refuses to start with when it is about to MAKE its account
-    from P2P_USERNAME/P2P_PASSWORD with a password one GPU would find within
-    an hour — None otherwise. Only that start: the database names no
-    identity and the folder holds no key. A node made by its .env before
-    keeps starting, and is told at its next sign-in (told_once). No person
-    sees this door, so there is no word to keep a weaker one: the operator's
-    .env is that word."""
-    from config import settings
-    from desktop import password_strength
-    if not settings.p2p_username or not settings.p2p_password:
-        return None
-    d = _identity_dir()
-    if d is not None and (d / "node_ed25519.key").exists():
-        return None
-    if _expected_pubkey() is not None or _holds_identity():
-        return None                       # its key is kept: the account was made
-    verdict = password_strength.verdict(settings.p2p_password, (settings.p2p_username, settings.p2p_email))
-    if verdict["zone"] != "refused":
-        return None
-    return ("P2P_PASSWORD would be found within an hour of guessing on one GPU: choose another in .env "
-            "— the node does not start")
+    return None if verdict["zone"] == "clear" else verdict
 
 
 # ---------------------------------------------------------------------------
@@ -403,12 +373,11 @@ def _refuse_older() -> None:
 
 def account_username() -> Optional[str]:
     """The account this node signs in as: its account file's, else an older
-    identity's info, else the environment's."""
-    from config import settings
+    identity's info."""
     account = _account()
     if account is not None:
         return account.get("username")
-    return _info().get("username") or settings.p2p_username or None
+    return _info().get("username") or None
 
 
 def account_configured() -> bool:
@@ -464,9 +433,18 @@ def identity_key_on_disk() -> bool:
 
 
 def pin_door() -> bool:
-    """Does a host show this node's pairing code — the launcher, which gives
-    the backend its sync server's port? A Docker node shows none: its doors
-    are the account password and the first-run account."""
+    """Does a host show this node's pairing code? Every one does since SEC-S5
+    §18: the launcher's window, and on a Docker node its console —
+    `./sautium pair`, `python -m pairing` in its container on any host — so
+    an account with no password (the master's among them) is signed into and
+    vouched for by its host's code, one logic for every node."""
+    return True
+
+
+def launcher_mode() -> bool:
+    """This backend runs under a launcher, which gives it its sync server's
+    port: the launcher's process owns the node's P2P and its identity
+    folder's first key; its setup code is in that folder, not a log."""
     from config import settings
     return bool(settings.p2p_listen_port)
 
@@ -567,32 +545,6 @@ def _may_take_name(username: str, pubkey: Optional[str] = None) -> bool:
     return pubkey == master_node.MASTER_PUBKEY_HEX.lower() or _holds_identity(pubkey)
 
 
-def reserved_name_refusal() -> Optional[str]:
-    """At start, after the migrations and before the key is recorded: the
-    words a node refuses to start with when it is about to make its account
-    from P2P_USERNAME under the reserved nickname with a key that is not
-    Support's — None otherwise. Only a start that MAKES the account, its
-    database naming no identity yet (B-132, the design session's narrowing):
-    a node made by its .env before the reservation keeps starting, with its
-    key or after a new P2P_PASSWORD (a holder's rotation keeps the name)."""
-    import master_node
-    from config import settings
-    from desktop.node_identity import is_reserved_username
-    if not settings.p2p_username or not is_reserved_username(settings.p2p_username):
-        return None
-    d = _identity_dir()
-    if d is not None and (d / "node_ed25519.key").exists():
-        return None                       # the folder's key is the account, not the env's
-    # The env road's key kept, or derived in this start on a node meant to be
-    # the master (settle_env_identity); with none, the background's key to
-    # come is not Support's — the master's is derived before this
-    pubkey = _expected_pubkey()
-    if pubkey == master_node.MASTER_PUBKEY_HEX.lower() or _holds_identity():
-        return None
-    return (f"P2P_USERNAME names the reserved nickname {settings.p2p_username}, and this node's "
-            "key is not Support's — the node does not start; choose another nickname in .env")
-
-
 def _code(groups: int) -> str:
     return "-".join("".join(secrets.choice(_PIN_ALPHABET) for _ in range(PIN_GROUP_LEN))
                     for _ in range(groups))
@@ -661,8 +613,8 @@ _held: Optional[dict] = None
 
 def births_here() -> bool:
     """Whether this process makes the account's key: a Docker node's backend,
-    never a launcher's (pin_door), whose own process does."""
-    return not pin_door()
+    never a launcher's (launcher_mode), whose own process does."""
+    return not launcher_mode()
 
 
 def _publish_birth(state: dict) -> None:
@@ -691,7 +643,7 @@ def _on_loop(coro_fn) -> None:
 
 def _key_arrived(pubkey: str) -> None:
     """The account's key is in place, under a running process (a creation,
-    the env road's first start): every cache of "no key" dropped, the role
+    the owner's word to another identity): every cache of "no key" dropped, the role
     decided, and what the start decided without a key decided again — the
     chat client, the identity worker (whose state replaces the key's), the
     followers (main: the peer surface, the DHT, the gate, the requesters,
@@ -744,6 +696,11 @@ def _born(account: dict, held: bool, weak: Optional[dict]):
             logger.error("A key landed in the identity folder while the account's was made: "
                          "it stays, and the one made is dropped")
             return
+        except OSError:
+            # A key that could not be placed (a full disk) leaves no account
+            # behind: the setup is offered again, its new code in the log
+            _undo_account("failed")
+            raise
         _record_signing_key(pubkey)
         _key_arrived(pubkey)
     return done
@@ -880,88 +837,12 @@ def resume_birth(password: str) -> bool:
     process's loop. False where none starts (made, making, held, or the
     launcher's to make)."""
     global _loop
-    if not births_here() or key_state() != "interrupted":
-        return False
     account = _account()
+    if not births_here() or account is None or key_state() != "interrupted":
+        return False
     _loop = asyncio.get_running_loop()
-    if account.get("source") == "env":
-        return False                 # the env road starts again at the next start, by itself
     logger.info("The account's key was not made before a stop: its making starts again")
     return _start_birth(account["username"], password, "resume", _born(account, _holds_identity(), None))
-
-
-# ---------------------------------------------------------------------------
-# The env road (P2P_USERNAME/P2P_PASSWORD): its key derived once, then kept
-# ---------------------------------------------------------------------------
-
-def meant_master() -> bool:
-    """A node meant to be the master (MASTER-FAILCLOSED's signals: its
-    database records the pin as its signing key of record, or SAUTIUM_MASTER=1)."""
-    import master_node
-    from config import settings
-    from p2p_identity import _recorded_signing_key
-    return master_node.master_configured() and (
-        settings.sautium_master or _recorded_signing_key() == master_node.MASTER_PUBKEY_HEX)
-
-
-def _env_born(seed: bytes, *, arrived: bool) -> None:
-    """The env road's key, made: kept beside its account file
-    (node_identity.ENV_KEY_FILENAME), never over a key; on record; and,
-    under a running process (`arrived`), followed."""
-    from config import settings
-    from desktop.node_identity import (ENV_KEY_FILENAME, _write_exclusive, key_from_seed,
-                                       public_hex, read_account, write_account)
-    from cryptography.hazmat.primitives import serialization
-    import p2p_identity
-    d = _identity_dir()
-    key = key_from_seed(seed)
-    pubkey = public_hex(key)
-    _write_exclusive(d / ENV_KEY_FILENAME, key.private_bytes(
-        encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()))
-    write_account(d, {**read_account(d), "pubkey": pubkey})
-    p2p_identity.forget_cached()
-    logger.info("The env road's key is kept (%s): no start derives it again",
-                p2p_identity.make_invite_code(settings.p2p_username, bytes.fromhex(pubkey)))
-    if arrived:
-        _record_signing_key(pubkey)
-        _key_arrived(pubkey)
-
-
-def settle_env_identity() -> Optional[str]:
-    """At the start's first step, on the env road (p2p_identity.env_configured):
-    the kept key checked against the environment, and — where there is none —
-    the derivation: in the start itself on a node meant to be the master
-    (fail-closed: its refusal reads the key before anything is written), else
-    in the background, begun by start_env_birth once the start is up.
-    Returns "derive" when the background is to make it, else None."""
-    from config import settings
-    import p2p_identity
-    if not p2p_identity.env_configured(settings):
-        return None
-    if p2p_identity.settle_env(settings):
-        return None
-    _account_written(_account())
-    if not meant_master():
-        return "derive"
-    from desktop.node_identity import derive_seed
-    logger.warning("This node is meant to be the master and its key is not kept: it is derived "
-                   "now, before anything starts (minutes)")
-    t0 = time.monotonic()
-    _env_born(derive_seed(settings.p2p_username, settings.p2p_password), arrived=False)
-    logger.warning("The master's key is derived and kept (%.0f s); the start goes on",
-                   time.monotonic() - t0)
-    return None
-
-
-def start_env_birth() -> None:
-    """The env road's key in the background (settle_env_identity said
-    "derive"), on the running loop."""
-    global _loop
-    from config import settings
-    _loop = asyncio.get_running_loop()
-    _start_birth(settings.p2p_username, settings.p2p_password, "env",
-                 lambda seed: _env_born(seed, arrived=True))
 
 
 class WrongPassword(Exception):
@@ -1004,7 +885,7 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     global _loop
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    from desktop.node_identity import key_from_seed, signin_hash, signin_matches, validate_username
+    from desktop.node_identity import check_rotation_name, key_from_seed, signin_hash, signin_matches
     d = _identity_dir()
     if d is None:
         raise RuntimeError("no identity directory configured")
@@ -1014,13 +895,10 @@ async def rotate_identity(username: str, password: str, current_password: str = 
         if older_identity():
             _refuse_older()
         account = _account()
-        if account.get("source") == "env":
-            raise RuntimeError("This identity comes from the node's environment "
-                               "(P2P_USERNAME, P2P_PASSWORD): change it there")
         if key_state() != "ready":
             raise KeyBeingMade()
         await step_up(current_password, pin)
-        validate_username(username)
+        check_rotation_name(d, username)
         if not password:
             info = await asyncio.to_thread(_rotate_to, d, username, Ed25519PrivateKey.generate(),
                                            True, None)

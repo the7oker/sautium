@@ -687,10 +687,6 @@ def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
 # its password signs nothing in, and the node is made anew.
 
 ACCOUNT_FILENAME = "account.json"
-# The env road's key (P2P_USERNAME/P2P_PASSWORD): kept on disk after its one
-# derivation, apart from node_ed25519.key, which says "the folder's account"
-# to every reader of the env road (backend/device_auth)
-ENV_KEY_FILENAME = "env_ed25519.key"
 
 
 def _hasher():
@@ -747,8 +743,8 @@ def new_account(username: str, password: str, *, source: str, email: str = "",
                 anonymous: bool = False) -> dict:
     """An account's file before its key: the id, the hash (none for an
     account with no password anyone knows), the key to come. `source`:
-    "form" (the Web UI's setup), "wizard" (the launcher's), "env" (the
-    node's environment)."""
+    "form" (the Web UI's setup), "wizard" (the launcher's), "console" (a
+    command's, the master's random key), "import" (an identity file's)."""
     validate_username(username)
     return {
         "v": 1,
@@ -900,6 +896,19 @@ def parse_rotation_notice(message: bytes, old_signature: bytes,
     return payload
 
 
+def check_rotation_name(identity_dir: Path, username: str) -> dict:
+    """The name a rotation takes: the shape, and the reservation — an
+    identity that holds the reserved nickname keeps it, no other takes it.
+    Asked before the new key is made (minutes) and again by the rotation.
+    Returns the identity's info."""
+    validate_username(username)
+    old_info = json.loads((identity_dir / "node_info.json").read_text(encoding="utf-8"))
+    if (is_reserved_username(username)
+            and username_skeleton(username) != username_skeleton(old_info["username"])):
+        raise ValueError(RESERVED_REFUSAL)
+    return old_info
+
+
 def rotate_identity(identity_dir: Path, username: str, new_private, anonymous: bool,
                     signin: Optional[str]) -> dict:
     """Replace the identity in `identity_dir` with `new_private` — the key
@@ -915,12 +924,7 @@ def rotate_identity(identity_dir: Path, username: str, new_private, anonymous: b
     memory, so a crash mid-way leaves the old identity whole."""
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
-    validate_username(username)
-
-    old_info = json.loads((identity_dir / "node_info.json").read_text(encoding="utf-8"))
-    if (is_reserved_username(username)
-            and username_skeleton(username) != username_skeleton(old_info["username"])):
-        raise ValueError(RESERVED_REFUSAL)
+    old_info = check_rotation_name(identity_dir, username)
     old_private = serialization.load_pem_private_key(
         (identity_dir / "node_ed25519.key").read_bytes(), password=None)
     old_pub = old_info["public_key_hex"].lower()

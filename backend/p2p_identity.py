@@ -2,11 +2,12 @@
 P2P identity for the backend — the key this node signs with, and the identity
 dict every reader resolves.
 
-The key is never derived here (SEC-S5): the launcher and a Web-UI account keep
-theirs in the identity folder (node_ed25519.key), and the env road
-(P2P_USERNAME/P2P_PASSWORD: the master, a hand-made .env) keeps its own after
-its one derivation (node_identity.ENV_KEY_FILENAME), made by
-desktop/identity_birth on device_auth's orders. Until a key is there, every
+The key is never derived here (SEC-S5): every identity is the identity
+folder's (node_ed25519.key beside node_info.json and account.json) — made by
+the account's creation (the Web UI's setup, the launcher's wizard, its key
+derived once in the background by desktop/identity_birth), brought by an
+identity file (desktop/identity_file), or a random key for an account with no
+password (the master's among them, SEC-S5 §18). Until a key is there, every
 reader here says None, which each already reads as "no identity yet".
 """
 
@@ -16,7 +17,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from desktop.node_identity import CERT_FILENAME, ENV_KEY_FILENAME
+from desktop.node_identity import CERT_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -89,47 +90,10 @@ def forget_cached() -> None:
     _identity_cache_mtime = None
 
 
-def _env_key_path(settings) -> Optional[Path]:
-    """The env road's kept key, when this node's account is the
-    environment's: P2P_USERNAME and P2P_PASSWORD set, and no key of the
-    folder's own account (node_ed25519.key — that account wins, as it always
-    did) nor an account file of another road."""
-    from desktop.node_identity import read_account
-    if not (settings.p2p_username and settings.p2p_password and settings.p2p_identity_dir):
-        return None
-    d = Path(settings.p2p_identity_dir)
-    if (d / "node_ed25519.key").exists():
-        return None
-    account = read_account(d)
-    if account is not None and (account.get("source") != "env"
-                                or account.get("username") != settings.p2p_username):
-        return None
-    return d / ENV_KEY_FILENAME
-
-
-def env_road(settings) -> bool:
-    """Whether this node's account is the environment's (_env_key_path)."""
-    return _env_key_path(settings) is not None
-
-
-def env_configured(settings) -> bool:
-    """Whether a start is to settle the env road (settle_env): P2P_USERNAME
-    and P2P_PASSWORD set, and the identity folder holding no account of
-    another road — the name in the account file may still be another pair's."""
-    from desktop.node_identity import read_account
-    if not (settings.p2p_username and settings.p2p_password and settings.p2p_identity_dir):
-        return False
-    d = Path(settings.p2p_identity_dir)
-    if (d / "node_ed25519.key").exists():
-        return False
-    account = read_account(d)
-    return account is None or account.get("source") == "env"
-
-
 def load_signing_key(settings):
-    """The node's Ed25519 signing key — the folder's account key, else the
-    env road's kept one — or None while there is none (no account, or its
-    key not derived yet). Never derives."""
+    """The node's Ed25519 signing key — the identity folder's — or None
+    while there is none (no account, or its key not made yet). Never
+    derives."""
     from cryptography.hazmat.primitives import serialization
 
     global _signing_key_cache
@@ -141,17 +105,12 @@ def load_signing_key(settings):
         if key_path.exists():
             _signing_key_cache = serialization.load_pem_private_key(
                 key_path.read_bytes(), password=None)
-            return _signing_key_cache
-    env_key = _env_key_path(settings)
-    if env_key is not None and env_key.exists():
-        _signing_key_cache = serialization.load_pem_private_key(env_key.read_bytes(), password=None)
     return _signing_key_cache
 
 
 def resolve_identity(settings) -> Optional[dict]:
-    """The node's account identity dict — node_info.json (an account of the
-    folder's) first, the env road's kept key second, None without either.
-    The single resolution point mirrored by main.py's lifespan and
+    """The node's account identity dict — node_info.json's — or None. The
+    single resolution point mirrored by main.py's lifespan and
     routers/p2p._get_identity."""
     global _identity_cache, _identity_cache_mtime
 
@@ -181,61 +140,7 @@ def resolve_identity(settings) -> Optional[dict]:
                     return _identity_cache
             except Exception as e:
                 logger.warning(f"Failed to read node_info.json: {e}")
-    if _identity_cache is not None:
-        return _identity_cache
-    if env_road(settings):
-        key = load_signing_key(settings)
-        if key is not None:
-            from desktop.node_identity import public_hex
-            pubkey = public_hex(key)
-            _identity_cache = {
-                "node_id": pubkey,
-                "public_key_hex": pubkey,
-                "username": settings.p2p_username,
-                "invite_code": make_invite_code(settings.p2p_username, bytes.fromhex(pubkey)),
-                "email": settings.p2p_email,
-            }
     return _identity_cache
-
-
-def settle_env(settings) -> bool:
-    """At a start on the env road, before anything reads the key: True when
-    its kept key is this environment's — the account file names
-    P2P_USERNAME, its hash takes P2P_PASSWORD (one check, about a second)
-    and the kept key is the one the file names; False when the key is to be
-    derived (device_auth.derive_env_key). A first start writes the account
-    file; another pair in .env is another account — the files the previous
-    pair kept are moved whole aside (replaced-<when>/), as the folder's
-    other replaced files are."""
-    from cryptography.hazmat.primitives import serialization
-
-    from desktop.node_identity import (_move_aside, new_account, public_hex, read_account,
-                                       signin_matches, write_account)
-    d = Path(settings.p2p_identity_dir)
-    account = read_account(d)
-    same = (account is not None and account.get("username") == settings.p2p_username
-            and account.get("signin") and signin_matches(account["signin"], settings.p2p_password))
-    if same:
-        key_path = d / ENV_KEY_FILENAME
-        if account.get("pubkey") and key_path.exists():
-            held = public_hex(serialization.load_pem_private_key(key_path.read_bytes(), password=None))
-            if held == account["pubkey"]:
-                return True
-            logger.error("The env road's kept key (%s…) is not the one its account file names "
-                         "(%s…): it is moved aside and the key derived again", held[:16],
-                         account["pubkey"][:16])
-            aside = _move_aside(d, ENV_KEY_FILENAME)
-            logger.warning("The env road's key moved to %s", aside.name)
-        return False
-    for name in ("account.json", ENV_KEY_FILENAME):
-        aside = _move_aside(d, name)
-        if aside is not None:
-            logger.warning("P2P_USERNAME/P2P_PASSWORD are not the pair that made %s: moved to %s",
-                           name, aside.name)
-    write_account(d, new_account(settings.p2p_username, settings.p2p_password, source="env",
-                                 email=settings.p2p_email or ""))
-    forget_cached()
-    return False
 
 
 def _recorded_signing_key() -> Optional[str]:
@@ -282,14 +187,11 @@ def master_refusal(settings) -> Optional[str]:
         meant = f"its database records {pin} as its key"
     else:
         meant = f"SAUTIUM_MASTER=1: its key is {pin}"
-    # The code is made from the key and the name as given, never derived or
-    # validated again: a name with a character the nickname rule refuses is
-    # exactly the accident to name (and it would cost a second Argon2id)
     folder = Path(settings.p2p_identity_dir) if settings.p2p_identity_dir else None
     if pubkey is None:
-        held = ("but it has no key: neither its identity folder nor P2P_USERNAME and "
-                "P2P_PASSWORD give one. Check both in .env.")
-    elif folder is not None and (folder / "node_ed25519.key").exists():
+        held = ("but it has no key: its identity folder holds none. Check that the folder is the "
+                "master's (P2P_IDENTITY_DIR), or import the master's identity file into it.")
+    else:
         try:
             info = json.loads((folder / "node_info.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -297,10 +199,6 @@ def master_refusal(settings) -> Optional[str]:
         name = info.get("username") if isinstance(info, dict) else None
         code = make_invite_code(name, bytes.fromhex(pubkey)) if name else f"the key {pubkey[:16]}…"
         held = f"but its identity folder holds {code}. Check that the folder is the master's."
-    else:
-        code = make_invite_code(settings.p2p_username, bytes.fromhex(pubkey))
-        held = (f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD "
-                f"in .env — one changed character is another key.")
     return (f"This backend is the Sautium master ({meant}), {held} "
             f"Nothing was written, signed or announced; not starting.")
 

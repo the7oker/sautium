@@ -431,9 +431,6 @@ async def _notary_follows_identity() -> None:
 # identity appears or changes (p2p_identity.on_change; registered at start)
 _IDENTITY_FOLLOWERS = (_peer_surface_follows_identity, _announce_user, _gate_follows_identity,
                        _requesters_follow_identity, _notary_follows_identity)
-# settle_env_identity's word at the start: "derive" — the env road's key is
-# made in the background once the followers are in place
-_env_birth: Optional[str] = None
 
 
 def _upnp_heuristic():
@@ -640,7 +637,12 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler for startup and shutdown events."""
     # Before anything starts a child
     from serving import hold_secrets
-    hold_secrets()
+    held = hold_secrets()
+    # An identity is the identity folder's alone since SEC-S5 §18: an
+    # environment that still names the old credentials is told so
+    if held & {"P2P_USERNAME", "P2P_PASSWORD"}:
+        logger.warning("P2P_USERNAME / P2P_PASSWORD are read by nothing since this release: the node's "
+                       "identity is its identity folder's. Remove them from .env")
     logger.info(f"Starting {running_line()}")
 
     # The database is a precondition, not a step to log around: the process
@@ -657,12 +659,6 @@ async def lifespan(app: FastAPI):
     # every restart refuses again (B-113). The process ends at once: uvicorn
     # logs an exception out of a lifespan with its traceback, and a refusal is
     # a state, not a crash; nothing has started that would need a stop.
-    # The env road's key (P2P_USERNAME/P2P_PASSWORD) checked against the
-    # environment, and on a node meant to be the master derived here when it
-    # is not kept — its refusal below reads the key; any other env node's is
-    # derived in the background once the start is up (SEC-S5)
-    global _env_birth
-    _env_birth = await asyncio.to_thread(device_auth.settle_env_identity)
     from p2p_identity import master_refusal
     refusal = await asyncio.to_thread(master_refusal, settings)
     if refusal:
@@ -710,18 +706,6 @@ async def lifespan(app: FastAPI):
     # DB on the event loop (the auth middleware runs there).
     await asyncio.to_thread(device_auth.prime)
     await asyncio.to_thread(device_auth.prepare_setup)
-    # A start about to make its account from P2P_USERNAME under the nickname
-    # kept for Support refuses before that key is on record (B-132), as the
-    # master's refusal above does: a state, not a crash; so does one about to
-    # make it from a P2P_PASSWORD one GPU would find within an hour (SEC-S2)
-    refusal = (await asyncio.to_thread(device_auth.reserved_name_refusal)
-               or await asyncio.to_thread(device_auth.env_password_refusal))
-    if refusal:
-        import os
-        from uvicorn.main import STARTUP_FAILURE
-        logger.error(refusal)
-        logging.shutdown()
-        os._exit(STARTUP_FAILURE)
     # The key this node signs with on record — or, with none, whether the
     # database says it had one (the account setup's question)
     await asyncio.to_thread(device_auth.record_identity_state)
@@ -981,8 +965,6 @@ async def lifespan(app: FastAPI):
     import p2p_identity
     for follower in _IDENTITY_FOLLOWERS:
         p2p_identity.on_change(follower)
-    if _env_birth == "derive":
-        device_auth.start_env_birth()
     if settings.p2p_enabled and settings.p2p_sync_port and settings.sautium_host_network:
         _start_host_network()
     if settings.p2p_sync_port:

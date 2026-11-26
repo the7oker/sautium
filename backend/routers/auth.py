@@ -211,6 +211,10 @@ async def auth_status() -> dict:
         # A host that shows pairing codes (the launcher): without one the
         # account password is the only way in, so it is never minted away
         "pin_door": device_auth.pin_door(),
+        # A launcher's node (its window, its identity folder) or a Docker
+        # node (its console, its log): where its setup code and its pairing
+        # code are found
+        "launcher": device_auth.launcher_mode(),
         "username": device_auth.account_username(),
         # While the setup form is open: this node never earns its identity
         # by computing (it runs no model — routers/p2p._email_road), so the
@@ -452,16 +456,14 @@ async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
     host can rotate, and an account with a password has it typed again — an
     anonymous one carries the pairing code its host shows now — checked with
     the rotation, under its lock, before anything else is derived
-    (device_auth.rotate_identity). A node whose host shows no pairing code
-    (Docker) keeps a password: minted, it would leave no way in for a new
-    browser. Boxed all the same — the passwords go in and the new token
-    comes out."""
+    (device_auth.rotate_identity). Every host shows a pairing code (a
+    Docker node's console since SEC-S5 §18), so a change to no password
+    leaves a way in. Boxed all the same — the passwords go in and the new
+    token comes out."""
     req, reply = opened
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=422, detail="Nickname required")
-    if not req.password and not device_auth.pin_door():
-        raise HTTPException(status_code=422, detail="Password required: this node is signed into by its password")
     try:
         info = await device_auth.rotate_identity(username, req.password, req.current_password, req.pin,
                                                  req.keep)

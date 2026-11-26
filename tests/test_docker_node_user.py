@@ -55,7 +55,9 @@ def test_every_credential_the_settings_read_is_held():
     from config import SECRET_ENV, Settings
     credentials = {name.upper() for name in Settings.model_fields
                    if re.search(r"password|secret|token|key$|_user$|username|email", name)}
-    assert {"P2P_PASSWORD", "CODEX_API_KEY", "LASTFM_SESSION_KEY"} <= credentials <= SECRET_ENV
+    assert {"POSTGRES_PASSWORD", "CODEX_API_KEY", "LASTFM_SESSION_KEY"} <= credentials <= SECRET_ENV
+    # read by nothing since SEC-S5 §18, dropped all the same: an older .env holds a password there
+    assert {"P2P_USERNAME", "P2P_PASSWORD"} <= SECRET_ENV and "P2P_PASSWORD" not in credentials
 
 
 def test_the_processes_that_start_agents_hold_the_secrets_before_anything_else():

@@ -702,22 +702,25 @@ def test_an_identity_rule_migration_leaves_witness_rows_whole(worker, conn, stag
     assert sign_audio.verify_all()                       # by its own copy of the stamp
 
 
-def test_a_rotation_signs_the_waiting_rows_with_the_old_key(conn, tmp_path, monkeypatch):
+def test_a_rotation_signs_the_waiting_rows_with_the_old_key(conn, births, tmp_path, monkeypatch):
     import device_auth
     monkeypatch.setattr(settings, "p2p_identity_dir", str(tmp_path))
-    monkeypatch.setattr(settings, "p2p_username", "")
-    monkeypatch.setattr(settings, "p2p_password", "")
     monkeypatch.setattr(p2p_identity, "_signing_key_cache", None)
     monkeypatch.setattr(p2p_identity, "resolve_identity", lambda s: None)
+    monkeypatch.setattr(device_auth, "_key_arrived", lambda pubkey: None)
+    # The new key's end, on a loop of its own as the backend's would be
+    monkeypatch.setattr(device_auth, "_on_loop", lambda follow: asyncio.run(follow()))
     device_auth.prepare_setup()
     # The module's witness rows are NODE's, never deleted: over them this
     # account is another identity, made on the owner's word
     asyncio.run(device_auth.create_account("first", "correct-horse-amber-lanterns", device_auth._setup_code,
                                            new_identity=True))
+    births.finish()
     old = json.loads((tmp_path / "node_info.json").read_text())["public_key_hex"]
     subjects = [_sighting("handshake") for _ in range(2)]
     assert all(_row(conn, s, "handshake")["signature"] is None for s in subjects)
     asyncio.run(device_auth.rotate_identity("second", "battery-staple-amber-lanterns", "correct-horse-amber-lanterns"))
+    births.finish()
     new = json.loads((tmp_path / "node_info.json").read_text())["public_key_hex"]
     assert new != old
     for s in subjects:

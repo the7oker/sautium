@@ -8528,7 +8528,7 @@
     _saidWaiting: false,
     waiting() {
       const s = this.state;
-      return !!(s && ['mining', 'paused', 'needs_email'].includes(s.status));
+      return !!(s && ['deriving', 'mining', 'paused', 'needs_email'].includes(s.status));
     },
     supportOnly() {
       const s = this.state;
@@ -8537,6 +8537,7 @@
     apply(d) {
       const was = this.state;
       this.state = d;
+      if (d.status === 'another_identity') window.Sautium.auth.askAnotherIdentity();
       if (d.status === 'ready') {
         this._saidWaiting = false;
         if (!d.initial && was && was.status && was.status !== 'ready') {
@@ -15075,12 +15076,11 @@
   // change who the node is (routers/auth.py). Asked whenever the status is
   // unknown — the node says what it needs either way. One without a password
   // changes on its host's word: the pairing code a page opened from the host
-  // carries (auth.js). A node whose host shows no pairing code (Docker) keeps
-  // a password: it is the only way in.
+  // carries (auth.js) — every host shows one (a Docker node's console, since
+  // SEC-S5 §18).
   async function openChangeIdentityFlow(account, authStatus) {
     const current = (account && account.username) || '';
     const asksCurrent = !authStatus || authStatus.password_login !== false;
-    const needsPassword = !!authStatus && authStatus.pin_door === false;
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -15105,13 +15105,11 @@
             Latin letters, digits, - or _ — it sits inside your invite code.
           </p>
           <div style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
-            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${needsPassword ? 'Password' : 'Password — optional'}</span>
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Password — optional</span>
             <div id="idNewPass"></div>
           </div>
           <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
-            ${needsPassword
-              ? 'This node is signed into by its password.'
-              : 'Makes this nickname yours on any device. Without it, the identity lives only on this machine.'}
+            Makes this nickname yours on any device. Without it, the identity lives only on this machine.
           </p>
           <label id="idConfirmRow" style="display:flex;flex-direction:column;gap:calc(4*var(--px));" hidden>
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
@@ -15160,7 +15158,6 @@
       const password = passInput.value;
       const currentPassword = currentInput ? currentInput.value : '';
       if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Nickname: 3-32 Latin letters, digits, - or _.');
-      if (needsPassword && !password) return fail('Enter a password: this node is signed into by it.');
       if (password && password !== pass2Input.value) return fail("Passwords don't match.");
       if (currentInput && !currentPassword) return fail('Enter the current password.');
       if (!asksCurrent && !window.Sautium.auth.hasHostCode()) {
@@ -17430,8 +17427,20 @@
   // (user_settings 'p2p.identity', desktop/p2p/identity_proof.py). The proof
   // is a background lottery, so progress is the odds so far, not a percent
   // of work done.
+  // The key's making in words: its estimate and when it began, said once —
+  // Argon2 has no progress to tell, and a clock here would be a timer.
+  // Draft words for the owner's words review.
+  function keyBirthWords(st) {
+    const mins = Math.max(1, Math.round((st.expected_s || 0) / 60));
+    const since = st.started_at ? ` · since ${new Date(st.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+    return `${st.purpose === 'resume' ? 'making its key again' : 'making its key'} · about ${mins} min on this machine${since}`;
+  }
   function identityLabel(st) {
     if (!st || !st.status) return '—';
+    // The account's key, made once in the background (desktop/identity_birth):
+    // one estimate at its start, the page's own clock beside it
+    if (st.status === 'deriving') return keyBirthWords(st);
+    if (st.status === 'another_identity') return 'the key made is another identity — asked';
     if (st.status === 'ready') return st.detail === 'email' ? 'email-verified' : 'proof ready';
     if (st.status === 'checking') return 'checking proof…';
     if (st.status === 'mining') {
@@ -17451,6 +17460,10 @@
   }
   function identityDetail(st) {
     if (!st || !st.status) return '';
+    if (st.status === 'deriving') {
+      return 'Your account is made. Its key is being made now: until then Sautium plays, scans and ' +
+        'analyses as usual; sharing, chat and friends start when the key is ready.';
+    }
     const parts = [];
     if (st.method) parts.push(`method: ${st.method}`);
     if (st.difficulty) parts.push(`E = ${st.difficulty} attempts expected`);
@@ -20310,11 +20323,6 @@
     // Notices ride /api/events (player.js re-dispatches the snapshot); the
     // link state comes from the same stream's transport.
     window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));
-    // The email typed on the first-run form: its code was asked for as the
-    // account was made, and this is the page that loads next — the code's
-    // dialog opens here, with no second tap (auth.js rememberEmail)
-    const firstRunGrant = window.Sautium.auth.takeFirstRunEmailGrant();
-    if (firstRunGrant) openEmailVerifyFlow(firstRunGrant);
     // The sign-in just made said this account's password is under a year
     // of one GPU, the first time it was estimated (device_auth.told_once):
     // said once, here, and kept nowhere
@@ -20324,9 +20332,7 @@
         title: 'This password can be found',
         kind: 'info',
         message: `One GPU would find this account's password in ${window.escapeProfileHtml(told.words)}. ` +
-          (told.env
-            ? "To change it: set a new P2P_PASSWORD in the node's .env and start it again. "
-            : 'To change it: Profile → Change nickname or password. ') +
+          'To change it: Profile → Change nickname or password. ' +
           'A new password is a new key and a new invite code: friends are told, and every device ' +
           'signs in again.',
       });

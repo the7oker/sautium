@@ -211,3 +211,32 @@ def cheap_key_cost(request, monkeypatch):
     monkeypatch.setattr(node_identity, "ARGON2_MEMORY_COST", 8 * 1024)
     monkeypatch.setattr(node_identity, "SIGNIN_TIME_COST", 1)
     monkeypatch.setattr(node_identity, "SIGNIN_MEMORY_COST", 8 * 1024)
+
+
+@pytest.fixture
+def births(monkeypatch):
+    """The account key's worker (device_auth._start_birth), held: each start
+    recorded ({username, password, purpose, done}) and ended by the test —
+    `births.finish()` derives the last start's seed and runs its end in the
+    test's own thread; a start while one is unfinished is refused, as the
+    worker refuses it."""
+    import device_auth
+    from desktop import node_identity
+
+    class Started(list):
+        def finish(self, i=-1):
+            birth = self[i]
+            birth["finished"] = True
+            birth["done"](node_identity.derive_seed(birth["username"], birth["password"]))
+
+    started = Started()
+
+    def start(username, password, purpose, done):
+        if any(not b.get("finished") for b in started):
+            return False
+        started.append({"username": username, "password": password, "purpose": purpose,
+                        "done": done})
+        return True
+
+    monkeypatch.setattr(device_auth, "_start_birth", start)
+    return started

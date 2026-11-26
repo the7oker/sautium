@@ -172,10 +172,8 @@ def node(scratch_dsn, tmp_path, monkeypatch):
     folder = tmp_path / "node_identity"
     folder.mkdir()
     for key, value in dict(p2p_identity_dir=str(folder), p2p_enabled=True, p2p_sync_port=8801,
-                           p2p_listen_port=0, p2p_username="", p2p_password="", p2p_email="").items():
+                           p2p_listen_port=0).items():
         monkeypatch.setattr(settings, key, value)
-    monkeypatch.setattr(p2p_identity, "ARGON2_TIME_COST", 1)
-    monkeypatch.setattr(p2p_identity, "ARGON2_MEMORY_COST", 8 * 1024)
     monkeypatch.setitem(identity_pow.POW_PARAMS, 1, TEST_PARAMS)
     monkeypatch.setitem(identity_proof.ensure_identity_proof.__kwdefaults__, "mem_guard_kib", 0)
     monkeypatch.setitem(identity_proof.ensure_identity_proof.__kwdefaults__, "pause_seconds", 0.05)
@@ -250,8 +248,15 @@ def _ready(state: dict) -> bool:
 
 
 def _account(node, username="owner", password="a password amber lanterns ford") -> dict:
-    """An account on disk, as the Web UI's setup leaves it."""
-    return device_auth._write_identity(node.folder, username, password)
+    """An account on disk, as the Web UI's setup leaves it once its key is
+    made (device_auth._born's placement), on record."""
+    from desktop import node_identity
+    account = node_identity.new_account(username, password, source="form")
+    node_identity.write_account(node.folder, account)
+    info = node_identity.place_account_key(
+        node.folder, node_identity.key_from_seed(node_identity.derive_seed(username, password)), account)
+    device_auth._record_signing_key(info["public_key_hex"])
+    return info
 
 
 def _proof_binds_its_certificate(node) -> dict:
