@@ -3382,6 +3382,7 @@ def add_library_folder(req: LibraryFolderAdd, request: Request) -> Dict[str, Any
         drop_look(path)
     path = added["folder"]["path"]
     library_watch.add(path)
+    library_root.offer_again()          # a disk added is no longer offered
     # Where the mount delivers no events the watch queues nothing: asked here
     request_scan({path: True}, explicit=True)
     db_execute("NOTIFY sautium_notices")
