@@ -74,8 +74,9 @@ def test_two_movements_titled_alike_in_one_copy_are_two_tracks(cur, library):
     first, last = _on(cur, 1), _on(cur, 14)
     assert first["track_id"] == str(track_uuid("Pulses", REICH))           # every old id stays
     assert last["track_id"] == str(track_uuid("Pulses", REICH, 2)) and last["occurrence"] == 2
-    _import(_disc4(library))                                                  # a rescan changes nothing
-    assert _on(cur, 14)["track_id"] == last["track_id"]
+    from database import get_db_context
+    with get_db_context() as db:                                              # a second settle moves nothing
+        assert occurrence.settle_copies(db, complete=True)["moved"] == 0
 
 
 def test_a_later_batch_puts_right_what_an_earlier_one_could_not_see(cur, library):
@@ -122,11 +123,29 @@ def test_the_release_splits_the_tracks_minted_before_the_rule(cur, library, scra
     cur.execute("""INSERT INTO listening_history (track_id, media_file_id, started_at, completed)
                    VALUES (%s, %s, now(), TRUE)""", (plain, last["id"]))
     sign_audio._materialize_owned_tracklists(cur)
+    # the old track's one binding, stamped on both files, and the copy the
+    # positional pass bound
+    rec = str(uuid.uuid4())
+    cur.execute("UPDATE media_files SET recording_mbid = %s WHERE track_id = %s", (rec, plain))
+    cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version)
+                   VALUES (%s, %s, 'positional', 2)""", (rec, plain))
+    cur.execute("UPDATE album_variants SET positional_bound = TRUE, release_mbid = %s", (str(uuid.uuid4()),))
+    cur.execute("UPDATE artists SET last_mb_sync = now()")
     conn = psycopg2.connect(scratch_dsn)
     try:
         out = db_migrate._split_occurrences(conn)
         assert out["copies"]["moved"] == 1
         assert _on(cur, 14)["track_id"] == second
+        # one recording stood for both movements: gone, for the canon to bind
+        # each on its own evidence, and its pass woken
+        cur.execute("SELECT count(*) AS n FROM track_mbids")
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT count(*) AS n FROM media_files WHERE recording_mbid IS NOT NULL")
+        assert cur.fetchone()["n"] == 0
+        cur.execute("SELECT bool_or(positional_bound) AS b FROM album_variants")
+        assert cur.fetchone()["b"] is False
+        cur.execute("SELECT count(*) AS n FROM artists WHERE last_mb_sync IS NULL")
+        assert cur.fetchone()["n"] == 1
         cur.execute("SELECT track_id::text AS t FROM listening_history")
         assert [r["t"] for r in cur.fetchall()] == [second]
         assert db_migrate._split_occurrences(conn)["copies"]["moved"] == 0
@@ -138,9 +157,48 @@ def test_the_release_splits_the_tracks_minted_before_the_rule(cur, library, scra
     assert [(r["position"], r["t"]) for r in cur.fetchall()] == [(1, plain), (14, second)]
 
 
+def test_the_slices_of_a_cue_image_take_their_own_places(cur, library):
+    """A CUE image's slices share their image's path: each is minted at its
+    own place among the sheet's positions (review round 1, H1)."""
+    path = f"{library}/Concerti/Concerti.flac"
+    entries = []
+    for n, (title, start) in enumerate((("I. Allegro", 0.0), ("II. Largo", 200.0),
+                                        ("I. Allegro", 400.0), ("II. Largo", 600.0)), 1):
+        d, md = _md(library, "Concerti", "Concerti", n, title, 200.0, "Il Giardino")
+        md.update(file_path=path, cue_start_seconds=start, cue_end_seconds=start + 200.0)
+        entries.append((d, md))
+    _import(entries)
+    cur.execute("SELECT track_number AS n, track_id::text AS t FROM media_files ORDER BY track_number")
+    assert [r["t"] for r in cur.fetchall()] == [
+        str(track_uuid("I. Allegro", "Il Giardino")), str(track_uuid("II. Largo", "Il Giardino")),
+        str(track_uuid("I. Allegro", "Il Giardino", 2)), str(track_uuid("II. Largo", "Il Giardino", 2))]
+
+
+def test_three_repeats_arriving_out_of_order_end_at_their_places_with_their_analysis(cur, library):
+    """Positions 6 and 9 read first (the first and second "[untitled]"),
+    position 3 later: each ends at its place — 3 the first, 6 the second, 9
+    the third — and the analysis made from 6 and 9 goes with each (review
+    round 1, M4: from the last position down, so a track a later position
+    leaves is free for the earlier one)."""
+    koner = "Thomas Köner"
+    _import([_md(library, "Nunatak", "Nunatak Gongamur", n, "[untitled]", 200.0 + n, koner) for n in (6, 9)])
+    for n in (6, 9):
+        cur.execute("""INSERT INTO analysis_sources (track_id, media_file_id, chromaprint, duration_seconds)
+                       SELECT track_id, id, %s, %s FROM media_files WHERE track_number = %s""",
+                    (f"AQAAA{n}", 200 + n, n))
+    _import([_md(library, "Nunatak", "Nunatak Gongamur", 3, "[untitled]", 203.0, koner)])
+    want = {3: 1, 6: 2, 9: 3}
+    for n, k in want.items():
+        assert _on(cur, n, "Nunatak")["track_id"] == str(track_uuid("[untitled]", koner, k))
+    cur.execute("""SELECT mf.track_number AS n, s.chromaprint FROM analysis_sources s
+                     JOIN media_files mf ON mf.track_id = s.track_id ORDER BY 1""")
+    assert [(r["n"], r["chromaprint"]) for r in cur.fetchall()] == [(6, "AQAAA6"), (9, "AQAAA9")]
+
+
 def _medium(cur, names_at: dict, recordings: dict, credit=7, medium=40):
     """A MusicBrainz medium as a slice or the dump holds it: {position: name},
     {position: recording gid}."""
+    cur.execute("INSERT INTO mb_medium (id, release, position) VALUES (%s, 4, 1)", (medium,))
     for position, name in names_at.items():
         rid = 1000 + position
         cur.execute("INSERT INTO mb_recording (id, gid, name, artist_credit) VALUES (%s, %s, %s, %s)",
@@ -155,21 +213,28 @@ def test_a_copy_held_in_part_takes_its_place_from_the_medium_it_is_bound_to(cur,
     copy gives it, once the file is bound to MusicBrainz's medium; an
     unbound partial copy keeps the first place (the residue)."""
     from database import get_db_context
-    cur.execute("DELETE FROM mb_track")
-    cur.execute("DELETE FROM mb_recording")
+    for table in ("mb_track", "mb_recording", "mb_medium"):
+        cur.execute(f"DELETE FROM {table}")
     recs = {n: str(uuid.uuid4()) for n in range(1, 15)}
     _medium(cur, {n: f"Music for 18 Musicians: {t}" for n, (t, _s) in enumerate(DISC4, 1)}, recs)
     _import(_disc4(library, {14}))
     assert _on(cur, 14)["track_id"] == str(track_uuid("Pulses", REICH))
     with get_db_context() as db:
-        assert occurrence.complete_copies(db)["moved"] == 0                    # not bound yet
+        assert occurrence.settle_copies(db, complete=True)["moved"] == 0      # not bound yet
     cur.execute("UPDATE media_files SET recording_mbid = %s WHERE track_number = 14", (recs[14],))
+    cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version)
+                   VALUES (%s, %s, 'overlap_verified', 2)""", (recs[14], str(track_uuid("Pulses", REICH))))
     with get_db_context() as db:
-        assert occurrence.complete_copies(db)["moved"] == 1
+        assert occurrence.settle_copies(db)["moved"] == 0                      # the files alone see no earlier one
+        assert occurrence.settle_copies(db, complete=True)["moved"] == 1
         db.commit()
     assert _on(cur, 14)["track_id"] == str(track_uuid("Pulses", REICH, 2))
+    # the binding follows its file: the stamp was this file's own recording
+    cur.execute("SELECT track_id::text AS t FROM track_mbids WHERE recording_mbid = %s", (recs[14],))
+    assert cur.fetchone()["t"] == str(track_uuid("Pulses", REICH, 2))
     with get_db_context() as db:
-        assert occurrence.complete_copies(db)["moved"] == 0
+        assert occurrence.settle_copies(db, complete=True)["moved"] == 0
+        assert occurrence.settle_copies(db)["moved"] == 0                      # a copy in part: never shrunk
     _import(_disc4(library, {1}))                                               # track 1 arrives
     assert _on(cur, 1)["track_id"] == str(track_uuid("Pulses", REICH))
     assert _on(cur, 14)["track_id"] == str(track_uuid("Pulses", REICH, 2))

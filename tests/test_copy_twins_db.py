@@ -114,7 +114,8 @@ def test_the_albums_word_folds_one_position_of_two_copies_and_the_print_decides(
     assert content.fold_copy_twins()["merged"] == 0           # idempotent
 
 
-def test_a_track_with_no_print_of_its_own_waits_and_the_sonic_pass_folds_it(cur, library):
+def test_a_track_with_no_print_of_its_own_waits_and_a_fold_of_the_tracks_just_analysed_takes_it(
+        cur, library):
     _two_copies(library, ("Section I",))
     _print(cur, "Music for 18 Musicians: Section I")
     assert content.fold_copy_twins()["waiting"] == 1
@@ -166,6 +167,27 @@ def test_titles_that_differ_beyond_the_fold_and_two_positions_of_one_copy_stay_a
                    SELECT track_id, id, %s, 190 FROM media_files WHERE raw_track_name = 'Слухи'""", (PRINT,))
     assert content.fold_copy_twins()["merged"] == 0
     assert _tracks(cur) == 4
+
+
+def test_a_group_that_would_put_two_positions_of_one_copy_on_one_track_is_left(cur, library):
+    """Two positions of one copy, one recording (a box repeating a song),
+    and a third copy of it elsewhere: each pair alone would fold, the group
+    would hold two positions of one copy — left as it is."""
+    v, rec = "Владимир Высоцкий", str(uuid.uuid4())
+    _import([_md(library, "Box", "Box", 10, "Слухи", 190.4, v), _md(library, "Box", "Box", 21, "Слухи", 190.4, v)])
+    _import([_md(library, "Best", "Best", 3, "Слухи", 190.5, v)])
+    cur.execute("UPDATE media_files SET recording_mbid = %s", (rec,))
+    cur.execute("""INSERT INTO analysis_sources (track_id, media_file_id, chromaprint, duration_seconds)
+                   SELECT DISTINCT ON (track_id) track_id, id, %s, 190 FROM media_files""", (PRINT,))
+    st = content.fold_copy_twins()
+    assert (st["merged"], st["vetoed"]) == (0, 1)
+
+
+def test_titles_alike_fold_their_accents(cur, library):
+    from canon.occurrence import titled_alike
+    assert titled_alike("Gymnopédie No. 1", "Gymnopedie No. 1")
+    assert titled_alike("Music for 18 Musicians: Section I", "Section I")
+    assert not titled_alike("Charango [instrumental]", "Charango [feat. Pacewon]")
 
 
 def test_the_credit_folds_keeper_is_the_same_on_every_node(cur, library):

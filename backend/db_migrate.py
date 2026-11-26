@@ -1035,17 +1035,16 @@ def _split_occurrences(conn) -> dict:
     """track_occurrences_v1: the tracks two positions of one tracklist
     shared before a title's place there was part of its id (canon.
     occurrence) — the copies' files moved to their own tracks (each later
-    position, with the analysis made from it and its own listens), the
-    copies held in part completed from the medium their files are bound to,
-    then the tracklist slots of every album. The moved files' content time
-    wakes their artists' canon; the slots' seals are the notary's to make
-    again."""
-    from canon.occurrence import complete_copies, settle_copies, settle_slots
+    position, with the analysis made from it and its own listens; a copy
+    held in part completed from the medium its files are bound to), then the
+    tracklist slots of every album. A moved file wakes its artists' canon,
+    which binds it on its own evidence; the slots' seals are the notary's to
+    make again."""
+    from canon.occurrence import settle_copies, settle_slots
     from database import get_db_context
     out = {}
     with get_db_context() as db:
-        out["copies"] = settle_copies(db)
-        out["held_in_part"] = complete_copies(db)
+        out["copies"] = settle_copies(db, complete=True)
         db.commit()
     out["slots"] = settle_slots(conn)
     conn.commit()

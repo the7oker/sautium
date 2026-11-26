@@ -35,12 +35,11 @@ from models import (
 from database import get_db_context
 from db_pool import db_execute, db_query, db_query_one
 from sql_queries import ARTIST_UNCREDITED
-from uuid_utils import (artist_uuid, track_uuid, album_uuid, genre_uuid, normalize, song_key,
-                        is_lossless as check_lossless)
+from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, normalize, is_lossless as check_lossless
 import file_stat
 from album_identity import assign_dir_albums, dir_disc, group_key
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
-from canon.occurrence import ordinals, settle_copies
+from canon.occurrence import batch_places, places_of, settle_copies
 from credits import derive_composers, lock_credits, split_names
 from provenance import ANALYSIS_KINDS, relink_returned_files
 import cue_sheet
@@ -445,33 +444,6 @@ def _classify_dirs(entries, sink: FileSink):
     return batch, existing
 
 
-def _batch_places(entries, dir_albums) -> Dict[str, int]:
-    """{file path: its place among the positions of its copy that carry its
-    title} over the batch's own files (canon.occurrence): a copy is the
-    folder's album as the folder rule groups it, a position (disc, track,
-    cue start). A file with no track number is no position (the first)."""
-    copies: Dict[tuple, list] = defaultdict(list)
-    for dir_path, md in entries:
-        title = md.get("title")
-        artist = md.get("artist") or md.get("album_artist")
-        album_title, album_artist, track_ov, disc_ov = dir_albums.get(
-            md.get("file_path"), (None, None, None, None))
-        number = track_ov if track_ov is not None else md.get("track_number")
-        if not title or not artist or number is None or album_title is None:
-            continue
-        disc = disc_ov if disc_ov is not None else (md.get("disc_number") or 1)
-        pos = (disc or 1, number, float(md["cue_start_seconds"])
-               if md.get("cue_start_seconds") is not None else -1.0)
-        copies[(dir_path, group_key(album_title, album_artist))].append(
-            (md["file_path"], pos, song_key(title, artist)))
-    out: Dict[str, int] = {}
-    for files in copies.values():
-        places = ordinals((pos, key) for _p, pos, key in files)
-        for path, pos, key in files:
-            out[path] = places[(pos, key)]
-    return out
-
-
 class _Albums:
     """Which album a file's assignment (title, credit) belongs to — the
     folder rule (LIBRARY-WATCH-DESIGN §3.4 a, §15.1). The folder, not the
@@ -627,7 +599,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     # Two positions of one copy are two tracks (canon.occurrence): each file
     # is minted at its title's place among the batch's files of its copy;
     # settle_copies, at the end, puts right what the batch could not see.
-    places = _batch_places(entries, dir_albums)
+    places = batch_places(entries, dir_albums)
 
     with get_db_context() as db:
         lock_credits(db)
@@ -680,7 +652,9 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             db.flush()
                         pending_cache.append(("artist", a_uid, artist))
                     # ── Track ──
-                    occurrence = places.get(file_path, 1)
+                    cue_start = metadata.get("cue_start_seconds")
+                    occurrence = places.get(
+                        (file_path, float(cue_start) if cue_start is not None else -1.0), 1)
                     t_uid = track_uuid(metadata["title"], track_artist_name, occurrence)
                     if t_uid in caches["track"]:
                         track = caches["track"][t_uid]
@@ -1020,23 +994,25 @@ _REREAD_SQL = text(f"""
 _MATERIAL_LENGTH_TOLERANCE = 0.5
 
 
-def _split_tracks(db, entries) -> Set[str]:
+def _split_tracks(db, entries, places: Dict[int, int]) -> Set[str]:
     """The tracks this re-read splits: every file of the track (here and at
     an HQPlayer) is in the batch and moves, and they move to two or more
     track identities — a merged work's movements, once TITLE's values are
     joined (CANON-CLASSICAL-DESIGN §1.4). Decided before any file moves, so
     no walk order changes it. All of a track's files moving to one identity
-    is a rename, which the track follows."""
+    is a rename, which the track follows. A file's identity is at its place
+    in its copy (`places`, canon.occurrence.places_of)."""
     moving: Dict[str, Set[str]] = defaultdict(set)
     files: Dict[str, int] = defaultdict(int)
     for _dir, md, row in entries:
         if not md.get("title") or not (md.get("artist") or md.get("album_artist")):
             continue
-        new = str(track_uuid(md["title"], md.get("artist") or md.get("album_artist")))
+        artist = md.get("artist") or md.get("album_artist")
+        new = str(track_uuid(md["title"], artist))
         old = (str(track_uuid(row.raw_track_name, row.raw_artist or row.raw_album_artist))
                if row.raw_track_name else None)
         if old != new:
-            moving[row.track_id].add(new)
+            moving[row.track_id].add(str(track_uuid(md["title"], artist, places.get(row.id, 1))))
             files[row.track_id] += 1
     candidates = [t for t, keys in moving.items() if len(keys) >= 2]
     if not candidates:
@@ -1066,7 +1042,18 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
     derive_due: Set[str] = set()
     with get_db_context() as db:
         lock_credits(db)
-        splits = _split_tracks(db, entries)
+        # each file's place in its copy as it now reads (canon.occurrence): a
+        # second movement whose tags changed goes to its own track, never
+        # through the first's
+        read = {}
+        for _d, md, row in entries:
+            if md.get("title") and (md.get("artist") or md.get("album_artist")):
+                _t, _c, track_ov, disc_ov = assignments[md["file_path"]]
+                read[row.id] = (disc_ov if disc_ov is not None else md.get("disc_number", 1),
+                                track_ov if track_ov is not None else md.get("track_number"),
+                                md["title"], md.get("artist") or md.get("album_artist"))
+        places = places_of(db, [row.album_variant_id for _d, _md, row in entries], read)
+        splits = _split_tracks(db, entries, places)
         if splits:
             # one recording for every movement of a work, signed: wrong for
             # all of them but one, and arbitrary for that one — each new track
@@ -1134,7 +1121,8 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                     if old_key != track_uuid(md["title"], track_artist):
                         # first: the analysis of the file's material moves with it
                         track = rehome_file_track(db, row.id, row.track_id, md["title"],
-                                                  track_artist, split=row.track_id in splits)
+                                                  track_artist, split=row.track_id in splits,
+                                                  occurrence=places.get(row.id, 1))
                         db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
                                    {"id": row.id})
                         stats["moved"] = stats.get("moved", 0) + (track != row.track_id)

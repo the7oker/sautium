@@ -1223,13 +1223,6 @@ def fold_credit_duplicates(dry_run: bool = True, artist_ids: list = None) -> dic
     return st
 
 
-def _folded(title: str) -> str:
-    """A title as the keeper compares it with MusicBrainz's name: the
-    identity's normalize over the accents taken off."""
-    t = unicodedata.normalize("NFKD", title or "")
-    return normalize("".join(ch for ch in t if not unicodedata.combining(ch)))
-
-
 def _recording_names(track_ids) -> dict:
     """{track: MusicBrainz's names of the recordings its files are bound to}
     (the dump's rows or a slice's): what the keeper rule reads. One read for
@@ -1258,8 +1251,9 @@ def _keeper(titles: dict, names: dict) -> str:
     Musicians: Section I" over the box's "Section I"), else, where none is
     or two are, the smallest uuid. Never which row came first: a node's
     created_at is its own."""
-    wanted = {_folded(n) for t in titles for n in names.get(t, ())}
-    named = [t for t, title in titles.items() if _folded(title) in wanted]
+    from canon.occurrence import folded
+    wanted = {folded(n) for t in titles for n in names.get(t, ())}
+    named = [t for t, title in titles.items() if folded(title) in wanted]
     return named[0] if len(named) == 1 else min(titles)
 
 
@@ -1274,7 +1268,7 @@ def _keeper(titles: dict, names: dict) -> str:
 _TWIN_LENGTH_TOLERANCE = 2.0
 
 _TWIN_PAIRS_SQL = """
-    WITH f AS (
+    WITH f AS MATERIALIZED (
         SELECT x.track_id, x.album_variant_id AS v, av.album_id,
                coalesce(x.disc_number, 1) AS d, x.track_number AS n,
                x.duration_seconds::float AS dur, x.recording_mbid AS rec
@@ -1285,18 +1279,24 @@ _TWIN_PAIRS_SQL = """
                        recording_mbid FROM hqp_library_files) x
           JOIN album_variants av ON av.id = x.album_variant_id
          WHERE av.absent_since IS NULL AND x.duration_seconds IS NOT NULL),
-    a AS (SELECT * FROM f
-           WHERE (%(tracks)s::uuid[] IS NULL OR f.track_id = ANY(%(tracks)s::uuid[]))
-             AND (%(artists)s::uuid[] IS NULL OR f.track_id IN (
-                  SELECT ta.track_id FROM track_artists ta
-                   WHERE ta.role = 'primary' AND ta.artist_id = ANY(%(artists)s::uuid[]))))
-    SELECT least(a.track_id, b.track_id)::text AS ta, greatest(a.track_id, b.track_id)::text AS tb,
-           bool_or(a.rec = b.rec) AS one_recording,
-           bool_or(a.album_id = b.album_id AND a.d = b.d AND a.n = b.n) AS one_place
-      FROM a JOIN f b ON b.track_id <> a.track_id AND b.v <> a.v
-       AND abs(a.dur - b.dur) <= %(tol)s
-       AND (a.rec = b.rec OR (a.album_id = b.album_id AND a.d = b.d AND a.n = b.n))
-     GROUP BY 1, 2
+    a AS MATERIALIZED (
+        SELECT * FROM f
+         WHERE (%(tracks)s::uuid[] IS NULL OR f.track_id = ANY(%(tracks)s::uuid[]))
+           AND (%(artists)s::uuid[] IS NULL OR f.track_id IN (
+                SELECT ta.track_id FROM track_artists ta
+                 WHERE ta.role = 'primary' AND ta.artist_id = ANY(%(artists)s::uuid[])))),
+    -- two equi-joins, each its own hash join: one recording, or one place
+    p AS (
+        SELECT a.track_id AS x, b.track_id AS y, TRUE AS one_recording, FALSE AS one_place
+          FROM a JOIN f b ON b.rec = a.rec
+         WHERE b.track_id <> a.track_id AND b.v <> a.v AND abs(a.dur - b.dur) <= %(tol)s
+        UNION ALL
+        SELECT a.track_id, b.track_id, FALSE, TRUE
+          FROM a JOIN f b ON b.album_id = a.album_id AND b.d = a.d AND b.n = a.n
+         WHERE b.track_id <> a.track_id AND b.v <> a.v AND abs(a.dur - b.dur) <= %(tol)s)
+    SELECT least(x, y)::text AS ta, greatest(x, y)::text AS tb,
+           bool_or(one_recording) AS one_recording, bool_or(one_place) AS one_place
+      FROM p GROUP BY 1, 2
 """
 
 
@@ -2672,21 +2672,33 @@ def canonicalize_pending(limit: int = None, artist_ids: list = None, woken=(),
         apply_editions(dry_run=False, artist_ids=editions_for, waiting=waiting,
                        take_arriving=take_arriving)
     if done:
-        # a copy held in part reads the positions it lacks off the medium its
-        # files are now bound to (canon.occurrence)
-        from canon.occurrence import complete_copies
-        with SessionLocal() as db:
-            complete_copies(db, [r["v"] for r in db_query("""
-                SELECT DISTINCT mf.album_variant_id AS v FROM owned_files mf
-                  JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
-                 WHERE ta.artist_id = ANY(%(ids)s::uuid[])""", {"ids": done})])
-            db.commit()
         fold_credit_duplicates(dry_run=False, artist_ids=done)   # one track read from two copies
-        fold_copy_twins(dry_run=False, artist_ids=done)          # one performance in two copies
+        # one performance in two copies (CANON-TRACKS-1 §3): its failure is
+        # the pass's, logged and counted, as the positional pass's is
+        try:
+            st["copy_twins"] = fold_copy_twins(dry_run=False, artist_ids=done)
+        except Exception as e:
+            st["errors"] += 1
+            logger.error("canon: the copy twins' fold failed: %s", e)
         # watermark BEFORE merge: rename leaves artist ids intact, merge re-ids the rare
         # collision survivors (they simply re-canon next scan — idempotent, cheap)
         db_execute("UPDATE artists SET last_mb_sync = now() WHERE id::text = ANY(%(ids)s)",
                    {"ids": done})
+        # After the watermark: a copy held in part reads the positions it lacks
+        # off the medium its files are now bound to (canon.occurrence), and a
+        # file that moves to its place wakes its artist's next pass, which
+        # binds it on its own evidence.
+        from canon.occurrence import settle_copies
+        try:
+            with SessionLocal() as db:
+                st["occurrences"] = settle_copies(db, [r["v"] for r in db_query("""
+                    SELECT DISTINCT mf.album_variant_id AS v FROM owned_files mf
+                      JOIN track_artists ta ON ta.track_id = mf.track_id AND ta.role = 'primary'
+                     WHERE ta.artist_id = ANY(%(ids)s::uuid[])""", {"ids": done})], complete=True)
+                db.commit()
+        except Exception as e:
+            st["errors"] += 1
+            logger.error("canon: the copies' places failed: %s", e)
         # cross-artist MBID collisions (a near-instant no-op at 0); a woken run
         # judges only the collisions its artists are in
         merge_collisions(dry_run=False, waiting=waiting, artist_ids=artist_ids)
