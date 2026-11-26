@@ -233,8 +233,11 @@ def test_a_folder_added_is_a_row_and_a_folder_of_the_library_at_once(tree, db):
     # the disk's label is kept with the row: the automount removes its own copy with the disk
     assert _rows(db) == [(rock, "Elements <b>")]
     assert library_root.paths() == [rock]
-    # a page names it by its disk and the folder under it, never the mount point's UUID
+    # a page names it by its disk and the folder under it, never the mount point's UUID — a row
+    # with no label yet (the start carried it over) by the label left beside the disks
     assert library_root.folder_name(added["folder"]) == "Elements <b> · Rock"
+    assert library_root.folder_name({**added["folder"], "label": None}) == "Elements <b> · Rock"
+    assert library_root.folder_name({"path": f"{tree.disks}/0000-NONE/Music", "label": None}) == "USB disk · Music"
     # a second folder beside it: several at once
     library_root.add(str(tree.music))
     assert library_root.paths() == [rock, str(tree.music)]
