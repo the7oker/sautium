@@ -55,8 +55,9 @@ except ImportError:
 # Argon2id parameters for key derivation: a thousand times the cost of the
 # first release's t=4 over 256 MiB, at half the memory and twice the passes
 # (SECURITY-PRE-RELEASE §9.13: the same memory traffic a guess, 290-315 MiB
-# left beside Nano on a 1 GB board). About 5 min on a desktop, 12 on a 16 GB
-# Pi 5, 26 on a 1 GB one — paid once, in the background (identity_birth).
+# left beside Nano on a 1 GB board). 5–11 min on a desktop (11 measured on
+# Legion under load, 2026-11-26), 12 on a 16 GB Pi 5, 26 on a 1 GB one — paid
+# once, in the background (identity_birth).
 # Part of every key: a change here is a new key for every account.
 ARGON2_TIME_COST = 8000
 ARGON2_MEMORY_COST = 131072  # 128 MiB

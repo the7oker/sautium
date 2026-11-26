@@ -1,6 +1,6 @@
 """The account's key, derived once, in the background (SEC-S5).
 
-The key costs minutes (node_identity.ARGON2_TIME_COST: about 5 on a desktop,
+The key costs minutes (node_identity.ARGON2_TIME_COST: 5–11 on a desktop,
 12 on a 16 GB Pi 5, 26 on a 1 GB board), and nothing else the node does waits
 for it: the account exists from its first second (node_identity's account
 file), and only what speaks for the node — P2P, the notary's seals, the

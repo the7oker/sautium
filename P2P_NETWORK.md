@@ -325,8 +325,9 @@ username + NFKC(password) → Argon2id (t=8000, 128 MiB, p=2) → 32-byte seed �
 ```
 
 **The key costs minutes, and the account does not wait for it** (since
-2026-11-26, SEC-S5): a thousand times the first release's cost, about 5 min on
-a desktop, 12 on a 16 GB Pi 5 and 26 on a 1 GB one. The account exists from
+2026-11-26, SEC-S5): a thousand times the first release's cost, 5–11 min on
+a desktop (11 measured on a loaded one, 2026-11-26), 12 on a 16 GB Pi 5 and 26
+on a 1 GB one. The account exists from
 its first second as `account.json` beside the identity — its nickname, a
 sign-in hash (Argon2id t=8 over 128 MiB, a salt of its own: what a sign-in
 checks, never the key again) and a random id the device token is derived from
