@@ -47,7 +47,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Debian's level of optimisation (PGO + LTO): an interpreter as fast as the
 # distributions' (python-build-standalone's ran bytecode 30-45 % slower,
 # measured). No readline and no gdbm headers: the interpreter links no GPL
-# library. The tests are left out of the install.
+# library. The tests are left out of the install, and so is tkinter with
+# what needs it (no Tk headers, so no _tkinter: a package that cannot import
+# would read as present), as Debian's python3.11 is without python3.11-tk.
 ARG CPYTHON_VERSION=3.11.18
 ARG CPYTHON_SHA256=9120e0a653868f6e3698d36cdd99e5a58903ec9469e448f21d98f7b16d8fa290
 RUN curl -fsSLo /tmp/python.tar.xz \
@@ -64,6 +66,8 @@ RUN curl -fsSLo /tmp/python.tar.xz \
     && find /usr/local/lib/python3.11 -depth -type d -name test -prune -exec rm -rf '{}' + \
     && find /usr/local -name 'libpython*.a' -delete \
     && find /usr/local/lib/python3.11 -name '*.opt-[12].pyc' -delete \
+    && rm -rf /usr/local/lib/python3.11/tkinter /usr/local/lib/python3.11/idlelib \
+        /usr/local/lib/python3.11/turtledemo /usr/local/bin/idle3* \
     && find /usr/local/lib -name '*.so*' -type f -exec strip --strip-unneeded '{}' + \
     && ln -s python3 /usr/local/bin/python \
     && /usr/local/bin/python3 -c "import ssl, sqlite3, ctypes, lzma, bz2, zlib, uuid, decimal, hashlib"

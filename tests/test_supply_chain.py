@@ -503,6 +503,8 @@ def test_both_images_build_the_same_interpreter_from_pythons_own_source():
     assert re.search(r"ARG CPYTHON_VERSION=3\.11\.\d+\nARG CPYTHON_SHA256=[0-9a-f]{64}\n", shared)
     assert "--enable-optimizations --with-lto" in shared and "--prefix=/usr/local" in shared
     assert "readline" not in _code(shared) and "gdbm" not in _code(shared)
+    # No Tk, so no tkinter package that would be found and fail to import
+    assert "tk-dev" not in shared and "rm -rf /usr/local/lib/python3.11/tkinter " in shared
     for name in ("Dockerfile", "Dockerfile.mac"):
         code = _code(_dockerfile(name))
         assert code.count("COPY --from=python /usr/local/ /usr/local/") == 1
