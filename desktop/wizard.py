@@ -56,6 +56,18 @@ def _link_button(parent, text: str, url: str) -> ctk.CTkButton:
     )
 
 
+# What the password field makes, in its two states (SEC-S5 §20; draft words
+# for the owner's words review — the page's are auth.js's for its two hosts)
+RANDOM_IDENTITY = (
+    "No password: your identity is a random key. Nobody can guess it or make it again — not even "
+    "you. It lives on this machine and in the identity file you export (Settings › Backup & "
+    "Restore); keep that file safe. Other browsers sign in with the pairing code this computer "
+    "shows.")
+PASSWORD_MAKES = (
+    "Your nickname and this password make your identity again on any machine — and so does anyone "
+    "who guesses it. The time above is how long one GPU would need. " + password_strength.PASSWORD_NOTE)
+
+
 class SetupWizard(ctk.CTkToplevel):
     """First-run setup wizard."""
 
@@ -619,6 +631,7 @@ class SetupWizard(ctk.CTkToplevel):
 
         def measure(_event=None):
             text = self._account_pass.get()
+            what.configure(text=PASSWORD_MAKES if text else RANDOM_IDENTITY)
             zone = ""
             if not text:
                 meter.configure(text="")
@@ -637,8 +650,10 @@ class SetupWizard(ctk.CTkToplevel):
                 self._account_keep.set(False)
                 keep_box.grid_remove()
 
-        hint(8, "Makes this nickname yours on any device. Without it, the "
-                "identity lives only on this machine. " + password_strength.PASSWORD_NOTE)
+        # Which identity the field makes (SEC-S5 §20), said under it as typed
+        what = ctk.CTkLabel(fields, text="", text_color="gray", anchor="w", height=0,
+                            font=ctk.CTkFont(size=12), justify="left", wraplength=520)
+        what.grid(row=8, column=0, sticky="ew", pady=(0, 10))
 
         confirm_label = label(9, "Confirm password")
         self._account_pass2 = entry(

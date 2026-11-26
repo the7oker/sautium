@@ -485,15 +485,6 @@ def test_an_account_without_a_password_changes_on_the_code_its_host_shows(rotati
     assert done == [("named", "a password now amber lanterns ford")]
 
 
-def test_the_setup_never_makes_an_account_without_a_password(doors):
-    """An account with no password is a random key, made by the launcher's
-    wizard or a console command — the Web UI's setup always takes one."""
-    r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(),
-                                                          {"username": "owner", "password": "",
-                                                           "setup_code": "x"}))
-    assert r.status_code == 422
-
-
 def test_a_busy_node_says_so_at_the_change(rotations, monkeypatch):
     change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
@@ -827,7 +818,7 @@ def test_a_pin_is_a_key_or_nothing():
 
 def test_a_refusal_at_the_credential_doors_names_the_field_never_its_value(doors):
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "", "setup_code": "pw4321"}))
+        "username": "owner" * 10, "password": "pw4321", "setup_code": "x"}))
     assert r.status_code == 422 and "pw4321" not in r.text
 
 
@@ -1625,3 +1616,35 @@ def test_a_door_s_word_on_the_password_comes_back_as_such():
                 "return [ok, window.Sautium.auth.takePasswordTold(), window.Sautium.auth.takePasswordTold()]",
                 store=dict(_SIGNED_IN), replies={"/api/auth/login": [[200, None, told]]})
     assert out["result"] == [True, weak["password"], None]
+
+
+# --- an empty password: the random identity (SEC-S5 §20) -----------------------
+
+def test_the_setup_takes_an_empty_password_as_a_random_key_at_once(fresh_node, births, monkeypatch):
+    """No password: a random key, placed at once — nothing derives it, ever;
+    no sign-in hash; its door the host's code."""
+    from routers import p2p as p2p_router
+    arrived = []
+    monkeypatch.setattr(device_auth, "_key_arrived", arrived.append)
+    monkeypatch.setattr(device_auth, "_record_signing_key", lambda pubkey: None)
+    monkeypatch.setattr(p2p_router, "_publish_identity_state", lambda state: None)
+    device_auth.prepare_setup()
+    made = asyncio.run(device_auth.create_account("owner", "", device_auth._setup_code))
+    assert made["key"] == "ready" and made["invite_code"].startswith("owner#")
+    assert births == [] and arrived == [made["public_key_hex"]]
+    account = json.loads((fresh_node / "account.json").read_text())
+    assert account["anonymous"] is True and account["signin"] is None
+    assert device_auth.password_door() is False and device_auth.account_anonymous() is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_new_password_field_says_which_identity_it_makes():
+    """Empty: the random identity and where it lives, in its host's words;
+    typed: what a password makes, and its price."""
+    js = (ROOT / "backend" / "static" / "auth.js").read_text(encoding="utf-8")
+    assert 'what.textContent = field.value ? PASSWORD_MAKES : randomIdentityWords();' in js
+    assert "make your identity again on any machine" in js
+    assert "./sautium pair, or python -m pairing in its container" in js
+    assert "in the identity file you export" in js
+    wizard = (ROOT / "desktop" / "wizard.py").read_text(encoding="utf-8")
+    assert "what.configure(text=PASSWORD_MAKES if text else RANDOM_IDENTITY)" in wizard

@@ -334,8 +334,8 @@ checks, never the key again) and a random id the device token is derived from
 its estimate said at the start and its end an event; P2P, the notary's seals
 and the email's code wait for it, nothing else does. `desktop/node_identity.
 derive_seed` is the one derivation every road calls. An account made with no
-password (the wizard's skipped form, a change to an empty password, the
-master's) has a random key, made at once: nothing would derive it again, and
+password (an empty field at any door — the Web UI's setup, the wizard, a
+change of identity — and the master's) has a random key, made at once: nothing would derive it again, and
 it comes back only from its identity file. An identity is the identity
 folder's alone: made by the account's creation, brought by an identity file,
 or random — no environment variable names one (since 2026-11-26, SEC-S5 §18;

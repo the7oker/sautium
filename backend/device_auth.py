@@ -820,6 +820,13 @@ async def create_account(username: str, password: str, setup_code: str,
         if not _may_take_name(username):
             raise ValueError(RESERVED_REFUSAL)
         held = await asyncio.to_thread(_holds_identity)
+        if not password:
+            _loop = asyncio.get_running_loop()
+            made = await asyncio.to_thread(_random_account, d, username, email,
+                                           held and not new_identity)
+            _setup_code = None
+            (d / SETUP_CODE_FILE).unlink(missing_ok=True)
+            return made
         weak = None
         if not held:
             await asyncio.to_thread(check_new_password, password, username, email, keep)
@@ -840,6 +847,33 @@ async def create_account(username: str, password: str, setup_code: str,
         _start_birth(username, password, "create",
                      _born(account, held and not new_identity, weak))
         return {"username": username, "key": "deriving"}
+
+
+def _random_account(d, username: str, email: str, held: bool) -> dict:
+    """The setup's account with no password: a random key, at once — nothing
+    would derive it again (SEC-S5 §15, §20). Over records of another identity
+    it is held for the owner's word like any other key that is not theirs."""
+    global _held
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from desktop.node_identity import (RESERVED_REFUSAL, new_account, place_account_key,
+                                       public_hex, write_account)
+    account = new_account(username, "", source="form", email=email, anonymous=True)
+    key = Ed25519PrivateKey.generate()
+    pubkey = public_hex(key)
+    if not _may_take_name(username, pubkey):
+        raise ValueError(RESERVED_REFUSAL)
+    write_account(d, account)
+    _account_written(account)
+    if held:
+        _held = {"key": key, "account": account, "weak": None}
+        _publish_birth({"status": "another_identity", "weak": None})
+        return {"username": username, "key": "another_identity"}
+    info = place_account_key(d, key, account)
+    _record_signing_key(pubkey)
+    _key_arrived(pubkey)
+    return {"username": username, "key": "ready", "invite_code": info["invite_code"],
+            "public_key_hex": pubkey}
 
 
 async def decide_new_identity(make: bool) -> dict:

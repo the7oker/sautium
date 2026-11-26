@@ -245,7 +245,8 @@ async def device_links(request: Request) -> dict:
 
 class CreateAccountRequest(BaseModel):
     username: str = Field(default="", max_length=32)
-    password: str = Field(default="", min_length=1, max_length=256)
+    # Empty: no password — a random key, made at once (SEC-S5 §15, §20)
+    password: str = Field(default="", max_length=256)
     # The email typed beside it, read here only as a word an attacker would
     # try first (the form sets it on the account once it exists)
     email: str = Field(default="", max_length=254)
@@ -304,8 +305,7 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
     # its key is made in the background, and what speaks for the node — the
     # chat client, the identity worker, the peer surface under the key — is
     # started when it lands (device_auth._key_arrived), with no restart.
-    return reply({"token": device_auth.current_token(_secret()),
-                  "username": info["username"], "key": info["key"]})
+    return reply({"token": device_auth.current_token(_secret()), **info})
 
 
 class NewIdentityRequest(StepUp):

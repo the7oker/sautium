@@ -15109,9 +15109,6 @@
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Password — optional</span>
             <div id="idNewPass"></div>
           </div>
-          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
-            Makes this nickname yours on any device. Without it, the identity lives only on this machine.
-          </p>
           <label id="idConfirmRow" style="display:flex;flex-direction:column;gap:calc(4*var(--px));" hidden>
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
             ${window.Sautium.auth.passwordField('idPass2', '', 'new-password')}

@@ -469,7 +469,7 @@
       if (r.status === 429 && r.resp.headers.get("X-Sautium-Auth-Error") === "shut") {
         return `Too many wrong setup codes — the next try is taken in ${r.resp.headers.get("Retry-After")} s.`;
       }
-      if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: required.";
+      if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _.";
       return errorDetail(r, "Could not create the account.");
     },
     async pair(code) {
@@ -615,10 +615,12 @@
       ${passwordField(id, placeholder, "new-password")}
       <p class="pw-meter" aria-live="polite"></p>
       <label class="pw-keep" hidden><input type="checkbox" data-pw-keep> I understand, keep it</label>
+      <p class="pw-what"></p>
       <p class="pw-note"></p>`;
     const field = root.querySelector("input.add-gear-input");
     const offer = root.querySelector(".pw-offer");
     const meter = root.querySelector(".pw-meter");
+    const what = root.querySelector(".pw-what");
     const keepRow = root.querySelector(".pw-keep");
     const keepBox = root.querySelector("[data-pw-keep]");
     let drawn = null;               // {phrase, words}
@@ -630,6 +632,9 @@
       meter.innerHTML = html;
       keepRow.hidden = zone !== "word";
       if (zone !== "word") keepBox.checked = false;
+      // Which identity the field makes (SEC-S5 §20): empty, a random key;
+      // typed, one its nickname and password make again anywhere
+      what.textContent = field.value ? PASSWORD_MAKES : randomIdentityWords();
     };
     const showOffer = (o) => {
       drawn = o;
@@ -691,6 +696,7 @@
       field.dispatchEvent(new Event("input"));
     });
     draw();
+    say("", "");
     return {
       field,
       keep: () => keepBox.checked,
@@ -702,6 +708,25 @@
         say(v.zone, htmlText(v.door));
       },
     };
+  }
+
+  // What the new-password field makes, in its two states (SEC-S5 §20; draft
+  // words for the owner's words review). Empty: the random identity, and
+  // where its copy and its other doors are — the launcher's window, or a
+  // Docker node's console. Typed: a mnemonic identity, and its price.
+  const PASSWORD_MAKES =
+    "Your nickname and this password make your identity again on any machine — and so does " +
+    "anyone who guesses it. The time above is how long one GPU would need.";
+  function randomIdentityWords() {
+    return launcherHost
+      ? "No password: your identity is a random key. Nobody can guess it or make it again — not " +
+        "even you. It lives on this machine and in the identity file you export (Settings › Backup " +
+        "& Restore); keep that file safe. Other browsers sign in with the pairing code this " +
+        "computer shows."
+      : "No password: your identity is a random key. Nobody can guess it or make it again — not " +
+        "even you. It lives on this node and in the identity file its console exports " +
+        "(./sautium identity export); keep that file safe. Other browsers sign in with the pairing " +
+        "code its console shows (./sautium pair, or python -m pairing in its container).";
   }
 
   window.Sautium.auth.newPassword = newPassword;
@@ -788,12 +813,10 @@
         // account (username+password -> Argon2id -> Ed25519), not a local
         // login, so it also switches on sync, chat and analysis signing.
         msg.innerHTML =
-          "Choose a nickname and password. This is your identity on the " +
+          "Choose a nickname, and a password if you want one. This is your identity on the " +
           "Sautium network, not just a local login — the nickname sits inside " +
           "your invite code, so Latin letters, digits, - or _.<br><br>" +
-          "<b>The password is never stored</b> — it derives your keys. If you " +
-          "lose it you get a new identity, and your invite code and friends " +
-          "with it.<br><br>" +
+          "What the password field makes — with a password or without — is said under it.<br><br>" +
           "The setup code proves you run this node. " + setupCodePlace();
         // The email is optional everywhere. On a node that never earns its
         // identity by computing it is the way to one (draft words for the
