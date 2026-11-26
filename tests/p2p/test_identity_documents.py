@@ -204,12 +204,17 @@ def test_the_mining_worker_keeps_another_key_s_proof(tmp_path):
 
 
 def test_a_restore_onto_a_node_with_no_info_keeps_another_key_s_documents(tmp_path):
-    """An env-derived Docker node keeps no node_info.json: nothing named the
-    live identity, so the restore wrote the backup's certificate over it."""
-    live = certificate(_key())
-    kept = _write(tmp_path, CERT, live)
-    incoming = certificate(_key())
-    data = json.dumps(incoming).encode("utf-8")
-    node_backup.write_identity(tmp_path, {CERT: data}, username="someone", password=None)
+    """With no node_info.json nothing named the live identity, so a restore
+    once wrote the backup's certificate over another key's. A restore of the
+    node's own key's backup moves that one aside whole; one of another key
+    writes no document at all."""
+    kept = _write(tmp_path, CERT, certificate(_key()))
+    own = _key()
+    data = json.dumps(certificate(own)).encode("utf-8")
+    stranger = json.dumps(certificate(_key())).encode("utf-8")
+    assert node_backup.write_identity(tmp_path, {CERT: stranger}, backup_key="ef" * 32,
+                                      live_key=own)["files"] == []
+    assert _aside(tmp_path) == {} and (tmp_path / CERT).read_bytes() == kept
+    node_backup.write_identity(tmp_path, {CERT: data}, backup_key=own, live_key=own)
     assert _aside(tmp_path) == {CERT: kept}
     assert (tmp_path / CERT).read_bytes() == data

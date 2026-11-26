@@ -678,9 +678,9 @@ def hold_secrets() -> frozenset:
     names case-insensitively); the settings, built at import, keep the
     values. A child it starts — an agent CLI, ffmpeg, pg_restore — inherits
     none of them, so none shows in a /proc/<pid>/environ the CLIs' user can
-    read. The backup CLI starts no agent: it reads its password by name
-    (`--password-env P2P_PASSWORD`), drops that variable alone and is
-    undumpable from its main(). Returns the names dropped."""
+    read. The backup CLI does the same first, though it starts no agent: it
+    holds the node's seed, and its children are pg_dump and pg_restore.
+    Returns the names dropped."""
     undumpable()
     from config import SECRET_ENV
     dropped = [n for n in os.environ if n.upper() in SECRET_ENV]

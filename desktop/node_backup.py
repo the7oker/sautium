@@ -1,4 +1,4 @@
-"""Node backup — format v1 (`.sbk`) and the database drivers around it.
+"""Node backup — format v2 (`.sbk`) and the database drivers around it.
 
 Product A of docs/design/BACKUP.md: one encrypted container holding a
 `pg_dump` of the node's own data (the MusicBrainz layer rides along as empty
@@ -11,13 +11,20 @@ The file
     magic "SAUTIUM-BACKUP\\0" · version u16 · header length u32 · header JSON
     then chunk frames: [ciphertext length u32][ciphertext] until EOF.
 
-Keys. KEK = Argon2id(password, salt "sautium-backup:v1:<username>") with the
-identity parameters (t=4, m=256 MiB, p=2). The salt domain differs from the
-identity seed's ("<username>:sautium"), so neither key can be turned into the
-other — same password, two unrelated keys. The KEK only wraps a random
-per-file data key (envelope): the key is deterministic, the ciphertext never
-is, and a second recipient (a printed recovery key, later) is one more
-wrapped copy in the header list.
+Keys (v2, since 2026-11-26, SEC-S5). KEK = HKDF-SHA256(ikm = the identity's
+32-byte Ed25519 seed, salt "", info "sautium-backup:v2:kek:" || the raw
+public key): nothing is typed to make or open a backup. The node that holds
+the key opens its own backups, and those of the keys it retired and keeps
+in its archive (`previous/`); another machine opens one once that identity
+is brought there first — its identity file, or the account made again with
+the same nickname and password. The price: whoever holds the seed opens
+every backup of that key. The encryption guards the copy that leaves the
+machine, not the machine — the disk that holds the seed holds the database
+too. The KEK only wraps a random per-file data key (envelope): the key is
+deterministic, the ciphertext never is, and a second recipient (a printed
+recovery key, later) is one more wrapped copy in the header list. A file of
+format v1 (its KEK Argon2id over the account's password) is refused with
+words: this version makes no such key.
 
 Chunks. XChaCha20-Poly1305 (libsodium's IETF AEAD through PyNaCl) with a
 24-byte nonce = random 16-byte prefix || chunk counter (u64), unique by
@@ -37,14 +44,15 @@ exits, so a tar would have needed a plaintext spool — exactly what "never a
 plaintext temp file" forbids. Member order: manifest.json first (so inspect
 and every pre-check read one small chunk), db.dump, identity/<file>...
 
-Never inside: the private Ed25519 seed (it derives from username +
-password, which the restore asks for anyway — `node_ed25519.key` is
-excluded at every level, the rotation archive's copies included), TLS
-material (re-generated), the `mb_*` and `lb_*` table DATA (re-loadable
-from the MusicBrainz / ListenBrainz dumps or their P2P slices; the schema
-is dumped so the restored database is complete).
+Never inside: the private Ed25519 seed (the key that opens the file cannot
+travel inside it — `node_ed25519.key` is excluded at every level, the
+rotation archive's copies included), the account file (`account.json`: its
+sign-in hash would be a cheap test of the password), the node's `.api_secret`
+(a restore keeps the node's own), TLS material (re-generated), the `mb_*`
+and `lb_*` table DATA (re-loadable from the MusicBrainz / ListenBrainz dumps
+or their P2P slices; the schema is dumped so the restored database is
+complete).
 """
-
 import hashlib
 import json
 import logging
@@ -60,18 +68,22 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import psycopg2
 import psycopg2.extensions
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from psycopg2 import sql
 
-from desktop.node_identity import PREVIOUS_DIRNAME, ROTATION_FILENAME
+from desktop.node_identity import (PREVIOUS_DIRNAME, ROTATION_FILENAME, load_previous_seeds,
+                                   read_account, write_identity_document)
 
 logger = logging.getLogger(__name__)
 
 MAGIC = b"SAUTIUM-BACKUP\0"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 FILE_SUFFIX = ".sbk"
 PART_SUFFIX = ".sbk.part"
 CHUNK_SIZE = 16 * 1024 * 1024
@@ -81,8 +93,16 @@ KEY_LEN = 32
 TAG_LEN = 16
 NONCE_PREFIX_LEN = 16
 NONCE_LEN = 24
-KDF_SALT_PREFIX = "sautium-backup:v1:"
-WRAP_AAD = b"sautium-backup:v1:wrap:"
+KEK_INFO = b"sautium-backup:v2:kek:"
+WRAP_AAD = b"sautium-backup:v2:wrap:"
+WRAP_KIND = "seed"
+SEED_LEN = 32
+_PUBKEY = re.compile(r"[0-9a-f]{64}")
+
+# Draft words for the owner's words review (SEC-S5 §13)
+OLDER_FORMAT = ("This backup was made by an older Sautium, whose backups were opened with a key "
+                "this version no longer makes. Make a new backup from the node itself; keep this "
+                "file only as a copy of what it held.")
 
 REC_END = 0
 REC_MEMBER_START = 1
@@ -97,11 +117,11 @@ IDENTITY_PREFIX = "identity/"
 # readers (restore, merge), on every platform: a file of the identity
 # folder, or of a retired identity's archive (`previous/<rotated at>-<key
 # prefix>/`, desktop.node_identity.rotate), these exact strings and nothing
-# else. Never a key or TLS material (module doc; the public PEM comes with
-# the re-derived key), and so never a name another platform's path rules
-# would read as somewhere else.
+# else. Never a key, TLS material, the account file or `.api_secret`
+# (module doc), and so never a name another platform's path rules would
+# read as somewhere else.
 IDENTITY_FILES = frozenset({"node_info.json", "birth_certificate.json",
-                            "identity_proof.json", ".api_secret"})
+                            "identity_proof.json"})
 # The identity documents, written by node_identity.write_identity_document alone
 DOCUMENT_FILES = frozenset({"birth_certificate.json", "identity_proof.json"})
 ARCHIVE_FILES = frozenset({"node_info.json", "birth_certificate.json",
@@ -120,16 +140,13 @@ class BackupError(Exception):
     """Anything that stops a backup or a restore; the message is for the user."""
 
 
-class WrongPassword(BackupError):
-    pass
-
-
 class Tampered(BackupError):
     """Authentication failed, or the stream is truncated / reordered."""
 
 
 class Refused(BackupError):
-    """A pre-check said no: newer schema, an existing database, a foreign identity."""
+    """A pre-check said no: an older or newer format, a newer schema, an
+    existing database, another identity's backup, no key here to open one."""
 
 
 class Cancelled(BackupError):
@@ -137,30 +154,61 @@ class Cancelled(BackupError):
 
 
 # ---------------------------------------------------------------------------
-# KDF + envelope
+# The key: the identity's seed
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
-class KdfParams:
-    time_cost: int = 4
-    memory_cost: int = 262144      # KiB — 256 MiB, the identity's parameters
-    parallelism: int = 2
-
-    def header(self, username: str) -> dict:
-        return {"alg": "argon2id", "t": self.time_cost, "m": self.memory_cost,
-                "p": self.parallelism, "salt": KDF_SALT_PREFIX + username}
+def seed_of(private_key) -> bytes:
+    """The raw 32-byte seed of an Ed25519 private key."""
+    return private_key.private_bytes(encoding=serialization.Encoding.Raw,
+                                     format=serialization.PrivateFormat.Raw,
+                                     encryption_algorithm=serialization.NoEncryption())
 
 
-DEFAULT_KDF = KdfParams()
+def _public_raw(seed: bytes) -> bytes:
+    return Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
 
 
-def derive_kek(password: str, username: str, kdf: KdfParams = DEFAULT_KDF) -> bytes:
-    from argon2.low_level import Type, hash_secret_raw
-    return hash_secret_raw(
-        secret=password.encode("utf-8"),
-        salt=(KDF_SALT_PREFIX + username).encode("utf-8"),
-        time_cost=kdf.time_cost, memory_cost=kdf.memory_cost,
-        parallelism=kdf.parallelism, hash_len=KEY_LEN, type=Type.ID)
+def seed_pubkey(seed: bytes) -> str:
+    """The public key (lower-case hex) of the identity seed `seed`."""
+    return _public_raw(seed).hex()
+
+
+def backup_kek(seed: bytes) -> bytes:
+    """The key that wraps a backup's data key: HKDF over the identity's seed,
+    its context naming the format and binding the key's public half."""
+    return HKDF(algorithm=hashes.SHA256(), length=KEY_LEN, salt=b"",
+                info=KEK_INFO + _public_raw(seed)).derive(seed)
+
+
+def live_seed(private_key, identity_dir: Optional[Path], *, to: str) -> bytes:
+    """The seed of `private_key`, the node's live key — Refused, in words,
+    while there is none: the account's key still being made (its account
+    file is there), or no identity at all. `to` names the act the words
+    end with ("back up", "restore", "merge", "open the backup")."""
+    if private_key is not None:
+        return seed_of(private_key)
+    if identity_dir is not None and read_account(identity_dir) is not None:
+        raise Refused(f"This node's key is still being made — {to} once it is ready.")
+    raise Refused("This node has no identity yet. Bring it here first — import its identity "
+                  "file, or create the account with the same nickname and password — then "
+                  f"{to}.")
+
+
+def seeds_held(private_key, identity_dir: Optional[Path], *, to: str) -> List[bytes]:
+    """Every seed a backup of this node opens with: the live key's
+    (live_seed), then each retired key's its archive keeps, newest first."""
+    seeds = [live_seed(private_key, identity_dir, to=to)]
+    if identity_dir is not None:
+        seeds += load_previous_seeds(identity_dir)
+    return seeds
+
+
+def another_identity(node: dict) -> str:
+    return (f"This backup is another identity's ({node.get('username') or '?'}, key "
+            f"{str(node.get('pubkey') or '')[:12]}…), and this node holds no key of it. Bring "
+            "that identity here first — import its identity file, or create the account with "
+            "the same nickname and password — then open the backup on it.")
 
 
 def _aead():
@@ -186,12 +234,10 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 class BackupWriter:
-    """Streams members into an open binary file. `kek` is the wrapping key
-    (`derive_kek`) — the password itself never has to reach the thread that
-    does the writing."""
+    """Streams members into an open binary file, its data key wrapped under
+    `seed`'s KEK (backup_kek); the header names the seed's public key."""
 
-    def __init__(self, fp, *, kek: bytes, username: str, pubkey: str,
-                 kdf: KdfParams = DEFAULT_KDF, chunk_size: int = CHUNK_SIZE,
+    def __init__(self, fp, *, seed: bytes, username: str, chunk_size: int = CHUNK_SIZE,
                  created_at: Optional[str] = None):
         self._fp = fp
         self._encrypt, _ = _aead()
@@ -205,12 +251,11 @@ class BackupWriter:
         self._buf = bytearray()
         self.plaintext_bytes = 0
         self.file_bytes = 0
-        node = {"pubkey": pubkey.lower(), "username": username}
+        node = {"pubkey": seed_pubkey(seed), "username": username}
         wrap_nonce = os.urandom(NONCE_LEN)
-        wrapped = self._encrypt(self._key, _wrap_aad(node), wrap_nonce, kek)
+        wrapped = self._encrypt(self._key, _wrap_aad(node), wrap_nonce, backup_kek(seed))
         self.header = {
-            "kdf": kdf.header(username),
-            "wrapped_keys": [{"kind": "password", "nonce": wrap_nonce.hex(),
+            "wrapped_keys": [{"kind": WRAP_KIND, "nonce": wrap_nonce.hex(),
                               "box": wrapped.hex()}],
             "chunk_size": chunk_size,
             "nonce_prefix": self._prefix.hex(),
@@ -291,11 +336,13 @@ def encode_header(header: dict) -> bytes:
 # ---------------------------------------------------------------------------
 
 def read_header(fp) -> Tuple[dict, bytes]:
-    """(header dict, raw header bytes). Validates the shape; no password."""
+    """(header dict, raw header bytes). Validates the shape; no key."""
     lead = fp.read(len(MAGIC) + 6)
     if len(lead) < len(MAGIC) + 6 or lead[:len(MAGIC)] != MAGIC:
         raise BackupError("not a Sautium backup file")
     version, length = struct.unpack(">HI", lead[len(MAGIC):])
+    if version == 1:
+        raise Refused(OLDER_FORMAT)
     if version != FORMAT_VERSION:
         raise Refused(f"backup format v{version} — this Sautium reads v{FORMAT_VERSION}; update first")
     if length > HEADER_MAX:
@@ -309,9 +356,8 @@ def read_header(fp) -> Tuple[dict, bytes]:
         raise Tampered("header is not JSON")
     try:
         node = header["node"]
-        kdf = header["kdf"]
         ok = (isinstance(node["username"], str) and isinstance(node["pubkey"], str)
-              and kdf["alg"] == "argon2id" and kdf["salt"] == KDF_SALT_PREFIX + node["username"]
+              and _PUBKEY.fullmatch(node["pubkey"]) is not None
               and isinstance(header["wrapped_keys"], list) and header["wrapped_keys"]
               and isinstance(header["chunk_size"], int) and 0 < header["chunk_size"] <= CHUNK_SIZE
               and len(bytes.fromhex(header["nonce_prefix"])) == NONCE_PREFIX_LEN)
@@ -359,9 +405,10 @@ class _Member:
 
 
 class BackupReader:
-    """Sequential reader. `unlock` needs the password (or the KEK); then
-    `members()` yields each member once, in file order — a consumer that
-    skips one gets it drained (and verified) before the next arrives."""
+    """Sequential reader. `unlock_with_seeds` needs a seed of the key the
+    header names; then `members()` yields each member once, in file order —
+    a consumer that skips one gets it drained (and verified) before the next
+    arrives."""
 
     def __init__(self, fp):
         self._fp = fp
@@ -383,21 +430,20 @@ class BackupReader:
     def created_at(self) -> str:
         return self.header.get("created_at", "")
 
-    def unlock(self, password: str, kdf: Optional[KdfParams] = None) -> None:
-        """Derive the KEK and unwrap the data key. The KDF parameters are the
-        fixed v1 set: a header asking for more memory is refused before any
-        derivation, so a crafted file cannot turn the check into a 16 GiB
-        allocation."""
-        expected = (kdf or DEFAULT_KDF).header(self.node["username"])
-        if self.header["kdf"] != expected:
-            raise Refused("unsupported key-derivation parameters in the header")
-        self.unlock_with_kek(derive_kek(password, self.node["username"], kdf or DEFAULT_KDF))
-
-    def unlock_with_kek(self, kek: bytes) -> None:
+    def unlock_with_seeds(self, seeds: Iterable[bytes]) -> None:
+        """Unwrap the data key with the seed, among `seeds` (the node's live
+        key's and its retired keys'), whose public key the header names. The
+        keys are matched before any unwrap, so a backup of another identity
+        is said as such (Refused), never as a damaged file; the right seed
+        that fails to unwrap is a damaged or forged header (Tampered)."""
         from nacl.exceptions import CryptoError
+        seed = next((s for s in seeds if seed_pubkey(s) == self.node["pubkey"]), None)
+        if seed is None:
+            raise Refused(another_identity(self.node))
+        kek = backup_kek(seed)
         aad = _wrap_aad(self.node)
         for entry in self.header["wrapped_keys"]:
-            if entry.get("kind") != "password":
+            if entry.get("kind") != WRAP_KIND:
                 continue
             try:
                 key = self._decrypt(bytes.fromhex(entry["box"]), aad,
@@ -407,7 +453,7 @@ class BackupReader:
             if len(key) == KEY_LEN:
                 self._key = key
                 return
-        raise WrongPassword("wrong password (or a damaged header)")
+        raise Tampered("the key the backup names does not open it: its header is damaged")
 
     def records(self) -> Iterator[Tuple[int, bytes]]:
         from nacl.exceptions import CryptoError
@@ -493,9 +539,9 @@ def identity_path(identity_dir: Path, rel: str) -> Path:
 
 def identity_files(identity_dir: Optional[Path]) -> List[Tuple[str, Path]]:
     """(member name, path) for every file the backup carries out of the
-    identity dir (identity_member): the info, the certificate, the proof,
-    the rotation archive and `.api_secret`; never a private key or TLS
-    material, at any depth."""
+    identity dir (identity_member): the info, the certificate, the proof
+    and the rotation archive; never a private key, TLS material, the account
+    file or `.api_secret`, at any depth."""
     if identity_dir is None or not identity_dir.is_dir():
         return []
     out = []
@@ -670,14 +716,16 @@ def _unique_path(directory: Path, name: str) -> Path:
     return directory / f"{stem}-{datetime.now(timezone.utc).strftime('%H%M%S')}{FILE_SUFFIX}"
 
 
-def create_backup(out_dir: Path, *, target: PgTarget, kek: bytes, username: str,
-                  pubkey: str, identity_dir: Optional[Path] = None,
+def create_backup(out_dir: Path, *, target: PgTarget, seed: bytes, username: str,
+                  identity_dir: Optional[Path] = None,
                   app_commit: Optional[str] = None, app_build: Optional[str] = None,
                   progress: Optional[ProgressFn] = None,
                   cancel: Optional[threading.Event] = None,
                   wait_ok: Optional[Callable[[], None]] = None,
-                  kdf: KdfParams = DEFAULT_KDF, chunk_size: int = CHUNK_SIZE) -> dict:
-    """Write `<out_dir>/sautium-backup-<node>-<date>.sbk`. The row counts in
+                  chunk_size: int = CHUNK_SIZE) -> dict:
+    """Write `<out_dir>/sautium-backup-<node>-<date>.sbk`, keyed on the
+    identity seed `seed` (the node's own: the header names its public key
+    and `username`). The row counts in
     the manifest and the dump come from ONE snapshot (`pg_export_snapshot` →
     `pg_dump --snapshot`), so a restore can be checked against them exactly
     even while the node keeps writing. `wait_ok()` is called before every
@@ -688,6 +736,7 @@ def create_backup(out_dir: Path, *, target: PgTarget, kek: bytes, username: str,
     progress = progress or (lambda *_a, **_k: None)
     cancel = cancel or threading.Event()
     wait_ok = wait_ok or (lambda: None)
+    pubkey = seed_pubkey(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     final_path = _unique_path(out_dir, backup_filename(pubkey))
     part_path = final_path.with_name(final_path.name[:-len(FILE_SUFFIX)] + PART_SUFFIX)
@@ -715,7 +764,7 @@ def create_backup(out_dir: Path, *, target: PgTarget, kek: bytes, username: str,
             "format_version": FORMAT_VERSION,
             "created_at": _now_iso(),
             "app": {"commit": app_commit, "build": app_build},
-            "node": {"pubkey": pubkey.lower(), "username": username},
+            "node": {"pubkey": pubkey, "username": username},
             "database": {"name": target.dbname, "snapshot": snapshot, "tables": counts,
                          **facts},
             "migrations": migrations,
@@ -723,8 +772,7 @@ def create_backup(out_dir: Path, *, target: PgTarget, kek: bytes, username: str,
         }
 
         with open(part_path, "wb") as fp:
-            writer = BackupWriter(fp, kek=kek, username=username, pubkey=pubkey,
-                                  kdf=kdf, chunk_size=chunk_size,
+            writer = BackupWriter(fp, seed=seed, username=username, chunk_size=chunk_size,
                                   created_at=manifest["created_at"])
             writer.add_member(MANIFEST_MEMBER, _canonical(manifest))
 
@@ -981,11 +1029,8 @@ def restore_database(reader: BackupReader, target: PgTarget, *, manifest: Option
                 elif member.name.startswith(IDENTITY_PREFIX):
                     rel = member.name[len(IDENTITY_PREFIX):]
                     if not identity_member(rel):
-                        # an older writer carried every file of the folder:
-                        # what is no identity file is left unread, never written
-                        logger.warning("backup member %r is no file of the identity folder "
-                                       "— not restored", member.name[:200])
-                        continue
+                        raise Tampered(f"backup member {member.name[:200]!r} is no file of the "
+                                       "identity folder")
                     data = member.read()
                     identity_seen.append(rel)
                     if identity_sink is not None:
@@ -1063,98 +1108,104 @@ def _subject(data: bytes) -> str:
     return str(doc.get("pubkey", "")).lower() if isinstance(doc, dict) else ""
 
 
-def write_identity(identity_dir: Path, files: Dict[str, bytes], *, username: str,
-                   password: Optional[str]) -> dict:
-    """Make this machine the node the backup came from. Identity files that
-    belong to a DIFFERENT key are moved aside (`replaced-<time>/`), never
-    deleted; the same key's files are overwritten in place. With
-    `node_info.json` in the set and a password, the private key is
-    re-derived and written like `create_account` does — nothing is written
-    unless the derivation reproduces the recorded public key, and nothing
-    unless every name is a file of the identity folder (identity_path)."""
-    from desktop import node_identity
-
-    identity_dir.mkdir(parents=True, exist_ok=True)
+def write_identity(identity_dir: Path, files: Dict[str, bytes], *, backup_key: str,
+                   live_key: str) -> dict:
+    """What a restore writes of the backup's identity members — the identity
+    is brought first (an identity file, or the account made with its pair),
+    so a restore only fills in what the folder lacks of it, and only from a
+    backup of the node's live key `live_key`: that key's certificate and
+    proof where the folder holds none of this key (the one writer,
+    node_identity.write_identity_document, moves another key's aside), and
+    the retired identities the backup's info lists and the node's does not
+    (merge_archive). The node's info, documents and `.api_secret` stay. A
+    backup of a retired key restores the database alone: its documents are
+    a retired identity's. Nothing is written unless every name is a file of
+    the identity folder (identity_path)."""
     targets = {rel: identity_path(identity_dir, rel) for rel in files}
-    info = None
-    if "node_info.json" in files:
-        info = json.loads(files["node_info.json"].decode("utf-8"))
-    incoming_pub = (info or {}).get("public_key_hex", "").lower()
+    written: List[str] = []
+    retired = 0
+    if backup_key.lower() == live_key.lower():
+        live_key = live_key.lower()
+        for rel in sorted(DOCUMENT_FILES & set(files)):
+            path = targets[rel]
+            held = _subject(path.read_bytes()) if path.exists() else ""
+            if _subject(files[rel]) == live_key and held != live_key:
+                write_identity_document(identity_dir, rel, files[rel], live_key)
+                written.append(rel)
+        retired = merge_archive(identity_dir, files)
+    return {"files": written, "retired_added": retired}
 
-    private_key = None
-    if info is not None and info.get("username"):
-        if not password:
-            raise Refused("the account password is needed to re-derive the node key")
-        private_key, derived_pub, _ = node_identity.derive_account_identity(
-            info["username"], password)
-        if derived_pub.lower() != incoming_pub:
-            raise Refused("this password does not derive the identity in the backup")
 
-    live_info = identity_dir / "node_info.json"
-    moved = None
-    if live_info.exists():
-        try:
-            live_pub = json.loads(live_info.read_text(encoding="utf-8")).get("public_key_hex", "").lower()
-        except (OSError, ValueError):
-            live_pub = ""
-        if live_pub and live_pub != incoming_pub:
-            moved = identity_dir / ("replaced-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
-            moved.mkdir()
-            for entry in list(identity_dir.iterdir()):
-                if entry == moved or entry.name.startswith("replaced-"):
-                    continue
-                entry.rename(moved / entry.name)
-            logger.info("existing identity %s… moved to %s", live_pub[:16], moved.name)
-
-    for rel, data in files.items():
-        path = targets[rel]
-        if rel in DOCUMENT_FILES:
-            # An env-derived node keeps no node_info.json, so nothing above
-            # moved a live document of another key: the one writer does
-            node_identity.write_identity_document(identity_dir, rel, data,
-                                                  incoming_pub or _subject(data))
+def merge_archive(identity_dir: Optional[Path], files: Dict[str, bytes]) -> int:
+    """Union of rotation records — a restore's and a merge's: every retired
+    identity the backup's node_info.json lists and this node's does not gets
+    its archive directory (the notice, the certificate, the proof — a backup
+    carries no key) and its entry. Nothing happens without a live
+    node_info.json to list them in. An entry whose
+    `dir` is no archive's name (ARCHIVE_DIR) is not taken, and a file goes
+    nowhere but its archive (identity_path). Returns how many were added."""
+    if identity_dir is None or "node_info.json" not in files:
+        return 0
+    live_path = identity_dir / "node_info.json"
+    if not live_path.exists():
+        return 0
+    live = json.loads(live_path.read_text(encoding="utf-8"))
+    theirs = json.loads(files["node_info.json"].decode("utf-8"))
+    known = {str(e.get("public_key_hex", "")).lower() for e in live.get("previous", [])}
+    known.add(str(live.get("public_key_hex", "")).lower())
+    added = 0
+    for entry in theirs.get("previous", []):
+        pub = str(entry.get("public_key_hex", "")).lower()
+        if not pub or pub in known or not ARCHIVE_DIR.fullmatch(str(entry.get("dir", ""))):
             continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        if rel == ".api_secret":
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-    if private_key is not None:
-        node_identity._save_keypair(private_key, info, identity_dir)
-    return {"pubkey": incoming_pub or None, "username": (info or {}).get("username") or username,
-            "moved_previous_identity": moved.name if moved else None,
-            "files": sorted(files)}
+        prefix = f"{PREVIOUS_DIRNAME}/{entry['dir']}/"
+        for rel, data in files.items():
+            if rel.startswith(prefix):
+                path = identity_path(identity_dir, rel)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    path.write_bytes(data)
+        live.setdefault("previous", []).append(entry)
+        known.add(pub)
+        added += 1
+    if added:
+        live["previous"].sort(key=lambda e: str(e.get("retired_at", "")))
+        tmp = live_path.with_name(live_path.name + ".tmp")
+        tmp.write_text(json.dumps(live, indent=2), encoding="utf-8")
+        tmp.replace(live_path)
+        logger.info("identity archive: %d retired identit%s added from the backup",
+                    added, "y" if added == 1 else "ies")
+    return added
 
 
 # ---------------------------------------------------------------------------
 # Inspect + selftest
 # ---------------------------------------------------------------------------
 
-def inspect_file(path: Path, password: Optional[str] = None,
-                 kdf: Optional[KdfParams] = None) -> dict:
-    """Header facts, plus the manifest when a password is given."""
+def inspect_file(path: Path, seeds: Optional[List[bytes]] = None) -> dict:
+    """Header facts, plus the manifest when the seeds this node holds are
+    given (BackupReader.unlock_with_seeds)."""
     out = {"path": str(path), "size": path.stat().st_size}
     with open(path, "rb") as fp:
         reader = BackupReader(fp)
         out["node"] = reader.node
         out["created_at"] = reader.created_at
-        if password is not None:
-            reader.unlock(password, kdf)
+        if seeds is not None:
+            reader.unlock_with_seeds(seeds)
             out["manifest"] = reader.read_manifest()
     return out
 
 
 def selftest(target: PgTarget, *, test_db: str, identity_dir: Optional[Path],
-             pubkey: str, username: str, out_dir: Optional[Path] = None,
+             username: str, out_dir: Optional[Path] = None,
              keep: bool = False, log: Callable[[str], None] = print) -> bool:
     """Dump this node → restore into `test_db` → compare every table's rows
     with the manifest → drop the test database. Returns True when every
     count matches. The schema-migration ledger is compared separately: a
-    restore under newer code legitimately grows it."""
-    import secrets
-    password = secrets.token_urlsafe(24)
+    restore under newer code legitimately grows it. The file is keyed on a
+    throwaway seed: it tests the format and the drivers, never the node's
+    key, and opens nowhere once the run ends."""
+    seed = os.urandom(SEED_LEN)
     out_dir = out_dir or Path(tempfile.mkdtemp(prefix="sautium-selftest-"))
     t0 = time.monotonic()
     log(f"[selftest] backing up {target.dbname} → {out_dir}")
@@ -1167,9 +1218,8 @@ def selftest(target: PgTarget, *, test_db: str, identity_dir: Optional[Path],
         else:
             log(f"[selftest] {phase}")
 
-    result = create_backup(out_dir, target=target, kek=derive_kek(password, username),
-                           username=username, pubkey=pubkey, identity_dir=identity_dir,
-                           progress=show)
+    result = create_backup(out_dir, target=target, seed=seed, username=username,
+                           identity_dir=identity_dir, progress=show)
     path = result["path"]
     log(f"[selftest] backup {path.name}: {result['size'] / 1e6:,.0f} MB in {time.monotonic() - t0:,.0f} s")
 
@@ -1190,7 +1240,7 @@ def selftest(target: PgTarget, *, test_db: str, identity_dir: Optional[Path],
     t1 = time.monotonic()
     with open(path, "rb") as fp:
         reader = BackupReader(fp)
-        reader.unlock(password)
+        reader.unlock_with_seeds([seed])
         manifest = reader.read_manifest()
         restored = restore_database(reader, test_target, manifest=manifest, replace=True,
                                     progress=show, file_size=path.stat().st_size,

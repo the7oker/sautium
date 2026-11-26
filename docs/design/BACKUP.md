@@ -10,9 +10,9 @@
 > **Relates to:** `P2P-SYNC-INTEGRITY.md` (signed records, the import gate —
 > the merge machinery this reuses), `P2P_NETWORK.md` § carry (the selection
 > gates), `backend/seed_export.py` / `backend/seed_import.py` (the existing
-> file-shaped export), `desktop/node_identity.py` (Argon2id derivation the
-> key scheme mirrors), `desktop/db_init.py` (migrations runner the restore
-> hands over to).
+> file-shaped export), `desktop/node_identity.py` (the identity whose seed
+> keys the file since format v2, 2026-11-26), `desktop/db_init.py`
+> (migrations runner the restore hands over to).
 
 ## Problem
 
@@ -66,14 +66,16 @@ own data ≈ 11 GB live, ≈ 3 GB as a compressed dump.
 | **Gear catalogue** | `gear_brands`, `gear_models`, `gear_specs`, `gear_spec_attributes`, `gear_technologies`, `gear_model_technologies`, `gear_sentiment_terms`, `gear_measured_caveats`, `gear_registry_entries` | yes | no | the `gear_brands` / `gear_models` rows the owner's chain names come along with `user_gear`; research stays where it was done |
 | **Node settings** | `user_settings` | yes (in the dump) | no | allowlist only |
 | **Runtime, re-creatable** | `p2p_gate_pool`, `p2p_contact_events`, `p2p_action_costs`, `p2p_dht_state`, `p2p_nodes_seen`, `external_api_cooldown`, `analysis_pace`, `host_requests`, `_schema_migrations` (travels with the dump, see restore) | in the dump, harmless | no | no |
-| **Files** | identity dir: `info.json`, `birth_certificate.json`, `identity_proof.json`, `previous/` (rotation archive), `.api_secret` | yes, encrypted | no | — |
+| **Files** | identity dir: `node_info.json`, `birth_certificate.json`, `identity_proof.json`, `previous/` (rotation archive) — never a key, `account.json` or `.api_secret` (format v2) | yes, encrypted | no | — |
 | **Files, elsewhere** | `.env`, MCP config, launcher `config.json`, a provider plugin's `secrets.json` | **not here** — the maintainer's private repo / the user's own secret store | no | no |
 
-The private Ed25519 seed is never written to a backup: it derives from
-username + password (`node_identity.derive_seed`), which the restore asks
-for anyway. `.api_secret` (random, the device-token key) is included so
-paired browsers keep working after a restore; a restore may also mint a new
-one, which only logs every browser out.
+The private Ed25519 seed is never written to a backup: since format v2
+(2026-11-26, SEC-S5) it is the key that opens the file, so it cannot travel
+inside it — the identity comes to a machine first (its identity file, or
+the account made with the same nickname and password), then the backup.
+Neither the account file (`account.json`: its sign-in hash would be a cheap
+test of the password) nor `.api_secret` is a member: a restore keeps the
+node's own.
 
 ---
 
@@ -85,9 +87,8 @@ one, which only logs every browser out.
 
 ```
 header (plaintext, authenticated as AAD)
-  magic        "SAUTIUM-BACKUP\0" + format version u16 (1)
-  kdf          {"alg":"argon2id","t":4,"m":262144,"p":2,"salt":"sautium-backup:v1:<username>"}
-  wrapped_key  SecretBox(nonce_random, KEK, data_key)      # 32-byte data key
+  magic        "SAUTIUM-BACKUP\0" + format version u16 (2 since 2026-11-26; v1 had a kdf block)
+  wrapped_key  {"kind":"seed"} AEAD(nonce_random, KEK, data_key)   # 32-byte data key
   chunk_size   u32 (16 MiB)
   node         pubkey hex, username (for the "wrong account" message)
 payload (encrypted stream)
@@ -100,14 +101,23 @@ plaintext inside the stream = a tar:
   identity/       the identity folder's files, no key (see "Identity" below)
 ```
 
-- **KEK = Argon2id(password, salt = `"sautium-backup:v1:" + username`)** with
-  the identity parameters (`ARGON2_TIME_COST=4`, `MEMORY_COST=256 MiB`,
-  `PARALLELISM=2`). The salt prefix differs from the identity seed's
-  (`"<username>:sautium"`), so a backup key can never be turned into the
-  node key and vice versa. Same password, two unrelated keys.
+- **KEK = HKDF-SHA256(ikm = the identity's 32-byte Ed25519 seed, salt "",
+  info = `"sautium-backup:v2:kek:"` ‖ the raw public key)** (format v2,
+  since 2026-11-26, SEC-S5; `node_backup.backup_kek`). It replaced v1's
+  Argon2id over the account password in its own salt domain, which kept a
+  backup key from ever being turned into the node key: with the key at
+  ×1000 a backup could not cost minutes of derivation, and an anonymous
+  identity had no password to key on. The price, said plainly: **whoever
+  holds the seed opens every backup of that key.** The encryption guards
+  the copy that leaves the machine, not the machine — the disk that holds
+  the seed holds the database too. The reader matches the header's public
+  key against the seeds the node holds (the live key's, then its retired
+  keys' in `previous/`) before any unwrap, so another identity's backup is
+  said as such. A v1 file is refused with words: this version makes no key
+  that opens it.
 - **Envelope, not direct encryption.** The payload is encrypted under a
-  random per-file `data_key`; the KEK only wraps that key. A password
-  change re-wraps 72 bytes instead of re-encrypting 3 GB, and a second
+  random per-file `data_key`; the KEK only wraps that key. A key change
+  re-wraps 72 bytes instead of re-encrypting 3 GB, and a second
   recipient (a printed recovery key, later) is one more wrapped copy in
   the header. The key is deterministic; the ciphertext never is.
 - **Chunked SecretBox** (PyNaCl, already in the stack: `nacl.secret.SecretBox`,
@@ -121,8 +131,10 @@ plaintext inside the stream = a tar:
   the dump tables rides along empty, so a restored database is complete and
   the loaders / slice cycles fill them later; `-T` would leave the tables
   missing after the migrations runner skips the already-recorded `001`.
-- The failure domain is deliberately the account password: losing it loses
-  the identity anyway, so the backup adds no new thing to remember.
+- The failure domain is the identity: losing it (no folder, no identity
+  file, no pair that derives it) loses the backups with it, so the backup
+  adds no new thing to remember. Since v2 that holds for an anonymous
+  identity too — its identity file brings it back.
 
 ### Creating a backup (backend job)
 
@@ -135,7 +147,8 @@ the record of the job's policy, which is unchanged._
 1. Verify the password derives this node's pubkey (`derive_account_identity`
    vs `get_node_id`); a wrong password is refused before any work. The
    KDF runs under the same semaphore as device-auth login (256 MiB per
-   attempt, one at a time).
+   attempt, one at a time). (Since format v2, 2026-11-26, there is no
+   password and no KDF: the job keys the file on the node's own seed.)
 2. Check free space in the target directory ≥ 2 × the last dump size
    (or 3 GB when unknown).
 3. Stream `pg_dump` stdout → tar writer → chunk encryptor → file; never
@@ -165,7 +178,8 @@ it replaces the database the backend is serving:
   with the app stopped (`docker compose stop backend`), or on the host
   against the published Postgres port.
 
-Steps: ask password → derive KEK, unwrap, read manifest → refuse when the
+Steps (as sketched; since format v2 nothing is asked — the seeds the node holds open it, and
+another identity's backup is refused until that identity is brought here): ask password → derive KEK, unwrap, read manifest → refuse when the
 manifest's newest migration is newer than the code's (`update first`) →
 compare manifest pubkey with the identity the password derives (mismatch =
 another account; the user may still restore *data only*) → create an empty
@@ -331,8 +345,9 @@ after a rebuild): union, keyed so that a second import changes nothing.
 | `user_settings` | key | **allowlist only** (`life_merge.SETTINGS_ALLOWLIST`: phantom layer, sync switches and budgets, gate mode, enrichment switches, scrobbling, album sort, language, diagnostics); a key set here wins; never machine state or machine-specific keys (`hqplayer.host`, ports, paths, `sync.last_at`, secrets) |
 | identity `previous/` | pubkey | union of rotation records (the notice, certificate and proof of each retired identity the backup lists and this node does not) |
 
-Input = a Product-A file of one's own (same account: the password unwraps
-it, the manifest pubkey matches or is a `previous/` key). Enrichment inside
+Input = a Product-A file of one's own (same account: the manifest pubkey
+matches or is a `previous/` key, and since 2026-11-26 the seed the node
+holds of that key unwraps it — no password). Enrichment inside
 such a file is not merged this way — it goes through Product B's gate like
 anyone else's.
 
@@ -418,9 +433,9 @@ from the sketch above, each for a reason found while building:
   prefix ‖ u64 counter) with the sha256 of the header bytes as AAD on
   **every** chunk, so an edited header fails the first chunk. The wrapped
   data key is the same AEAD under the KEK with the identity fields
-  (username, pubkey) as AAD. KDF parameters are pinned: a header asking for
-  more memory is refused before any derivation runs (a crafted file cannot
-  turn "try the password" into a 16 GiB allocation).
+  (username, pubkey) as AAD. (v1's KDF parameters were pinned, so a header
+  could not ask for a 16 GiB derivation; v2 has no KDF to pin — its HKDF is
+  microseconds.)
 - **Framed members, not a tar.** A tar header carries the member size up
   front; pg_dump's size is unknown until it exits, and spooling it would be
   the plaintext temp file the design forbids. Each chunk's plaintext is one
@@ -444,15 +459,17 @@ from the sketch above, each for a reason found while building:
   `en_US.utf8` dump on Windows; indexes are rebuilt by the restore anyway).
 - **Identity: the seed is never in the file, at any depth.**
   `node_ed25519.key` / `.pub` and the TLS pair are excluded from the live
-  dir *and* from `previous/` archives; the live key is re-derived at
-  restore from username + password and written only when it reproduces the
-  recorded public key. A rotation archive therefore loses its private keys
-  in a restore (messages to a retired key can no longer be opened) — the
-  accepted v1 limit of "the seed never leaves". `.api_secret` rides along
-  so paired browsers keep working. An identity member is one of the names
-  the folder holds (`node_backup.identity_member`, 2026-11-03): its four
-  files and those of each `previous/<rotated at>-<key prefix>/`, exact
-  strings on every platform; a restore or a merge writes no other name.
+  dir *and* from `previous/` archives. Since format v2 (2026-11-26) the
+  seed is the file's key: the identity is brought first (its identity file,
+  or the account made with the same pair), and a restore never derives or
+  writes a key. A rotation archive's private keys stay where they are — a
+  backup of a retired key opens only on a node that keeps that key in its
+  archive. Neither `account.json` nor `.api_secret` is a member since v2.
+  An identity member is one of the names the folder holds
+  (`node_backup.identity_member`, 2026-11-03): its three files and those of
+  each `previous/<rotated at>-<key prefix>/`, exact strings on every
+  platform; a restore or a merge reads no other name (a member that is none
+  is a damaged file).
 - **Restore is staged and reversible.** The dump lands in
   `<db>__restore`; only a complete, migrated restore is swapped in. A
   database holding own data (owned files, listens, friends, chat, gear,
@@ -469,16 +486,22 @@ from the sketch above, each for a reason found while building:
   apply_migrations` before the swap; a dump from **newer** code (an
   unknown `NNN_*.sql`, or a higher `identity_rule_v*`) is refused with
   "update first".
-- **Identity move.** `write_identity` moves a *different* live identity to
-  `replaced-<time>/` (never deletes), overwrites the same key's files in
-  place. A backup from an env-credential Docker node carries no
-  `node_info.json`; the launcher then runs `create_account` with the pair
-  that opened the file — the same key.
-- **Docker → launcher (and back) works on the same account.** The KEK is
-  username + password, so the file opens on any machine that knows the
-  pair; the launcher's wizard ("Restore from a backup…") builds the fresh
-  cluster, restores the dump under its own database name and owner, writes
-  the identity documents and derives the key — the new node IS the old one
+- **No identity move (since 2026-11-26).** A restore never changes the
+  node's identity: `write_identity` writes only from a backup of the
+  node's live key, only what its folder lacks — this key's certificate and
+  proof where it holds none of this key (a document of another key moved
+  aside by `node_identity.write_identity_document`), and the retired
+  identities the backup lists and the node does not
+  (`node_backup.merge_archive`, the merge's union). The node's
+  `node_info.json`, its documents of this key and its `.api_secret` stay. A
+  backup of a retired key restores the database alone. (Until then a
+  restore moved a different live identity to `replaced-<time>/` and
+  re-derived the key from the pair that opened the file.)
+- **Docker → launcher (and back) works on the same identity.** Since v2
+  the file opens on any machine that holds the identity's key: bring the
+  identity first (its identity file, or the account made with the same
+  pair), then restore — the fresh cluster gets the dump under its own
+  database name and owner and the identity folder what it lacks of it — the new node IS the old one
   (stop the old node first: two live nodes on one key confuse the DHT, the
   relays and the support desk). What travels: the whole catalog, the
   sealed enrichment, listens, friends, chat, settings. What does not: the
@@ -501,12 +524,14 @@ from the sketch above, each for a reason found while building:
   can ever hang a backup. A cancel aborts a blocked wait by cancelling the
   statement. pg_dump keeps its snapshot across the pause.
 - **Launcher and CLI only — no Web UI (2026-09-14).** A browser cannot
-  receive a 3 GB file and the password that keys it belongs where the file
-  lands, so the Settings › Library card and `/api/settings/backup*` were
-  removed. The launcher's Settings & Tools › Backup & Restore › "Create backup…" runs
+  receive a 3 GB file and the password that then keyed it belonged where
+  the file lands, so the Settings › Library card and `/api/settings/backup*`
+  were removed. (Since 2026-11-19 the Web UI makes one again — "Back up now",
+  `backend/backup_job.py`, the file kept on the node and no route serving
+  it; since 2026-11-26 with no password and no step-up.) The launcher's Settings & Tools › Backup & Restore › "Create backup…" runs
   the very CLI a Docker node's weekly task runs (`desktop/backup_task.py`
-  spawns `python -m backup create --password-env SAUTIUM_BACKUP_PASSWORD
-  --progress-json --cancel-on-stdin` on the backend interpreter with
+  spawns `python -m backup create --progress-json --cancel-on-stdin` — no
+  password since 2026-11-26 — on the backend interpreter with
   `service_manager.backend_env()`), shows its JSON events in the action's
   own row — the button that started the job turns into its red Cancel, a
   progress line and a thin bar appear beneath the section and the result
@@ -531,8 +556,9 @@ from the sketch above, each for a reason found while building:
   makes the backend's own `desktop.*` imports explicit there instead of a
   side effect of `routers/sync.py`.
 - **The weekly task's contract** (the maintainer's own scheduled script):
-  `docker exec sautium-backend python -m backup create --password-env
-  P2P_PASSWORD`, the password from the container's environment, the file
+  `docker exec sautium-backend python -m backup create` — no password and
+  no credential from the environment since 2026-11-26 (the file is keyed on
+  the node's own seed; before, `--password-env P2P_PASSWORD`) —, the file
   under `/app/data/backup` (bind mount `./data/backup`) with the `.sbk`
   suffix, a non-zero exit on any failure, and a terminal counter whose
   `counting…` / `dumping…` / `identity…` lines the script's log filter
@@ -542,35 +568,42 @@ from the sketch above, each for a reason found while building:
   from PGDG and pin `PG_BIN=/usr/lib/postgresql/18/bin`. The launcher
   passes its `pgsql/bin` (or Homebrew's) as `PG_BIN` in `backend.env`, and
   `BACKUP_DIR=<data_dir>/backup`; Docker mounts `./data/backup`.
-- **Anonymous identities cannot back up**: the key is the account password
-  and a minted one was never seen. `python -m backup create` refuses with
-  that message and points at Profile (`backup.py`, `nb.Refused`).
+- **Anonymous identities back up like any other** (since 2026-11-26,
+  SEC-S5 §16; until then refused, the key being a password nobody had
+  seen): the KEK is the seed's, and the identity file opens the backup on
+  another machine. A node whose key is still being made, or that has no
+  identity, refuses with words that say so (`node_backup.live_seed`).
 
 Entry points: launcher Settings & Tools › Backup & Restore › "Create backup…" and
 "Restore from backup…", the wizard's identity step ("Restore from a
 backup…", the restore runs after `full_init`); `python -m backup
 create|inspect|restore|selftest` in the container (`docker compose run
 --rm --no-deps backend python -m backup restore /app/data/backup/<file>
-[--db music_ai_test] [--replace] [--identity]`) or on the launcher's
+[--db music_ai_test] [--replace]` — `--identity` went with v2: the identity
+folder is completed always, from its own key's backup alone) or on the launcher's
 interpreter (`python312\python.exe -m backup …` from `backend/`).
-Tests: `tests/test_node_backup.py` (KDF domain vector, round trip,
-manifest-first, wrong password, pinned KDF parameters, edited header,
-flipped byte, truncation at four points, reorder / duplicate / drop,
-trailing bytes, compatibility refusals, identity file selection, identity
-write with archive) and `tests/test_backup_cli.py` (the JSON event lines,
+Tests: `tests/test_node_backup.py` (the seed's HKDF key, round trip,
+manifest-first, another identity's backup refused before any unwrap, a
+retired seed, a v1 file refused with its words, edited header, flipped
+byte, truncation at four points, reorder / duplicate / drop, trailing
+bytes, compatibility refusals, identity file selection — `account.json`
+never a member —, the identity folder completed from its own key's backup
+alone, the archive union) and `tests/test_backup_cli.py` (the JSON event lines,
 the terminal counter's words, stdin cancel, the env-file bootstrap, the
 launcher helpers); the database half is `python -m backup selftest`.
 
 ## Code layout
 
-- `desktop/node_backup.py` — format v1: KDF, envelope, chunked AEAD,
-  member framing (writer / reader), `pg_dump` / `pg_restore` drivers,
-  `restore_database`, `write_identity`, `selftest`.
+- `desktop/node_backup.py` — format v2: the seed's KEK and the seeds a node
+  holds (`backup_kek`, `seeds_held`), envelope, chunked AEAD, member
+  framing (writer / reader), `pg_dump` / `pg_restore` drivers,
+  `restore_database`, `write_identity`, the rotation-archive union
+  (`merge_archive`), `selftest` (a throwaway seed).
 - `backend/backup.py` — the node binding and the ONE "make a backup": the
   `python -m backup` CLI (`create`, `inspect`, `restore`, `selftest`,
   `export`, `import`, `merge`) on
-  either interpreter (backend.env bootstrap under the launcher), password
-  verification through `device_auth.verify_password`, the playback signal
+  either interpreter (backend.env bootstrap under the launcher), the node's
+  seed from `p2p_identity.load_signing_key` (no password since 2026-11-26), the playback signal
   (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the
   job), `--progress-json` / `--cancel-on-stdin` for the launcher.
 - `desktop/backup_task.py` — the launcher's "Create backup…", "Merge from
@@ -585,8 +618,7 @@ launcher helpers); the database half is `python -m backup selftest`.
 - `desktop/settings.py` — the Settings & Tools dialog: General (ports) and
   Backup & Restore (node backup status line, "Create backup…" / "Cancel
   backup", "Restore from backup…"; "Merge from backup…"; the share export /
-  import; the identity certificate transfer), `PasswordDialog`,
-  `ExportDialog`.
+  import; the identity certificate transfer), `ExportDialog`.
 - `backend/main.py` — wires `PlaybackSignal` to the load meter's samples.
   No router, no Web UI.
 - `backend/share.py` — Product B: the JSON-lines file (writer, reader,
@@ -598,7 +630,8 @@ launcher helpers); the database half is `python -m backup selftest`.
   caller of them.
 - `backend/life_merge.py` — Product C: the same-account rule, the
   pg_restore script → scratch schema loader, the keyed union
-  (`merge_life`), the rotation-archive union, `merge_backup`; `python -m
+  (`merge_life`), `merge_backup` (opened by the seeds the node holds; the
+  rotation-archive union is `node_backup.merge_archive`); `python -m
   backup merge [--dry-run]` in backend/backup.py.
 - `backend/play_stats.py` — `local_play_stats` as a function of
   `listening_history`: the one statement the tracker and the merge share.
@@ -637,8 +670,8 @@ launcher helpers); the database half is `python -m backup selftest`.
   in the launcher's Backup & Restore tab is cheap; automatic backups to a
   folder are a later switch.
 - Recovery key: a second wrapped copy of the data key under a printed
-  random key, for users who would rather not tie backups to the account
-  password. Format v1 leaves room (a list of wrapped keys); UI later.
+  random key, for users who would rather not tie backups to the identity's
+  key alone. The format leaves room (a list of wrapped keys); UI later.
 - `covers` (471 MB of art in the database) stays in the dump for now;
   moving art to files is a separate question.
 - Restore into a node that already has data replaces it, and only on an
