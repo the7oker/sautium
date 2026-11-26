@@ -2150,6 +2150,8 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
                     library_watch.add(folder["path"])
                 else:
                     drop_look(folder["path"])
+                    import library_root
+                    library_root.offer_again()      # its disk, still plugged in, is offered again
         else:
             stats = prune_missing_files(
                 plan["file_ids"], plan["counts"], progress_cb=progress,

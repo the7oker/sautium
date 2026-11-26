@@ -358,15 +358,16 @@ def test_the_route_adds_arms_the_watch_and_scans_the_folder_alone(tree, db, monk
     monkeypatch.setattr(scanner, "drop_look", lambda path: done.append(("unlook", path)))
     monkeypatch.setattr(main, "request_scan", lambda scopes, **kw: done.append((scopes, kw)))
     monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: done.append("wake"))
+    monkeypatch.setattr(library_root, "offer_again", lambda: done.append("offer"))
     page = type("R", (), {"state": type("S", (), {"signer": "device"})()})()
     jazz = str(tree.music / "Jazz")
     answer = settings_router.add_library_folder(settings_router.LibraryFolderAdd(path=jazz), page)
     assert answer == {"folder": {"id": answer["folder"]["id"], "path": jazz, "label": None, "name": jazz},
                       "merged": []}
-    assert done == [("watch", jazz), ({jazz: True}, {"explicit": True}), "wake"]
+    assert done == [("watch", jazz), "offer", ({jazz: True}, {"explicit": True}), "wake"]
     done.clear()
     settings_router.add_library_folder(settings_router.LibraryFolderAdd(path=str(tree.music)), page)
-    assert done[:3] == [("unwatch", jazz), ("unlook", jazz), ("watch", str(tree.music))]
+    assert done[:4] == [("unwatch", jazz), ("unlook", jazz), ("watch", str(tree.music)), "offer"]
     for refused in (str(tree.outside), jazz):
         with pytest.raises(HTTPException) as no:
             settings_router.add_library_folder(settings_router.LibraryFolderAdd(path=refused), page)

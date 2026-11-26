@@ -830,6 +830,20 @@ def _count_new_disks() -> bool:
     return changed
 
 
+def offer_again() -> None:
+    """The library's folders changed (one added, one forgotten): the disks
+    plugged in are counted again, off the caller's thread — a disk just
+    forgotten is one the library never had, offered for its tap at once, not
+    at the next plug (found on the box: a stick forgotten with no mount
+    change after it was offered nothing)."""
+    def run():
+        if count_new_disks():
+            from routers.settings import notify_library_subscribers
+            db_execute("NOTIFY sautium_notices")
+            notify_library_subscribers()
+    threading.Thread(target=run, daemon=True, name="new-disks").start()
+
+
 def new_disks() -> List[Dict[str, Any]]:
     """The disks plugged in that the library never had and that hold music
     (the counts count_new_disks made): {path, uuid, label, size_bytes,

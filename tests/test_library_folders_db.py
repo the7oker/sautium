@@ -176,7 +176,8 @@ def test_a_disk_out_is_forgotten_with_what_it_alone_held(cur, disks, main_module
     assert [d["uuid"] for d in library_root.new_disks()] == ["BBBB-2222"]
 
 
-def test_a_folder_that_answers_is_forgotten_and_its_files_stay(cur, disks, main_module):
+def test_a_folder_that_answers_is_forgotten_and_its_files_stay(cur, disks, main_module, monkeypatch):
+    monkeypatch.setattr(library_root, "_counted", {})
     asyncio.run(main_module.scan_forget(disks.folders["A"]["id"]))
     assert _wait_until(lambda: not main_module._scan_state["running"])
     asked = main_module._prune_plan_counts(main_module._scan_state["prune_plan"])
@@ -185,6 +186,9 @@ def test_a_folder_that_answers_is_forgotten_and_its_files_stay(cur, disks, main_
     _answer(main_module, asked["id"], True)
     assert library_root.paths() == [disks.folders["B"]["path"]]
     assert (disks.a / "Music" / "Aurora" / "First Light" / "02.flac").exists()   # nothing on the disk
+    # still plugged in, the disk is one the library never had: offered at once, with no plug
+    # to wake a count (the box, 2026-11-26)
+    assert _wait_until(lambda: [d["uuid"] for d in library_root.new_disks()] == ["AAAA-1111"])
     assert [Path(p).parts[-4] for p, _a in _variants(cur, "First Light")] == ["BBBB-2222"]
 
 
