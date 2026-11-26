@@ -13,13 +13,14 @@ from fastapi import APIRouter, HTTPException
 
 from db_pool import db_query, db_query_one
 from release_groups import release_group_cluster, simplify_edition_name
-from sql_queries import rip_quality
+from sql_queries import album_away, rip_quality
 
 router = APIRouter(prefix="/api/release-groups", tags=["release-groups"])
 
 
 @router.get("/{group_id}")
 def get_release_group(group_id: str) -> dict:
+    from scanner import gone_prefixes
     ids = release_group_cluster(group_id)
     if not ids:
         raise HTTPException(status_code=404, detail="release group not found")
@@ -50,10 +51,12 @@ def get_release_group(group_id: str) -> dict:
                (SELECT {rip_quality('bool_or(av.is_lossless)',
                                     'max(av.sample_rate) FILTER (WHERE av.is_lossless)',
                                     'max(av.bit_depth) FILTER (WHERE av.is_lossless)')}
-                FROM album_variants av WHERE av.album_id = al.id) AS quality
+                FROM album_variants av WHERE av.album_id = al.id) AS quality,
+               -- an edition none of whose files opens here now: its tile's mark (B-152)
+               {album_away('al.id')} AS not_here
         FROM albums al
         WHERE al.id = ANY(%(ids)s::uuid[])
-    """, {"ids": ids})
+    """, {"ids": ids, "gone": gone_prefixes()})
 
     by_id = {r["album_id"]: r for r in rows}
     primary = by_id.get(ids[0]) or rows[0]    # cluster is primary-first
@@ -91,6 +94,7 @@ def get_release_group(group_id: str) -> dict:
             "media_file_id": r["media_file_id"],
             "cover_url": r["cover_url"],
             "release_mbid": r["release_mbid"],
+            "not_here": r["not_here"],
         })
     editions.sort(key=lambda e: (0 if e["album_id"] == primary["album_id"] else 1,
                                  -e["track_count"], e["year"] or 9999))

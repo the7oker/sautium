@@ -26,7 +26,7 @@ that does not is an ordinary issue.
 
 | Surface | Bind | Authentication |
 |---|---|---|
-| Web UI and API (backend, 8800; launcher 18000) | all IPv4 interfaces, plain HTTP | HMAC-SHA256 request signing with the node's device token — one for the node, derived from its key and an epoch, so "Sign out everywhere" ends every browser at once — earned once with the account password or a pairing code the launcher carries in a QR code and its "Open Web UI" link (a Docker node has no surface for one: its doors are the password and the first-run account), through an exchange boxed end to end (NaCl box to a per-exchange key the node's identity signs; the browser pins that identity on first sign-in); 60 s replay window |
+| Web UI and API (backend, 8800; launcher 18000) | all IPv4 interfaces, plain HTTP | HMAC-SHA256 request signing with the node's device token — one for the node, derived from a random id of its account and an epoch, so "Sign out everywhere" ends every browser at once — earned once with the account password (checked by a sign-in hash kept beside the identity, never by deriving the key) or a pairing code the host carries in a QR code and a link (the launcher's window and "Open Web UI"; a Docker node's console, `./sautium pair` or `python -m pairing` in its container), through an exchange boxed end to end (NaCl box to a per-exchange key the node's identity signs; the browser pins that identity on first sign-in); 60 s replay window |
 | Media proxy and DLNA eventing (8830/8831; launcher 8832/8833) | all IPv4 interfaces, plain HTTP; for the LAN (the owner's own tailnet counts as his LAN), never forwarded | unguessable tokens — an owned file's is an HMAC of its path under the node secret, served only while a queue registers the file; a stream buffer's and a cover's are random and die with the queue — exist because HQPlayer, on this machine or on another one on the LAN, and DLNA renderers cannot sign requests |
 | Peer surface (launcher: a random port in 20000–29999, UPnP-mapped; Docker: 8801, UPnP-mapped by a host-networked node, else forwarded by hand) | internet, TLS pinned to the node's Ed25519 key | per-IP limits; sync pulls are open by design; chat, relay and diagnostics need an invite-code↔pubkey binding plus timestamp-bound Ed25519 signatures |
 | Peer discovery (DHT `19001/udp`, launcher: peer port + 1; LAN discovery `19002/udp`, the launcher and a host-networked Docker node) | all interfaces | none — public DHT announces and a LAN JSON broadcast carry no secrets; everything that follows goes through the peer surface |
@@ -117,9 +117,13 @@ beside it is a fork, which stops those launchers until the tag is deleted. The
 installers' `SHA256SUMS.txt` is signed by the same key.
 
 The password against a guess at home: the key is derived from the nickname
-and the password, and an invite code, `/health`, a birth certificate or a
-share file fixes it, so whoever holds one can test guesses at home, unseen
-and without a limit. The password is the only protection. The node refuses
+and the password (Argon2id at t=8000 over 128 MiB — minutes a guess on a
+desktop CPU, a few seconds on a top GPU), and an invite code, `/health`, a
+birth certificate or a share file fixes it, so whoever holds one can test
+guesses at home, unseen and without a limit. The password is the only
+protection. The disk is not: it holds the key itself (or an identity file
+does, under its own optional passphrase), and whoever holds the key opens the
+node's backups, which are keyed on it. The node refuses
 one that a single GPU would find within about an hour at the key's cost,
 asks the person's own word up to about a year, shows the time while it is
 typed, and offers a generated phrase first (`desktop/password_strength.py`).

@@ -386,3 +386,47 @@ def test_a_drop_whose_voucher_lapsed_at_the_worker_is_said_so(conn, scratch_dsn,
     async def scene():
         return await client._mailbox_deposit(fid, await client._pending_for(fid))
     assert asyncio.run(scene()) == "kept in the master's mailbox, its voucher lapsed at the Worker"
+
+
+# --- the Support row carries the pin of the release (SEC-S5 §15, Q7 as a rule) ----
+
+def _master_row(conn):
+    return _rows(conn, """SELECT id, public_key_hex, invite_code, previous_public_key_hex,
+                                 encode(key_fingerprint, 'hex'), join_token_id::text
+                            FROM friends WHERE source = 'master'""")
+
+
+def test_a_resolved_support_row_of_an_earlier_pin_takes_the_pin_with_its_thread(conn, scratch_dsn,
+                                                                                master):
+    earlier = node_identity.make_invite_code("Sautium", bytes.fromhex(EARLIER_MASTER.pub))
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO friends (username, public_key_hex, invite_code, source, bound_identity)
+                       VALUES ('Sautium', %s, %s, 'master', %s) RETURNING id""",
+                    (EARLIER_MASTER.pub, earlier, ME.pub))
+        fid = cur.fetchone()[0]
+    _write(conn, fid, "a question kept in the thread")
+    asyncio.run(_client(scratch_dsn)._ensure_master_contact())
+    [(row_id, pub, invite, previous, fingerprint, _token)] = _master_row(conn)
+    assert (row_id, pub, invite, previous) == (fid, MASTER.pub, master, EARLIER_MASTER.pub)
+    assert fingerprint == cc.chat_wire.key_fingerprint(MASTER.pub).lower()
+    assert _rows(conn, "SELECT count(*) FROM p2p_messages WHERE friend_id = %s", (fid,)) == [(1,)]
+
+
+def test_a_waiting_support_row_of_an_earlier_pin_waits_for_the_new_code_and_its_handshake(
+        conn, scratch_dsn, master):
+    """A row unbound by this node's own new key (the recreation road), or one
+    never resolved: it is never resolved onto the pin without the master
+    hearing of this node — it waits for the new code, and the resolver
+    introduces this node by its token."""
+    earlier = node_identity.make_invite_code("Sautium", bytes.fromhex(EARLIER_MASTER.pub))
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO friends (username, public_key_hex, invite_code, source, key_fingerprint)
+                       VALUES ('Sautium', %s, %s, 'master', %s) RETURNING id""",
+                    (f"pending:{earlier}", earlier,
+                     bytes.fromhex(cc.chat_wire.key_fingerprint(EARLIER_MASTER.pub))))
+        fid = cur.fetchone()[0]
+    asyncio.run(_client(scratch_dsn)._ensure_master_contact())
+    [(row_id, pub, invite, _previous, fingerprint, token)] = _master_row(conn)
+    assert (row_id, pub, invite) == (fid, f"pending:{master}", master)
+    assert fingerprint == cc.chat_wire.key_fingerprint(MASTER.pub).lower()
+    assert token == master_node.MASTER_TOKEN_ID

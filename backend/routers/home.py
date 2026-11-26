@@ -719,12 +719,15 @@ def get_listening_history(
     stays off the shelf. The scan window is a multiple of the page, and a
     run is only ever as long as the window sees — the right cap for a shelf.
     """
-    sessions = db_query("""
+    sessions = db_query(f"""
         WITH recent AS (
             SELECT ls.id, ls.title, ls.subtitle, ls.cover_id, ls.cover_url,
                    ls.origin, ls.track_count, ls.started_at, ls.ended_at, ls.source,
                    (SELECT count(DISTINCT st.album_id) FROM session_tracks st
                     WHERE st.session_id = ls.id AND st.album_id IS NOT NULL) AS album_count,
+                   (SELECT st.album_id FROM session_tracks st
+                    WHERE st.session_id = ls.id AND st.album_id IS NOT NULL
+                    ORDER BY st.position LIMIT 1) AS first_album,
                    (SELECT md5(string_agg(st.track_id::text, ',' ORDER BY st.position))
                     FROM session_tracks st WHERE st.session_id = ls.id) AS content_key
             FROM listening_sessions ls
@@ -759,12 +762,19 @@ def get_listening_history(
                started_at,
                album_count,
                repeat_count,
-               source
+               source,
+               -- a card of one album (not a station's) is that album: its mark
+               -- when none of its files opens here now (B-152), and the id the
+               -- shelf asks the mark by when what opens changes
+               CASE WHEN album_count = 1 AND origin IS DISTINCT FROM 'radio'
+                    THEN first_album::text END AS album_id,
+               CASE WHEN album_count = 1 AND origin IS DISTINCT FROM 'radio'
+                    THEN {album_away('first_album')} END AS not_here
         FROM counted
         WHERE run_start = 1
         ORDER BY ended_at DESC, id
         LIMIT %(limit)s
-    """, {"limit": limit, "scan": limit * 5})
+    """, {"limit": limit, "scan": limit * 5, "gone": gone_prefixes()})
 
     return {"sessions": sessions}
 

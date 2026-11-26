@@ -131,7 +131,7 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      splits once the tracks two positions of one tracklist shared — a box's
      two "Pulses", eleven "[untitled]", a release's three "I. Allegro" —
      before a title's place among them was an input of the id
-     (tracks.occurrence, delta 079): the copies' later positions move to
+     (tracks.occurrence, delta 080): the copies' later positions move to
      their own tracks with their analysis and listens, a copy held in part
      is completed from the medium its files are bound to, the slots follow
      (canon.occurrence). The twins step (`copy_twins_v1`, the same day)
@@ -155,6 +155,20 @@ picker drove (`hqp_choice_v1`, _save_hqp_choice): its choice — the
 environment's HQPLAYER_ENABLED or a saved host, with no `output.type` — is
 saved as the picker would have saved it, so that "chosen" is the saved rows
 alone from then on and no default address is ever dialled (2026-11-22).
+
+Then, once per database, the library's folders (`library_folders_v1`,
+_library_folders; LIBRARY-FOLDERS-1, 2026-11-26): the one folder a node read
+until then becomes the first rows of `library_folders`. A node with roots
+had every folder its owner chose as a row of `library_roots`, the newest the
+folder: read newest first, the newest is a folder, and an earlier one is a
+folder where the library holds a copy under it and it lies neither in a kept
+folder (then it is part of it) nor around one (the owner narrowed to the
+newer: its other copies are "Elsewhere", forgotten by the owner) — two
+sticks chosen in turn are two folders, the first one's albums no longer
+away; `library_roots` is dropped. A launcher's folder (MUSIC_LIBRARY_PATH,
+written from its config.json) is its first row; a setup node's .env folder
+is made sure of at every start besides (library_root.apply). Copies left
+under no folder are counted and said.
 
 Before the schema deltas, where this node's own role administers the
 cluster (Docker), the assistant's read-only login is re-stated
@@ -324,6 +338,54 @@ _TRACKLIST_LEFTOVERS = """
     AND NOT EXISTS (SELECT 1 FROM album_variants av WHERE av.album_id = al.id)
     AND NOT EXISTS (SELECT 1 FROM album_tracks at WHERE at.album_id = al.id AND at.imported)
     AND NOT EXISTS (SELECT 1 FROM seed_picks sp WHERE sp.album_id = al.id)"""
+
+
+def _library_folders(conn) -> dict:
+    """The one folder of before as the first rows of library_folders (the
+    module docstring's ledger). Idempotent by its marker; every write here
+    is ON CONFLICT DO NOTHING besides."""
+    import library_root
+    kept: list = []
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('library_roots') IS NOT NULL")
+        if cur.fetchone()[0]:
+            cur.execute("SELECT mount, subpath, chosen_at FROM library_roots ORDER BY chosen_at DESC, id DESC")
+            for mount, subpath, chosen_at in cur.fetchall():
+                path = mount if not subpath else f"{mount.rstrip('/')}/{subpath}"
+                if kept:
+                    if any(library_root._under(path, k) or library_root._under(k, path) for k, _at in kept):
+                        continue
+                    cur.execute("""SELECT EXISTS (SELECT 1 FROM album_variants WHERE location = 'local'
+                                                     AND (directory_path = %s OR starts_with(directory_path, %s)))""",
+                                (path, path.rstrip("/") + "/"))
+                    if not cur.fetchone()[0]:
+                        continue
+                kept.append((path, chosen_at))
+            for path, chosen_at in kept:
+                cur.execute("INSERT INTO library_folders (path, added_at) VALUES (%s, %s) "
+                            "ON CONFLICT (path) DO NOTHING", (path, chosen_at))
+            cur.execute("DROP TABLE library_roots")
+        kind = library_root.kind()
+        named = None
+        if kind == "launcher" and settings.music_library_path:
+            named = library_root.stored(settings.music_library_path)
+        elif kind == "setup":
+            named = library_root.env_folder()
+        if named:
+            cur.execute("INSERT INTO library_folders (path) VALUES (%s) ON CONFLICT (path) DO NOTHING", (named,))
+            kept.append((named, None))
+        cur.execute("""SELECT count(DISTINCT av.album_id) FROM album_variants av
+                        WHERE av.location = 'local'
+                          AND NOT EXISTS (SELECT 1 FROM library_folders lf
+                                           WHERE av.directory_path = lf.path
+                                              OR starts_with(av.directory_path, rtrim(lf.path, '/') || '/'))""")
+        elsewhere = cur.fetchone()[0]
+    conn.commit()
+    library_root.invalidate()
+    if elsewhere:
+        logger.warning("%d album(s) lie under no folder of the library: listed in Settings › Library as "
+                       "\"Elsewhere\", for the owner to forget", elsewhere)
+    return {"folders": [k for k, _at in kept], "kind": kind, "elsewhere": elsewhere}
 
 
 def _remove_tracklist_leftovers(conn) -> dict:
@@ -717,8 +779,8 @@ def _reseal_analysis_records() -> dict:
         # take for another author's.
         if not keys and db.execute(text(SEALED_FIRST_HAND_SQL)).scalar():
             logger.error("the analysis records are not re-sealed: records no imported source holds "
-                         "carry seals, and no key of this node resolves (P2P_USERNAME/P2P_PASSWORD, "
-                         "or the identity folder) — the node's own would go as another's; the next "
+                         "carry seals, and no key of this node resolves (its identity folder holds "
+                         "none) — the node's own would go as another's; the next "
                          "start tries again")
             return {"done": False, "keys": 0}
         p = {"keys": keys}
@@ -998,6 +1060,11 @@ def apply_pending() -> dict:
             logger.info("tracklist leftovers (albums with no copy, no release group and no "
                         "imported slot) removed, once: %s", out["tracklist_leftovers"])
             _mark(conn, "tracklist_leftovers_v1")
+
+        if not _marked(conn, "library_folders_v1"):
+            out["library_folders"] = _library_folders(conn)
+            logger.info("the library's folders, from the one folder of before: %s", out["library_folders"])
+            _mark(conn, "library_folders_v1")
 
         # Before the seed: its segments get their scores as they land.
         if not _marked(conn, "zero_shot_labels_v1"):

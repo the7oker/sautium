@@ -11,8 +11,9 @@ stays, and the database would refuse the merge any change or deletion.
 Enrichment inside the file is not touched: that travels as a share export
 through the gate (Product B), like anyone else's.
 
-The file is a Product-A `.sbk` of the same account: the password unwraps it,
-and the manifest's key is this node's or one it retired. Its `pg_dump`
+The file is a Product-A `.sbk` of the same account: its key is this node's or
+one it retired, and the seed this node holds of it opens it — nothing is
+typed (SEC-S5). Its `pg_dump`
 member streams through `pg_restore --data-only -t <life tables> -f -` — one
 pass, nothing decrypted on disk — and the SQL text that comes out is COPY'd
 into a scratch schema (`_merge`) inside this very database, in the same
@@ -27,7 +28,6 @@ arrived through the sync or a share import — and everything else lands.
 histories merged in either order give the same numbers as one history would.
 """
 
-import json
 import logging
 import re
 import subprocess
@@ -86,9 +86,11 @@ _COPY_LINE = re.compile(r'^COPY (?:"?[\w]+"?\.)?"?(\w+)"? \((.*)\) FROM stdin;$'
 # ---------------------------------------------------------------------------
 
 def check_same_account(manifest: dict, *, pubkey: str, previous: List[str]) -> None:
-    """The merge takes this account's own backups only: the manifest's key is
-    the node's current one or one it retired (a renamed account is the same
-    person; a friend's backup whose password one happens to know is not)."""
+    """The merge takes this account's own backups only: the key the backup
+    names is the node's current one or one it retired (a renamed account is
+    the same person; a friend's backup is not). The merge's own words for
+    what is structural since SEC-S5 — a backup of no key this node holds
+    cannot open (node_backup.BackupReader.unlock_with_seeds)."""
     node = manifest.get("node") or {}
     key = str(node.get("pubkey") or "").lower()
     if key and (key == pubkey.lower() or key in {p.lower() for p in previous}):
@@ -215,11 +217,8 @@ def load_scratch(reader: nb.BackupReader, target: nb.PgTarget, conn, *, tables: 
                 elif member.name.startswith(nb.IDENTITY_PREFIX):
                     rel = member.name[len(nb.IDENTITY_PREFIX):]
                     if not nb.identity_member(rel):
-                        # an older writer carried every file of the folder:
-                        # what is no identity file is left unread, never written
-                        logger.warning("backup member %r is no file of the identity folder "
-                                       "— not merged", member.name[:200])
-                        continue
+                        raise nb.Tampered(f"backup member {member.name[:200]!r} is no file of "
+                                          "the identity folder")
                     identity[rel] = member.read()
                 else:
                     raise nb.Tampered(f"unexpected member {member.name}")
@@ -686,61 +685,17 @@ def merge_life(conn, *, progress: Optional[ProgressFn] = None, own_keys: List[st
 
 
 # ---------------------------------------------------------------------------
-# Identity: the rotation archive
-# ---------------------------------------------------------------------------
-
-def merge_identity(identity_dir: Optional[Path], files: Dict[str, bytes]) -> int:
-    """Union of rotation records: every retired identity the backup's
-    node_info.json lists and this node's does not gets its archive directory
-    (the notice, the certificate, the proof — a backup carries no key) and
-    its entry. Nothing happens without a live node_info.json — a Docker node
-    keeps none. An entry whose `dir` is no archive's name (nb.ARCHIVE_DIR)
-    is not taken, and a file goes nowhere but its archive
-    (nb.identity_path). Returns how many were added."""
-    if identity_dir is None or "node_info.json" not in files:
-        return 0
-    live_path = identity_dir / "node_info.json"
-    if not live_path.exists():
-        return 0
-    live = json.loads(live_path.read_text(encoding="utf-8"))
-    theirs = json.loads(files["node_info.json"].decode("utf-8"))
-    known = {str(e.get("public_key_hex", "")).lower() for e in live.get("previous", [])}
-    known.add(str(live.get("public_key_hex", "")).lower())
-    added = 0
-    for entry in theirs.get("previous", []):
-        pub = str(entry.get("public_key_hex", "")).lower()
-        if not pub or pub in known or not nb.ARCHIVE_DIR.fullmatch(str(entry.get("dir", ""))):
-            continue
-        prefix = f"{nb.PREVIOUS_DIRNAME}/{entry['dir']}/"
-        for rel, data in files.items():
-            if rel.startswith(prefix):
-                path = nb.identity_path(identity_dir, rel)
-                path.parent.mkdir(parents=True, exist_ok=True)
-                if not path.exists():
-                    path.write_bytes(data)
-        live.setdefault("previous", []).append(entry)
-        known.add(pub)
-        added += 1
-    if added:
-        live["previous"].sort(key=lambda e: str(e.get("retired_at", "")))
-        tmp = live_path.with_name(live_path.name + ".tmp")
-        tmp.write_text(json.dumps(live, indent=2), encoding="utf-8")
-        tmp.replace(live_path)
-        logger.info("identity archive: %d retired identit%s added from the backup",
-                    added, "y" if added == 1 else "ies")
-    return added
-
-
-# ---------------------------------------------------------------------------
 # The whole thing
 # ---------------------------------------------------------------------------
 
-def merge_backup(path: Path, password: str, *, target: nb.PgTarget, pubkey: str,
+def merge_backup(path: Path, *, target: nb.PgTarget, seeds: List[bytes],
                  previous: List[str], identity_dir: Optional[Path] = None,
                  progress: Optional[ProgressFn] = None, cancel: Optional[threading.Event] = None,
-                 dry_run: bool = False, kdf: nb.KdfParams = nb.DEFAULT_KDF) -> dict:
-    """Open `path` with `password`, insist it is this account's, load the
-    life tables into the scratch schema and union them in — one transaction,
+                 dry_run: bool = False) -> dict:
+    """Insist `path` is this account's — `seeds` the node's (its live key's
+    first, then its retired keys': node_backup.seeds_held), `previous` the
+    public keys it retired — open it with the seed of its key, load the life
+    tables into the scratch schema and union them in — one transaction,
     committed unless `dry_run` (which reports the same counts and changes
     nothing). Returns {"merged", "waiting", "loaded", "manifest", "dry_run"}."""
     progress = progress or (lambda *_a, **_k: None)
@@ -751,14 +706,15 @@ def merge_backup(path: Path, password: str, *, target: nb.PgTarget, pubkey: str,
         with lock:                                   # two threads speak; one line at a time
             progress(phase, **fields)
 
+    pubkey = nb.seed_pubkey(seeds[0])
     file_size = path.stat().st_size
     with open(path, "rb") as fp:
         reader = nb.BackupReader(fp)
+        check_same_account({"node": reader.node}, pubkey=pubkey, previous=previous)
         report("unlocking")
-        reader.unlock(password, kdf)
+        reader.unlock_with_seeds(seeds)
         manifest = reader.read_manifest()
         nb.check_compatible(manifest)
-        check_same_account(manifest, pubkey=pubkey, previous=previous)
         # Every life table, those the backup predates included: pg_restore
         # selects nothing for them, and load_scratch makes them empty.
         tables = list(LIFE_TABLES)
@@ -784,7 +740,7 @@ def merge_backup(path: Path, password: str, *, target: nb.PgTarget, pubkey: str,
             raise
         finally:
             conn.close()
-    result["merged"]["rotations"] = 0 if dry_run else merge_identity(identity_dir, identity)
+    result["merged"]["rotations"] = 0 if dry_run else nb.merge_archive(identity_dir, identity)
     result.update(loaded=loaded, manifest=manifest, dry_run=dry_run)
     logger.info("%s of %s's backup from %s: %s; waiting %s",
                 "dry run" if dry_run else "merge", manifest["node"]["username"],

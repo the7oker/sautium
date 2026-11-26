@@ -8,6 +8,8 @@
     ./sautium status     what is installed, what runs, what is mounted
     ./sautium roots      the folders it may read music from; --forget <folder>
     ./sautium pair       a code and its QR to sign another device in
+    ./sautium identity   export this node's identity to a file, or import one
+                         (export [--no-passphrase] [--out FILE], import FILE)
     ./sautium update     ask the host agent for the newest signed release
     ./sautium remove     take Sautium off this machine
 
@@ -33,6 +35,7 @@ if sys.version_info < (3, 9):       # before anything a later Python alone has (
     sys.exit("./sautium needs Python 3.9 or newer; this is " + sys.version.split()[0])
 
 import argparse
+import getpass
 import hashlib
 import hmac
 import importlib.util
@@ -857,7 +860,7 @@ def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
             lines.append(f"Music root {root}: empty — nothing is in it yet")
         else:
             lines.append(f"Music root {root}: {state} — its disk is not mounted, or the folder was removed. "
-                         f"Its albums show as away. To forget it: ./sautium roots --forget {shlex.quote(root)}")
+                         f"Its albums show as not connected. To forget it: ./sautium roots --forget {shlex.quote(root)}")
         lines += ["  mounted: " + printable(line) for line, of in zip(mounted, owner) if of == root]
     return lines + [f"A line of /etc/fstab mounts the disk {OLD_BOOT_MOUNT_POINT.fullmatch(point).group(1)} at "
                     f"{point}, where Sautium does not look: it never appears in Sautium (./sautium shows the step)"
@@ -890,7 +893,7 @@ def chosen_roots(music: Optional[str], held: List[str], docker_root: Optional[st
         if inside is None:
             roots.append(real)
         elif real != inside:
-            say(f"{music} is inside {inside}, which this node already reads: choose it as the music folder "
+            say(f"{music} is inside {inside}, which this node already reads: add it as a music folder "
                 "in Sautium (More › Library).")
     return roots + [AUTOMOUNT_BASE]
 
@@ -1209,19 +1212,26 @@ def setup_code() -> Optional[str]:
 
 
 def qr(text: str) -> Optional[str]:
-    """`text` as a QR of block characters, drawn by the image's encoder in a
-    container that sees no network, no mount and no capability; the text goes
-    in on stdin, never on a command line a process list would show."""
-    code = ("import sys, qrcode; q = qrcode.QRCode(border=2); q.add_data(sys.stdin.read()); "
-            "q.make(fit=True); q.print_ascii(invert=True)")
+    """`text` as a QR of block characters with its value as text under it —
+    the one presentation of a printed QR, backend/pairing.present (the
+    checkout's own file, which no container writes), run by the image's
+    encoder in a container that sees no network, no mount and no capability;
+    the text goes in on stdin, never on a command line a process list would
+    show."""
+    source = (ROOT / "backend" / "pairing.py").read_text(encoding="utf-8")
+    code = ("import sys\nns = {'__name__': 'sautium_pairing'}\n"
+            f"exec(compile({source!r}, 'pairing.py', 'exec'), ns)\n"
+            "sys.stdout.write(ns['present'](sys.stdin.read()))\n")
     result = run(["docker", "run", "--rm", "-i", "--network", "none", "--read-only", "--cap-drop", "ALL",
                   "--security-opt", "no-new-privileges:true", "--user", f"{os.getuid()}:{os.getgid()}",
                   "--label", "com.docker.compose.project=sautium-setup",
                   "--entrypoint", "python3", agent.image_of(ROOT), "-I", "-c", code],
                  stdin=text.encode(), timeout=60)
     drawn = result.stdout.decode("utf-8", "replace")
-    # Only block characters and spaces are a picture; anything else is not shown
-    if result.returncode != 0 or not drawn.strip() or re.search(r"[^\s\u2580\u2584\u2588\u00a0]", drawn):
+    tail = "\n\n" + text + "\n"
+    picture = drawn[:-len(tail)] if drawn.endswith(tail) else ""
+    # Only block characters and spaces are a picture, and only the text sent is its value
+    if result.returncode != 0 or not picture.strip() or re.search(r"[^\s\u2580\u2584\u2588\u00a0]", picture):
         return None
     return drawn
 
@@ -1286,6 +1296,8 @@ def last_screen(m: dict, preset: Optional[str]) -> None:
         if picture:
             say()
             say(picture.rstrip("\n"))
+        else:
+            say(f"                 {url}#setup={code}")
     elif (ROOT / "data" / "node_identity" / "node_info.json").exists():
         say("  This node has its account already: sign in with its nickname and password.")
     else:
@@ -1755,8 +1767,8 @@ def moved_block(root: str, old: dict, label: str, systemd: int, forgotten: bool 
     """An install whose line mounts its disk at the root itself: the old
     line's undo and the line at the new point, as one step. The line keeps
     its own options; one written before the plug option gains it. The node
-    takes the files and the chosen folder along at its next start, by the
-    UUID both points carry (library_root.apply). `forgotten`: the root was
+    takes the files and the library's folder along at its next start, by
+    the UUID both points carry (library_root.apply). `forgotten`: the root was
     forgotten and the line left, so the disk is nowhere Sautium looks."""
     uuid = old["uuid"]
     point = f"{AUTOMOUNT_BASE}/{uuid}"
@@ -1864,12 +1876,12 @@ def follows(root: str, found: Optional[dict]) -> None:
     """What follows the block that moves a root's disk under the folder disks
     are mounted in: the root, an empty folder from then on, is forgotten —
     which writes the override again (the disks' folder bound, where the block
-    made it) and makes the node again — and `found`'s folder is chosen at its
+    made it) and makes the node again — and `found`'s folder is added at its
     new place. None after the move of the setup's own old line: the node
-    takes the chosen folder along with its files."""
+    takes the library's folder along with its files."""
     say(f"Then run:  ./sautium roots --forget {shlex.quote(root)}")
     if found is not None:
-        say(f"and choose {named(found)} as the music folder in Sautium (More › Library).")
+        say(f"and add {named(found)} as a music folder in Sautium (More › Library).")
     say()
 
 
@@ -2047,19 +2059,19 @@ def cmd_setup(args) -> int:
         # would be made by Docker whenever the disk is out — a folder of
         # root's in the desktop's own place for that disk. With the line
         # pasted its disk lies under the folder the node reads disks in, and
-        # the folder named is chosen there, in the Web UI. (A disk someone
+        # the folder named is added there, in the Web UI. (A disk someone
         # mounted by hand stays the root it was named as until it is
         # forgotten: `follows`.)
         moved = disk is not None and disk["desktop"] and fstab_line(disk["point"]) is not None
         if disk is not None and disk["desktop"] and not moved:
             raise Stop(f"the music disk is not set, so Sautium would not read {music}: paste the block above, "
-                       f"then run ./sautium again and choose {named(disk)} as the music folder in Sautium "
+                       f"then run ./sautium again and add {named(disk)} as a music folder in Sautium "
                        "(More › Library)")
         roots = chosen_roots(None if moved else music, held_roots(ROOT / ROOTS_OVERRIDE), m.get("docker_root"))
         write_roots(roots)
         boot_mount_steps(roots, held_labels(ROOT / ROOTS_OVERRIDE), shown=disk["point"] if disk else None)
         if moved:
-            say(f"Then choose {named(disk)} as the music folder in Sautium (More › Library).")
+            say(f"Then add {named(disk)} as a music folder in Sautium (More › Library).")
         elif disk is None and music and os.path.realpath(music) in roots:
             # A mount the setup has no line for (someone's own line of
             # /etc/fstab, a network share): taken as it is, and said. Never
@@ -2124,11 +2136,9 @@ def cmd_pair(args) -> int:
                    "its account (open its address and create it first)")
     addresses = own_addresses()
     url = f"http://{addresses[0] if addresses else '127.0.0.1'}:{WEB_PORT}/#pair={code}"
-    say(f"Open on the other device within a few minutes:  {url}")
-    picture = qr(url)
-    if picture:
-        say()
-        say(picture.rstrip("\n"))
+    say("Open on the other device within a few minutes:")
+    say()
+    say((qr(url) or url).rstrip("\n"))
     return 0
 
 
@@ -2267,8 +2277,8 @@ def cmd_roots(args) -> int:
     if moved:
         say(f"Sautium finds the albums under {root} at {moved_to} when it starts again; nothing is removed.")
     else:
-        say(f"Albums under {root} will show as away in Sautium; nothing is removed. Choose another folder in "
-            "More › Library.")
+        say(f"Albums under {root} will show as not connected in Sautium; nothing is removed. Forget them, "
+            "or add another folder, in More › Library.")
     write_roots([r for r in roots if r != root])
     if node_running():
         start()
@@ -2391,6 +2401,191 @@ def cmd_remove(args) -> int:
     return 0
 
 
+# -- the identity file ------------------------------------------------------------------
+# The node's key leaves and enters by the machine's own hands (SEC-S5 §16): here, and the
+# launcher's window — never the Web UI. The host never opens the identity folder, which
+# the node writes: desktop/identity_file runs in a container made for it from the
+# backend's service, on the node's own files, and its stdin and stdout are all the host
+# touches. The host keeps only its end: the person's file, the passphrase typed here.
+
+# desktop/identity_file's own (held to them by a test)
+IDENTITY_MAGIC = b"SAUTIUM-IDENTITY\0"
+IDENTITY_SUFFIX = ".sautium-identity"
+IDENTITY_FILE_MAX = 4 * 1024 * 1024
+ANSWER_MAX = 65536
+# The checkout's folders a container writes (the compose files' binds): no file of the
+# host's goes there — a link the node left would take it anywhere
+CONTAINER_WRITES = ("data", "backend/data", "run")
+
+
+def identity_cmd(*args: str) -> List[str]:
+    """`python -m desktop.identity_file` in a container of its own, made from the
+    backend's service as compose defines it — its image, its mounts, its user (the
+    entrypoint hands the folders over and drops root) — and gone after it: whether the
+    backend runs or not (a refused start included)."""
+    return agent.compose_cmd(ROOT) + ["run", "--rm", "--no-deps", "-T", "backend",
+                                      "python", "-m", "desktop.identity_file", *args]
+
+
+def node_said(result) -> str:
+    """The last line the command said, as the terminal may show it."""
+    lines = (result.stderr if isinstance(result.stderr, bytes) else b"").decode("utf-8", "replace").strip().splitlines()
+    return printable(lines[-1]) if lines else "it said nothing"
+
+
+def answer(result: subprocess.CompletedProcess) -> dict:
+    """The command's one JSON line, read as a stranger's: bounded, an object."""
+    if result.returncode != 0:
+        raise Stop(node_said(result))
+    try:
+        reply = json.loads(result.stdout[:ANSWER_MAX])
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict):
+        raise Stop("the node's identity command gave no answer: " + node_said(result))
+    return reply
+
+
+def out_path(given: Optional[str]) -> Path:
+    """Where the export is written: the file named, else one in the home folder —
+    new, and never inside the checkout: a private key one `git add` from the
+    public tree (its containers' folders are inside it too)."""
+    path = Path(given or Path.home() / f"sautium-identity-{time.strftime('%Y%m%d')}{IDENTITY_SUFFIX}").absolute()
+    parent = path.parent.resolve()
+    checkout = ROOT.resolve()
+    if parent == checkout or checkout in parent.parents:
+        raise Stop(f"{path.parent} is inside Sautium's own folder: name a file of your own elsewhere "
+                   "(the identity file holds this node's key)")
+    if os.path.lexists(path):
+        raise Stop(f"{path} is there already: name another file")
+    return path
+
+
+def write_private(path: Path, data: bytes) -> None:
+    """A new file readable by its owner alone, never through a link."""
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def identity_export(args) -> int:
+    path = out_path(args.out)
+    line, keep, timeout = b"", False, 600
+    offer = answer(run(identity_cmd("phrase")))
+    if not args.no_passphrase:
+        say("The file is locked with a passphrase: the phrase drawn for you, or one of your own.")
+        say()
+        say(f"    {printable(str(offer.get('phrase')))}      ({printable(str(offer.get('count')))})")
+        say()
+        say(printable(str(offer.get("words"))))
+        say()
+        first = getpass.getpass("Passphrase — the phrase above, or your own: ")
+        if getpass.getpass("The passphrase again: ") != first:
+            raise Stop("the two passphrases are not the same: nothing was written")
+        line = first.encode("utf-8") + b"\n"
+        verdict = answer(run(identity_cmd("check"), stdin=line))
+        if verdict.get("zone") == "refused":
+            raise Stop(printable(str(verdict.get("door"))))
+        if verdict.get("zone") == "word":
+            say(printable(str(verdict.get("door"))))
+            if input("Type keep to keep it, anything else to choose another: ").strip().lower() != "keep":
+                raise Stop("nothing was written")
+            keep = True
+        expected = int(verdict.get("expected_s") or 0)
+        timeout = max(600, 3 * expected + 300)
+        say(f"Locking the file: {printable(str(verdict.get('expected_words')))} on this machine.")
+    result = run(identity_cmd("export", *(["--no-passphrase"] if args.no_passphrase else []),
+                              *(["--keep"] if keep else [])), stdin=line, timeout=timeout)
+    if result.returncode != 0:
+        raise Stop(node_said(result))
+    data = result.stdout
+    if not data.startswith(IDENTITY_MAGIC) or len(data) > IDENTITY_FILE_MAX:
+        raise Stop("the node's identity command gave no identity file: " + node_said(result))
+    write_private(path, data)
+    say(f"Written to {path}, readable by you alone.")
+    say()
+    say(printable(str(offer.get("plain" if args.no_passphrase else "words"))))
+    return 0
+
+
+def identity_import(args) -> int:
+    import threading
+    try:
+        data = agent._read_bounded(Path(args.file), IDENTITY_FILE_MAX)
+    except OSError as e:
+        raise Stop(f"{args.file} cannot be read: {e.strerror or e}")
+    if not data or not data.startswith(IDENTITY_MAGIC):
+        raise Stop(f"{args.file} is not a Sautium identity file")
+    facts = answer(run(identity_cmd("peek"), stdin=data))
+    if facts.get("refusal"):
+        raise Stop(printable(str(facts["refusal"])))
+    named = printable(str(facts.get("invite_code") or str(facts.get("public_key_hex"))[:16]))
+    say(f"The identity file of {named}, made {printable(str(facts.get('created_at')))[:10]}.")
+    flags = []
+    if facts.get("another_identity"):
+        say()
+        say(printable(str(facts.get("another_words"))))
+        if input("Type yes to bring it here all the same: ").strip().lower() != "yes":
+            raise Stop("nothing was changed")
+        flags = ["--another-identity"]
+    passphrase = ""
+    if facts.get("locked"):
+        passphrase = getpass.getpass("The file's passphrase: ")
+        say(f"Opening it: {printable(str(facts.get('expected_words')))} on this machine; the node keeps "
+            "running meanwhile.")
+    else:
+        say(printable(str(facts.get("plain"))))
+    child = subprocess.Popen(identity_cmd("import", *flags), cwd=str(ROOT), stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    said: List[bytes] = []
+    # stderr apart, so a child that says much never blocks on a pipe the host is not reading
+    reader = threading.Thread(target=lambda: said.append(child.stderr.read(ANSWER_MAX)), daemon=True)
+    reader.start()
+
+    def finish(words: str) -> Stop:
+        child.stdin.close()
+        child.wait()
+        reader.join()
+        lines = b"".join(said).decode("utf-8", "replace").strip().splitlines()
+        return Stop(printable(lines[-1]) if lines else words)
+
+    child.stdin.write(passphrase.encode("utf-8") + b"\n" + str(len(data)).encode() + b"\n" + data)
+    child.stdin.flush()
+    # The opening's end is the child's own line: the host waits on it, it does not ask
+    opened = child.stdout.readline(ANSWER_MAX)
+    if not opened.startswith(b'{"opened"'):
+        raise finish("the file was not opened: nothing was changed")
+    say("Opened. The node stops while the identity is placed, and starts again on it.")
+    stopped = run(agent.compose_cmd(ROOT) + ["stop", "backend"], timeout=180)
+    if stopped.returncode != 0:
+        raise finish("the node could not be stopped: nothing was changed")
+    child.stdin.write(b"place\n")
+    child.stdin.flush()
+    placed = child.stdout.readline(ANSWER_MAX)
+    child.stdin.close()
+    child.wait()
+    reader.join()
+    started = run(agent.compose_cmd(ROOT) + ["start", "backend"], timeout=600)
+    if not placed.startswith(b'{"placed"'):
+        lines = b"".join(said).decode("utf-8", "replace").strip().splitlines()
+        raise Stop((printable(lines[-1]) if lines else "the identity was not placed")
+                   + "; the node was started again as it was")
+    if started.returncode != 0:
+        raise Stop("the identity is placed, but the node did not start: " + node_said(started)
+                   + ". docker compose up -d starts it")
+    say(f"This node is {named} now. A browser signs in with its password, or by ./sautium pair.")
+    return 0
+
+
+def cmd_identity(args) -> int:
+    refuse_root()
+    return identity_export(args) if args.action == "export" else identity_import(args)
+
+
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(prog="./sautium", description="Sautium on this machine.")
     sub = parser.add_subparsers(dest="command")
@@ -2406,12 +2601,19 @@ def main(argv: List[str]) -> int:
     roots = sub.add_parser("roots", help="the folders this node may read music from")
     roots.add_argument("--forget", metavar="FOLDER", help="stop reading a folder: the folder itself is untouched")
     sub.add_parser("pair", help="a code and its QR for another device")
+    identity = sub.add_parser("identity", help="this node's identity as a file, to bring it to another machine")
+    action = identity.add_subparsers(dest="action", required=True)
+    export = action.add_parser("export", help="write this node's identity to a file")
+    export.add_argument("--no-passphrase", action="store_true", help="the file unlocked: whoever holds it is this node")
+    export.add_argument("--out", metavar="FILE", help="the file to write (default: one in your home folder)")
+    action.add_parser("import", help="make this node the identity a file holds").add_argument("file", metavar="FILE")
     sub.add_parser("update", help="move to the newest signed release")
     remove = sub.add_parser("remove", help="take Sautium off this machine")
     remove.add_argument("--data", action="store_true", help="the database, the identity and the backups too")
     args = parser.parse_args(argv)
     command = {None: cmd_setup, "setup": cmd_setup, "status": cmd_status, "roots": cmd_roots,
-               "pair": cmd_pair, "update": cmd_update, "remove": cmd_remove}[args.command]
+               "pair": cmd_pair, "identity": cmd_identity, "update": cmd_update,
+               "remove": cmd_remove}[args.command]
     try:
         return command(args)
     except Stop as e:

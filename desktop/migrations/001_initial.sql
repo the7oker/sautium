@@ -1776,20 +1776,26 @@ CREATE TABLE IF NOT EXISTS host_requests (
     answered_at TIMESTAMPTZ
 );
 
--- The library's folder as the owner chose it in the Web UI, on a node whose
--- console setup gave it roots to choose under (backend/library_root.py;
--- PI-NODE-2B, 2026-11-19): the root it lies under and the path beneath it
--- ('' = the root itself). The newest row is the folder; an earlier choice
--- stays as a row — a root with an identity, for the day a node reads more
--- than one. Whether the folder is there now is the mount table's to say,
--- never stored. Empty on every node whose folder is named outside it (a
--- launcher's, a Docker node's MUSIC_LIBRARY_PATH).
-CREATE TABLE IF NOT EXISTS library_roots (
+-- The library's folders (LIBRARY-FOLDERS-1, 2026-11-26): every folder the
+-- person has given the library — picked under the roots in the Web UI, added
+-- in the launcher's window, or named in the node's .env — several at once.
+-- `path` is the folder as media_files.file_path spells it (forward slashes, no
+-- trailing separator): the prefix of every file it holds, and its identity.
+-- Under the folder disks are mounted in, the path carries the filesystem's
+-- UUID (the automount's and the setup's own mount point), so a disk keeps its
+-- folder whoever mounts it and wherever it is plugged; elsewhere it is the
+-- path the person gave. No folder lies inside another (the one writer,
+-- library_root.add, refuses the inner and merges the outer under a lock of
+-- this table). Whether a folder answers now is the process's look, never
+-- stored. `label`: the disk's label as it was last read (a stranger's text,
+-- for the page alone) — the automount removes its own copy with the disk, and
+-- the row of a disk that is out still names it.
+CREATE TABLE IF NOT EXISTS library_folders (
     id SERIAL PRIMARY KEY,
-    mount TEXT NOT NULL,
-    subpath TEXT NOT NULL DEFAULT '',
-    chosen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT library_roots_place UNIQUE (mount, subpath)
+    path TEXT NOT NULL,
+    label TEXT,
+    added_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT library_folders_path UNIQUE (path)
 );
 
 -- The settings rows the assistant's own queries read (assistant_queries.

@@ -206,7 +206,7 @@ def system_facts(sources: Sources, conn=None) -> dict:
         "backend": {
             "status": health.get("status"),
             "database": scrub_personal(str(database)) if database is not None else None,
-            "music_library_exists": (checks.get("music_library") or {}).get("exists"),
+            "music_folders": checks.get("music_library"),
             "dht": checks.get("dht"),
         },
         "ports": sources.config.get("ports"),
@@ -327,6 +327,38 @@ def p2p_facts(conn, sources: Sources) -> dict:
     }
 
 
+def _without_folder_names(library: Optional[dict], scan: Optional[dict]) -> tuple:
+    """The Library's state as a support bundle carries it without the
+    person's tick: each folder its state and counts, never its name or a
+    disk's label (a stranger's text, a person's own words), a new disk only
+    counted; a scan's lines with the folders' names cut, a plan without its
+    folder's name (LIBRARY-FOLDERS-1)."""
+    names = sorted(({f.get("name") or "" for f in (library or {}).get("folders") or []}
+                    | {d.get("label") or "" for d in (library or {}).get("new_disks") or []}) - {""},
+                   key=len, reverse=True)
+
+    def cut(job: Optional[dict]) -> Optional[dict]:
+        if not job:
+            return job
+        job = dict(job)
+        for name in names:
+            if isinstance(job.get("progress"), str):
+                job["progress"] = job["progress"].replace(name, "<folder>")
+        if isinstance(job.get("prune_plan"), dict):
+            job["prune_plan"] = {k: v for k, v in job["prune_plan"].items() if k != "name"}
+        if isinstance(job.get("result"), dict) and isinstance(job["result"].get("prune_plan"), dict):
+            job["result"] = {**job["result"], "prune_plan": {k: v for k, v in job["result"]["prune_plan"].items()
+                                                             if k != "name"}}
+        return job
+    if library:
+        library = {**library,
+                   "folders": [{k: f.get(k) for k in ("connected", "disk", "albums", "tracks", "away_copies")}
+                               for f in library.get("folders") or []],
+                   "new_disks": len(library.get("new_disks") or []),
+                   "scan": cut(library.get("scan"))}
+    return library, cut(scan)
+
+
 def jobs_facts(conn, sources: Sources) -> dict:
     def backend(path: str) -> Optional[dict]:
         return sources.backend.get(path) if sources.backend else None
@@ -341,10 +373,11 @@ def jobs_facts(conn, sources: Sources) -> dict:
         errors = [{"error": e, "count": n} for e, n in cur.fetchall()]
         cur.execute("SELECT filename, applied_at FROM _schema_migrations ORDER BY id")
         migrations = [{"filename": f, "applied_at": _iso(a)} for f, a in cur.fetchall()]
+    library, scan = _without_folder_names(backend("/api/settings/library"), backend("/scan/status"))
     return {
         "stats": backend("/stats"),
-        "library": backend("/api/settings/library"),
-        "scan": backend("/scan/status"),
+        "library": library,
+        "scan": scan,
         "enrich": backend("/enrich/status"),
         "musicbrainz": backend("/api/settings/musicbrainz/status"),
         "external_metadata": {"by_status": fetch_status, "top_errors": errors},

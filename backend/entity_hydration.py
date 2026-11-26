@@ -18,7 +18,7 @@ silently dropped (logged at debug level by the caller if needed).
 
 from db_pool import db_query
 from playback.manager import active_hqp_endpoint
-from sql_queries import ARTIST_COMPOSER_ONLY, ARTIST_OWNED, HERE, best_rip_order, owned_rank
+from sql_queries import ARTIST_COMPOSER_ONLY, ARTIST_OWNED, HERE, album_away, best_rip_order, owned_rank
 
 
 def hydrate_artists(artist_ids: list[str]) -> list[dict]:
@@ -64,7 +64,8 @@ def hydrate_albums(album_ids: list[str]) -> list[dict]:
     """
     if not album_ids:
         return []
-    rows = db_query("""
+    from scanner import gone_prefixes
+    rows = db_query(f"""
         SELECT al.id::text AS album_id,
                al.title AS album,
                al.release_year AS year,
@@ -103,10 +104,12 @@ def hydrate_albums(album_ids: list[str]) -> list[dict]:
                  (SELECT COUNT(*)::int FROM album_tracks atr WHERE atr.album_id = al.id)
                ) AS track_count,
                EXISTS (SELECT 1 FROM album_variants av5
-                       WHERE av5.album_id = al.id) AS is_owned
+                       WHERE av5.album_id = al.id) AS is_owned,
+               -- his album none of whose files opens here now: the tile's mark (B-152)
+               {album_away('al.id')} AS not_here
         FROM albums al
         WHERE al.id::text = ANY(%(ids)s)
-    """, {"ids": list(album_ids)})
+    """, {"ids": list(album_ids), "gone": gone_prefixes()})
     by_id = {r["album_id"]: r for r in rows}
     return [by_id[aid] for aid in album_ids if aid in by_id]
 

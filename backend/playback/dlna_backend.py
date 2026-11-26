@@ -2273,17 +2273,17 @@ class DlnaBackend(PlayerBackend):
         renderer could play.
 
         The two cases are not the same problem and must not read the same. A
-        file UNDER the library root with no media_files row is an indexing gap
-        — scanning fixes it. A file outside the root is not a gap at all:
-        HQPlayer can open anything on the machine, while the library is defined
-        by its root, so importing whatever HQPlayer happened to be playing
+        file UNDER a folder of the library with no media_files row is an
+        indexing gap — scanning fixes it. A file outside every folder is not a
+        gap at all: HQPlayer can open anything on the machine, while the library
+        is the folders the owner gave it, so importing whatever HQPlayer happened to be playing
         would catalogue files the owner never chose — and in a node that syncs,
         mint rows that travel to peers as a side effect of pressing play.
 
         A catalogued file the disk refused is neither: it was scanned, and no
         rescan brings it back while the library's drive is unmounted."""
-        root = settings.library_db_root()
-        norm = lambda p: p.replace("\\", "/").rstrip("/").lower()
+        import library_root
+        folders = library_root.paths()
         inside = outside = streamed = unreadable = held = 0
         for i in range(skipped):
             item = self._queue.item_at(first + i)
@@ -2302,7 +2302,7 @@ class DlnaBackend(PlayerBackend):
                 continue
             uri = src.get("uri", "")
             path = unquote(uri[8:] if uri.startswith("file:///") else uri)
-            if root and norm(path).startswith(norm(root) + "/"):
+            if library_root.folder_of(path.replace("\\", "/"), folders) is not None:
                 inside += 1
             else:
                 outside += 1
@@ -2315,15 +2315,14 @@ class DlnaBackend(PlayerBackend):
                     "their provider, and nothing else is left in the queue.")
         if unreadable and not (inside or outside or held):
             return (f"{unreadable} queued track(s) could not be read from the "
-                    f"library ({root or 'unset'}) — is its drive connected? "
-                    "Reconnect it, then try again.")
+                    "library — is its drive connected? Reconnect it, then try again.")
         if inside and not (outside or unreadable or held):
-            return (f"{inside} queued item(s) are in your library folder but "
+            return (f"{inside} queued item(s) are in a folder of your library but "
                     "have not been scanned yet, so they cannot be streamed to a "
                     "renderer. Run Scan Library, then try again.")
         if outside and not (inside or unreadable or held):
             return (f"{outside} queued item(s) live outside this node's library "
-                    f"({root or 'unset'}) — HQPlayer can open them directly, but "
+                    "— HQPlayer can open them directly, but "
                     "they cannot be streamed to another renderer. Play something "
                     "from the library to replace the queue.")
         return (f"None of the {skipped} queued item(s) can be sent to this "

@@ -199,7 +199,7 @@ def estimate(password: str, user_inputs=()) -> Estimate:
     make at the key's cost. `user_inputs`: the account's own words — its
     nickname, its email — which an attacker tries first. The password is
     read as the derivation will read it (NFKC), its first ESTIMATED_CHARS."""
-    password = unicodedata.normalize("NFKC", password)[:ESTIMATED_CHARS]
+    password = node_identity.account_password(password)[:ESTIMATED_CHARS]
     if not password:
         return Estimate(guesses=1.0, seconds=1 / guesses_per_second(), zone="refused")
     dictionaries = {**matching.RANKED_DICTIONARIES,

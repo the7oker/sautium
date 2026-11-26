@@ -34,6 +34,7 @@ from typing import Optional, Tuple
 import psycopg2
 
 import host_channel
+import library_root
 import serving
 from config import build_identity, settings
 from db_pool import Listener, db_query
@@ -70,7 +71,7 @@ def config_view() -> dict:
     (diag_bundle.config_allowlisted keeps what it keeps of them); a key with
     none is absent."""
     return {
-        "music_path": settings.music_library_path,
+        "music_path": library_root.env_folder(),
         "provider": settings.default_provider,
         "hqplayer": {"enabled": settings.hqplayer_enabled, "host": settings.hqplayer_host,
                      "port": settings.hqplayer_port},

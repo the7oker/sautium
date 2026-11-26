@@ -1,4 +1,4 @@
--- 079 — CANON-TRACKS-1 (2026-11-26): the same DDL as 001_initial.sql's
+-- 080 — CANON-TRACKS-1 (2026-11-26): the same DDL as 001_initial.sql's
 -- tracks block, for nodes that ran the earlier files. Idempotent: a no-op on
 -- the schema 001 just created.
 --

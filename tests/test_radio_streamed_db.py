@@ -528,7 +528,8 @@ def _music_folder(monkeypatch, gone: bool) -> None:
     from config import settings
     monkeypatch.setattr(settings, "music_library_path", "E:/Music")
     monkeypatch.setattr(settings, "music_host_path", None)
-    monkeypatch.setattr(scanner, "_folder_unreachable", gone)
+    monkeypatch.setattr(scanner, "_looks", {})
+    scanner._look_of("E:/Music").unreachable = gone
 
 
 def test_the_real_scorer_serves_no_track_whose_only_copy_is_not_here_now(node, monkeypatch):

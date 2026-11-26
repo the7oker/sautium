@@ -10,12 +10,27 @@ from desktop import node_identity as ni
 pytestmark = pytest.mark.skipif(not ni.HAS_CRYPTO, reason="cryptography missing")
 
 
+def _key(username, password):
+    return ni.key_from_seed(ni.derive_seed(username, password))
+
+
+def _rotate(tmp: Path, username, password, anonymous=False):
+    """A rotation as device_auth runs it: the key made from the pair (a
+    random one with no password), the new sign-in hash beside it."""
+    if not password:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        return ni.rotate_identity(tmp, username, Ed25519PrivateKey.generate(), True, None)
+    return ni.rotate_identity(tmp, username, _key(username, password), anonymous,
+                              ni.signin_hash(password))
+
+
 def _mint(tmp: Path, username="first", password="hunter2xx", email="v@example.com"):
-    private, pub_hex, invite = ni.derive_account_identity(username, password)
-    info = {"node_id": pub_hex, "public_key_hex": pub_hex, "algorithm": "Ed25519",
-            "username": username, "invite_code": invite, "email": email,
-            "email_verified": True, "anonymous": False}
+    private = _key(username, password)
+    pub_hex = ni.public_hex(private)
+    info = {**ni.account_info(username, private, email=email, email_verified=True)}
     ni._save_keypair(private, info, tmp)
+    ni.write_account(tmp, {**ni.new_account(username, password, source="form", email=email),
+                           "pubkey": pub_hex})
     (tmp / "birth_certificate.json").write_text('{"pubkey": "%s"}' % pub_hex)
     (tmp / "identity_proof.json").write_text('{"pubkey": "%s"}' % pub_hex)
     return pub_hex
@@ -23,8 +38,12 @@ def _mint(tmp: Path, username="first", password="hunter2xx", email="v@example.co
 
 def test_rotation_archives_the_old_identity_and_signs_the_notice(tmp_path):
     old_pub = _mint(tmp_path)
-    result = ni.rotate_identity(tmp_path, "second", "correct-horse", anonymous=False)
+    account_id = ni.read_account(tmp_path)["account_id"]
+    result = _rotate(tmp_path, "second", "correct-horse")
     info, rotation = result["info"], result["rotation"]
+    account = ni.read_account(tmp_path)
+    assert account["account_id"] == account_id and account["username"] == "second"
+    assert account["pubkey"] == info["public_key_hex"] and ni.signin_matches(account["signin"], "correct-horse")
 
     assert info["public_key_hex"] != old_pub
     assert info["username"] == "second" and info["invite_code"].startswith("second#")
@@ -51,7 +70,7 @@ def test_rotation_archives_the_old_identity_and_signs_the_notice(tmp_path):
 
 def test_notice_needs_both_keys_and_untouched_bytes(tmp_path):
     _mint(tmp_path)
-    rotation = ni.rotate_identity(tmp_path, "second", "correct-horse", False)["rotation"]
+    rotation = _rotate(tmp_path, "second", "correct-horse")["rotation"]
     message = base64.b64decode(rotation["message"])
     old_sig = bytes.fromhex(rotation["old_signature"])
     new_sig = bytes.fromhex(rotation["new_signature"])
@@ -71,8 +90,8 @@ def test_notice_needs_both_keys_and_untouched_bytes(tmp_path):
 
 def test_retired_seeds_come_newest_first_and_chain(tmp_path):
     first = _mint(tmp_path)
-    second = ni.rotate_identity(tmp_path, "second", "correct-horse", False)["info"]["public_key_hex"]
-    third = ni.rotate_identity(tmp_path, "third", "", True)
+    second = _rotate(tmp_path, "second", "correct-horse")["info"]["public_key_hex"]
+    third = _rotate(tmp_path, "third", "", True)
 
     assert third["info"]["anonymous"] is True
     previous = ni.previous_identities(tmp_path)
@@ -92,5 +111,5 @@ def test_same_pair_is_refused_and_nothing_moves(tmp_path):
     _mint(tmp_path, "first", "hunter2xx")
     before = sorted(p.name for p in tmp_path.iterdir())
     with pytest.raises(ValueError):
-        ni.rotate_identity(tmp_path, "first", "hunter2xx", False)
+        _rotate(tmp_path, "first", "hunter2xx")
     assert sorted(p.name for p in tmp_path.iterdir()) == before

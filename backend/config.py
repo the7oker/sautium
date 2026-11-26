@@ -169,22 +169,18 @@ class Settings(BaseSettings):
     sautium_master: bool = False
     # The folders this node may read music from, colon-separated, each bound
     # read-only at its own host path by the console setup's compose override
-    # (library_root.py). Set, the owner chooses the library's folder under
-    # them in the Web UI and music_library_path is that stored choice; unset,
-    # the folder is the one MUSIC_LIBRARY_PATH names.
+    # (library_root.py). Set, the owner adds the library's folders under them
+    # in the Web UI (MUSIC_LIBRARY_PATH then names an empty folder); unset,
+    # the library's folders are the one MUSIC_LIBRARY_PATH names (a Docker
+    # node's .env) or those the launcher's window added.
     sautium_library_roots: str = ""
     # The labels of the roots that are disks themselves, as the setup read
     # them (a JSON object, root → label; library_root._root_labels)
     sautium_library_root_labels: str = ""
-    p2p_username: str = ""
-    p2p_password: str = ""
-
-    p2p_email: str = ""
-    # Where the node's Ed25519 identity lives. The launcher passes its own
-    # path; a Docker node defaults to the bind-mounted data dir so an account
-    # created through onboarding survives container recreates. Env
-    # credentials (P2P_USERNAME/PASSWORD) remain the alternative for anyone
-    # who prefers configuring identity by hand.
+    # Where the node's Ed25519 identity lives — the only place an identity
+    # comes from (SEC-S5 §18). The launcher passes its own path; a Docker
+    # node defaults to the bind-mounted data dir so an account created
+    # through onboarding survives container recreates.
     p2p_identity_dir: str = "/app/data/node_identity"
     p2p_listen_port: int = 0   # Desktop sync server port (direct chat delivery)
 
@@ -264,23 +260,6 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
-    def library_db_root(self) -> str:
-        """The library root as media_files.file_path spells it: forward
-        slashes, no trailing separator — the prefix every stored path shares
-        (Docker stores the host path, the launcher the native one)."""
-        root = self.music_host_path or self.music_library_path or ""
-        return root.replace("\\", "/").rstrip("/")
-
-    @property
-    def music_library_exists(self) -> bool:
-        """Mounted and accessible? A dropped WSL drvfs mount raises OSError
-        (ENODEV/EIO), which Path.exists() re-raises instead of treating as
-        missing — catch it so /health degrades instead of 500-ing."""
-        try:
-            return Path(self.music_library_path).exists()
-        except OSError:
-            return False
-
     def translate_to_host_path(self, scanner_path: str) -> str:
         """Translate a scanner-visible path to a native OS path for DB storage.
 
@@ -333,9 +312,6 @@ class Settings(BaseSettings):
         if not has_provider:
             missing.append("AI provider (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or CLAUDE_CODE_ENABLED)")
 
-        if not self.music_library_exists:
-            missing.append(f"MUSIC_LIBRARY_PATH (current: {self.music_library_path})")
-
         return missing
 
 
@@ -344,7 +320,9 @@ settings = Settings()
 
 # The variables the settings read the node's credentials and the owner's
 # accounts from. A process that starts agent CLIs drops them from its
-# environment once the settings hold them (serving.hold_secrets).
+# environment once the settings hold them (serving.hold_secrets). P2P_*:
+# read by nothing since SEC-S5 §18, and still dropped — a .env written before
+# it holds a password there.
 SECRET_ENV = frozenset({
     "POSTGRES_USER", "POSTGRES_PASSWORD", "DATABASE_URL",
     "P2P_USERNAME", "P2P_PASSWORD", "P2P_EMAIL",

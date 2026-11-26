@@ -7,10 +7,11 @@ binds them to a node — its database, identity dir, backup dir and PostgreSQL
 tools — and is the ONE implementation of "make a backup" for every caller:
 
   * the Docker node's weekly task: `docker exec sautium-backend python -m
-    backup create --password-env P2P_PASSWORD` (sautium-private/scripts/
-    backup.sh). Entry point, subcommand, `--password-env`, the default
-    output dir (BACKUP_DIR, `/app/data/backup`) and the `.sbk` suffix are a
-    contract that script relies on; a non-zero exit is its failure signal;
+    backup create` (sautium-private/scripts/backup.sh) — no password since
+    2026-11-26 (SEC-S5: the backup is keyed on the node's own seed). Entry
+    point, subcommand, the default output dir (BACKUP_DIR,
+    `/app/data/backup`) and the `.sbk` suffix are a contract that script
+    relies on; a non-zero exit is its failure signal;
   * the launcher's Settings & Tools › Backup & Restore › "Create backup…", which runs
     this same CLI on the backend interpreter (desktop/backup_task.py) with
     `--progress-json --cancel-on-stdin`;
@@ -23,10 +24,12 @@ that file into its environment BEFORE `config` builds its Settings: the same
 DSN, identity dir, BACKUP_DIR and PG_BIN (pgsql/bin) the backend runs with.
 In a container there is no such file and compose has set the environment.
 
-The policy is the same everywhere. The account password is verified by
-re-deriving the identity (device_auth.verify_password — the login path, under
-its Argon2id semaphore), pg_dump runs at below-normal priority, and the job
-pauses while the node plays music. Playback is known to the backend process
+The policy is the same everywhere. The file is keyed on the node's own seed
+(node_backup.backup_kek: the key p2p_identity.load_signing_key reads, never
+derived here), so nothing is typed: a backup is made by whoever may run this
+CLI on the node, and opened — restore, inspect, merge — by a node that holds
+that key or keeps it among the keys it retired. pg_dump runs at below-normal
+priority, and the job pauses while the node plays music. Playback is known to the backend process
 and the job runs in another, so the signal crosses through PostgreSQL: the
 backend holds a session advisory lock (PLAYBACK_LOCK_KEY) for as long as its
 load meter reports playback (PlaybackSignal, driven by the meter's samples),
@@ -36,16 +39,14 @@ wait is an event, not a poll, and a backend that dies takes its lock with
 it, so the job can never hang on a stale flag.
 
 The Web UI makes a backup and never hands one over (since 2026-11-19,
-backend/backup_job.py: this same CLI as a child of the backend, the password
-through the credential box): the file stays in the node's backup folder and
-leaves by a disk or a share. There is deliberately no download (the surface
-of before was removed 2026-09-14): a browser cannot receive a 3 GB file, and
-the file holds the node's identity under the password's strength alone.
+backend/backup_job.py: this same CLI as a child of the backend): the file
+stays in the node's backup folder and leaves by a disk or a share. There is
+deliberately no download (the surface of before was removed 2026-09-14): a
+browser cannot receive a 3 GB file, and the file holds the node's whole
+database.
 """
 
 import argparse
-import asyncio
-import getpass
 import json
 import logging
 import os
@@ -128,6 +129,14 @@ def node() -> Optional[dict]:
     if not ident or not ident.get("username"):
         return None
     return {"username": ident["username"], "pubkey": ident["public_key_hex"].lower()}
+
+
+def held_seeds(to: str) -> List[bytes]:
+    """The seeds this node opens a backup with: its live key's, then its
+    retired keys' (node_backup.seeds_held — Refused, in words, with no key
+    here yet; `to` names the act)."""
+    from p2p_identity import load_signing_key
+    return nb.seeds_held(load_signing_key(settings), identity_dir(), to=to)
 
 
 def _fmt_bytes(n: int) -> str:
@@ -253,30 +262,21 @@ class CancelToken:
 # Create — the one entry every caller goes through
 # ---------------------------------------------------------------------------
 
-def create(password: str, *, out_dir: Optional[Path] = None,
+def create(*, out_dir: Optional[Path] = None,
            progress: Optional[nb.ProgressFn] = None,
            cancel: Optional[CancelToken] = None) -> dict:
-    """Verify the password against this node's identity, then write the
-    backup. Raises node_backup errors (WrongPassword, Refused, Cancelled,
-    BackupError); returns node_backup.create_backup's result."""
-    import device_auth
+    """Write this node's backup, keyed on its own seed — an anonymous
+    account's too (SEC-S5 §16: its identity file opens it on another
+    machine). Raises node_backup errors (Refused, Cancelled, BackupError);
+    returns node_backup.create_backup's result."""
+    from p2p_identity import load_signing_key
 
     progress = progress or (lambda *_a, **_k: None)
     cancel = cancel or CancelToken()
+    seed = nb.live_seed(load_signing_key(settings), identity_dir(), to="back up")
     ident = node()
     if ident is None:
-        raise nb.Refused("this node has no account — nothing to key the backup on")
-    if device_auth.account_anonymous():
-        raise nb.Refused("this identity's password was minted and never shown — "
-                         "set one (Profile) before backing up")
-    try:
-        right = asyncio.run(device_auth.verify_password(password))
-    except device_auth.Busy as e:
-        raise nb.BackupError("the password could not be checked: the key derivation failed — "
-                             "try again") from e
-    if not right:
-        raise nb.WrongPassword("wrong password")
-    kek = nb.derive_kek(password, ident["username"])
+        raise nb.Refused("this node's key has no account — nothing to name the backup by")
 
     hold = PlaybackHold(settings.database_url)
 
@@ -304,8 +304,8 @@ def create(password: str, *, out_dir: Optional[Path] = None,
         cancel._hold = hold
         version = build_identity()
         return nb.create_backup(
-            out, target=pg_target(), kek=kek, username=ident["username"],
-            pubkey=ident["pubkey"], identity_dir=identity_dir(),
+            out, target=pg_target(), seed=seed, username=ident["username"],
+            identity_dir=identity_dir(),
             app_commit=version["commit"], app_build=version["build"],
             progress=progress, cancel=cancel.event, wait_ok=wait_ok)
     finally:
@@ -316,27 +316,6 @@ def create(password: str, *, out_dir: Optional[Path] = None,
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
-
-def _password(args, *, prompt: str) -> str:
-    """The account password: from the variable named, which then leaves this
-    process's environment, so pg_dump and pg_restore, started after, never
-    inherit it — or asked for."""
-    if getattr(args, "password_stdin", False):
-        # The Web UI's job: the first line of its pipe, never an environment
-        # a process of the same user could read before this one closed it
-        value = sys.stdin.readline().rstrip("\r\n")
-        if not value:
-            sys.exit("no password on standard input")
-        return value
-    var = args.password_env or ("SAUTIUM_BACKUP_PASSWORD"
-                                if os.environ.get("SAUTIUM_BACKUP_PASSWORD") else None)
-    if var:
-        value = os.environ.pop(var, None)
-        if not value:
-            sys.exit(f"environment variable {var} is empty")
-        return value
-    return getpass.getpass(prompt)
-
 
 class HumanProgress:
     """The terminal form: a redrawn byte counter (the weekly task's log filter
@@ -412,13 +391,12 @@ def watch_stdin_for_cancel(token: CancelToken, stream=None) -> threading.Thread:
 
 
 def _cmd_create(args) -> int:
-    password = _password(args, prompt="Account password: ")
     printer = JsonProgress() if args.progress_json else HumanProgress()
     token = CancelToken()
     if args.cancel_on_stdin:
         watch_stdin_for_cancel(token)
     try:
-        result = create(password, out_dir=Path(args.out) if args.out else None,
+        result = create(out_dir=Path(args.out) if args.out else None,
                         progress=printer, cancel=token)
     except nb.Cancelled:
         printer.cancelled()
@@ -440,8 +418,8 @@ def _db_error(e: psycopg2.Error) -> str:
 
 
 def _cmd_inspect(args) -> int:
-    password = None if args.no_password else _password(args, prompt="Backup password (Enter to skip): ")
-    info = nb.inspect_file(Path(args.file), password or None)
+    info = nb.inspect_file(Path(args.file),
+                           held_seeds("open the backup") if args.manifest else None)
     print(json.dumps(info, indent=2, default=str))
     return 0
 
@@ -460,11 +438,11 @@ def _other_sessions(target: nb.PgTarget) -> int:
 def _cmd_restore(args) -> int:
     path = Path(args.file)
     target = pg_target(args.db)
-    password = _password(args, prompt="Backup password: ")
+    seeds = held_seeds("restore")
     printer = HumanProgress()
     with open(path, "rb") as fp:
         reader = nb.BackupReader(fp)
-        reader.unlock(password)
+        reader.unlock_with_seeds(seeds)
         manifest = reader.read_manifest()
         db = manifest["database"]
         print(f"backup of {manifest['node']['username']} ({manifest['node']['pubkey'][:16]}…) "
@@ -485,15 +463,13 @@ def _cmd_restore(args) -> int:
                                      identity_sink=identity.__setitem__)
     print(f"\nrestored {result['database']}; {result['migrations_applied']} newer migration(s) applied"
           + (f"; previous database kept as {result['previous']}" if result["previous"] else ""))
-    if args.identity:
-        d = Path(settings.p2p_identity_dir)
-        out = nb.write_identity(d, identity, username=manifest["node"]["username"], password=password)
-        print(f"identity written to {d}: {', '.join(out['files'])}"
-              + (f" (previous identity moved to {out['moved_previous_identity']})"
-                 if out["moved_previous_identity"] else ""))
-    elif identity:
-        print(f"identity documents NOT written ({len(identity)} in the backup) — pass --identity "
-              "to make this machine the node")
+    d = identity_dir()
+    if d is not None:
+        out = nb.write_identity(d, identity, backup_key=reader.node["pubkey"],
+                                live_key=nb.seed_pubkey(seeds[0]))
+        if out["files"] or out["retired_added"]:
+            print(f"identity folder {d}: {len(out['files'])} document(s) and "
+                  f"{out['retired_added']} retired identity record(s) added from the backup")
     return 0
 
 
@@ -627,20 +603,15 @@ def _cmd_merge(args) -> int:
     import life_merge
     from desktop.node_identity import previous_identities
     path = Path(args.file)
-    password = _password(args, prompt="Backup password: ")
     printer = JsonProgress() if args.progress_json else HumanProgress()
     token = CancelToken()
     if args.cancel_on_stdin:
         watch_stdin_for_cancel(token)
-    ident = node()
-    if ident is None:
-        printer.failed("this node has no account — nothing to match the backup against")
-        return 1
     idir = identity_dir()
     previous = [str(e.get("public_key_hex", "")) for e in previous_identities(idir)] if idir else []
     try:
         result = life_merge.merge_backup(
-            path, password, target=pg_target(), pubkey=ident["pubkey"], previous=previous,
+            path, target=pg_target(), seeds=held_seeds("merge"), previous=previous,
             identity_dir=idir, progress=printer, cancel=token.event, dry_run=args.dry_run)
     except nb.Cancelled:
         printer.cancelled()
@@ -673,50 +644,33 @@ def _cmd_merge(args) -> int:
 
 
 def _cmd_selftest(args) -> int:
-    ident = node() or {"username": "selftest", "pubkey": "00" * 32}
+    ident = node() or {"username": "selftest"}
     ok = nb.selftest(pg_target(), test_db=args.db, identity_dir=identity_dir(),
-                     pubkey=ident["pubkey"], username=ident["username"],
+                     username=ident["username"],
                      out_dir=Path(args.out) if args.out else None, keep=args.keep)
     return 0 if ok else 1
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    # The account password may sit in this process's environment from its
-    # start (--password-env); no other process of its user reads it there
-    from serving import undumpable
-    undumpable()
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    # A Windows console on a legacy code page cannot encode the arrows and
-    # ellipses in the help and progress text; a hand-run CLI must not die on
-    # its own output (the launcher's child runs with PYTHONUTF8=1 anyway).
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(errors="replace")
+def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="backup", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    pw = argparse.ArgumentParser(add_help=False)
-    pw.add_argument("--password-env", metavar="VAR",
-                    help="read the password from this environment variable "
-                         "(default: SAUTIUM_BACKUP_PASSWORD when set, else prompt)")
-    c = sub.add_parser("create", parents=[pw], help="write a backup of this node")
+    c = sub.add_parser("create", help="write a backup of this node, keyed on its own key")
     c.add_argument("--out", help="directory (default: the node's backup dir)")
     c.add_argument("--progress-json", action="store_true",
                    help="one JSON object per line on stdout instead of the terminal counter")
     c.add_argument("--cancel-on-stdin", action="store_true",
                    help="a `cancel` line (or EOF) on stdin cancels the job")
-    c.add_argument("--password-stdin", action="store_true",
-                   help="the password is the first line of stdin (before any `cancel` line)")
-    i = sub.add_parser("inspect", parents=[pw], help="show what a backup holds")
+    i = sub.add_parser("inspect", help="show what a backup holds")
     i.add_argument("file")
-    i.add_argument("--no-password", action="store_true", help="header only")
-    r = sub.add_parser("restore", parents=[pw],
-                       help="rebuild a database from a backup (stop the backend first)")
+    i.add_argument("--manifest", action="store_true",
+                   help="open it with this node's keys and show its manifest too")
+    r = sub.add_parser("restore",
+                       help="rebuild a database from a backup of this node's identity "
+                            "(stop the backend first)")
     r.add_argument("file")
     r.add_argument("--db", help="target database (default: the node's)")
     r.add_argument("--replace", action="store_true",
                    help="replace a database that holds own data (kept as <db>__previous)")
-    r.add_argument("--identity", action="store_true",
-                   help="write the identity documents too — this machine becomes the node")
     r.add_argument("--yes", action="store_true", help="no questions; terminate other sessions")
     x = sub.add_parser("export", help="write a share export for another collector")
     x.add_argument("--scope", choices=("analysed", "engaged", "owned"), default="engaged",
@@ -739,7 +693,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="enrich only artists, albums and tracks already here; create none")
     m.add_argument("--progress-json", action="store_true")
     m.add_argument("--cancel-on-stdin", action="store_true")
-    g = sub.add_parser("merge", parents=[pw],
+    g = sub.add_parser("merge",
                        help="union my own life data (listens, friends, chats, gear…) from a backup "
                             "of this account made elsewhere; nothing here is replaced")
     g.add_argument("file")
@@ -750,7 +704,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--db", default="music_ai_test")
     s.add_argument("--out", help="where the temporary backup file goes")
     s.add_argument("--keep", action="store_true", help="keep the test database and the file")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    # This process holds the node's seed and the database's login: no other
+    # process of its user reads either, and pg_dump and pg_restore, started
+    # after, inherit no credential of the environment
+    from serving import hold_secrets
+    hold_secrets()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # A Windows console on a legacy code page cannot encode the arrows and
+    # ellipses in the help and progress text; a hand-run CLI must not die on
+    # its own output (the launcher's child runs with PYTHONUTF8=1 anyway).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+    args = parser().parse_args(argv)
     try:
         return {"create": _cmd_create, "inspect": _cmd_inspect,
                 "restore": _cmd_restore, "selftest": _cmd_selftest,

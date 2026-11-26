@@ -75,19 +75,20 @@ def _library_file(path: str, *, missing: bool) -> None:
     asked for by the browser does (routers/media.py): found missing, the
     folder is looked at, not waited for (scanner.check_folder — the moment a
     dropped mount becomes visible; its record is the notice's and the
-    queue's event); served as it lies on disk, the folder answers
-    (scanner.folder_seen — never a cache file's word) — a file of that
-    folder only (scanner.of_music_folder): a row of another folder says
-    nothing of this one. Read off the process's own scanner, never imported
+    queue's event); served as it lies on disk, its folder answers
+    (scanner.folder_seen — never a cache file's word) — a file of a folder
+    of the library only (scanner.folder_of): a row of no folder says
+    nothing of any. Read off the process's own scanner, never imported
     here: one that never loaded it looks at no folder
     (playback.queue.gone_prefixes)."""
     scanner = sys.modules.get("scanner")
-    if scanner is None or not scanner.of_music_folder(path):
+    folder = scanner.folder_of(path) if scanner is not None else None
+    if folder is None:
         return
     if missing:
-        scanner.check_folder()
+        scanner.check_folder(folder)
     else:
-        scanner.folder_seen(False)
+        scanner.folder_seen(folder, False)
 
 
 def shown(token: str) -> str:

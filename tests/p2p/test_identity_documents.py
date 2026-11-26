@@ -139,8 +139,7 @@ def test_the_docker_writer_keeps_the_master_s_certificate(tmp_path, caplog):
     (tmp_path / "node_info.json").write_text(json.dumps({
         "node_id": mine, "public_key_hex": mine, "username": "Sautium", "invite_code": "Sautium#X"}))
     masters = _write(tmp_path, CERT, certificate(_key()))
-    settings = SimpleNamespace(p2p_identity_dir=str(tmp_path), p2p_username="", p2p_password="",
-                               p2p_email="")
+    settings = SimpleNamespace(p2p_identity_dir=str(tmp_path))
     p2p_identity.forget_cached()
     try:
         assert p2p_identity.save_certificate(settings, certificate(mine, method="pow"))
@@ -181,17 +180,6 @@ def test_the_launcher_s_writers_keep_another_key_s_documents(launcher, tmp_path,
     assert _moved_said(caplog, CERT, theirs["pubkey"], other)
 
 
-def test_an_imported_bundle_keeps_the_documents_it_replaces(launcher, tmp_path):
-    mine = launcher
-    theirs = certificate(_key(), method="pow")
-    kept = {CERT: _write(tmp_path, CERT, theirs), PROOF: _write(tmp_path, PROOF, proof(theirs))}
-    cert = certificate(mine, method="pow")
-    bundle = tmp_path / "bundle.json"
-    bundle.write_text(json.dumps({"certificate": cert, "proof": proof(cert)}))
-    assert birth_cert.import_certificate(str(bundle))
-    assert _aside(tmp_path) == kept
-
-
 def test_the_mining_worker_keeps_another_key_s_proof(tmp_path):
     mine = _key()
     cert = dict(certificate(mine, method="pow"), difficulty=2)
@@ -205,12 +193,17 @@ def test_the_mining_worker_keeps_another_key_s_proof(tmp_path):
 
 
 def test_a_restore_onto_a_node_with_no_info_keeps_another_key_s_documents(tmp_path):
-    """An env-derived Docker node keeps no node_info.json: nothing named the
-    live identity, so the restore wrote the backup's certificate over it."""
-    live = certificate(_key())
-    kept = _write(tmp_path, CERT, live)
-    incoming = certificate(_key())
-    data = json.dumps(incoming).encode("utf-8")
-    node_backup.write_identity(tmp_path, {CERT: data}, username="someone", password=None)
+    """With no node_info.json nothing named the live identity, so a restore
+    once wrote the backup's certificate over another key's. A restore of the
+    node's own key's backup moves that one aside whole; one of another key
+    writes no document at all."""
+    kept = _write(tmp_path, CERT, certificate(_key()))
+    own = _key()
+    data = json.dumps(certificate(own)).encode("utf-8")
+    stranger = json.dumps(certificate(_key())).encode("utf-8")
+    assert node_backup.write_identity(tmp_path, {CERT: stranger}, backup_key="ef" * 32,
+                                      live_key=own)["files"] == []
+    assert _aside(tmp_path) == {} and (tmp_path / CERT).read_bytes() == kept
+    node_backup.write_identity(tmp_path, {CERT: data}, backup_key=own, live_key=own)
     assert _aside(tmp_path) == {CERT: kept}
     assert (tmp_path / CERT).read_bytes() == data
