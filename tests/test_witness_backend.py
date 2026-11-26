@@ -726,9 +726,6 @@ def test_a_rotation_signs_the_waiting_rows_with_the_old_key(conn, tmp_path, monk
         assert record_sig.verify(witness.statement(row, old), row["signature"], old)
 
 
-KDF = nb.KdfParams(time_cost=1, memory_cost=8 * 1024, parallelism=1)
-
-
 def _target(dsn: str, dbname=None) -> nb.PgTarget:
     url = urlparse(dsn)
     return nb.PgTarget(host=url.hostname, port=url.port, user=url.username, password=url.password,
@@ -743,11 +740,10 @@ def test_a_backup_round_trip_keeps_the_rows_and_their_guard(worker, scratch_dsn,
     _sighting("introduced")                                       # one unsigned too
     source = _target(scratch_dsn)
     restored = _target(scratch_dsn, "sautium_witness_restore")
-    created = nb.create_backup(tmp_path, target=source, kek=nb.derive_kek("pw", "node", KDF),
-                               username="node", pubkey=NODE_PUB, kdf=KDF)
+    created = nb.create_backup(tmp_path, target=source, seed=nb.seed_of(NODE), username="node")
     with open(created["path"], "rb") as fp:
         reader = nb.BackupReader(fp)
-        reader.unlock("pw", KDF)
+        reader.unlock_with_seeds([nb.seed_of(NODE)])
         nb.restore_database(reader, restored, manifest=reader.read_manifest(), replace=True)
     try:
         copy = restored.connect()

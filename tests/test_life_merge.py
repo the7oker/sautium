@@ -1,7 +1,8 @@
 """The life-data merge (backend/life_merge.py, BACKUP.md Product C).
 
 The pure parts run anywhere: pg_restore's script split into COPY blocks, the
-same-account rule, the rotation-archive union. The merge itself is the
+same-account rule (the rotation-archive union is node_backup.merge_archive,
+tests/test_node_backup.py). The merge itself is the
 acceptance case from the design — two clones with divergent histories merge
 to the union in either order and `local_play_stats` recomputes to the same
 numbers — and runs against a real PostgreSQL (the backend container's: two
@@ -9,7 +10,6 @@ throwaway databases built from the migrations), skipped where there is none.
 """
 
 import io
-import json
 import os
 import sys
 import uuid
@@ -74,44 +74,6 @@ def test_same_account_rule():
         life_merge.check_same_account({"node": {}}, pubkey=own, previous=[])
 
 
-D0, D1 = "20260101T000000Z-000000000000", "20260201T000000Z-111111111111"   # as rotate names them
-
-
-def test_rotation_archive_union(tmp_path):
-    live = {"public_key_hex": "ab" * 32, "username": "vale", "previous": [
-        {"public_key_hex": "11" * 32, "dir": D1, "retired_at": "2026-02-01T00:00:00Z"}]}
-    (tmp_path / "node_info.json").write_text(json.dumps(live))
-    theirs = {"public_key_hex": "ab" * 32, "previous": [
-        {"public_key_hex": "11" * 32, "dir": D1, "retired_at": "2026-02-01T00:00:00Z"},
-        {"public_key_hex": "00" * 32, "dir": D0, "retired_at": "2026-01-01T00:00:00Z"}]}
-    files = {"node_info.json": json.dumps(theirs).encode(),
-             f"previous/{D0}/rotation.json": b'{"v":1}', f"previous/{D0}/birth_certificate.json": b"{}",
-             f"previous/{D1}/rotation.json": b"stale"}
-    assert life_merge.merge_identity(tmp_path, files) == 1
-    info = json.loads((tmp_path / "node_info.json").read_text())
-    assert [e["dir"] for e in info["previous"]] == [D0, D1]          # oldest first
-    assert (tmp_path / "previous" / D0 / "rotation.json").read_bytes() == b'{"v":1}'
-    assert not (tmp_path / "previous" / D1).exists()                 # known: nothing written
-    assert life_merge.merge_identity(tmp_path, files) == 0
-    assert life_merge.merge_identity(None, files) == 0
-    assert life_merge.merge_identity(tmp_path / "nowhere", files) == 0
-
-
-def test_a_retired_identity_is_taken_only_under_an_archive_name(tmp_path):
-    folder = tmp_path / "identity"
-    folder.mkdir()
-    live = {"public_key_hex": "ab" * 32, "username": "vale", "previous": []}
-    (folder / "node_info.json").write_text(json.dumps(live))
-    theirs = {"public_key_hex": "ab" * 32, "previous": [
-        {"public_key_hex": "22" * 32, "dir": "../elsewhere", "retired_at": "2026-03-01T00:00:00Z"}]}
-    files = {"node_info.json": json.dumps(theirs).encode(),
-             "previous/../elsewhere/rotation.json": b"{}"}
-    assert life_merge.merge_identity(folder, files) == 0
-    assert json.loads((folder / "node_info.json").read_text()) == live
-    assert sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*")) == [
-        "identity", "identity/node_info.json"]
-
-
 # ---------------------------------------------------------------------------
 # The acceptance case, on a real cluster
 # ---------------------------------------------------------------------------
@@ -120,8 +82,10 @@ PG = dict(host=os.environ.get("SAUTIUM_TEST_PGHOST", "postgres"),
           port=int(os.environ.get("SAUTIUM_TEST_PGPORT", "5432")),
           user=os.environ.get("SAUTIUM_TEST_PGUSER", "musicai"),
           password=os.environ.get("SAUTIUM_TEST_PGPASSWORD", "supervisor"))
-KDF = nb.KdfParams(time_cost=1, memory_cost=8 * 1024, parallelism=1)
-PW, USER, PUB = "merge me", "vale", "ab" * 32
+# Throwaway identities: the account's key, and another's
+SEED, USER = bytes(range(32)), "vale"
+PUB = nb.seed_pubkey(SEED)
+OTHER_SEED = bytes(range(32, 64))
 T0 = datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc)
 T1, T2, T3, T4 = (uuid.UUID(int=n) for n in (1, 2, 3, 4))
 S1, S2, S3, S4 = (uuid.UUID(int=n) for n in (11, 12, 13, 14))
@@ -278,14 +242,12 @@ def _seed(clones):
         refresh(t)
 
 
-def _backup(target, out_dir: Path) -> Path:
-    kek = nb.derive_kek(PW, USER, KDF)
-    result = nb.create_backup(out_dir, target=target, kek=kek, username=USER, pubkey=PUB, kdf=KDF)
-    return result["path"]
+def _backup(target, out_dir: Path, seed: bytes = SEED) -> Path:
+    return nb.create_backup(out_dir, target=target, seed=seed, username=USER)["path"]
 
 
 def _merge(path: Path, target, **kw) -> dict:
-    return life_merge.merge_backup(path, PW, target=target, pubkey=PUB, previous=[], kdf=KDF, **kw)
+    return life_merge.merge_backup(path, target=target, seeds=[SEED], previous=[], **kw)
 
 
 def _stats(target):
@@ -311,11 +273,13 @@ def test_two_clones_merge_to_the_union_in_either_order(clones, tmp_path):
     _seed(clones)
     file_a, file_b = _backup(a, tmp_path / "a"), _backup(b, tmp_path / "b")
 
-    # Not this account: refused before anything is read into the database.
-    with pytest.raises(nb.Refused, match="another identity"):
-        life_merge.merge_backup(file_b, PW, target=a, pubkey="99" * 32, previous=[], kdf=KDF)
-    with pytest.raises(nb.WrongPassword):
-        life_merge.merge_backup(file_b, "nope", target=a, pubkey=PUB, previous=[], kdf=KDF)
+    # Not this account: refused before anything is read into the database —
+    # in the merge's words, and no password is asked for it
+    with pytest.raises(nb.Refused, match="the merge takes this account's own backups only"):
+        life_merge.merge_backup(file_b, target=a, seeds=[OTHER_SEED], previous=[])
+    # One of its retired keys whose seed the node no longer holds: no key here opens it
+    with pytest.raises(nb.Refused, match="holds no key of it"):
+        life_merge.merge_backup(file_b, target=a, seeds=[OTHER_SEED], previous=[PUB])
 
     # A dry run reports the merge and leaves the database as it was.
     plan = _merge(file_b, a, dry_run=True)
@@ -525,8 +489,8 @@ def test_a_retired_keys_backup_brings_only_signed_witness_records(clones, tmp_pa
     a, b = clones["a"], clones["b"]
     signed, unsigned = "81" * 32, "82" * 32
     _exec(b, [_witness(signed, signed=True), _witness(unsigned)])
-    got = life_merge.merge_backup(_backup(b, tmp_path / "b"), PW, target=a, pubkey="cd" * 32,
-                                  previous=[PUB], kdf=KDF)
+    got = life_merge.merge_backup(_backup(b, tmp_path / "b"), target=a, seeds=[OTHER_SEED, SEED],
+                                  previous=[PUB])
     assert got["merged"]["witness"] == 1
     assert {r[0] for r in _rows(a, "SELECT subject FROM p2p_witness WHERE subject = ANY(%s)",
                                 ([signed, unsigned],))} == {signed}

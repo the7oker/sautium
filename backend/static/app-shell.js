@@ -17171,10 +17171,10 @@
     }));
   }
 
-  /* "Back up now" (backend/backup_job.py): the making only. The account's
-     password rides the credential box; the file stays on the node — said
-     where it is, with what that means — and nothing here downloads it. The
-     job's progress follows the Library stream. Old backups are counted, and
+  /* "Back up now" (backend/backup_job.py): the making only. Nothing is
+     typed — the file is keyed on the node's own key (SEC-S5); it stays on
+     the node — said where it is, with what that means — and nothing here
+     downloads it. The job's progress follows the Library stream. Old backups are counted, and
      "Keep the newest" is the owner's confirmed act, never the node's rule.
      Draft words for the owner's words review. */
   function backupLine(b) {
@@ -17191,7 +17191,7 @@
       if (r.ok) line.textContent = backupLine(await r.json());
     } catch (_) { /* the row keeps its last line */ }
   }
-  const BACKUP_PHASES = { starting: 'Checking the password…', counting: 'Counting what there is…',
+  const BACKUP_PHASES = { starting: 'Starting…', counting: 'Counting what there is…',
                           dumping: 'Writing the database…', identity: 'Adding the identity…',
                           paused: 'Paused while music plays…' };
   function backupJobLine(job) {
@@ -17212,7 +17212,7 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
-            A backup holds your library's records, your listening history and this node's identity, encrypted with your account password.
+            A backup holds your library's records, your listening history and this node's identity documents, encrypted with this node's key. It opens on a node that holds this identity: on another machine, bring the identity there first.
           </p>
           <div data-state style="font-size:calc(13*var(--px));color:var(--color-text);line-height:1.5;"></div>
           <button class="profile-btn primary" data-start>Back up now</button>
@@ -17259,11 +17259,9 @@
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     start.addEventListener('click', () => onceInFlight(start, async () => {
       msg.textContent = '';
-      const res = await askStepUp({
-        title: 'Back up now', confirm: 'Back up',
-        text: 'Your account password encrypts the backup. Without it the file cannot be opened.',
-      }, password => window.Sautium.auth.boxed('/api/backup', {}, { password }));
-      if (res && res.ok) paint(res.data);
+      const r = await fetch('/api/backup', { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) paint(data); else msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not started.';
     }));
     stop.addEventListener('click', () => onceInFlight(stop, async () => {
       const r = await fetch('/api/backup/cancel', { method: 'POST' });

@@ -1,14 +1,13 @@
 """"Back up now" from the Web UI (backend/backup_job.py, routers/backup.py;
 PI-NODE-2B §4.2): the making only.
 
-- The account's password reaches the job in the child's environment alone,
-  with the database's login the lifespan dropped from this process's; this
-  process's own environment never holds it.
+- Nothing is typed (SEC-S5: the file is keyed on the node's own seed): the
+  job gets no password, by pipe, environment or argument, and the database's
+  login the lifespan dropped from this process's environment.
 - One job at a time; its progress lines become the state; a cancel is the
   child's stdin closing; an error is its own sentence.
-- The route takes the password through the credential box and the signed
-  door (a wrong one refused before any job), an account with no password
-  has nothing to key a backup on.
+- The route asks no password and no step-up (§14 Q9): it starts the job,
+  single-flight.
 - "Keep the newest" removes exactly the older files of the folder, real
   backup files alone.
 - No route of the app serves a file from the backup folder.
@@ -22,7 +21,6 @@ import os
 import sys
 import threading
 import time
-import types
 from pathlib import Path
 
 import pytest
@@ -39,9 +37,7 @@ from config import settings  # noqa: E402
 STAND_IN = r"""
 import json, os, sys
 seen = {k: os.environ.get(k) for k in ("SAUTIUM_BACKUP_PASSWORD", "POSTGRES_PASSWORD", "POSTGRES_USER", "P2P_PASSWORD")}
-typed = sys.stdin.readline().rstrip("\n")       # --password-stdin: the pipe's first line
-open(os.environ["STAND_IN_OUT"], "w").write(json.dumps(
-    {"env": seen, "argv": sys.argv[1:], "typed": typed, "environ": sorted(os.environ.values())}))
+open(os.environ["STAND_IN_OUT"], "w").write(json.dumps({"env": seen, "argv": sys.argv[1:]}))
 def say(**line):
     sys.stdout.write(json.dumps(line) + "\n"); sys.stdout.flush()
 say(phase="counting")
@@ -70,9 +66,6 @@ def job(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "backup_dir", str(folder))
     monkeypatch.setattr(settings, "postgres_user", "musicai")
     monkeypatch.setattr(settings, "postgres_password", "the database's")
-    monkeypatch.setattr(settings, "p2p_username", "")
-    monkeypatch.setattr(settings, "p2p_password", "")
-    monkeypatch.setattr(settings, "p2p_email", "")
     monkeypatch.setattr(backup_job, "_command", lambda: [sys.executable, str(script), "create"])
     monkeypatch.setattr(backup_job, "_wake", lambda: woken.append(1))
     monkeypatch.setattr(backup_job, "_proc", None)
@@ -95,50 +88,26 @@ def _ended(seconds: float = 20) -> dict:
     return backup_job.state()["job"]
 
 
-def test_the_password_goes_down_the_jobs_pipe_and_into_no_environment(job):
-    assert backup_job.start("the account's") is True
+def test_the_job_gets_no_password_and_the_databases_login(job):
+    assert backup_job.start() is True
     ended = _ended()
     assert ended["done"] == {"name": "sautium-backup-abc-2026-11-19.sbk", "size": 4000}
     assert ended["error"] is None and job.woken
     seen = json.loads(job.seen.read_text())
-    assert seen["typed"] == "the account's"
-    # No environment holds it — the child's is readable by the node's user while the child starts
     assert seen["env"] == {"SAUTIUM_BACKUP_PASSWORD": None, "POSTGRES_PASSWORD": "the database's",
                            "POSTGRES_USER": "musicai", "P2P_PASSWORD": None}
-    assert "the account's" not in seen["environ"] and "the account's" not in os.environ.values()
     assert "POSTGRES_PASSWORD" not in os.environ
-    # Nor the command line (the module's own, read from its source: the fixture's stands in for it here)
     assert seen["argv"] == ["create"]
     source = (BACKEND / "backup_job.py").read_text(encoding="utf-8")
-    assert '"create", "--password-stdin",' in source and '"--cancel-on-stdin"' in source
-    assert "--password-env" not in source
-
-
-def test_the_cli_reads_the_password_as_the_pipes_first_line(monkeypatch):
-    import io
-    backup = pytest.importorskip("backup")
-    args = types.SimpleNamespace(password_stdin=True, password_env=None)
-    monkeypatch.setattr(sys, "stdin", io.StringIO("the account's\ncancel\n"))
-    assert backup._password(args, prompt="") == "the account's"
-    assert sys.stdin.readline() == "cancel\n"                     # the rest is the cancel channel's
-    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
-    with pytest.raises(SystemExit, match="no password on standard input"):
-        backup._password(args, prompt="")
-
-
-def test_an_account_given_in_env_is_handed_to_the_job_too(job, monkeypatch):
-    monkeypatch.setattr(settings, "p2p_username", "owner")
-    monkeypatch.setattr(settings, "p2p_password", "the env account's")
-    env = backup_job._child_env()
-    assert (env["P2P_USERNAME"], env["P2P_PASSWORD"]) == ("owner", "the env account's")
-    assert "SAUTIUM_BACKUP_PASSWORD" not in env
-    assert "P2P_EMAIL" not in env
+    assert '"create", "--progress-json", "--cancel-on-stdin"' in source
+    assert "--password" not in source and "stdin.write" not in source
+    assert "p2p_password" not in source and "P2P_" not in source
 
 
 def test_one_job_at_a_time_and_a_cancel_is_the_pipes_end(job, monkeypatch):
     monkeypatch.setenv("STAND_IN_MODE", "wait")
-    assert backup_job.start("pw") is True
-    assert backup_job.start("pw") is False                       # a second tap: one is running
+    assert backup_job.start() is True
+    assert backup_job.start() is False                       # a second tap: one is running
     deadline = time.monotonic() + 20
     while backup_job.state()["job"]["phase"] != "dumping":
         assert time.monotonic() < deadline
@@ -149,14 +118,14 @@ def test_one_job_at_a_time_and_a_cancel_is_the_pipes_end(job, monkeypatch):
     ended = _ended()
     assert (ended["cancel_requested"], ended["error"], ended["done"]) == (True, None, None)
     assert backup_job.cancel() is False                          # nothing runs
-    assert backup_job.start("pw") is True                        # and the next one may
+    assert backup_job.start() is True                        # and the next one may
     backup_job.cancel()
     _ended()
 
 
 def test_a_job_that_fails_says_its_own_sentence(job, monkeypatch):
     monkeypatch.setenv("STAND_IN_MODE", "error")
-    backup_job.start("pw")
+    backup_job.start()
     ended = _ended()
     assert ended["error"].startswith("not enough space in /app/data/backup") and ended["done"] is None
 
@@ -191,7 +160,7 @@ def test_keep_the_newest_removes_exactly_the_older_backups(job, tmp_path):
 def test_nothing_is_removed_while_a_job_writes(job, monkeypatch):
     _backups(job.folder, 5)
     monkeypatch.setenv("STAND_IN_MODE", "wait")
-    backup_job.start("pw")
+    backup_job.start()
     with pytest.raises(RuntimeError, match="a backup is running"):
         backup_job.keep_newest()
     backup_job.cancel()
@@ -199,51 +168,33 @@ def test_nothing_is_removed_while_a_job_writes(job, monkeypatch):
     assert backup_job.state()["count"] == 5
 
 
-def test_the_route_asks_the_password_at_the_signed_door_before_any_job(job, monkeypatch):
-    import asyncio
-
-    import device_auth
+def test_the_route_starts_the_job_with_no_password_and_no_step_up(job, monkeypatch):
     from fastapi import HTTPException
     from routers import backup as backup_router
-    from routers.auth import StepUp
     started = []
-    monkeypatch.setattr(backup_job, "start", lambda password: started.append(password) or True)
-
-    async def refuse(password, pin):
-        raise device_auth.WrongPassword()
-    monkeypatch.setattr(device_auth, "step_up", refuse)
-
-    def ask(**given):
-        return asyncio.run(backup_router.post_backup(opened=(StepUp(**given), lambda body: body)))
+    monkeypatch.setattr(backup_job, "start", lambda: started.append(1) or True)
+    assert backup_router.post_backup()["job"] is not None and started == [1]
+    monkeypatch.setattr(backup_job, "start", lambda: False)
     with pytest.raises(HTTPException) as refused:
-        ask(password="a guess")
-    assert refused.value.status_code == 403 and refused.value.headers["X-Sautium-Auth-Error"] == "step-up"
-    assert started == []
-
-    async def vouch(password, pin):
-        return None
-    monkeypatch.setattr(device_auth, "step_up", vouch)
-    with pytest.raises(HTTPException) as refused:
-        ask(pin="ABCD-EFGH")                                     # the host's code: no password to key on
-    assert refused.value.status_code == 409 and "no password" in refused.value.detail and started == []
-    assert ask(password="the right one")["job"] is not None and started == ["the right one"]
-    monkeypatch.setattr(backup_job, "start", lambda password: False)
-    with pytest.raises(HTTPException) as refused:
-        ask(password="the right one")
+        backup_router.post_backup()
     assert refused.value.status_code == 409 and refused.value.detail == "A backup is running"
-
-
-def test_the_password_is_taken_only_through_the_box():
-    from routers import backup as backup_router
     source = (BACKEND / "routers" / "backup.py").read_text(encoding="utf-8")
-    assert "async def post_backup(opened=boxed(StepUp))" in source and "await step_up(req)" in source
+    assert "step_up" not in source and "boxed" not in source and "password" not in source
     posts = [r for r in backup_router.router.routes if "POST" in r.methods]
     assert sorted(r.path for r in posts) == ["/api/backup", "/api/backup/cancel", "/api/backup/keep-newest"]
 
 
+def test_the_page_asks_no_password_to_back_up():
+    shell = (BACKEND / "static" / "app-shell.js").read_text(encoding="utf-8")
+    sheet = shell[shell.index("function openBackupSheet()"):]
+    sheet = sheet[:sheet.index("\n  }\n")]
+    assert "fetch('/api/backup', { method: 'POST' })" in sheet
+    assert "askStepUp" not in sheet and "password" not in sheet.lower()
+
+
 def test_no_route_serves_a_file_from_the_backup_folder():
-    """The file holds the node's identity under the password's strength
-    alone: it leaves by a disk or a share, never by HTTP. Held three ways:
+    """The file holds the node's whole database: it leaves by a disk or a
+    share, never by HTTP. Held three ways:
     the folder is named by the backup's own modules alone; neither of them
     nor the routes builds a file or stream response; and the app's static
     mount is its own folder."""

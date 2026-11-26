@@ -57,9 +57,9 @@ IDENTITY_MISSING = (
     "or password before, the record of the identities it replaced comes back only with a copy "
     "of the folder or a backup; without it, what they signed is another author's here. It asks "
     "for the setup code, in setup_code.txt in that folder. Then restart Sautium;\n"
-    "•  or restore a backup (Settings & Tools › Backup & Restore), which is made only "
-    "for a node whose password you chose. It also replaces the database with the one in the "
-    "backup; the current one is kept beside it.\n"
+    "Once the identity is back, a backup of it (Settings & Tools › Backup & Restore) opens "
+    "and restores its database, the current one kept beside it; a backup never brings an "
+    "identity itself.\n"
     "Without a password you chose, only the copy of the folder brings it back.\n\n"
     "A new identity made here has no nickname or password: a browser signs in to it only "
     "through Open Web UI or a QR code here, and chat, friends, the invite code, support "
@@ -1278,20 +1278,20 @@ class LauncherApp(ctk.CTk):
             self._jobs.pop(kind, None)
             dispatch({"phase": "error", "message": f"could not start: {e}"})
 
-    def _create_backup(self, password: str):
+    def _create_backup(self):
         """Settings & Tools › Backup & Restore › Create backup…: the CLI on the backend
         interpreter, its events in the tab's row and on the progress line.
         The backend keeps serving — pg_dump reads a snapshot."""
         from desktop.backup_task import CliRun
-        self._run_cli("backup", CliRun.backup(self.service_manager, password, lambda _ev: None))
+        self._run_cli("backup", CliRun.backup(self.service_manager, lambda _ev: None))
 
-    def _merge_life(self, path: str, password: str):
+    def _merge_life(self, path: str):
         """Settings & Tools › Backup & Restore › Merge from backup…: `backup merge`
         on the backend interpreter — the keyed union of this account's life
         data out of another machine's backup. The backend keeps serving: the
         merge only adds rows and recomputes play stats from history."""
         from desktop.backup_task import CliRun
-        self._run_cli("merge", CliRun.merge(self.service_manager, path, password, lambda _ev: None))
+        self._run_cli("merge", CliRun.merge(self.service_manager, path, lambda _ev: None))
 
     def _export_plan(self, on_plan):
         """`export --plan` for the export dialog: how many albums each broad
@@ -1382,11 +1382,12 @@ class LauncherApp(ctk.CTk):
         return {kind: {"running": run.running, "last_event": run.last_event}
                 for kind, run in self._jobs.items()}
 
-    def _restore_from_backup(self, path, password, manifest):
-        """Settings & Tools › Backup & Restore: this node becomes the one in the backup.
-        The database is renamed under whoever holds a connection to it, so
-        everything that talks to it stops first — P2P, the backend — and
-        comes back on the restored database with the restored identity."""
+    def _restore_from_backup(self, path, manifest):
+        """Settings & Tools › Backup & Restore: this node's database becomes
+        the backup's — a backup of this node's identity, opened by the keys
+        it holds. The database is renamed under whoever holds a connection
+        to it, so everything that talks to it stops first — P2P, the backend
+        — and comes back on the restored database."""
         if any(run.running for run in self._jobs.values()):
             self._progress_text.configure(text="Wait for the running backup, export or import to finish")
             return
@@ -1398,7 +1399,6 @@ class LauncherApp(ctk.CTk):
             self.ui_call(lambda: self._progress_text.configure(text=msg))
 
         def _run():
-            from desktop import api_client as api_client_mod
             from desktop.restore import restore_launcher_node
             if self.p2p_manager:
                 try:
@@ -1410,8 +1410,7 @@ class LauncherApp(ctk.CTk):
             self.service_manager.stop_backend()
             failure = None
             try:
-                result = restore_launcher_node(path, password, config=self.config,
-                                               replace=True, identity=True,
+                result = restore_launcher_node(path, config=self.config, replace=True,
                                                progress=progress)
             except Exception as e:
                 logger.error(f"Restore failed: {e}", exc_info=True)
@@ -1419,9 +1418,6 @@ class LauncherApp(ctk.CTk):
                 self.ui_call(lambda: self._set_status("error", "Restore failed"))
                 self.ui_call(lambda: self._progress_text.configure(text=failure))
             else:
-                # The file may carry another node's .api_secret — re-read it
-                # before the first signed call to the restarted backend.
-                api_client_mod.forget_secret()
                 who = manifest["node"]["username"]
                 note = (f"Restored {who}'s node from {manifest['created_at'][:10]}"
                         + (" — the previous database is kept as sautium__previous"

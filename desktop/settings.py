@@ -2,9 +2,9 @@
 
 Two tabs. "General" holds the launcher-only settings (ports) and their own
 Save. "Backup & Restore" holds actions, not settings: the node backup and
-its restore (docs/design/BACKUP.md — the file lands on this machine, the
-password that keys it is typed here, and a restore replaces the database
-the backend serves) and the identity certificate transfer. AI provider,
+its restore (docs/design/BACKUP.md — the file lands on this machine, keyed
+on the node's own key, and a restore replaces the database the backend
+serves) and the identity certificate transfer. AI provider,
 HQPlayer connection and Last.fm scrobbling live in the Web UI, so there is
 one source of truth for each of them, not two parallel configs.
 """
@@ -51,8 +51,8 @@ class SettingsDialog(ctk.CTkToplevel):
         # the backup CLI (desktop/backup_task.py) as one job per KIND —
         # "backup", "merge", "export", "import" can overlap, each in its own row here
         # — and _restore_from_backup stops the services, replaces the
-        # database and identity, starts them again. This dialog collects
-        # the file and the password, hands over, and stays open: the button
+        # database, starts them again. This dialog collects the file, hands
+        # over, and stays open: the button
         # that started a job turns into its red Cancel and the row beneath it
         # shows the progress (the launcher's own scan button is the pattern).
         self.on_restore = on_restore
@@ -121,7 +121,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
         # Node backup: "Create backup…" runs the same CLI a Docker node's weekly
         # task runs (desktop/backup_task.py); the restore replaces the database
-        # and identity with the file's (desktop/restore.py).
+        # with the file's (desktop/restore.py).
         self._section(tab, "Node backup", first=True)
         self._backup_status = self._status(tab, self._backup_status_text())
         row = self._button_row(tab)
@@ -137,9 +137,10 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(row, text="Folder", width=80, command=lambda: self._open(backup_dir()),
                       fg_color="transparent", border_width=1).pack(side="left")
         self._hint(tab, (
-            "Database (without the MusicBrainz catalogue) and identity in one file, "
-            "encrypted with the account password. Restoring replaces this node's; "
-            "the current database is kept as sautium__previous."))
+            "Database (without the MusicBrainz catalogue) and identity documents in one file, "
+            "encrypted with this node's key: it opens on a node that holds this identity. "
+            "Restoring replaces this node's database; the current one is kept as "
+            "sautium__previous. The backup pauses while music plays."))
         self._rows["backup"].mount(tab)
 
         # Product C: what the owner did on another machine of the same account
@@ -281,17 +282,8 @@ class SettingsDialog(ctk.CTkToplevel):
     def _create_backup(self):
         if not self.on_backup:
             return
-
-        def ready(password: str):
-            self._started("backup")
-            self.on_backup(password)
-
-        from desktop.backup_task import backup_dir
-        PasswordDialog(
-            self, title="Create backup",
-            text=("The account password encrypts the file and opens it again on "
-                  f"restore. The backup pauses while music plays. Written to {backup_dir()}"),
-            on_ok=ready)
+        self._started("backup")
+        self.on_backup()
 
     def _export_share(self):
         if not self.on_export:
@@ -336,32 +328,22 @@ class SettingsDialog(ctk.CTkToplevel):
             return
         try:
             with open(chosen, "rb") as fp:
-                header, _ = nb.read_header(fp)
+                nb.read_header(fp)
         except (nb.BackupError, OSError) as e:
             self._states["merge"] = {"running": False,
                                      "last_event": {"phase": "error", "message": str(e)}}
             self._render_rows()
             return
-
-        def ready(password: str):
-            self._started("merge")
-            self.on_merge(chosen, password)
-
-        who, when = header["node"]["username"], (header.get("created_at") or "")[:10]
-        PasswordDialog(
-            self, title="Merge from backup",
-            text=(f"Backup of {who} from {when}. Its listens, sessions, friends, messages, chats, "
-                  "gear and preferences are added to this node — nothing here is replaced, and "
-                  "merging the same file twice changes nothing. The account password opens it."),
-            on_ok=ready)
+        self._started("merge")
+        self.on_merge(chosen)
 
     def _restore_from_backup(self):
         from desktop.restore import RestoreDialog
 
-        def ready(path, password, manifest):
+        def ready(path, manifest):
             self.destroy()
             if self.on_restore:
-                self.on_restore(path, password, manifest)
+                self.on_restore(path, manifest)
 
         RestoreDialog(self, on_ready=ready, confirm_replace=True)
 
@@ -504,44 +486,6 @@ class _JobRow:
             if last and last.get("size"):
                 return min(0.99, ev["bytes"] / last["size"])
         return None
-
-
-class PasswordDialog(ctk.CTkToplevel):
-    """A masked entry and two buttons; `on_ok(password)` on Enter or OK."""
-
-    def __init__(self, parent, *, title: str, text: str, on_ok: Callable[[str], None]):
-        super().__init__(parent)
-        self.title(title)
-        self.geometry("460x230")
-        self.resizable(False, False)
-        self.transient(parent)
-        self.grab_set()
-        self._on_ok = on_ok
-
-        ctk.CTkLabel(self, text=title, font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
-        ctk.CTkLabel(self, text=text, text_color="gray", justify="left",
-                     wraplength=410).pack(padx=24, anchor="w")
-        ctk.CTkLabel(self, text="Account password", anchor="w").pack(padx=24, anchor="w", pady=(10, 0))
-        self._entry = ctk.CTkEntry(self, show="*", width=410)
-        self._entry.pack(padx=24, pady=(2, 4))
-        self._entry.bind("<Return>", lambda _e: self._submit())
-        self._error = ctk.CTkLabel(self, text="", text_color="#ef4444")
-        self._error.pack(padx=24, anchor="w")
-
-        btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
-        ctk.CTkButton(btns, text="Start", width=120, command=self._submit).pack(side="right")
-        ctk.CTkButton(btns, text="Cancel", width=100, command=self.destroy,
-                      fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
-        self.after(100, self._entry.focus_set)
-
-    def _submit(self):
-        password = self._entry.get()
-        if not password:
-            self._error.configure(text="Type the account password")
-            return
-        self.destroy()
-        self._on_ok(password)
 
 
 _EXPORT_SCOPES = (("analysed", "Every album with audio analysis here"),

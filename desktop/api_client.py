@@ -198,12 +198,6 @@ def _secret_path() -> Path:
 _cached_secret: Optional[bytes] = None
 
 
-def forget_secret() -> None:
-    """After a restore wrote another node's .api_secret: the next request
-    reads the file again instead of signing with the retired value."""
-    global _cached_secret
-    _cached_secret = None
-
 def _load_secret() -> Optional[bytes]:
     """Read the HMAC secret, retrying briefly if the backend hasn't
     written it yet (startup race window). The host's own client's alone
