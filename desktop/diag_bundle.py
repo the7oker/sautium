@@ -206,7 +206,7 @@ def system_facts(sources: Sources, conn=None) -> dict:
         "backend": {
             "status": health.get("status"),
             "database": scrub_personal(str(database)) if database is not None else None,
-            "music_library_exists": (checks.get("music_library") or {}).get("exists"),
+            "music_folders": checks.get("music_library"),
             "dht": checks.get("dht"),
         },
         "ports": sources.config.get("ports"),

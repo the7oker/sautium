@@ -44,22 +44,21 @@ def _range_headers(start: int, end: int, total: int, mime: str) -> dict:
 def _serve_disk(path: str, mime: str, request: Request, library: bool = False):
     """Range-stream a file on disk (owned original, or a cached Opus
     transcode). `library`: the file is the library's own original — the only
-    kind that speaks for the music folder (a cache file says nothing about
-    it, nor does a row of a folder the library has left), and only when that
+    kind that speaks for its folder (a cache file says nothing about one,
+    nor does a row of a folder the library has left), and only when that
     changes what the notices show, never once per range request."""
-    from scanner import check_folder, folder_seen, of_music_folder
-    library = library and of_music_folder(path)
+    from scanner import check_folder, folder_of, folder_seen
+    folder = folder_of(path) if library else None
     try:
         total = os.path.getsize(path)
     except OSError:
-        # A missing file is the moment a dropped music mount becomes
-        # visible: the folder is looked at — not waited for — and the 404
-        # goes out at once.
-        if library:
-            check_folder()
+        # A missing file is the moment a dropped mount becomes visible: its
+        # folder is looked at — not waited for — and the 404 goes out at once.
+        if folder is not None:
+            check_folder(folder)
         raise HTTPException(status_code=404, detail="file missing on disk")
-    if library:
-        folder_seen(False)
+    if folder is not None:
+        folder_seen(folder, False)
     span = parse_byte_range(request.headers.get("range"), total)
     if span is UNSATISFIABLE:
         return _unsatisfiable(total)

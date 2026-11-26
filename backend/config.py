@@ -169,9 +169,10 @@ class Settings(BaseSettings):
     sautium_master: bool = False
     # The folders this node may read music from, colon-separated, each bound
     # read-only at its own host path by the console setup's compose override
-    # (library_root.py). Set, the owner chooses the library's folder under
-    # them in the Web UI and music_library_path is that stored choice; unset,
-    # the folder is the one MUSIC_LIBRARY_PATH names.
+    # (library_root.py). Set, the owner adds the library's folders under them
+    # in the Web UI (MUSIC_LIBRARY_PATH then names an empty folder); unset,
+    # the library's folders are the one MUSIC_LIBRARY_PATH names (a Docker
+    # node's .env) or those the launcher's window added.
     sautium_library_roots: str = ""
     # The labels of the roots that are disks themselves, as the setup read
     # them (a JSON object, root → label; library_root._root_labels)
@@ -264,23 +265,6 @@ class Settings(BaseSettings):
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
-    def library_db_root(self) -> str:
-        """The library root as media_files.file_path spells it: forward
-        slashes, no trailing separator — the prefix every stored path shares
-        (Docker stores the host path, the launcher the native one)."""
-        root = self.music_host_path or self.music_library_path or ""
-        return root.replace("\\", "/").rstrip("/")
-
-    @property
-    def music_library_exists(self) -> bool:
-        """Mounted and accessible? A dropped WSL drvfs mount raises OSError
-        (ENODEV/EIO), which Path.exists() re-raises instead of treating as
-        missing — catch it so /health degrades instead of 500-ing."""
-        try:
-            return Path(self.music_library_path).exists()
-        except OSError:
-            return False
-
     def translate_to_host_path(self, scanner_path: str) -> str:
         """Translate a scanner-visible path to a native OS path for DB storage.
 
@@ -332,9 +316,6 @@ class Settings(BaseSettings):
         ])
         if not has_provider:
             missing.append("AI provider (set ANTHROPIC_API_KEY, OPENAI_API_KEY, or CLAUDE_CODE_ENABLED)")
-
-        if not self.music_library_exists:
-            missing.append(f"MUSIC_LIBRARY_PATH (current: {self.music_library_path})")
 
         return missing
 

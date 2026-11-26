@@ -413,7 +413,8 @@ See:
   while a copy of the track is here (it moves to that copy). Since
   2026-11-24 a slot's way in is also read again when the folder its file
   lies in stops or starts answering (`scanner.gone_prefixes`, the process's
-  recorded observation; its change is the queue's event,
+  recorded observation — one look a folder of the library since
+  2026-11-26, LIBRARY-FOLDERS-1; its change is the queue's event,
   `PlaybackManager.reach_changed` — the slot the output sounds is read when
   the output leaves it), and a file that does not open here now — its
   folder not answering, its copy away, or the file itself not found by the
@@ -679,12 +680,35 @@ See:
   `COMPOSE_FILE`; `./host/` is bound into no container) binds each root —
   a folder named with `--music`, the automount's `/media/sautium` — read-only
   at its own host path, `rslave`, and lists them in `SAUTIUM_LIBRARY_ROOTS`;
-  the owner picks the library's folder under them in the Web UI (a row of
-  `library_roots`), and `MUSIC_LIBRARY_PATH` then names an empty folder. A
-  path a page names — the folder picked, a scan's scope — is resolved and
-  must stay under a root; under roots the scanner follows no link out of
-  them. An install whose `.env` names `MUSIC_LIBRARY_PATH` itself (made by
-  hand) keeps that line and gets no roots: its files keep their paths. A disk plugged in later is seen by a
+  the owner adds the library's folders under them in the Web UI, and
+  `MUSIC_LIBRARY_PATH` then names an empty folder. **The library is every
+  folder the person has given it, several at once** (since 2026-11-26,
+  LIBRARY-FOLDERS-1; before it one chosen folder, and a second disk's albums
+  read "away" while it was in): a row of `library_folders` a folder, its
+  `path` as `media_files.file_path` spells it and its identity (under the
+  disks' folder it carries the filesystem's UUID); added under the roots
+  here, in the launcher's window there (the OS's dialog: the route takes a
+  host-signed call alone), named in `.env` on a Docker node made by hand
+  (made sure of at every start); no folder inside another (the inner
+  refused, the outer takes them in). Each folder answers or not by its own
+  look (`scanner.folder_unreachable`); a scan walks the folders that answer
+  and names the others, and its judges — the Rescan's plan, "Scan for new"'s
+  set-aside, the yes's check — judge only what was walked: **away** is a file
+  a Rescan did not find where its folder answers, and a folder that does not
+  answer is **not connected** (its albums play as a phantom does, a warning
+  toast at its onset, its dimmed row in Settings › Library). A folder leaves
+  only by the owner's confirmed "Forget this disk and its albums", connected
+  or not — what only its files held goes, as every removal takes; listens and
+  a heard or analysed track stay. A disk plugged in that the library never had
+  is counted once a mount and offered for one tap (a toast's "Add to library",
+  the list's Add), never joined by itself; nothing of one passed over is
+  kept. The one folder of before became the first rows once
+  (`db_migrate`'s `library_folders_v1`; its leftovers under no folder are
+  "Elsewhere", forgotten by the owner). A path a page names — a folder
+  added, a scan's scope — is resolved and must stay under a root; under
+  roots the scanner follows no link out of them. An install whose `.env`
+  names `MUSIC_LIBRARY_PATH` itself (made by hand) keeps that line and gets
+  no roots: its files keep their paths. A disk plugged in later is seen by a
   `poll()` on the mount table (`backend/mount_watch.py`), never a timer. The
   setup never runs `sudo`: it prints root steps (lingering; the automount,
   not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
@@ -1000,7 +1024,7 @@ toast takes no pointer events and never blocks the user (see
 | File | Purpose |
 |------|---------|
 | `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release — never one older than the version HEAD's tree states, and none at all once the host agent is installed: then the release is the agent's, since 2026-11-25 —, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`; the automount's rule, unit and script, and the `/etc/fstab` line that mounts one music disk at the automount's own point for it, since 2026-11-24): standard library, never root, root steps printed and never run |
-| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type — or, since 2026-11-24, `ambivalent` / `unknown` for a volume no one filesystem is found on —, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
+| `backend/library_root.py` + `backend/mount_watch.py` | The library's folders (`library_folders`, several at once since 2026-11-26: given, added — the inner refused, the outer merged —, named; the roots, the boundary every named path is resolved against; the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —; a disk the library never had, counted once a mount and offered for one tap), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type — or, since 2026-11-24, `ambivalent` / `unknown` for a volume no one filesystem is found on —, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
 | `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
 | `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides, padded to a whole bucket both ways; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8); the new password's edge at every door (`check_new_password`), the time said once at a sign-in (`told_once`), the 140-bit pairing code nobody types |

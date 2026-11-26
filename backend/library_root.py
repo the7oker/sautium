@@ -1,19 +1,34 @@
-"""The library's folder as the owner's choice under mounted roots
-(PI-NODE-2B §4.3).
+"""The library's folders: every folder the person has given it, several at
+once (LIBRARY-FOLDERS-1, 2026-11-26; before it, one chosen folder —
+PI-NODE-2B §4.3).
 
-A node its console setup made is given ROOTS: the folders it may read music
-from — the folder the machine mounts music disks in (its automount, or the
-setup's line of /etc/fstab for one disk: the same point for a disk whoever
-mounts it), a folder named at setup — each bound into the container
-read-only at its own host path
-(`SAUTIUM_LIBRARY_ROOTS`, from the setup's compose override, which no
-container can write). The path the library stores is then the path an
-HQPlayer on the same machine opens, with no translation. Under those roots
-the owner picks the library's folder in the Web UI; the choice is a row
-(`library_roots`), and `settings.music_library_path` is that row for the life
-of the process (`apply`, `choose`). With no row the node has no music folder
-yet, which the scanner, the watcher and the notices already know as "not
-set".
+A folder is a row of `library_folders`, its `path` as media_files.file_path
+spells it: the prefix of every file it holds, and its identity. It is given
+three ways, by the kind of node (`kind`):
+
+- "pick" — a node its console setup made is given ROOTS: the folders it may
+  read music from — the folder the machine mounts music disks in (its
+  automount, or the setup's line of /etc/fstab for one disk: the same point
+  for a disk whoever mounts it, named by the filesystem's UUID), a folder
+  named at setup — each bound into the container read-only at its own host
+  path (`SAUTIUM_LIBRARY_ROOTS`, from the setup's compose override, which no
+  container can write). The path the library stores is then the path an
+  HQPlayer on the same machine opens, with no translation. The owner adds
+  folders under those roots in the Web UI (`add`); a disk plugged in that the
+  library never had is offered for one tap (`new_disks`), never joined by
+  itself;
+- "launcher" — the launcher's window adds them (the OS's own folder dialog,
+  the person at the machine: the route admits a host-signed call alone); its
+  one folder of before is the first row (db_migrate's library_folders_v1);
+- "setup" — a Docker node whose .env names its folder (MUSIC_LIBRARY_PATH
+  bound at /music, MUSIC_HOST_PATH the stored prefix): that folder, made sure
+  of at every start (`apply`); another is another bind in its compose file.
+
+No folder lies inside another: the one writer (`add`) refuses the inner and
+merges the outer, under a lock of the table. A folder leaves only by the
+owner's confirmed removal of what it alone held (scanner.plan_folder_removal,
+CLAUDE.md's retention rule). Whether a folder answers now is the process's
+look (scanner), never stored.
 
 The roots are the mount, and the mount is the boundary: everything a page
 names is resolved by the kernel's own view (`realpath`) and must stay under a
@@ -28,9 +43,6 @@ mounted (`.unread/`, `unread`): one small file a volume, written by the
 automount's script, whose label and filesystem type a stranger's disk chose.
 Each is read bounded, never through a link, and no path is built from what a
 file says.
-
-Every other node — a launcher's, a Docker node whose folder is named in .env
-— has no roots, and this module changes nothing there (`picks` is False).
 """
 
 import json
@@ -39,11 +51,12 @@ import os
 import re
 import shlex
 import stat
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from config import settings
-from db_pool import db_execute, db_query, db_query_one
+from db_pool import db_execute, db_query, db_query_one, transaction
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +118,18 @@ def roots() -> List[str]:
 
 
 def picks() -> bool:
-    """This node's owner chooses the library's folder in the Web UI."""
+    """This node's owner adds the library's folders in the Web UI, under
+    the roots its setup gave it."""
     return bool(roots())
+
+
+def kind() -> str:
+    """Who gives this node its folders: "pick" (the Web UI, under the
+    roots), "launcher" (the launcher's window), "setup" (the node's .env)."""
+    if picks():
+        return "pick"
+    from claude_code import is_launcher_mode
+    return "launcher" if is_launcher_mode() else "setup"
 
 
 def within(path: str) -> Optional[str]:
@@ -119,41 +142,120 @@ def within(path: str) -> Optional[str]:
     return None
 
 
-def chosen() -> Optional[str]:
-    """The folder the owner chose, as stored; None before any choice."""
-    row = db_query_one("SELECT mount, subpath FROM library_roots ORDER BY chosen_at DESC, id DESC LIMIT 1")
-    if row is None:
+def stored(path: str) -> str:
+    """A folder or a file as media_files.file_path spells it: forward
+    slashes, no trailing separator (the launcher's E:\\Music is E:/Music; a
+    Docker node of Windows or macOS stores its bind's host path)."""
+    return settings.translate_to_host_path(path).replace("\\", "/").rstrip("/") or "/"
+
+
+def local(path: str) -> str:
+    """A stored path as this process opens it."""
+    return settings.translate_to_local_path(path)
+
+
+def _key(path: str) -> str:
+    """A stored path as two are compared: Windows' names ignore case."""
+    return path.casefold() if os.name == "nt" else path
+
+
+def _under(path: str, folder: str) -> bool:
+    p, f = _key(path), _key(folder)
+    return p == f or p.startswith(f.rstrip("/") + "/")
+
+
+def env_folder() -> Optional[str]:
+    """The folder a setup node's .env names, stored form: MUSIC_HOST_PATH
+    where the node translates (a Docker node of Windows or macOS), else
+    MUSIC_LIBRARY_PATH. None on a node of another kind."""
+    if kind() != "setup" or not settings.music_library_path:
         return None
-    return row["mount"] if not row["subpath"] else f"{row['mount'].rstrip('/')}/{row['subpath']}"
+    named = (settings.music_host_path or settings.music_library_path).replace("\\", "/").rstrip("/")
+    return named or None
+
+
+# The table's rows as this process last read them. The backend is the one
+# writer (add, the forget's yes, the start's apply and its re-point), and each
+# write drops them (invalidate): a reader on the play path — a file served to a
+# renderer, a slot's way in — asks the database nothing.
+_rows: Optional[List[Dict[str, Any]]] = None
+_rows_lock = threading.Lock()
+
+
+def invalidate() -> None:
+    """The folders changed (a write of the table): read again at next use."""
+    global _rows
+    with _rows_lock:
+        _rows = None
+
+
+def given() -> List[Dict[str, Any]]:
+    """The library's folders, oldest first: {id, path, label}. On a setup
+    node the folder its .env names is one, row or not yet (the start writes
+    its row)."""
+    global _rows
+    with _rows_lock:
+        if _rows is None:
+            _rows = [dict(r) for r in db_query("SELECT id, path, label FROM library_folders ORDER BY added_at, id")]
+        rows = [dict(r) for r in _rows]
+    env = env_folder()
+    if env is not None and not any(_key(r["path"]) == _key(env) for r in rows):
+        rows.append({"id": None, "path": env, "label": None})
+    return rows
+
+
+def paths() -> List[str]:
+    return [f["path"] for f in given()]
+
+
+def folder_of(path: str, folders: Optional[List[str]] = None) -> Optional[str]:
+    """The folder (its stored path) a stored path lies in, None outside
+    every folder of the library."""
+    for folder in (paths() if folders is None else folders):
+        if _under(path, folder):
+            return folder
+    return None
+
+
+def folder_name(folder: Dict[str, Any]) -> str:
+    """A folder as a page and a log line name it: under the disks' folder
+    its disk's label and the folder beneath it (the mount point's own name
+    is a UUID), else its path."""
+    path = folder["path"]
+    for root in roots():
+        if _disks_folder(root) and _under(path, root) and path != root:
+            point, _, under = path[len(root.rstrip("/")) + 1:].partition("/")
+            disk = folder.get("label") or "USB disk"
+            return f"{disk} · {under}" if under else disk
+    return path
 
 
 def apply() -> None:
-    """At the node's start, after the migrations: the stored choice becomes
-    the library's folder. A disk the setup's old line mounted at a root of its
-    own, now mounted in the disks' folder, takes its files, copies, covers and
-    the choice along first (_follow_moved_disks), so its folder stays chosen.
-    Any other choice whose root is no longer mounted (the setup ran again with
-    other folders) is no folder: the Library row says "Not chosen" again, and
-    nothing stored is touched."""
+    """At the node's start, after the migrations. A setup node's .env folder
+    has its row; a disk the setup's old line mounted at a root of its own,
+    now mounted in the disks' folder, takes its files, copies, covers and
+    folder along (_follow_moved_disks). A folder under a root the node is
+    no longer given stays a folder of the library: not connected, its
+    albums listed, forgotten only by the owner. What each folder holds is
+    said."""
+    env = env_folder()
+    if env is not None:
+        db_execute("INSERT INTO library_folders (path) VALUES (%s) ON CONFLICT (path) DO NOTHING", (env,))
+    if picks():
+        _follow_moved_disks()
+    invalidate()
+    folders = given()
+    logger.info("music folders: %s%s", ", ".join(f["path"] for f in folders) or "none",
+                f" (roots: {', '.join(roots())})" if picks() else "")
     if not picks():
         return
-    _follow_moved_disks()
-    path = chosen()
-    if path is not None and within(path) is None:
-        logger.warning("the chosen music folder %s lies under no root this node is given now", path)
-        path = None
-    settings.music_library_path = path or ""
-    # A root is mounted at its own host path: what the library stores is what
-    # this process reads
-    settings.music_host_path = None
-    logger.info("music folder: %s (roots: %s)", path or "not chosen", ", ".join(roots()))
     mounts = _mounts()
     for root in roots():
         if not _gone(root, mounts):
             continue
         if _held(root):
             logger.warning("music root %s is empty: its disk is not mounted, or the folder was removed; "
-                           "its albums are away. Forget it on the machine: ./sautium roots --forget %s",
+                           "its albums are not connected. Forget it on the machine: ./sautium roots --forget %s",
                            root, shlex.quote(root))
         else:
             logger.info("music root %s is empty: nothing is in it yet", root)
@@ -164,8 +266,8 @@ def apply() -> None:
 # new place already (a scan read the disk there first): away, for the owner's
 # Away row (PI-NODE-2E Q5). The stat columns stay, so the start's scan finds
 # each file unchanged at its new path; no id changes, so tracks, analysis,
-# listens and the queue are untouched. A choice at the new place already is
-# the same place: one row, the newer choice.
+# listens and the queue are untouched. A folder at the new place already is
+# the same folder: one row, the earlier.
 _MOVE_SQL = """
     WITH moves AS (
         SELECT old, uuid, %(disks)s::text || '/' || uuid AS new
@@ -212,19 +314,14 @@ _MOVE_SQL = """
             OR (c.source_type = 'embedded'
                 AND starts_with(c.source_path, split_part(c.source_path, ':', 1) || ':' || m.old || '/'))),
     places AS (
-        SELECT r.id, r.chosen_at, s.subpath,
-               EXISTS (SELECT 1 FROM library_roots o WHERE o.mount = %(disks)s AND o.subpath = s.subpath) AS there
-          FROM library_roots r JOIN moves m ON r.mount = m.old
-         CROSS JOIN LATERAL (SELECT m.uuid || CASE WHEN r.subpath = '' THEN '' ELSE '/' || r.subpath END
-                                    AS subpath) s),
+        SELECT r.id, m.new || substr(r.path, length(m.old) + 1) AS path,
+               EXISTS (SELECT 1 FROM library_folders o
+                        WHERE o.path = m.new || substr(r.path, length(m.old) + 1)) AS there
+          FROM library_folders r JOIN moves m ON r.path = m.old OR starts_with(r.path, m.old || '/')),
     places_moved AS (
-        UPDATE library_roots r SET mount = %(disks)s, subpath = p.subpath
-          FROM places p WHERE r.id = p.id AND NOT p.there),
-    places_kept AS (
-        UPDATE library_roots o SET chosen_at = GREATEST(o.chosen_at, p.chosen_at)
-          FROM places p WHERE p.there AND o.mount = %(disks)s AND o.subpath = p.subpath),
+        UPDATE library_folders r SET path = p.path FROM places p WHERE r.id = p.id AND NOT p.there),
     places_dropped AS (
-        DELETE FROM library_roots r USING places p WHERE r.id = p.id AND p.there)
+        DELETE FROM library_folders r USING places p WHERE r.id = p.id AND p.there)
     SELECT m.old, m.new, count(f.old) AS files
       FROM moves m LEFT JOIN files f ON f.old = m.old
      GROUP BY m.old, m.new
@@ -232,49 +329,118 @@ _MOVE_SQL = """
 
 
 def _follow_moved_disks() -> None:
-    """A choice stored under an old-shape point that is no root now, while a
-    root is the folder disks are mounted in: the disk is mounted there, at
-    its UUID (the move block of PI-NODE-2D, then `roots --forget`), and every
+    """A folder under an old-shape point that is no root now, while a root
+    is the folder disks are mounted in: the disk is mounted there, at its
+    UUID (the move block of PI-NODE-2D, then `roots --forget`), and every
     path stored under the old point is rewritten to the new one. Nothing is
-    read from the disk, so a disk that is out moves too — its copy is then
-    "not connected", which is true. A second start finds no choice under the
-    old point: nothing to do."""
+    read from the disk, so a disk that is out moves too — its folder is
+    then "not connected", which is true. A second start finds no folder
+    under the old point: nothing to do."""
     disks = next((root for root in roots() if _disks_folder(root)), None)
     if disks is None:
         return
-    given = roots()
-    moves = {row["mount"]: match.group(1)
-             for row in db_query("SELECT DISTINCT mount FROM library_roots")
-             for match in [OLD_BOOT_MOUNT_POINT.fullmatch(row["mount"])]
-             if match and row["mount"] not in given}
+    given_roots = roots()
+    moves = {}
+    for row in db_query("SELECT path FROM library_folders"):
+        match = OLD_BOOT_MOUNT_POINT.match(row["path"])
+        if match and row["path"][match.end():][:1] in ("", "/") and match.group(0) not in given_roots:
+            moves[match.group(0)] = match.group(1)
     if not moves:
         return
     for row in db_query(_MOVE_SQL, {"olds": list(moves), "uuids": list(moves.values()), "disks": disks}):
         logger.info("music folder moved with its disk: %d files from %s to %s", row["files"], row["old"], row["new"])
 
 
-def choose(path: str) -> str:
-    """The owner's choice: stored, and the library's folder from now on. The
-    caller re-arms the folder watcher and asks for a scan; what the library
-    held under another folder stays until a Rescan's question."""
-    if not picks():
+def standing(path: str) -> Dict[str, Any]:
+    """Where a folder a page is about to add stands against the library:
+    `inside` — the name of the folder it lies in (it is read already),
+    `holds` — the names of the folders it would take in."""
+    real = stored(path)
+    rows = [r for r in given() if r["id"] is not None]
+    inside = next((r for r in rows if _under(real, r["path"])), None)
+    holds = [r for r in rows if _under(r["path"], real) and _key(r["path"]) != _key(real)]
+    return {"inside": folder_name(inside) if inside else None, "holds": [folder_name(r) for r in holds]}
+
+
+def _admitted(path: str) -> str:
+    """The real folder a request names, if this node may add it; else
+    Refused, in words for the page."""
+    k = kind()
+    if k == "setup":
         raise Refused("This node's music folder is named where the node was set up")
-    real = within(path)
-    if real is None or not os.path.isdir(real):
+    if k == "pick":
+        real = within(path)
+        if real is None or not os.path.isdir(real):
+            raise Refused("That folder is not one this node may read")
+        if any(real == root and _disks_folder(root) for root in roots()):
+            # where disks appear, not a folder of music: adding it would join every stick by itself
+            raise Refused("That is where disks appear, not a folder of music: add a disk, or a folder on one")
+        return real
+    if not os.path.isabs(path):
         raise Refused("That folder is not one this node may read")
-    mount = next(r for r in roots() if real == r or real.startswith(r.rstrip("/") + "/"))
-    subpath = real[len(mount):].strip("/")
-    # The newest choice is the folder (chosen): later than every stored one
-    # whatever the clock says — a board with no battery starts in the past
-    # until the network sets its time.
-    db_execute("""
-        INSERT INTO library_roots (mount, subpath, chosen_at)
-        SELECT %s, %s, GREATEST(now(), COALESCE(max(chosen_at) + interval '1 microsecond', now()))
-        FROM library_roots
-        ON CONFLICT (mount, subpath) DO UPDATE SET chosen_at = EXCLUDED.chosen_at""", (mount, subpath))
-    settings.music_library_path = real
-    logger.info("music folder chosen: %s", real)
+    real = os.path.realpath(path)
+    if not os.path.isdir(real):
+        raise Refused("That folder is not one this node may read")
     return real
+
+
+_write = threading.Lock()
+
+
+def add(path: str) -> Dict[str, Any]:
+    """The owner gives the library a folder: stored, its disk's label read.
+    A folder inside one of the library's is refused (it is read already); one
+    that holds folders of the library takes them in (their rows go, their
+    files' paths are absolute and stay). Checked and written under a lock of
+    the table. Returns {folder, merged}. The caller arms the folder's watch
+    and queues its scan."""
+    real = _admitted(path)
+    folder = stored(real)
+    label = _label_of(real)
+    with _write, transaction() as cur:
+        cur.execute("LOCK TABLE library_folders IN SHARE ROW EXCLUSIVE MODE")
+        cur.execute("SELECT id, path, label FROM library_folders")
+        rows = [dict(zip(("id", "path", "label"), r)) for r in cur.fetchall()]
+        inside = next((r for r in rows if _under(folder, r["path"])), None)
+        if inside is not None:
+            raise Refused(f"It is already in your library, as part of {folder_name(inside)}.")
+        merged = [r for r in rows if _under(r["path"], folder)]
+        if merged:
+            cur.execute("DELETE FROM library_folders WHERE id = ANY(%s)", ([r["id"] for r in merged],))
+        cur.execute("INSERT INTO library_folders (path, label) VALUES (%s, %s) RETURNING id, path, label",
+                    (folder, label))
+        row = dict(zip(("id", "path", "label"), cur.fetchone()))
+    invalidate()
+    logger.info("music folder added: %s%s", folder,
+                f" (it takes in {', '.join(r['path'] for r in merged)})" if merged else "")
+    return {"folder": row, "merged": [r["path"] for r in merged]}
+
+
+def _label_of(real: str) -> Optional[str]:
+    """The label of the disk `real` lies on: in the disks' folder its
+    automount's (or the setup block's) word, a root that is a disk itself
+    the setup's."""
+    for root in roots():
+        if _disks_folder(root) and real.startswith(root.rstrip("/") + "/"):
+            return _label(root, real[len(root.rstrip("/")) + 1:].split("/", 1)[0])
+        if real == root or real.startswith(root.rstrip("/") + "/"):
+            return _root_labels().get(root)
+    return None
+
+
+def refresh_labels() -> None:
+    """A disk plugged in: its folders' rows take the label it carries now
+    (renamed on another computer); a disk out keeps the one last read."""
+    for folder in given():
+        if folder["id"] is None:
+            continue
+        real = local(folder["path"])
+        if not os.path.isdir(real):
+            continue
+        label = _label_of(real)
+        if label is not None and label != folder["label"]:
+            db_execute("UPDATE library_folders SET label = %s WHERE id = %s", (label, folder["id"]))
+            invalidate()
 
 
 def _read_small(path: str, most: int) -> Optional[tuple]:
@@ -500,43 +666,53 @@ def _count_audio(folder: str) -> Dict[str, Any]:
     return {"audio_files": files, "capped": bool(stack) or seen >= COUNT_ENTRIES_MAX}
 
 
-def folders(under: Optional[str] = None) -> Dict[str, Any]:
-    """The picker's listing. With no `under`: where a choice can start — each
-    root that is a folder of music itself (`empty` where nothing is in it,
-    and then `held`: the library holds copies from it, so its disk is out or
-    the folder was removed — else it is new), each disk mounted beneath a
-    root (the disks' folder) or as a root, with its label and size — and,
-    last, each volume plugged in that nothing mounted (kind "unread": no
-    path, a row to read, never to open). With `under`: that folder's own
-    folders, its audio count, the way back up, and the disk it lies on
-    (`disk`: its path, label and size; None under a folder named at setup) —
-    what a page names the place by, where the path holds a UUID."""
+def places(under: Optional[str] = None) -> Dict[str, Any]:
+    """The folder sheet's listing. With no `under`: where an added folder
+    can start — each root that is a folder of music itself (`empty` where
+    nothing is in it, and then `held`: the library holds copies from it, so
+    its disk is out or the folder was removed — else it is new), each disk
+    mounted beneath a root (the disks' folder) or as a root, with its label
+    and size — and, last, each volume plugged in that nothing mounted (kind
+    "unread": no path, a row to read, never to open). Each place says the
+    folder of the library it is or lies in (`in_library`). With `under`:
+    that folder's own folders, its audio count, the way back up, the disk
+    it lies on (`disk`: its path, label and size; None under a folder named
+    at setup) — what a page names the place by, where the path holds a UUID
+    — and where it stands against the library (`standing`: the folder it
+    lies in, the folders it would take in)."""
     if not picks():
-        raise Refused("This node's music folder is named where the node was set up")
+        raise Refused("This node's music folders are not added here")
     if under is None:
         mounts = _mounts()
         labels = _root_labels()
         points = _disk_points(mounts)
-        places = []
+        folders_ = given()
+        places_ = []
+
+        def in_library(path):
+            inside = next((f for f in folders_ if _under(path, f["path"])), None)
+            return folder_name(inside) if inside else None
         for root in roots():
             if not os.path.isdir(root):
                 continue
             if root in mounts or _disks_folder(root):
-                places.extend({"path": path, "name": name or path, "kind": "disk",
-                               "label": _label(root, name) if name else labels.get(path),
-                               "size_bytes": _size(path), "read_only": mounts[path]}
-                              for path, of, name in points if of == root)
+                places_.extend({"path": path, "name": point or path, "kind": "disk",
+                                "label": _label(root, point) if point else labels.get(path),
+                                "size_bytes": _size(path), "read_only": mounts[path],
+                                "in_library": in_library(path)}
+                               for path, of, point in points if of == root)
             else:
                 # a folder named at setup: itself the place
                 empty = _gone(root, mounts)
-                places.append({"path": root, "name": root, "kind": "folder", "label": None,
-                               "size_bytes": None, "empty": empty, "held": _held(root) if empty else None})
+                places_.append({"path": root, "name": root, "kind": "folder", "label": None,
+                                "size_bytes": None, "empty": empty, "held": _held(root) if empty else None,
+                                "in_library": in_library(root)})
         # A volume nothing mounted is a place that cannot be opened: no path
-        places.extend({"path": None, "name": volume["device"], "kind": "unread", "label": volume["label"],
-                       "size_bytes": None, "format": volume["format"], "mounts": volume["mounts"],
-                       "driver": volume["driver"], "unclear": volume["unclear"]}
-                      for volume in unread())
-        return {"under": None, "places": places, "chosen": settings.music_library_path or None}
+        places_.extend({"path": None, "name": volume["device"], "kind": "unread", "label": volume["label"],
+                        "size_bytes": None, "format": volume["format"], "mounts": volume["mounts"],
+                        "driver": volume["driver"], "unclear": volume["unclear"]}
+                       for volume in unread())
+        return {"under": None, "places": places_}
     real = within(under)
     if real is None or not os.path.isdir(real):
         raise Refused("That folder is not one this node may read")
@@ -547,15 +723,79 @@ def folders(under: Optional[str] = None) -> Dict[str, Any]:
         raise Refused(f"That folder could not be read ({e.strerror or e})")
     # Up from a root, or from a disk in the disks' folder, is the list of places
     top = real in roots() or (parent in roots() and _disks_folder(parent))
-    on = next(((path, root, name) for path, root, name in _disk_points(_mounts())
+    on = next(((path, root, point) for path, root, point in _disk_points(_mounts())
                if real == path or real.startswith(path.rstrip("/") + "/")), None)
     return {"under": real,
             "parent": None if top else parent,
             "disk": on and {"path": on[0], "name": on[2], "size_bytes": _size(on[0]),
                             "label": _label(on[1], on[2]) if on[2] else _root_labels().get(on[0])},
-            "folders": [{"name": name, "path": os.path.join(real, name)} for name in names],
-            "chosen": settings.music_library_path or None,
+            "folders": [{"name": n, "path": os.path.join(real, n)} for n in names],
+            "standing": standing(real),
             **_count_audio(real)}
+
+
+# A disk plugged in that the library never had (LIBRARY-FOLDERS-1 §3.2): its
+# audio counted once a mount — keyed by the point and the device the mount
+# gave it, so a disk plugged in again is counted afresh — on the mount
+# watch's own thread, never on a page's read.
+_counted: Dict[tuple, Dict[str, Any]] = {}
+_counted_lock = threading.Lock()
+
+
+def _device(path: str) -> Optional[int]:
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
+
+
+def _new_points() -> List[tuple]:
+    """(path, root, point) of each disk mounted in the disks' folder that is
+    no folder of the library, lies in none and holds none."""
+    folders_ = paths()
+    return [(path, root, point) for path, root, point in _disk_points(_mounts())
+            if point is not None and not any(_under(path, f) or _under(f, path) for f in folders_)]
+
+
+def count_new_disks() -> bool:
+    """Count the audio of every disk plugged in that the library never had,
+    once a mount. Returns whether a count changed what new_disks says."""
+    if not picks():
+        return False
+    changed = False
+    points = _new_points()
+    keys = {(path, _device(path)) for path, _root, _point in points}
+    for path, _root, _point in points:
+        key = (path, _device(path))
+        with _counted_lock:
+            if key in _counted:
+                continue
+        count = _count_audio(path)
+        with _counted_lock:
+            _counted[key] = count
+        changed = changed or count["audio_files"] > 0
+    with _counted_lock:
+        for key in [k for k in _counted if k not in keys]:
+            changed = changed or _counted.pop(key)["audio_files"] > 0
+    return changed
+
+
+def new_disks() -> List[Dict[str, Any]]:
+    """The disks plugged in that the library never had and that hold music
+    (the counts count_new_disks made): {path, uuid, label, size_bytes,
+    audio_files, capped}. A disk with no audio file is not offered: a stick
+    of documents says nothing. Nothing of a disk passed over is stored — it
+    is offered again at its next plug (the owner, Q8)."""
+    if not picks():
+        return []
+    found = []
+    for path, root, point in _new_points():
+        with _counted_lock:
+            count = _counted.get((path, _device(path)))
+        if count and count["audio_files"]:
+            found.append({"path": path, "uuid": point, "label": _label(root, point),
+                          "size_bytes": _size(path), **count})
+    return found
 
 
 def _disks_folder(root: str) -> bool:

@@ -22,7 +22,7 @@ from discography import (ALBUM_SORT_EXPR, fetch_new_albums, phantom_sort,
 from genre_queries import artist_genres
 from release_groups import collapse_to_groups
 from playback.manager import active_hqp_endpoint
-from sql_queries import ARTIST_COMPOSER_ONLY, HERE, best_rip_order, owned_rank
+from sql_queries import ARTIST_COMPOSER_ONLY, HERE, album_away, best_rip_order, owned_rank
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +228,14 @@ def _fmt_added(added_at) -> str:
         return f"{days // 30}mo ago"
     return f"{days // 365}y ago"
 
+
+
+
+def _gone() -> list:
+    """The folders that do not answer now (scanner.gone_prefixes): what an
+    album tile's mark reads."""
+    from scanner import gone_prefixes
+    return gone_prefixes()
 
 @router.get("/{artist_id}")
 def get_artist(
@@ -504,7 +512,9 @@ def get_artist(
                  ELSE 3
                END AS role_priority,
                m.time_listened_seconds,
-               m.popularity
+               m.popularity,
+               -- his album none of whose files opens here now: the tile's mark (B-152)
+               {album_away('al.id')} AS not_here
         FROM albums al
         JOIN album_variants av ON av.album_id = al.id
         JOIN owned_files mf ON mf.album_variant_id = av.id
@@ -523,7 +533,7 @@ def get_artist(
         GROUP BY al.id, al.title, al.musicbrainz_id, al.release_year, al.created_at,
                  al.cover_url, m.time_listened_seconds, m.popularity
         ORDER BY role_priority, {sort_expr}
-    """, {"id": artist_id, "album_ids": album_ids})
+    """, {"id": artist_id, "album_ids": album_ids, "gone": _gone()})
 
     # Whether ListenBrainz ranked anything here — read before the raw
     # metric columns are dropped below; feeds the credit line.

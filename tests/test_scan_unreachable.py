@@ -1,6 +1,7 @@
 """A scan never reports a walk over an unreachable music folder as a scan
-(scanner.library_unreachable — the rule the library.mount_missing notice and
-the prune read): every entry point refuses it and wakes the notices, a walk
+(scanner.folder_unreachable — the rule a folder's library.folder_out notice
+and the prune read, one folder at a time since LIBRARY-FOLDERS-1): every
+entry point refuses it and wakes the notices, a walk
 that found nothing records nothing, and a prune deletes nothing from a
 partial tree — the folder gone, or a subfolder the walk could not read. On
 2026-10-09 a Docker bind that came up on an empty directory turned "Scan for
@@ -59,19 +60,20 @@ def cur(scratch_dsn, monkeypatch):
     engine = database.make_engine(scratch_dsn)
     monkeypatch.setattr(database, "SessionLocal",
                         sessionmaker(autocommit=False, autoflush=False, bind=engine))
-    # The notice's onset and the folder's state are process state: each test
-    # starts with none armed and the folder answering, once the look worker
-    # is idle — a look still running would land in this test.
+    # The notice's onset and each folder's state are process state: each test
+    # starts with none armed and every folder answering, once the look
+    # workers are idle — a look still running would land in this test.
     assert _wait_until(_worker_idle)
     monkeypatch.setattr(settings_router, "_derived_since", {})
-    for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0),
-                        ("_look_given_up", False), ("_look_wakes_wanted", False)):
-        monkeypatch.setattr(scanner, name, value)
+    monkeypatch.setattr(scanner, "_looks", {})
     conn = psycopg2.connect(scratch_dsn)
     conn.autocommit = True
     with conn.cursor() as c:
-        for table in ("user_settings", "media_files", "album_variants", "albums", "tracks"):
+        for table in ("user_settings", "media_files", "album_variants", "albums", "tracks",
+                      "library_folders"):
             c.execute(f"DELETE FROM {table}")
+        import library_root
+        library_root.invalidate()
         yield c
     assert _wait_until(_worker_idle)
     conn.close()
@@ -80,7 +82,13 @@ def cur(scratch_dsn, monkeypatch):
 
 
 def _worker_idle():
-    return not scanner._looking and not scanner._look_wanted
+    return all(not look.looking and not look.wanted for look in list(scanner._looks.values()))
+
+
+def _look():
+    """The one folder's state (the module's library: the folder its .env names)."""
+    from config import settings
+    return scanner._look_of(settings.music_host_path)
 
 
 @pytest.fixture
@@ -134,20 +142,21 @@ def test_a_folder_that_is_gone_is_refused_as_unreachable_not_reported_as_a_faile
     assert _last_scan(cur) is None
 
 
-def test_a_folder_that_never_was_is_still_a_wrong_setting(cur, library):
-    library.rmdir()                      # nothing catalogued: no library to be away
-    with pytest.raises(ValueError, match="does not exist"):
-        scanner.LibraryScanner()
-
-
-def test_a_picked_folder_gone_before_its_first_file_is_away_not_a_wrong_setting(cur, library, monkeypatch):
-    """On a node whose owner picks the folder under mounted roots, the folder
-    is a choice, never a setting to get wrong: its disk pulled before any file
-    was read is the unreachable library too."""
-    import library_root
-    monkeypatch.setattr(library_root, "picks", lambda: True)
-    library.rmdir()
+def test_a_folder_that_is_not_there_is_not_connected_whatever_it_held(cur, library):
+    """A folder of the library whose path is not there — its disk pulled
+    before any file was read, a folder named and never made — is not
+    connected: refused like a folder that lost its music, never walked as
+    an empty tree (LIBRARY-FOLDERS-1: a folder is something the person
+    gave, never a setting to get wrong)."""
+    library.rmdir()                      # nothing catalogued
     with pytest.raises(scanner.LibraryUnreachable):
+        scanner.LibraryScanner().scan_and_import()
+
+
+def test_a_scanner_with_no_folder_refuses_rather_than_walk_where_it_stands(cur, library, monkeypatch):
+    from config import settings
+    monkeypatch.setattr(settings, "music_library_path", "")
+    with pytest.raises(ValueError, match="No music folder is chosen"):
         scanner.LibraryScanner()
 
 
@@ -155,7 +164,7 @@ def _owned_file(cur, album="Solar Fields/Shaped By Time", name="01.flac"):
     """A catalogued file with a track of its own; a second name in the same
     folder joins that folder's copy (one album, one variant)."""
     from config import settings
-    album_dir = f"{settings.library_db_root()}/{album}"
+    album_dir = f"{settings.music_host_path}/{album}"
     track = str(uuid.uuid4())
     cur.execute("INSERT INTO tracks (id, title) VALUES (%s, 'Silent Walking')", (track,))
     cur.execute("SELECT id FROM album_variants WHERE directory_path = %s", (album_dir,))
@@ -179,20 +188,21 @@ def _last_scan(cur):
 def test_an_empty_folder_is_unreachable_only_while_the_catalog_knows_files(
         cur, library, monkeypatch):
     from config import settings
-    assert not scanner.library_unreachable()      # a fresh node's empty folder
+    folder = settings.music_host_path
+    assert not scanner.folder_unreachable(folder)      # a fresh node's empty folder
 
     _owned_file(cur)
-    assert scanner.library_unreachable()
+    assert scanner.folder_unreachable(folder)
 
     (library / "Electronic").mkdir()
-    assert not scanner.library_unreachable()
+    assert not scanner.folder_unreachable(folder)
 
     library.joinpath("Electronic").rmdir()
-    library.rmdir()                               # the drive itself gone
-    assert scanner.library_unreachable()
+    library.rmdir()                                    # the drive itself gone
+    assert scanner.folder_unreachable(folder)
 
     monkeypatch.setattr(settings, "music_library_path", "")
-    assert not scanner.library_unreachable()      # no folder chosen yet is not "unmounted"
+    assert scanner.look_all() == {}                    # no folder yet: nothing to be "unmounted"
 
 
 def test_the_notice_names_the_folder_the_owner_knows(cur, library):
@@ -200,9 +210,12 @@ def test_the_notice_names_the_folder_the_owner_knows(cur, library):
 
     notice = {n["key"]: n for n in settings_router._notices_state()["items"]}
 
-    # the host's name for the folder, never the path the node walks
-    assert notice["library.mount_missing"]["data"]["path"] == (
-        library.parent / "host" / "Music").as_posix()
+    # the host's name for the folder, never the path the node walks; a
+    # warning, its standing state the folder's row (LIBRARY-FOLDERS-1 Q9)
+    out = notice["library.folder_out.env"]
+    assert out["kind"] == "warning"
+    assert out["data"]["name"] == (library.parent / "host" / "Music").as_posix()
+    assert out["data"]["albums"] == 1
 
 
 def _keys():
@@ -212,7 +225,7 @@ def _keys():
 def test_the_notices_look_and_never_wake_the_channel(cur, library, heard):
     _owned_file(cur)                              # the folder is empty
 
-    assert "library.mount_missing" in _keys()     # the derivation looked
+    assert "library.folder_out.env" in _keys()    # the derivation looked
     assert heard(timeout=0.5) == []               # and woke nobody: on a flapping share it
                                                   # would wake itself without end
 
@@ -240,8 +253,8 @@ def test_a_look_a_dead_mount_holds_reads_as_unreachable_and_holds_no_reader(
     release, blocked = _hang_the_folder(monkeypatch, library)   # ...and stops answering
     try:
         t = time.monotonic()
-        assert "library.mount_missing" in _keys()  # a look stuck past patience: a dead mount
-        assert "library.mount_missing" in _keys()  # the next reader does not wait again
+        assert "library.folder_out.env" in _keys()  # a look stuck past patience: a dead mount
+        assert "library.folder_out.env" in _keys()  # the next reader does not wait again
         assert time.monotonic() - t < 2
         assert blocked.is_set()
     finally:
@@ -249,7 +262,7 @@ def test_a_look_a_dead_mount_holds_reads_as_unreachable_and_holds_no_reader(
     # the look answers after all — a disk spinning up, not a dead mount: the
     # tabs that read "unreachable" on its behalf are woken
     assert heard() == ["sautium_notices"]
-    assert "library.mount_missing" not in _keys()
+    assert "library.folder_out.env" not in _keys()
 
 
 def _wait_until(pred, timeout=5.0):
@@ -264,15 +277,17 @@ def _wait_until(pred, timeout=5.0):
 def test_an_older_look_that_lands_late_records_nothing(cur, library, monkeypatch):
     _owned_file(cur)                              # the folder is empty: a look says gone
     release, blocked = _hang_the_folder(monkeypatch, library)
-    old = threading.Thread(target=scanner.library_unreachable, kwargs={"wake": False})
+    from config import settings
+    old = threading.Thread(target=scanner.folder_unreachable, args=(settings.music_host_path,),
+                           kwargs={"wake": False})
     old.start()
     assert blocked.wait(5)
 
-    scanner.folder_seen(False)                    # a newer word: a library file served
+    scanner.folder_seen(settings.music_host_path, False)   # a newer word: a library file served
     release.set()
     old.join(5)
 
-    assert scanner._folder_unreachable is False   # the stale "gone" landed last and lost
+    assert _look().unreachable is False           # the stale "gone" landed last and lost
 
 
 class _NoRange:
@@ -303,17 +318,18 @@ def test_only_the_librarys_own_files_speak_for_the_folder(cur, library, tmp_path
     media._serve_disk(owned, "audio/flac", _NoRange(), library=True)
     assert heard(timeout=0.5) == []               # never once per request
 
-    # A row of a folder the library has left (another one picked, its rows
-    # there until a Rescan): served, it does not say this folder answers
+    # A row under no folder of the library (one forgotten since): served,
+    # it does not say any folder answers
     for f in (library / "A").iterdir():
         f.unlink()
     (library / "A").rmdir()
-    assert scanner.library_unreachable() and heard() == ["sautium_notices"]
+    from config import settings
+    assert scanner.folder_unreachable(settings.music_host_path) and heard() == ["sautium_notices"]
     elsewhere = tmp_path / "old-library" / "01.flac"
     elsewhere.parent.mkdir()
     elsewhere.write_bytes(b"x" * 16)
     media._serve_disk(str(elsewhere), "audio/flac", _NoRange(), library=True)
-    assert heard(timeout=0.5) == [] and scanner._folder_unreachable is True
+    assert heard(timeout=0.5) == [] and _look().unreachable is True
 
 
 def test_opening_the_library_looks_and_wakes_the_notices_on_a_change(
@@ -365,7 +381,7 @@ def backend_here(main_module, monkeypatch):
             if u.path == "/scan/start":
                 return asyncio.run(main_module.scan_start(
                     skip_existing=q.get("skip_existing", "true") == "true",
-                    subpath=q.get("subpath"), prune=q.get("prune") == "true"))
+                    scope=q.get("scope"), prune=q.get("prune") == "true"))
             if u.path == "/scan/status":
                 return asyncio.run(main_module.scan_status())
             if u.path == "/scan/prune":
@@ -529,7 +545,7 @@ def test_a_folder_with_an_entry_it_cannot_type_is_left_out_whole(library, monkey
     monkeypatch.setattr(os, "scandir",
                         lambda path=".": Listing(path) if os.fspath(path) == str(album) else real(path))
 
-    audio, cues, unread = scanner.LibraryScanner().find_audio_files()
+    audio, cues, unread = scanner.LibraryScanner(str(library)).find_audio_files()
 
     # never the image without its cue: imported whole, it would supersede its slices
     assert (audio, cues, unread) == ([], [], [str(album)])
@@ -629,8 +645,14 @@ def test_the_away_count_says_the_copies_and_the_albums_no_other_copy_holds(cur, 
                 (album, kept.replace("(CD)", "(Vinyl)")))
     cur.execute("INSERT INTO media_files (track_id, album_variant_id, file_path) VALUES (%s, %s, %s)",
                 (track, cur.fetchone()[0], kept.replace("(CD)", "(Vinyl)") + "/01.flac"))
+    (library / "Kept").mkdir()                    # the folder answers
 
-    assert asyncio.run(settings_router._library_state())["away"] == {"copies": 2, "albums": 1}
+    assert asyncio.run(settings_router._library_state())["away"] == {"copies": 2, "albums": 1, "waiting": 0}
+    # its disk pulled: the copies away wait for it — their removal could not see them still missing
+    (library / "Kept").rmdir()
+    from config import settings
+    scanner.check_folder(settings.music_host_path, wait=True)      # the look the pull wakes
+    assert asyncio.run(settings_router._library_state())["away"] == {"copies": 2, "albums": 1, "waiting": 2}
 
 
 def test_the_plan_names_what_the_removal_would_delete_and_deletes_nothing(
@@ -650,7 +672,7 @@ def test_the_plan_names_what_the_removal_would_delete_and_deletes_nothing(
     lib = asyncio.run(settings_router._library_state())
     assert lib["scan"]["prune_plan"] == {"id": plan["id"], "kind": "rescan", **plan["counts"]}
     assert asyncio.run(main_module.scan_status())["prune_plan"] == lib["scan"]["prune_plan"]
-    assert lib["away"] == {"albums": 1, "copies": 1}
+    assert lib["away"] == {"albums": 1, "copies": 1, "waiting": 0}
     cur.execute("SELECT count(*) FROM tracks")
     assert cur.fetchone()[0] == tracks
     assert _files(cur) == ["Other/01.flac", "Other/02.flac", "Shaped By Time/01.flac"]
@@ -747,11 +769,11 @@ def test_a_drive_that_leaves_after_the_yes_removes_nothing_and_says_so(
     assert state["result"]["prune"]["pruned"] == 0
     assert state["result"]["prune"]["refused"] == scanner.unreachable_words()
     assert state["result"]["plan_id"] == plan_id
-    assert state["progress"] == ("Nothing removed: the music folder is empty or not mounted. "
+    assert state["progress"] == ("Nothing removed: no folder of these files is connected. "
                                  "Reconnect it, then Rescan")
     said = [r for r in caplog.records if r.name == "scanner"]
     assert [(r.levelname, r.getMessage()) for r in said] == [
-        ("WARNING", "Prune aborted at the yes: the music folder is unreachable")]
+        ("WARNING", "Prune aborted at the yes: no folder of its files answers")]
     assert _files(cur) == ["A/01.flac", "A/02.flac"]
     # the Library's snapshot carries it: the page says it once
     lib = asyncio.run(settings_router._library_state())
@@ -776,11 +798,13 @@ def test_removing_the_albums_away_is_refused_while_the_folder_is_gone(
     assert heard() == ["sautium_notices"]         # the look's news
 
 
-def test_a_yes_judges_a_file_as_the_plan_did(cur, library, main_module, monkeypatch, tmp_path):
-    """The plan's walk covers the current root, by exact name. A row under
-    the folder the library was copied away from (the old copy kept on its
-    old drive) is missing from the library though the file still opens, and
-    the yes removes it as the plan said."""
+def test_a_rescan_judges_its_folders_alone_and_a_row_under_none_is_elsewhere(
+        cur, library, main_module, monkeypatch, tmp_path):
+    """The plan's walk covers the library's folders, by exact name. A row
+    under the folder the library was copied away from (the old copy kept on
+    its old drive) lies under no folder: no Rescan judges it — before
+    LIBRARY-FOLDERS-1 it read as missing, though the file still opened. It
+    is listed as "Elsewhere", and goes at the owner's yes to its Forget."""
     (library / "A").mkdir()
     (library / "A" / "01.flac").touch()
     _owned_file(cur, "A")
@@ -792,13 +816,21 @@ def test_a_yes_judges_a_file_as_the_plan_did(cur, library, main_module, monkeypa
                 "SELECT t.id, (SELECT min(id) FROM album_variants), %s FROM tracks t "
                 "WHERE t.title = 'Old copy'", (old.as_posix(),))
     state = _rescan(main_module, monkeypatch)
-    assert state["prune_plan"]["counts"]["files"] == 1
+    assert state["prune_plan"] is None
+    assert asyncio.run(settings_router._library_state())["elsewhere"] == {"albums": 1, "tracks": 1}
 
-    _answer(main_module, state["prune_plan"]["id"], True)
+    asyncio.run(main_module.scan_forget(None))
+    assert _wait_until(lambda: not state["running"])
+    asked = main_module._prune_plan_counts(state["prune_plan"])
+    assert (asked["kind"], asked["elsewhere"], asked["files"], asked["tracks"], asked["albums"]) == (
+        "folder", True, 1, 1, 0)
+    _answer(main_module, asked["id"], True)
 
     assert state["result"]["prune"]["pruned"] == 1
     cur.execute("SELECT count(*) FROM media_files WHERE file_path = %s", (old.as_posix(),))
     assert cur.fetchone()[0] == 0
+    assert _files(cur) == ["A/01.flac"]
+    assert asyncio.run(settings_router._library_state())["elsewhere"] is None
 
 
 def test_a_scan_that_asks_nothing_keeps_the_question_and_a_rescan_replaces_it(
@@ -851,13 +883,15 @@ def test_a_yes_that_would_now_remove_more_removes_nothing_and_asks_again(
 
 
 def test_a_plan_for_a_subfolder_judges_only_that_subfolder(cur, library):
-    """`cli.py scan --prune --path Jazz` walks <root>/Jazz alone; a missing
-    file under another folder whose name merely contains it is not its."""
+    """`cli.py scan --prune --path <folder>/Jazz` walks <folder>/Jazz alone; a
+    missing file under another folder whose name merely contains it is not
+    its."""
+    from config import settings
     _a_file_missing_beside(cur, library, "Jazz/Kept")
     _owned_file(cur, "Jazz/Gone")
     _owned_file(cur, "Acid Jazz Collection/Gone too")
 
-    plan = scanner.plan_prune(subpath="Jazz")
+    plan = scanner.plan_prune(scopes=[(f"{settings.music_host_path}/Jazz", True)])
 
     assert (plan["checked"], plan["pruned"], plan["away"]) == (3, 1, 1)
     assert _away(cur) == ["Gone"]
@@ -1007,7 +1041,7 @@ def test_a_folder_that_goes_and_comes_back_loses_nothing(
     assert sorted(_files(cur)) == sorted(files + ["Keep/01.flac"])
     cur.execute("SELECT id, musicbrainz_id FROM albums WHERE title <> 'Keep' ORDER BY title")
     assert cur.fetchall() == albums               # the albums, their MusicBrainz match
-    assert asyncio.run(settings_router._library_state())["away"] == {"albums": 2, "copies": 2}
+    assert asyncio.run(settings_router._library_state())["away"] == {"albums": 2, "copies": 2, "waiting": 0}
     for title in ("Carrier", "Relay", "Probe B"):  # nothing reads a copy that is away
         assert _queued(cur, title) == {"embeddings": False, "features": False, "instruments": False}
 
@@ -1053,8 +1087,9 @@ def _scoped(main_module, monkeypatch, folder, prune):
     """A walk of one folder: a scoped Rescan (prune), or the watcher's or
     "Scan for new"'s walk of it (no question)."""
     from canon import post_import
+    from config import settings
     monkeypatch.setattr(post_import, "run", _post_import)
-    main_module.request_scan({folder: True}, prune=prune)
+    main_module.request_scan({f"{settings.music_host_path}/{folder}": True}, prune=prune)
     main_module._scan_thread.join()
     return main_module._scan_state
 

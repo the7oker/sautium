@@ -423,166 +423,191 @@ class _FSEvents:
 _SOURCE = {"win32": _ReadDirectoryChanges, "darwin": _FSEvents}.get(sys.platform, _Inotify)
 
 _lock = threading.Lock()
-_state = {"state": NOT_SET, "why": None}
-_source = None
-_thread: Optional[threading.Thread] = None
+# Each folder of the library has its own watch (LIBRARY-FOLDERS-1): a stick on
+# a local file system is watched while a folder on a NAS is not.
+_watches: Dict[str, Dict] = {}
 _request: Optional[Callable] = None
 
 
-def state() -> Dict[str, Optional[str]]:
-    """The watch as the node knows it: watching, no_events (and why),
-    unreachable, not_set."""
+def state() -> Dict[str, Dict[str, Optional[str]]]:
+    """Each folder's watch as the node knows it: watching, no_events (and
+    why), unreachable, not_set."""
     with _lock:
-        return {"state": _state["state"], "why": _state["why"]}
+        return {path: {"state": w["state"], "why": w["why"]} for path, w in _watches.items()}
 
 
 def being_written() -> Set[str]:
     """The files the watcher saw written and not yet closed (inotify): a
     scan leaves them for their own close-write."""
     with _lock:
-        source = _source
-    return source.being_written() if source is not None else set()
-
-
-def _rel(path: str, root: str) -> str:
-    return os.path.relpath(path, root).replace("\\", "/") if path != root else ""
+        sources = [w["source"] for w in _watches.values() if w.get("source") is not None]
+    return set().union(*(source.being_written() for source in sources)) if sources else set()
 
 
 def start(request: Callable) -> None:
-    """Arm the watcher on the music folder, then queue the whole library:
-    what changed while the node was down is found by that walk, and what
-    changes during it is in the queue (the watch is armed first). Called at
-    the backend's start and again when the folder is back."""
+    """Arm the watcher on every folder of the library, then queue each
+    whole: what changed while the node was down is found by that walk, and
+    what changes during it is in the queue (the watch is armed first).
+    Called at the backend's start."""
     global _request, _WATCHED_SUFFIXES
-    from config import settings
-    from scanner import AUDIO_EXTENSIONS, library_unreachable
+    import library_root
+    from scanner import AUDIO_EXTENSIONS
     _request = request
     _WATCHED_SUFFIXES = set(AUDIO_EXTENSIONS) | {".cue"}
-    root = settings.music_library_path
+    for path in library_root.paths():
+        _start_folder(path)
+
+
+def add(path: str) -> None:
+    """A folder joined the library: watched from now on (its scan is the
+    caller's to queue — the watch queues one where it is armed)."""
+    if _request is not None:
+        _start_folder(path)
+
+
+def forget(path: str) -> None:
+    """A folder left the library: its watch goes."""
     with _lock:
-        if _source is not None:
+        w = _watches.pop(path, None)
+    if w is not None and w.get("source") is not None:
+        w["source"].stop()
+
+
+def _start_folder(path: str) -> None:
+    from config import settings
+    from scanner import folder_unreachable
+    local = os.path.abspath(settings.translate_to_local_path(path))
+    with _lock:
+        w = _watches.setdefault(path, {"state": NOT_SET, "why": None, "source": None})
+        if w["source"] is not None or w.get("arming"):
             return
-        if not root:
-            _state.update(state=NOT_SET, why=None)
-            return
-        missing = not os.path.isdir(root)
+        missing = not os.path.isdir(local)
         if missing:
-            _state.update(state=UNREACHABLE, why="the music folder is not there")
-        elif _state.get("arming"):
-            return
+            w.update(state=UNREACHABLE, why="the folder is not there")
         else:
-            _state["arming"] = True
+            w["arming"] = True
     if missing:
         # a drive not plugged in: a look, recorded by its own rule, so the
         # first look that finds it there arms the watch (folder_back); with
         # an empty catalogue the first scan that finds music does
-        library_unreachable(wake=True)
+        folder_unreachable(path, wake=True)
         return
     try:
-        if library_unreachable(wake=False):
+        if folder_unreachable(path, wake=False):
             with _lock:
-                _state.update(state=UNREACHABLE, why=None)
+                w.update(state=UNREACHABLE, why=None)
             return
-        root = os.path.abspath(root)
         try:
-            why = mount_kind(root)
+            why = mount_kind(local)
         except OSError as e:
             why = f"its mount could not be read ({e})"
         if why is not None:
             with _lock:
-                _state.update(state=NO_EVENTS, why=why)
-            logger.info(f"Library watch: not armed — the music folder's mount is {why}, which "
+                w.update(state=NO_EVENTS, why=why)
+            logger.info(f"Library watch: not armed on {path} — its mount is {why}, which "
                         "delivers no events for other programs' writes; 'Scan for new' finds new music")
             # Files read under an older reader (scanner.TAGS_READ_REV) are read
             # again by any scan that meets them; with no events nothing queues
-            # one, so the start (and the folder's return) queues the library
-            # until a whole walk has read it under this reader — a file that
-            # walk could not read or did not meet is read when a scan meets it.
+            # one, so the start (and the folder's return) queues the folder
+            # until a whole walk has read the library under this reader — a
+            # file that walk could not read or did not meet is read when a
+            # scan meets it.
             from scanner import reread_due
             if reread_due():
-                request({"": True}, explicit=True)
+                _request({path: True}, explicit=True)
             return
-        _arm(root)
+        _arm(path, local, w)
     finally:
         with _lock:
-            _state.pop("arming", None)
+            w.pop("arming", None)
 
 
-def _arm(root: str) -> None:
-    global _source, _thread
+def _arm(path: str, local: str, w: Dict) -> None:
+    from config import settings
 
-    def on_dirty(path: str, recursive: bool) -> None:
-        rel = _rel(path, root)
-        if not rel.startswith(".."):
-            _request({rel: recursive}, explicit=False)
+    def on_dirty(changed: str, recursive: bool) -> None:
+        scope = settings.translate_to_host_path(changed).replace("\\", "/").rstrip("/")
+        if scope == path or scope.startswith(path.rstrip("/") + "/"):
+            _request({scope: recursive}, explicit=False)
 
     holder = []
 
     def on_lost(why: str, as_state: str = UNREACHABLE) -> None:
-        _lost(why, as_state, holder[0] if holder else None)
+        _lost(path, why, as_state, holder[0] if holder else None)
 
     try:
-        source = _SOURCE(root, on_dirty, on_lost)
+        source = _SOURCE(local, on_dirty, on_lost)
         holder.append(source)
     except OSError as e:
         with _lock:
-            _state.update(state=NO_EVENTS, why=f"the watch could not be placed ({e})")
+            w.update(state=NO_EVENTS, why=f"the watch could not be placed ({e})")
         hint = (" — raise fs.inotify.max_user_watches" if getattr(e, "errno", None) == 28 else "")
-        logger.warning(f"Library watch: not armed: {e}{hint}")
+        logger.warning(f"Library watch: not armed on {path}: {e}{hint}")
         return
     with _lock:
-        _source = source
-        _state.update(state=WATCHING, why=None)
-        _thread = threading.Thread(target=_run, args=(source,), daemon=True, name="library-watch")
-        _thread.start()
-    logger.info(f"Library watch: watching {root}")
-    _request({"": True}, explicit=True)
+        if _watches.get(path) is not w:
+            # forgotten while it was armed
+            source.stop()
+            source.close()
+            return
+        w.update(state=WATCHING, why=None, source=source)
+        w["thread"] = threading.Thread(target=_run, args=(path, source), daemon=True, name="library-watch")
+        w["thread"].start()
+    logger.info(f"Library watch: watching {local}")
+    _request({path: True}, explicit=True)
 
 
-def _run(source) -> None:
+def _run(path: str, source) -> None:
     try:
         source.run()
     except Exception as e:
         logger.error(f"Library watch failed: {e}", exc_info=True)
-        _lost(f"the watch failed ({e})", UNREACHABLE, source)
+        _lost(path, f"the watch failed ({e})", UNREACHABLE, source)
     finally:
         source.close()
 
 
-def _lost(why: str, as_state: str = UNREACHABLE, source=None) -> None:
-    """The watch went (the drive unplugged, the folder removed): disarmed,
-    nothing removed — a scan is no part of it — and the folder looked at
-    (the notice, what the queue opens). It is armed again when the
+def _lost(path: str, why: str, as_state: str = UNREACHABLE, source=None) -> None:
+    """A folder's watch went (the drive unplugged, the folder removed):
+    disarmed, nothing removed — a scan is no part of it — and the folder
+    looked at (the notice, what the queue opens). It is armed again when the
     folder answers (folder_back). Past the watch limit it is no_events. A
     late word from a source already replaced changes nothing."""
-    global _source
     with _lock:
-        if source is not None and source is not _source:
+        w = _watches.get(path)
+        if w is None or (source is not None and source is not w["source"]):
             return
-        source, _source = _source, None
-        _state.update(state=as_state, why=why)
+        source, w["source"] = w["source"], None
+        w.update(state=as_state, why=why)
     if source is not None:
         source.stop()
-    logger.warning(f"Library watch: disarmed — {why}")
+    logger.warning(f"Library watch: disarmed on {path} — {why}")
     if as_state == UNREACHABLE:
         # The folder's own word that it went: looked at, so the notice and
         # the queue's ways in follow now (scanner.check_folder)
         from scanner import check_folder
-        check_folder()
+        check_folder(path)
 
 
-def folder_back() -> None:
-    """The music folder answers again (scanner's look): arm once more."""
-    if _request is not None and state()["state"] == UNREACHABLE:
-        start(_request)
+def folder_back(path: Optional[str] = None) -> None:
+    """A folder answers again (the scanner's look; with no `path`, any that
+    a scan or the mount table found back): armed once more."""
+    if _request is None:
+        return
+    with _lock:
+        back = [p for p, w in _watches.items()
+                if w["state"] == UNREACHABLE and (path is None or p == path)]
+    for p in back:
+        _start_folder(p)
 
 
 def stop() -> None:
-    global _source
     with _lock:
-        source, _source = _source, None
-        thread = _thread
-    if source is not None:
-        source.stop()
-    if thread is not None:
-        thread.join(timeout=5)
+        watches = list(_watches.values())
+        _watches.clear()
+    for w in watches:
+        if w.get("source") is not None:
+            w["source"].stop()
+    for w in watches:
+        if w.get("thread") is not None:
+            w["thread"].join(timeout=5)

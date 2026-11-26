@@ -572,12 +572,26 @@ class BackendAPIClient:
         self.last_health = health
         return health
 
-    def start_scan(self, subpath: str = None) -> Optional[dict]:
-        """Start library scan as background task."""
+    def start_scan(self, scope: str = None) -> Optional[dict]:
+        """Start a library scan as a background task: `scope` a folder inside
+        one of the library's (its full path), none every folder."""
         params = "skip_existing=true"
-        if subpath:
-            params += f"&subpath={urllib.parse.quote(subpath)}"
+        if scope:
+            params += f"&scope={urllib.parse.quote(scope)}"
         return self._post_json(f"/scan/start?{params}", timeout=10)
+
+    def library_folders(self) -> Optional[list]:
+        """The library's folders as the node lists them (their stored paths),
+        None when the node does not answer."""
+        lib = self._get_json("/api/settings/library", timeout=15)
+        return None if lib is None else [f["path"] for f in lib.get("folders") or []]
+
+    def add_folder(self, path: str) -> Optional[dict]:
+        """One folder more of the library — the launcher's own call, signed
+        with the host's secret: the node takes a folder outside its roots
+        from no one else (LIBRARY-FOLDERS-1 Q5). The node arms its watch and
+        scans it alone."""
+        return self._post_json("/api/settings/library/folders", {"path": path}, timeout=15)
 
     def scan_status(self) -> Optional[dict]:
         """Poll scan progress."""

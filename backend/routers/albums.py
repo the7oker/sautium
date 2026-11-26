@@ -557,6 +557,15 @@ def get_album(
             "SELECT id, name, product FROM hqp_endpoints WHERE id = ANY(%(ids)s)", {"ids": list(held)})}
         for v in album["variants"]:
             v["hqp_label"] = labels.get(v["hqp_endpoint_id"])
+    # A local copy says the folder of the library it lies in, by the name the
+    # folder list gives it (a disk's label, never its UUID): two copies on
+    # two disks read apart (LIBRARY-FOLDERS-1 §5)
+    import library_root
+    folders = library_root.given()
+    for v in album["variants"]:
+        if v["location"] == "local":
+            folder = next((f for f in folders if library_root._under(v["directory_path"], f["path"])), None)
+            v["folder"] = library_root.folder_name(folder) if folder else None
     album["selected_variant_id"] = (variant_id if variant_id is not None
                                     else qrow["variant_id"])
     album["is_owned"] = True

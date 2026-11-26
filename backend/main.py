@@ -34,7 +34,7 @@ from auth_hmac import HMACAuthMiddleware, ensure_secret
 from auth_hmac import secret_path as _secret_path
 from config import (settings, get_settings, ui_build, build_identity, running_line,
                     running_version, LOGGING_CONFIG, HEALTH_PROBE_PATH)
-from db_pool import db_query_one
+from db_pool import db_query, db_query_one
 import csp
 import device_auth
 import lastfm_auth
@@ -1549,10 +1549,15 @@ async def health_check() -> Dict[str, Any]:
             "torch_installed": hardware_profile.resolve().models != "absent",
         }
 
-    # Music library check
+    # The library's folders: how many, and how many answer by this process's
+    # recorded look (scanner.gone_prefixes) — counts, no path
+    import library_root
+    from scanner import gone_prefixes
+    folders = await asyncio.to_thread(library_root.paths)
+    gone = set(gone_prefixes())
     health_status["checks"]["music_library"] = {
-        "path": settings.music_library_path,
-        "exists": settings.music_library_exists
+        "folders": len(folders),
+        "answering": sum(1 for f in folders if f.rstrip("/") + "/" not in gone),
     }
 
     # P2P / DHT status
@@ -1611,14 +1616,18 @@ def _config_identity() -> Dict[str, Any]:
     return {"app_version": identity["release"][1:] if identity["release"] else None, **identity}
 
 
+def _folders_paths() -> List[str]:
+    import library_root
+    return library_root.paths()
+
+
 @app.get("/config")
 async def get_config() -> Dict[str, Any]:
     """Get current configuration (excluding sensitive data)."""
     return {
         "app_name": settings.app_name,
         **_config_identity(),
-        "music_library_path": settings.music_library_path,
-        "music_library_exists": settings.music_library_exists,
+        "music_folders": await asyncio.to_thread(_folders_paths),
         "embedding_model": settings.embedding_model,
         "embedding_dimension": settings.embedding_dimension,
         "audio_sample_duration": settings.audio_sample_duration,
@@ -1768,18 +1777,33 @@ _scan_state: Dict[str, Any] = {
 _scan_lock = threading.Lock()
 
 
-def _new_prune_plan(file_ids: List[int], stats: Dict[str, Any], kind: str) -> Dict[str, Any]:
+def _new_prune_plan(file_ids: List[int], stats: Dict[str, Any], kind: str,
+                    folder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """A question about removals: `kind` "rescan" (a Rescan's missing files and
-    copies found again elsewhere) or "away" (the owner's removal of the copies
-    that are away)."""
+    copies found again elsewhere), "away" (the owner's removal of the copies
+    that are away) or "folder" (the owner's "Forget this disk and its
+    albums": `folder` the row, None for the copies under no folder). Each
+    plan names the folders its files lie in: a yes waits while none of
+    them answers (a folder's removal waits for nothing — its disk out is
+    the point)."""
+    import library_root
     from scanner import prune_counts
-    return {"id": secrets.token_hex(8), "kind": kind, "file_ids": file_ids,
-            "counts": prune_counts(stats)}
+    known = library_root.paths()
+    rows = db_query("SELECT DISTINCT file_path FROM media_files WHERE id = ANY(%s)", (file_ids,)) if file_ids else []
+    folders = sorted({f for f in (library_root.folder_of(r["file_path"], known) for r in rows) if f})
+    plan = {"id": secrets.token_hex(8), "kind": kind, "file_ids": file_ids,
+            "counts": prune_counts(stats), "folders": folders}
+    if kind == "folder":
+        plan["folder"] = folder
+        plan["name"] = library_root.folder_name(folder) if folder else None
+    return plan
 
 
 def _plan_said(plan: Dict[str, Any]) -> str:
     """A plan in a progress line: the missing files and the old copies,
     named apart as the question names them."""
+    if plan["kind"] == "folder":
+        return f"the {len(plan['file_ids'])} file(s) of {plan['name'] or 'the albums elsewhere'}"
     c = plan["counts"]
     parts = ([f"{c['files']} missing file(s)"] if c["files"] else []) + \
             ([f"{c['copies']} old album cop(ies)"] if c["copies"] else [])
@@ -1787,14 +1811,36 @@ def _plan_said(plan: Dict[str, Any]) -> str:
 
 
 def _prune_plan_counts(plan: Dict[str, Any]) -> Dict[str, Any]:
-    """What the Library screen asks about: the plan without its file ids."""
-    return {"id": plan["id"], "kind": plan["kind"], **plan["counts"]}
+    """What the Library screen asks about: the plan without its file ids —
+    for a folder's removal, the folder by its name and whether it answers
+    (the question's words differ)."""
+    from scanner import gone_prefixes
+    gone = gone_prefixes()
+    # a yes waits while no folder its files lie in answers (the route refuses it)
+    said = {"id": plan["id"], "kind": plan["kind"], **plan["counts"],
+            "waits": plan["kind"] != "folder" and bool(plan["folders"])
+            and all(f.rstrip("/") + "/" in gone for f in plan["folders"])}
+    if plan["kind"] == "folder":
+        folder = plan["folder"]
+        said.update(name=plan["name"], elsewhere=folder is None,
+                    connected=folder is not None and folder["path"].rstrip("/") + "/" not in gone,
+                    disk=folder is not None and _on_a_disk(folder["path"]))
+    return said
+
+
+def _on_a_disk(path: str) -> bool:
+    """A folder in the disks' folder (a disk's, by its UUID), not a folder
+    of the machine's own."""
+    import library_root
+    return any(library_root._disks_folder(root) and path.startswith(root.rstrip("/") + "/")
+               for root in library_root.roots())
 
 
 # The one scan queue (LIBRARY-WATCH-DESIGN §4). Every scan — "Scan for new",
 # Rescan, the launcher's folder picker, the CLI, the folder watcher and the
 # start's walk — is a request merged into `_scan_pending`: the folders to
-# walk (relative to the library; "" is all of it) with whether each is
+# walk (stored paths, as media_files spells them, each inside a folder of the
+# library — LIBRARY-FOLDERS-1; "" is every folder) with whether each is
 # walked whole, a Rescan's prune, a read of every file again, and whether a
 # person (or the start) asked. One worker takes the whole request at a
 # round's start and scans until nothing is pending: a change during a scan
@@ -1814,7 +1860,7 @@ def _merge_scopes(into: Dict[str, bool], scopes: Dict[str, bool]) -> None:
     """Merge folder scopes into a request: a folder walked whole absorbs
     every scope under it; one already under such a folder adds nothing."""
     for rel, recursive in scopes.items():
-        rel = rel.replace("\\", "/").strip("/")
+        rel = rel.replace("\\", "/").rstrip("/")
         if any(rec and (r == "" or rel == r or rel.startswith(r + "/")) for r, rec in into.items()):
             continue
         if recursive:
@@ -1830,8 +1876,8 @@ def _merge_scopes(into: Dict[str, bool], scopes: Dict[str, bool]) -> None:
 
 def request_scan(scopes: Optional[Dict[str, bool]] = None, *, prune: bool = False,
                  reread: bool = False, explicit: bool = True) -> bool:
-    """Queue a scan. `scopes` maps folders (relative to the library) to
-    whether each is walked whole; None is the whole library. `explicit` is a
+    """Queue a scan. `scopes` maps folders (stored paths) to whether each is
+    walked whole; None is every folder of the library. `explicit` is a
     person's or the start's: the canon then takes albums still arriving
     (canon.content.arriving_albums). Returns True when it waits behind a
     running job, which takes it when done."""
@@ -1934,6 +1980,14 @@ def _announce_done() -> None:
     db_execute("NOTIFY sautium_scan_done")
 
 
+def _folder_said(path: str) -> str:
+    """A folder of the library in a progress line: its name as the folder
+    list says it (a disk's label, never its UUID)."""
+    import library_root
+    row = next((f for f in library_root.given() if f["path"] == path), {"path": path})
+    return library_root.folder_name(row)
+
+
 def _scan_round(req: Dict[str, Any], since) -> Optional[Dict[str, Any]]:
     """One round of the scan queue: the request's folders walked, read and
     imported; a Rescan ends with a plan of what it would remove, never with
@@ -1974,15 +2028,19 @@ def _scan_round(req: Dict[str, Any], since) -> Optional[Dict[str, Any]]:
         # how many, and a prune keeps what lies under them.
         unread_note = (f" — {result['unread']} folder(s) could not be read"
                        if result["unread"] else "")
+        # The folders of the scope that did not answer: not walked, their
+        # albums not connected — never missing (LIBRARY-FOLDERS-1 §3.4)
+        out_note = "".join(f" — {_folder_said(path)} was not scanned: it is not connected"
+                           for path in scanner.last_out)
         if state["cancel_requested"]:
             state["progress"] = "Scan cancelled"
         elif not result["processed"] and whole:
             # An empty walk scanned nothing: no prune and no "Last scan" stamp,
             # which the Library screen would show as a scan that happened. Over
-            # a catalog that knows files it is the folder gone mid-run,
-            # refused like one gone before the walk.
+            # a catalog that knows files it is the folders gone mid-run,
+            # refused like ones gone before the walk.
             refuse_if_unreachable()
-            state["progress"] = "No audio files found" + unread_note
+            state["progress"] = "No audio files found" + unread_note + out_note
         else:
             if req["prune"] and not state["cancel_requested"]:
                 # The canon first: the plan counts what only the missing files
@@ -1995,7 +2053,7 @@ def _scan_round(req: Dict[str, Any], since) -> Optional[Dict[str, Any]]:
                     from scanner import plan_prune
                     prune_stats = plan_prune(
                         progress_cb=lambda msg: state.update(progress=msg),
-                        subpath=None if whole else next(iter(scopes)),
+                        scopes=scanner.last_scopes,
                         cancel_check=lambda: state["cancel_requested"],
                         disk_paths=scanner.last_disk_paths,
                         unread=scanner.last_unread,
@@ -2014,12 +2072,12 @@ def _scan_round(req: Dict[str, Any], since) -> Optional[Dict[str, Any]]:
                 # Rescan — nothing removed, nothing asked (CLAUDE.md, the
                 # away row); the walk judges only the folders it walked.
                 result["away"] = set_aside_missing(
-                    None if whole else sorted(scopes.items()), scanner.last_disk_paths,
+                    scanner.last_scopes, scanner.last_disk_paths,
                     scanner.last_unread, scanner.last_gone)
 
             kept = (result.get("prune") or {}).get("kept_unread")
             away = (result.get("prune") or {}).get("away") or result.get("away")
-            state["progress"] = ("Scan complete" + unread_note
+            state["progress"] = ("Scan complete" + unread_note + out_note
                                  + (f"; the prune keeps {kept} file(s) there" if kept else "")
                                  + (f" — {away} album cop(ies) set aside as away, their files "
                                     "not found" if away else "")
@@ -2073,29 +2131,50 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
         state["progress"] = msg
         notify_library_subscribers()
 
+    folder = plan.get("folder") if plan["kind"] == "folder" else None
     try:
-        from scanner import prune_missing_files
-        stats = prune_missing_files(
-            plan["file_ids"], plan["counts"], progress_cb=progress,
-            cancel_check=lambda: state["cancel_requested"],
-        )
+        import library_watch
+        from scanner import drop_look, prune_missing_files, remove_folder
+        if plan["kind"] == "folder":
+            # The folder leaves the process first: no watcher event re-reads
+            # it while its rows go
+            if folder is not None:
+                library_watch.forget(folder["path"])
+            stats = remove_folder(folder, plan["counts"], progress_cb=progress,
+                                  cancel_check=lambda: state["cancel_requested"])
+            if folder is not None:
+                if stats.get("grew"):
+                    library_watch.add(folder["path"])
+                else:
+                    drop_look(folder["path"])
+        else:
+            stats = prune_missing_files(
+                plan["file_ids"], plan["counts"], progress_cb=progress,
+                cancel_check=lambda: state["cancel_requested"],
+            )
         # The result names the plan it answers: the page that said yes says
         # a refusal (`prune.refused`) once
         if stats.get("refused"):
             state["result"] = {"prune": stats, "plan_id": plan["id"]}
-            state["progress"] = ("Nothing removed: the music folder is empty or not mounted. "
+            state["progress"] = ("Nothing removed: no folder of these files is connected. "
                                  "Reconnect it, then Rescan")
         elif stats.pop("grew", False):
-            again = _new_prune_plan(stats.pop("file_ids"), stats, plan["kind"])
+            again = _new_prune_plan(stats.pop("file_ids"), stats, plan["kind"], folder)
             state["result"] = {"prune": stats, "prune_plan": _prune_plan_counts(again),
                                "plan_id": plan["id"]}
             state["progress"] = ("The library changed since the question — "
                                  f"{_plan_said(again)} wait for your answer")
         else:
             state["result"] = {"prune": stats, "plan_id": plan["id"]}
-            state["progress"] = f"Removal complete — {stats['pruned']} file(s) removed"
+            state["progress"] = (f"{plan['name'] or 'The albums elsewhere'} forgotten — "
+                                 f"{stats['pruned']} file(s) removed from the library"
+                                 if plan["kind"] == "folder" else
+                                 f"Removal complete — {stats['pruned']} file(s) removed")
         logger.info(f"Prune results: {stats}")
     except Exception as e:
+        if folder is not None:
+            import library_watch
+            library_watch.add(folder["path"])
         logger.error(f"Prune failed: {e}", exc_info=True)
         state["progress"] = f"Removal failed: {str(e)[:200]}"
         state["result"] = {"prune_error": str(e), "plan_id": plan["id"]}
@@ -2108,13 +2187,14 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
         resume_scans()
 
 
-async def _refuse_if_unreachable() -> None:
-    """A route's refusal of what would read the music folder while it does
-    not answer (a scan, a removal): 409 with the scan's own sentence."""
+async def _refuse_if_unreachable(folders: Optional[List[str]] = None) -> None:
+    """A route's refusal of what would read the library's folders while none
+    of them (of `folders`, every folder by default) answers — a scan, a
+    removal: 409 with the scan's own sentence."""
     from scanner import LibraryUnreachable, refuse_if_unreachable
     try:
         # off the event loop: a scandir of a dead network mount can stall
-        await asyncio.to_thread(refuse_if_unreachable)
+        await asyncio.to_thread(refuse_if_unreachable, folders)
     except LibraryUnreachable as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -2122,19 +2202,23 @@ async def _refuse_if_unreachable() -> None:
 @app.post("/scan/start")
 async def scan_start(
     skip_existing: bool = True,
-    subpath: Optional[str] = None,
+    scope: Optional[str] = None,
     prune: bool = False,
 ) -> Dict[str, Any]:
     """Queue a scan (request_scan): started at once, or after the job that
-    runs. Its progress is pushed on the Library stream; /scan/status reads it."""
+    runs. `scope`: a folder inside one of the library's (its path as this
+    node stores or reads it); none, every folder. Its progress is pushed on
+    the Library stream; /scan/status reads it."""
+    import library_root
     from playback import hqp_benchmark
     from scanner import scope_admitted
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
-    scope = (subpath or "").replace("\\", "/").strip("/")
-    if scope and not await asyncio.to_thread(scope_admitted, settings.music_library_path, scope):
-        raise HTTPException(status_code=400, detail="That folder is not inside the music folder")
-    await _refuse_if_unreachable()
+    scope = library_root.stored(scope) if scope else ""
+    folder = await asyncio.to_thread(scope_admitted, scope) if scope else None
+    if scope and folder is None:
+        raise HTTPException(status_code=400, detail="That folder is not inside a folder of the library")
+    await _refuse_if_unreachable([folder] if folder else None)
     queued = request_scan({scope: True}, prune=prune, reread=not skip_existing)
     return {"success": True, "queued": queued,
             "message": "Scan queued" if queued else "Scan started"}
@@ -2177,7 +2261,9 @@ async def scan_away() -> Dict[str, Any]:
     from routers.settings import notify_library_subscribers
     if hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
-    await _refuse_if_unreachable()
+    from scanner import away_folders
+    # refused only while every folder holding copies away is out (F23)
+    await _refuse_if_unreachable(await asyncio.to_thread(away_folders))
     with _scan_lock:
         if _scan_state["running"]:
             raise HTTPException(status_code=409, detail="Scan already running")
@@ -2191,6 +2277,66 @@ async def scan_away() -> Dict[str, Any]:
     return {"success": True}
 
 
+def _forget_worker(folder: Optional[Dict[str, Any]]) -> None:
+    """The owner asked to forget a folder (None: the copies under no
+    folder): plan what it alone holds, and ask."""
+    from routers.settings import notify_library_subscribers
+    import library_root
+    state = _scan_state
+    plan = None
+    try:
+        from scanner import plan_folder_removal
+        stats = plan_folder_removal(folder["path"] if folder else None)
+        file_ids = stats.pop("file_ids")
+        plan = _new_prune_plan(file_ids, stats, "folder", folder)
+        state["result"] = {"prune": stats, "prune_plan": _prune_plan_counts(plan)}
+        state["progress"] = (f"Forget {library_root.folder_name(folder) if folder else 'the albums elsewhere'}"
+                             " waits for your answer")
+    except Exception as e:
+        logger.error(f"Planning a folder's removal failed: {e}", exc_info=True)
+        state["progress"] = f"Removal failed: {str(e)[:200]}"
+        state["result"] = {"prune_error": str(e)}
+    finally:
+        with _scan_lock:
+            state["prune_plan"] = plan
+            state["running"] = False
+        notify_library_subscribers()
+        _announce_done()
+        resume_scans()
+
+
+async def scan_forget(folder_id: Optional[int]) -> Dict[str, Any]:
+    """"Forget this disk (folder) and its albums" — `folder_id` None: the
+    copies under no folder ("Elsewhere"). The plan, then the same question
+    and answer as a Rescan's (/scan/prune); the folder's state asks nothing
+    of it (a disk out is the point). A setup node's .env folder is no one's
+    to forget here: it would be back at the next start."""
+    import library_root
+    from playback import hqp_benchmark
+    from routers.settings import notify_library_subscribers
+    if hqp_benchmark.measures_here():
+        raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
+    folder = None
+    if folder_id is not None:
+        folder = next((f for f in await asyncio.to_thread(library_root.given) if f["id"] == folder_id), None)
+        if folder is None:
+            raise HTTPException(status_code=404, detail="No such folder in the library")
+        if library_root.env_folder() == folder["path"]:
+            raise HTTPException(status_code=409, detail=(
+                "This folder is named where this node was set up (MUSIC_LIBRARY_PATH in its .env)"))
+    with _scan_lock:
+        if _scan_state["running"]:
+            raise HTTPException(status_code=409, detail="Scan already running")
+        if _scan_state["prune_plan"] is not None:
+            raise HTTPException(status_code=409, detail=(
+                "A question about removals is waiting for its answer — answer it first."))
+        _scan_state.update(running=True, cancel_requested=False, stats=None, result=None,
+                           prune_plan=None, progress="Looking at what the folder holds...")
+    threading.Thread(target=_forget_worker, args=(folder,), daemon=True).start()
+    notify_library_subscribers()
+    return {"success": True}
+
+
 @app.post("/scan/prune")
 async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
     """The owner's answer to a Rescan's plan (`prune_plan` in /scan/status):
@@ -2199,9 +2345,11 @@ async def scan_prune(plan_id: str, remove: bool) -> Dict[str, Any]:
     from playback import hqp_benchmark
     if remove and hqp_benchmark.measures_here():
         raise HTTPException(status_code=409, detail=hqp_benchmark.HERE_BUSY)
-    if remove:
+    with _scan_lock:
+        held = _scan_state["prune_plan"]
+    if remove and held is not None and held["id"] == plan_id and held["kind"] != "folder":
         # before the plan is taken: it waits, still true once the disk is back
-        await _refuse_if_unreachable()
+        await _refuse_if_unreachable(held["folders"])
     with _scan_lock:
         if remove and _scan_state["running"]:
             # the plan waits for the scan in flight; its yes is taken after
