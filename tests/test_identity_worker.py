@@ -284,8 +284,9 @@ def test_an_account_made_in_the_web_ui_earns_its_proof_with_no_restart(node, scr
         r = web.post("/api/auth/create-account", json=_seal(web.get("/api/auth/handshake").json(), {
             "username": "owner", "password": "a password amber lanterns ford", "setup_code": code}))
         assert r.status_code == 200, r.text
-        assert (node.folder / "node_info.json").exists()
+        # The account at once, its key in the background: the worker starts on the key
         state = _await_identity(scratch_dsn, _ready)
+        assert (node.folder / "node_info.json").exists()
     assert state["detail"] == "proof" and state["difficulty"] == EASY
     cert = _proof_binds_its_certificate(node)
     assert cert["method"] == "pow" and node.worker.issuances() == 1
@@ -332,7 +333,8 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
     real = p2p_router._publish_identity_state
 
     def publish(state):
-        if rotating.is_set() and state["difficulty"] != EASY:
+        if (rotating.is_set() and state.get("status") != "deriving"
+                and state.get("difficulty") != EASY):
             release.wait(30)                            # the old thread, held in its attempt
         published.append(dict(state))
         real(state)
@@ -347,7 +349,15 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
             workers.append(first)
             await asyncio.to_thread(_await_identity, scratch_dsn, lambda s: s.get("attempts", 0) > 2)
             rotating.set()
-            info = await device_auth.rotate_identity("second", "second password amber lanterns ford", "first password amber lanterns ford")
+            assert (await device_auth.rotate_identity(
+                "second", "second password amber lanterns ford",
+                "first password amber lanterns ford"))["key"] == "deriving"
+            # The new key is made in the background, the old identity whole till then
+            for _ in range(600):
+                info = json.loads((node.folder / "node_info.json").read_text())
+                if info["public_key_hex"] != old:
+                    break
+                await asyncio.sleep(0.05)
             await asyncio.sleep(1)
             held = (node.worker.asked_for(info["public_key_hex"].lower()),
                     any(s["difficulty"] == EASY for s in published), first.mining.done())
@@ -367,6 +377,7 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
     assert info["public_key_hex"] != old
     cert = _proof_binds_its_certificate(node)
     assert cert["pubkey"] == info["public_key_hex"].lower()
+    published = [s for s in published if s.get("status") != "deriving"]
     olds = [i for i, s in enumerate(published) if s["difficulty"] != EASY]
     news = [i for i, s in enumerate(published) if s["difficulty"] == EASY]
     assert published[olds[-1]]["status"] == "stopped" and olds[-1] < news[0]

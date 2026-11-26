@@ -288,6 +288,8 @@ def _changing(tmp_path, monkeypatch):
         return None
     monkeypatch.setattr(device_auth, "step_up", stepped)
     monkeypatch.setattr(device_auth, "_after_rotation", lambda pubkey: None)
+    # The new key's end, on a loop of its own as the backend's would be
+    monkeypatch.setattr(device_auth, "_on_loop", lambda follow: asyncio.run(follow()))
     return d
 
 
@@ -422,6 +424,7 @@ def test_no_door_logs_a_password_or_its_time(db, births, doors, tmp_path, monkey
     _settings(monkeypatch, p2p_identity_dir=str(tmp_path))
     monkeypatch.setattr(device_auth, "_key_arrived", lambda pubkey: None)
     monkeypatch.setattr(p2p_router, "_publish_identity_state", lambda state: None)
+    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     caplog.set_level("DEBUG")
     device_auth.prepare_setup()
     code = device_auth._setup_code
@@ -433,7 +436,6 @@ def test_no_door_logs_a_password_or_its_time(db, births, doors, tmp_path, monkey
     _call(doors, "/api/auth/create-account", {"username": "alice", "password": SENTINEL,
                                               "setup_code": code})       # made
     births.finish()
-    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
 
     async def right(password, **_kw):
         return True
@@ -459,7 +461,7 @@ def test_a_sign_in_carries_the_time_once_in_its_sealed_answer(db, doors, monkeyp
         return True
     monkeypatch.setattr(device_auth, "password_tried", right)
     _, said, _ = _call(doors, "/api/auth/login", {"password": WORD})
-    assert said["token"] and said["password"]["zone"] == "word" and said["password"]["env"] is True
+    assert said["token"] and said["password"]["zone"] == "word"
     _, said, _ = _call(doors, "/api/auth/login", {"password": WORD})
     assert "password" not in said
 

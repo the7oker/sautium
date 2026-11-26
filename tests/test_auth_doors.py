@@ -1320,9 +1320,12 @@ def test_a_start_puts_its_key_on_record_or_says_once_that_the_identity_is_missin
     assert lost_key.record() == "ab" * 32
 
 
-def test_the_door_asks_about_another_identity_when_its_key_is_made(lost_key, fresh_node, doors):
+def test_the_door_asks_about_another_identity_when_its_key_is_made(lost_key, fresh_node, doors,
+                                                                    monkeypatch):
     """The setup's browser is signed in at once; the question comes with the
     key, and nothing is placed until the owner answers."""
+    from routers import auth
+    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     lost_key.signed_by(_key_of("owner", "the right one"))
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
         "username": "owner", "password": "a different one amber lanterns ford", "setup_code": lost_key.code}))

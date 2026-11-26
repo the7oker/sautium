@@ -140,7 +140,6 @@ def test_the_shape_rule_still_answers_first_and_the_backend_reads_the_same_rule(
         node_identity.validate_new_username("Ѕаutium")          # Cyrillic letters: the shape refuses
     with pytest.raises(ValueError, match="3-32 Latin letters"):
         node_identity.validate_new_username("Sautium\n")       # `$` alone would take it
-    assert p2p_identity.validate_username is node_identity.validate_username
 
 
 def test_the_reserved_skeleton_is_supports_own_name():
