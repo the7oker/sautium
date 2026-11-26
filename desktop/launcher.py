@@ -143,6 +143,7 @@ class LauncherApp(ctk.CTk):
         self.after(100, self._drain_ui_queue)
         self._streams_started = False
         self._scan_active = False     # a Library wake is only ours while a scan we started runs
+        self._folders: list = []      # the library's folders as the node last listed them
         self._qr_timer = None
         self._node_down = False       # _show_node_down's panel holds the QR block
         self._session_start = None    # (data_dir, previous session) until node.started is recorded
@@ -510,6 +511,7 @@ class LauncherApp(ctk.CTk):
 
         # Connect API client to the right port
         self.api_client.set_port(port)
+        threading.Thread(target=self._read_folders, daemon=True, name="library-folders").start()
 
         # QRs carry a pairing code so scanning the phone straight into a
         # signed-in session needs no typing. They keep themselves current
@@ -1085,18 +1087,21 @@ class LauncherApp(ctk.CTk):
         webbrowser.open(f"http://localhost:{port}/{fragment}")
 
     def _scan_button_label(self) -> str:
-        """The button picks a folder first and scans second. Before any
-        folder is set that first half is the whole act, and "Scan Library"
-        named an operation on something the user did not have."""
-        return "Scan Library…" if self.config.get("music_path") else "Choose Music Folder…"
+        """The button picks a folder first: one inside a folder of the
+        library is scanned, any other is added to it (LIBRARY-FOLDERS-1: the
+        library is every folder given, several at once). Before any folder
+        is there adding is the whole act."""
+        return "Add or Scan Folder…" if self._folders else "Add Music Folder…"
 
     def _folder_caption_text(self) -> str:
-        """The folder the scan button acts on — or, while there is none,
-        that a node without one is a working node: Home, streaming and
-        friends run without a single file."""
-        path = self.config.get("music_path", "")
-        if not path:
+        """The library's folder, or how many there are — or, while there is
+        none, that a node without one is a working node: Home, streaming
+        and friends run without a single file."""
+        if not self._folders:
             return "or stream music now"
+        if len(self._folders) > 1:
+            return f"{len(self._folders)} music folders"
+        path = self._folders[0]
         if len(path) <= 48:
             return path
         # Cut at a separator, so the tail starts with a whole folder name.
@@ -1105,30 +1110,18 @@ class LauncherApp(ctk.CTk):
         return "…" + (tail[cut:] if cut >= 0 else tail)
 
     def _scan_library(self):
-        """Open folder picker and scan selected folder."""
-        music_path = self.config.get("music_path", "")
+        """The OS's own folder dialog — the person at this machine: a folder
+        inside one of the library's is scanned alone, any other is added to
+        the library (the node watches it and scans it). Nothing is replaced
+        and nothing restarts: the library is every folder given."""
         selected = filedialog.askdirectory(
-            title="Select Folder to Scan",
-            initialdir=music_path,
+            title="Add a music folder, or scan one",
+            initialdir=self._folders[0] if self._folders else "",
         )
         if not selected:
             return
-
-        # Normalize paths for comparison
-        selected_p = Path(selected).resolve()
-        music_p = Path(music_path).resolve() if music_path else None
-
-        subpath = None
-        need_restart = False
-
-        if music_p and selected_p == music_p:
-            subpath = None
-        elif music_p and self._is_subpath(selected_p, music_p):
-            subpath = str(selected_p.relative_to(music_p))
-        else:
-            self.config = update_config({"music_path": str(selected_p)})
-            self.service_manager.config = self.config
-            need_restart = True
+        chosen = Path(selected).resolve()
+        inside = next((f for f in self._folders if self._is_subpath(chosen, Path(f))), None)
 
         self._btn_scan.configure(text="Cancel Scan",
                                  command=self._cancel_scan,
@@ -1136,30 +1129,51 @@ class LauncherApp(ctk.CTk):
         self._progress_text.configure(text="Starting scan...")
 
         def _do_start():
-            if need_restart:
-                def progress(msg):
-                    self.ui_call(lambda: self._progress_text.configure(text=msg))
-
-                msg = "Setting up music library..." if not music_p else "Restarting with new music path..."
-                self._set_status_safe("starting", msg)
-                if not self.service_manager.restart_backend_and_tracker(progress_cb=progress):
-                    self.ui_call(self._scan_done)
-                    return
-                port = self.config.get("ports", {}).get("web", 8000)
-                self.api_client.set_port(port)
-
-            result = self.api_client.start_scan(subpath)
+            if inside is not None:
+                result = self.api_client.start_scan(str(chosen))
+            else:
+                result = self.api_client.add_folder(str(chosen))
+                if result and result.get("folder"):
+                    result = {"success": True}
+                    self._read_folders()
             if result and result.get("success"):
                 self._scan_active = True
                 self.ui_call(self._refresh_scan)
             else:
-                # A refusal carries its reason (the music folder unreachable,
-                # a scan already running) — show it, not a bare failure.
+                # A refusal carries its reason (the folder unreachable, one
+                # already in the library, a scan already running) — show it,
+                # not a bare failure.
                 self.ui_call(lambda: self._progress_text.configure(
                     text=(result or {}).get("detail") or "Failed to start scan"))
                 self.ui_call(self._scan_done)
 
         threading.Thread(target=_do_start, daemon=True).start()
+
+    def _read_folders(self):
+        """The library's folders as the node lists them (off the UI thread).
+        Once, the folder this launcher kept in its config before the library
+        had several: the node made it the library's first folder at its
+        start (db_migrate's library_folders_v1), and the config forgets it —
+        a folder the node does not list yet is added first."""
+        folders = self.api_client.library_folders()
+        if folders is None:
+            return
+        old = self.config.get("music_path", "")
+        if old:
+            # the node's spelling: forward slashes, a drive's root keeping its own
+            stored = old.replace("\\", "/").rstrip("/")
+            stored = stored + "/" if len(stored) == 2 and stored[1] == ":" else stored
+            listed = lambda: any(f.casefold() == stored.casefold() for f in folders)
+            if not listed():
+                self.api_client.add_folder(old)
+                folders = self.api_client.library_folders() or folders
+            if listed():                  # forgotten only once the node holds it
+                self.config = update_config({"music_path": ""})
+                self.service_manager.config = self.config
+        self._folders = folders
+        self.ui_call(lambda: (self._btn_scan.configure(text=self._scan_button_label())
+                              if not self._scan_active else None,
+                              self._folder_caption.configure(text=self._folder_caption_text())))
 
     def _refresh_scan(self):
         """Read scan status once. Called when the Library channel says the
@@ -1187,8 +1201,10 @@ class LauncherApp(ctk.CTk):
         self._btn_scan.configure(state="disabled")
 
     def _scan_done(self):
-        """Restore UI after scan completes."""
+        """Restore UI after scan completes. The folders are read again: the
+        Web UI may have added or forgotten one meanwhile."""
         self._scan_active = False
+        threading.Thread(target=self._read_folders, daemon=True, name="library-folders").start()
         self._btn_scan.configure(
             text=self._scan_button_label(), command=self._scan_library,
             state="disabled" if self._node_down else "normal", fg_color="transparent",

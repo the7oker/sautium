@@ -16,6 +16,14 @@ from streaming.base import FetchedAudio, ProviderManifest, StreamProvider, Track
 from streaming.proxy import MediaProxy
 
 
+@pytest.fixture(autouse=True)
+def _no_folders_table(monkeypatch):
+    """No database here: the library's folders are none but the one the
+    settings name (library_root.given's rows as already read)."""
+    import library_root
+    monkeypatch.setattr(library_root, "_rows", [])
+
+
 class _GatedProvider(StreamProvider):
     """Every fetch blocks until its title is released — the pipe's order and
     what is in flight become observable."""
@@ -312,7 +320,9 @@ def _streamed(i):
                      provider="stub")
 
 
-def test_unplayable_reason_reads_the_skipped_slots():
+def test_unplayable_reason_reads_the_skipped_slots(monkeypatch):
+    import library_root
+    monkeypatch.setattr(library_root, "paths", lambda: ["E:/Music"])
     q = CanonicalQueue()
     q.replace([_streamed(i) for i in range(1, 6)])
     stub = types.SimpleNamespace(_queue=q)
@@ -340,7 +350,9 @@ def test_a_file_token_is_checked_when_served_not_when_minted(tmp_path):
         proxy.materialize_file(tok, None)
 
 
-def test_unplayable_reason_names_owned_files_the_disk_refused():
+def test_unplayable_reason_names_owned_files_the_disk_refused(monkeypatch):
+    import library_root
+    monkeypatch.setattr(library_root, "paths", lambda: ["E:/Music"])
     q = CanonicalQueue()
     q.replace([QueueItem(track_id=f"t{i}", media_file_id=i,
                          source={"kind": "file", "path": f"E:/Music/A/B/{i}.flac",
@@ -381,10 +393,11 @@ def test_a_library_file_asked_for_here_speaks_for_the_music_folder(tmp_path, mon
     import urllib.error
     import urllib.request
     said = []
+    music = str(tmp_path / "music")
     monkeypatch.setitem(sys.modules, "scanner", types.SimpleNamespace(
-        check_folder=lambda wait=False: said.append("looked at"),
-        folder_seen=lambda unreachable: said.append(("answers", not unreachable)),
-        of_music_folder=lambda path: str(path).startswith(str(tmp_path / "music") + "/")))
+        check_folder=lambda path=None, wait=False: said.append(("looked at", path)),
+        folder_seen=lambda path, unreachable: said.append(("answers", path, not unreachable)),
+        folder_of=lambda path: music if str(path).startswith(music + "/") else None))
     proxy = MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k",
                        bind_host="127.0.0.1")
     proxy.start()
@@ -407,15 +420,15 @@ def test_a_library_file_asked_for_here_speaks_for_the_music_folder(tmp_path, mon
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/file/{tok}", timeout=5) as r:
             assert r.status == 200 and len(r.read()) == 1000
-        assert said == [("answers", True)]
+        assert said == [("answers", music, True)]
         track.unlink()                              # the disk pulled under a running node
         with pytest.raises(urllib.error.HTTPError) as e:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/file/{tok}", timeout=5)
-        assert e.value.code == 500 and said == [("answers", True), "looked at"]
+        assert e.value.code == 500 and said == [("answers", music, True), ("looked at", music)]
         # the DLNA backend's own read before a URL is handed to a renderer says it too
         with pytest.raises(OSError):
             proxy.materialize_file(tok, None)
-        assert said[2:] == ["looked at"]
+        assert said[2:] == [("looked at", music)]
     finally:
         proxy._httpd.shutdown()
     # a process that never loaded the scanner looks at no folder

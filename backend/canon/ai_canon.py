@@ -33,7 +33,6 @@ from difflib import SequenceMatcher
 from anyascii import anyascii
 
 import claude_code
-from config import settings
 from database import SessionLocal
 import mb_answers
 from db_pool import db_query
@@ -123,9 +122,10 @@ def _residue(limit, since=None):
 
 def _context(artist_id, name):
     """Owned albums / genres / one album folder + the f_unaccent MB namesakes.
-    The folder is a local edition's path below the library root, without the
-    root: a copy elsewhere (an HQPlayer's library, a stray absolute path) or
-    an unset root gives none."""
+    The folder is a local edition's path below the folder of the library it
+    lies in, without that folder: a copy elsewhere (an HQPlayer's library, a
+    path under no folder) gives none."""
+    import library_root
     ctx = db_query("""
         SELECT
           (SELECT string_agg(DISTINCT al.title, ' / ') FROM albums al
@@ -133,12 +133,12 @@ def _context(artist_id, name):
           (SELECT string_agg(DISTINCT g.name, ', ') FROM albums al
              JOIN album_artists aa ON aa.album_id=al.id AND aa.artist_id=%(a)s::uuid
              JOIN album_genres ag ON ag.album_id=al.id JOIN genres g ON g.id=ag.genre_id) AS genres,
-          (SELECT min(substr(av.directory_path, length(%(root)s) + 2)) FROM albums al
+          (SELECT min(substr(av.directory_path, length(rtrim(f.p, '/')) + 2)) FROM albums al
              JOIN album_artists aa ON aa.album_id=al.id AND aa.artist_id=%(a)s::uuid
              JOIN album_variants av ON av.album_id=al.id
-            WHERE av.location = 'local' AND %(root)s <> ''
-              AND starts_with(av.directory_path, %(root)s || '/')) AS path
-    """, {"a": artist_id, "root": settings.library_db_root()})[0]
+             JOIN unnest(%(folders)s::text[]) AS f(p) ON starts_with(av.directory_path, rtrim(f.p, '/') || '/')
+            WHERE av.location = 'local') AS path
+    """, {"a": artist_id, "folders": library_root.paths()})[0]
     cands = db_query("""
         SELECT m.gid::text AS gid, m.name, COALESCE(m.comment, '') AS comment
         FROM mb_artist m WHERE f_unaccent(m.name) = f_unaccent(%(n)s)

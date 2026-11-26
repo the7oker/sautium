@@ -3610,7 +3610,7 @@
   // `not_here`, for a tile already on the page (homeShelf).
   function markAlbumTile(tile, why) {
     tile.classList.toggle('is-not-here', !!why);
-    const cover = tile.querySelector('.album-cover');
+    const cover = tile.querySelector('.album-cover, .mosaic-cover');
     let mark = cover.querySelector('.album-tile-out');
     if (!why) {
       if (mark) mark.remove();
@@ -3622,6 +3622,24 @@
       cover.appendChild(mark);
     }
     mark.textContent = notHereWords(why).mark;
+  }
+
+  // The tiles a page drew from rows that carry no mark (Discovery's search
+  // blocks): asked by their album ids, by the one definition
+  // (POST /api/home/albums-away, sql_queries.album_away), and set in place.
+  async function markShownAlbums(container) {
+    const tiles = [...container.querySelectorAll('[data-album-id]')].filter(t => t.dataset.albumId);
+    const ids = [...new Set(tiles.map(t => t.dataset.albumId))];
+    if (!ids.length) return;
+    try {
+      const resp = await fetch('/api/home/albums-away', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+      if (!resp.ok) return;
+      const said = (await resp.json()).not_here || {};
+      tiles.forEach(t => { if (t.isConnected) markAlbumTile(t, said[t.dataset.albumId] || null); });
+    } catch (err) {
+      console.warn('album marks: the node did not answer', err);
+    }
   }
 
   // A listening-history tile. Reuses the album-tile visual (cover + two
@@ -3650,9 +3668,15 @@
       ? `<span class="album-tile-repeat">×${Number(item.repeat_count)}</span>` : '';
     // A card generated from the imported Last.fm history says so, quietly.
     const source = item.source === 'lastfm' ? ' <span class="tile-source">· last.fm</span>' : '';
+    // A card of one album none of whose files opens here now: the album
+    // tile's mark (B-152), set again in place by its album id (homeShelf)
+    const out = item.not_here
+      ? `<span class="album-tile-feat album-tile-out">${escapeHtml(notHereWords(item.not_here).mark)}</span>` : '';
+    if (out) tile.classList.add('is-not-here');
+    if (item.album_id) tile.dataset.albumId = item.album_id;
     tile.innerHTML = `
       <div class="album-cover" style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">
-        ${cover}${repeat}${stack}
+        ${cover}${repeat}${stack}${out}
       </div>
       <div class="album-title">${escapeHtml(title || '')}</div>
       <div class="album-artist">${escapeHtml(subtitle || '')}${source}</div>
@@ -5095,6 +5119,7 @@
       ? items.slice(0, DISCOVERY_TRACK_STEP) : items;
     body.innerHTML = DISCOVERY_RENDERERS[descriptor.layout](visible) + stateNote;
     wireDetailHandlers(body);
+    if (descriptor.layout === 'albums') markShownAlbums(body);
     if (descriptor.layout === 'tracks') updatePlayingHighlight();
     attachBlockPaging(screen, descriptor, body, data.next_cursor, params,
                       items.slice(visible.length));
@@ -5205,11 +5230,14 @@
         const score = (a.similarity != null)
           ? `<span class="mosaic-score">${Number(a.similarity).toFixed(2)}</span>`
           : '';
+        // his album none of whose files opens here now: the album tile's mark (B-152)
+        const out = a.not_here
+          ? `<span class="album-tile-feat album-tile-out">${escapeHtml(notHereWords(a.not_here).mark)}</span>` : '';
         return `
-          <button class="mosaic-tile${phantom}" type="button"
+          <button class="mosaic-tile${phantom}${out ? ' is-not-here' : ''}" type="button"
                   data-album-id="${escapeHtml(a.album_id || '')}">
             <div class="mosaic-cover"
-                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}${score}</div>
+                 style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}${score}${out}</div>
             <div class="mosaic-title">${escapeHtml(a.album || a.title || '')}</div>
             <div class="mosaic-artist">${escapeHtml(a.artist || '')}</div>
           </button>`;
@@ -5288,9 +5316,12 @@
     const cover = url
       ? `<img src="${url}" alt="" loading="lazy" onerror="this.style.display='none'">`
       : '';
+    const out = item.not_here
+      ? `<span class="album-tile-feat album-tile-out">${escapeHtml(notHereWords(item.not_here).mark)}</span>` : '';
+    if (out) tile.classList.add('is-not-here');
     tile.innerHTML = `
       <div class="mosaic-cover"
-           style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}</div>
+           style="--cover-bg-1: ${c.bg1}; --cover-bg-2: ${c.bg2};">${cover}${out}</div>
       <div class="mosaic-title">${escapeHtml(item.title || '')}</div>
       <div class="mosaic-artist">${escapeHtml(item.artist || '')}</div>
     `;
@@ -6067,7 +6098,9 @@
     const fmt = v.file_format || (v.is_lossless ? 'Lossless' : null);
     const specs = [sr, bd, fmt].filter(Boolean).join(' · ');
     const tailParts = (v.directory_path || '').split(/[\\/]/).filter(Boolean).slice(-2);
-    const tail = tailParts.join('/');
+    // a local copy is named by the folder of the library it lies in (a disk's
+    // label) and its own folder: two copies on two disks read apart
+    const tail = v.folder ? `${v.folder} › ${tailParts[tailParts.length - 1] || ''}` : tailParts.join('/');
     const base = specs && tail ? `${specs} · ${tail}` : (specs || tail || ('Variant ' + v.variant_id));
     // Where the copy lives: a rip held at an HQPlayer names it; a local rip
     // says nothing, as before.
@@ -12891,6 +12924,7 @@
     pin:   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s-7-6.5-7-12a7 7 0 1114 0c0 5.5-7 12-7 12z"/><circle cx="12" cy="10" r="2.5"/></svg>',
     check: '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4L19 7"/></svg>',
     close: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    plus:  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
   };
 
   /* ISO 3166-1 alpha-2 country codes. Country names rendered via
@@ -14159,10 +14193,6 @@
       }
     },
   };
-  NOTICE_COPY['library.mount_missing'] = n => ({
-    title: 'Music folder unreachable',
-    text: `<span class="num">${escapeHtml(fmtPathForDisplay((n.data && n.data.path) || ''))}</span> is empty or not mounted — your own tracks stream or wait until it is back.`,
-  });
   // The same failure on three plays in a row (playback/hqp_diagnostics.py):
   // the output, not a track. The facts come from the server; the words here.
   NOTICE_COPY['hqplayer.failing'] = n => ({
@@ -14469,6 +14499,31 @@
       return { title: 'Sautium support asks for diagnostics from this node',
                text: `Asked on ${fmtDayHm((n.data && n.data.issued_at) || n.since)} — nothing goes until you review it.`,
                action: { label: 'Review', run: () => openSupportRequestSheet(n.data) } };
+    }
+    // A folder of the library not connected (its disk pulled): a warning at
+    // its onset, its standing state the folder's row in Settings › Library
+    // (LIBRARY-FOLDERS-1 Q9). Drafts for the words sitting.
+    if (n.key.startsWith('library.folder_out.')) {
+      const d = n.data || {};
+      const albums = Number(d.albums) || 0;
+      return { title: `${escapeHtml(d.name || 'A music folder')} is not connected`,
+               text: albums
+                 ? `Its <span class="num">${fmtNum(albums)}</span> album${albums === 1 ? '' : 's'} `
+                   + `${d.streams ? (albums === 1 ? 'streams' : 'stream') : 'cannot play'} until it is back.`
+                 : 'Its music cannot play until it is back.' };
+    }
+    // A disk plugged in that the library never had (LIBRARY-FOLDERS-1 §3.2):
+    // its one tap — the whole disk; a folder on it is chosen in Settings ›
+    // Library. Nothing is kept of a disk passed over.
+    if (n.key.startsWith('disk.new.')) {
+      const d = n.data || {};
+      return { title: 'A disk with music was plugged in',
+               text: `${d.label ? escapeHtml(d.label) : 'A disk'} holds <span class="num">${fmtNum(d.audio_files)}${d.capped ? '+' : ''}</span> audio file${d.audio_files === 1 ? '' : 's'}.`,
+               action: { label: 'Add to library', run: async () => {
+                 const refused = await addLibraryFolder(d.path);
+                 if (refused) notices.toast({ kind: 'error', key: 'library.folders', title: 'Not added',
+                                             text: escapeHtml(refused) });
+               } } };
     }
     if (n.key.startsWith('disk.unread.')) {
       const c = unreadDiskCopy(n.data || {});
@@ -18979,11 +19034,31 @@
   // of albums it found again elsewhere — counted apart, since a copy that
   // goes is not music that goes. "away": the owner's removal of the copies
   // that are away, which takes their albums when nothing else holds them.
+  // "folder": "Forget this disk (folder) and its albums" — what it alone
+  // holds, its disk out or in (LIBRARY-FOLDERS-1 §4.4), or the copies under
+  // no folder ("Elsewhere"). Drafts for the words sitting.
   function _prunePlanTitle(p) {
+    // a folder that is no disk goes by its path, said as the folder list says it
+    if (p.kind === 'folder') return p.elsewhere ? 'Forget the albums elsewhere?'
+      : `Forget ${p.disk ? p.name : fmtPathForDisplay(p.name)} and its albums?`;
     if (p.kind === 'away') return 'Remove albums that are away?';
     return p.files ? 'Remove missing files?' : 'Remove the old copies?';
   }
   function _prunePlanMessage(p) {
+    if (p.kind === 'folder') {
+      const where = p.elsewhere ? 'these folders' : p.disk ? 'this disk' : 'this folder';
+      const lines = [p.albums
+        ? `${_count(p.albums, 'album', 'albums')} that only ${where} ${p.elsewhere ? 'hold' : 'holds'} ${p.albums === 1 ? 'leaves' : 'leave'} your library`
+          + (p.copies ? `; ${_count(p.copies, 'album stays', 'albums stay')}, held by another copy.` : '.')
+        : p.copies ? `Its ${_count(p.copies, 'album stays', 'albums stay')} in your library, held by another copy.`
+        : 'Its files leave your library.'];
+      lines.push('Your listening history stays, and the tracks you have played or analysed stay, to stream.');
+      lines.push(p.elsewhere || p.connected
+        ? 'The files stay where they are and Sautium stops reading them; add the folder again at any time.'
+        : p.disk ? 'Nothing on the disk is touched: plug it in again and Sautium offers to add it.'
+        : 'Nothing in the folder is touched; add it again at any time.');
+      return lines.join(' ');
+    }
     const also = [];
     if (p.tracks)  also.push(`${_count(p.tracks, 'track', 'tracks')} with no analysis and no listens`);
     if (p.artists) also.push(_count(p.artists, 'artist', 'artists'));
@@ -19028,27 +19103,24 @@
     const kind = _pruneYesSent.get(r.plan_id);
     _pruneYesSent.delete(r.plan_id);
     if (r.prune && r.prune.refused) {
-      notices.toast({ kind: 'error', key: 'library.prune',
-                      title: kind === 'away' ? 'Albums away' : 'Rescan',
+      notices.toast({ kind: 'error', key: 'library.prune', title: _planTitle(kind),
                       text: escapeProfileHtml(r.prune.refused) });
     }
   }
-  let _prunePlanHeld = null;       // the question the folder's absence holds back
+  const _planTitle = kind => (kind === 'away' ? 'Albums away' : kind === 'folder' ? 'Forget' : 'Rescan');
   async function _askPrunePlan(plan) {
     // One question at a time: a plan that arrives while one is open (another
     // device's Rescan, a yes that had to ask again) waits for the render that
-    // follows the answer. With the music folder out the node refuses any yes
-    // (PI-NODE-2E F23): the question waits, and the snapshot the folder's
-    // return sends asks it.
-    if (!plan || _prunePlanOpen || _prunePlansAsked.has(plan.id)) return;
-    if (notices.get('library.mount_missing')) { _prunePlanHeld = plan; return; }
-    _prunePlanHeld = null;
+    // follows the answer. While no folder its files lie in answers the node
+    // refuses any yes (PI-NODE-2E F23; `waits`): the question waits, and the
+    // snapshot a folder's return sends asks it.
+    if (!plan || _prunePlanOpen || _prunePlansAsked.has(plan.id) || plan.waits) return;
     _prunePlansAsked.add(plan.id);
     _prunePlanOpen = true;
     const remove = await window.confirmDestructive({
       title: _prunePlanTitle(plan),
       message: escapeProfileHtml(_prunePlanMessage(plan)),
-      confirmText: 'Remove',
+      confirmText: plan.kind === 'folder' ? 'Forget' : 'Remove',
       cancelText: 'Keep',
       focusCancel: true,
     }).finally(() => { _prunePlanOpen = false; });
@@ -19070,81 +19142,132 @@
     }
     if (detail) {
       _pruneYesSent.delete(plan.id);
-      notices.toast({ kind: 'error', key: 'library.prune',
-                      title: plan.kind === 'away' ? 'Albums away' : 'Rescan',
+      notices.toast({ kind: 'error', key: 'library.prune', title: _planTitle(plan.kind),
                       text: escapeProfileHtml(detail) });
     }
     if (waiting) { _prunePlansAsked.delete(plan.id); return; }
     if (parseHash().startsWith('more/library')) render();
   }
 
-  // The library.mount_missing condition explained where it bites: a scan here
-  // would walk an empty folder, so the server refuses one. The notice set is
-  // the one source, on render and on every snapshot (the library read wakes
-  // the channel when it sees the folder gone first).
-  // Who names the folder decides the line under it (lib.music_folder, kept
-  // on the row): the owner here, under the roots the node's setup mounted
-  // ('pick'); the launcher's window; the node's .env ('setup').
-  const MUSIC_FOLDER_LINES = {
-    pick: '',
-    launcher: 'Configured in the launcher.',
-    setup: 'Named where this node was set up (MUSIC_LIBRARY_PATH in its .env).',
+  // The library's folders (backend routers/settings._folders_state;
+  // LIBRARY-FOLDERS-1): each with its state, what it holds, and — explicit
+  // and confirmed — "Forget this disk and its albums"; a disk plugged in
+  // that the library never had on top, for one tap; the copies under no
+  // folder as "Elsewhere". A folder that is not connected is a dimmed row,
+  // never a red one: a friend's stick out for months keeps its row until it
+  // is forgotten (the owner, Q9). Who gives this node its folders
+  // (lib.music_folder) decides the line in place of "Add a folder": the
+  // owner here, under the roots the node's setup mounted ('pick'); the
+  // launcher's window; the node's .env ('setup'). Drafts for the words
+  // sitting (LIBRARY-FOLDERS-1 §8.1).
+  const FOLDERS_ADDED_ELSEWHERE = {
+    launcher: 'Folders are added in the Sautium window on this computer.',
+    setup: 'Named where this node was set up (MUSIC_LIBRARY_PATH in its .env). '
+      + 'Another folder is another bind in its compose file.',
   };
   // Under a disk the machine mounted read-only — in the folder sheet, and
-  // under the chosen folder while it is on one (lib.music_folder_pullable).
-  // Draft words for the owner's words review.
+  // under a folder of the library on one (folder.pullable).
   const SAFE_TO_PULL = 'Sautium only reads this disk and writes nothing to it. '
-    + 'You can unplug it at any time: its albums are away until it is back.';
-  // While the folder does not answer its albums stream where this node
-  // streams (kept on the row, musicStreams), and wait where it does not:
-  // the row says which. Drafts for the words sitting (PI-NODE-2D-DESIGN §9.1).
-  function paintMusicPathRow(row, missing) {
-    row.classList.toggle('notice-row', missing);
-    row.classList.toggle('kind-error', missing);
-    const sub = row.querySelector('.row-stack-sub');
-    const line = missing
-      ? (row.dataset.musicStreams
-        ? 'Not connected — your own tracks stream or wait, and nothing can be scanned, until it is back.'
-        : 'Not connected — your own tracks cannot play or be scanned until it is back.')
-      : row.dataset.musicPullable ? SAFE_TO_PULL
-      : MUSIC_FOLDER_LINES[row.dataset.musicFolder] || '';
-    if (sub.textContent !== line) sub.textContent = line;
-    sub.hidden = !line;
+    + 'You can unplug it at any time.';
+  // A folder's row. `streams`: what its albums do while it is out — stream
+  // where this node streams, else wait (lib.streams).
+  function _folderRow(f, streams) {
+    const what = f.disk ? 'disk' : 'folder';
+    const counts = `${_count(f.albums, 'album', 'albums')} · ${_count(f.tracks, 'track', 'tracks')}`;
+    const sub = !f.connected
+      ? (streams ? `Its albums stream until the ${what} is back: each track once in full, then 30-second excerpts.`
+                 : `Its albums cannot play until the ${what} is back.`)
+      : f.pullable ? SAFE_TO_PULL : '';
+    const [head, under] = f.disk ? f.name.split(' · ') : [fmtPathForDisplay(f.name), ''];
+    const forget = f.forgettable
+      ? `<div class="folder-actions"><button class="profile-btn secondary" type="button" data-action="forget-folder" data-folder-id="${Number(f.id)}">Forget this ${what} and its albums</button></div>`
+      : '';
+    return `
+      <div class="form-row stacked folder-row${f.connected ? '' : ' is-out'}" data-folder-row="${Number(f.id) || ''}">
+        <div class="row-stack">
+          <span class="row-stack-label"><span class="status-dot ${f.connected ? 'green' : 'dim'}"></span>${escapeProfileHtml(head)}${under ? `<span class="folder-under">${escapeProfileHtml(under)}</span>` : ''}</span>
+        </div>
+        <div class="row-stack-value">${f.connected ? '' : '<span class="folder-state">Not connected · </span>'}<span class="folder-counts">${escapeProfileHtml(counts)}</span></div>
+        ${sub ? `<div class="row-stack-sub">${escapeProfileHtml(sub)}</div>` : ''}
+        ${forget}
+      </div>`;
   }
-  // The Library screen under the notice library.mount_missing (`missing`):
-  // the Music path row's sentence, and — a scan or a removal of a folder
-  // that does not answer is refused by the node — "Scan for new", "Rescan"
-  // and the Away row's Remove waiting for the folder under it, the notice's
-  // own sentence under Remove; all come back with the notice's end. Whether this
-  // node streams meanwhile is asked once a stretch (GET /api/player/reach).
-  let _nodeStreams = null;        // null: not known for this stretch
-  let _nodeStreamsAsked = false;
-  function paintMusicFolder(missing) {
-    if (!missing) {
-      _nodeStreams = null; _nodeStreamsAsked = false;
-      if (_prunePlanHeld) _askPrunePlan(_prunePlanHeld);
-    }
-    const row = document.querySelector('[data-music-path-row]');
-    if (row) {
-      row.dataset.musicStreams = _nodeStreams ? '1' : '';
-      paintMusicPathRow(row, missing);
-    }
-    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"], [data-action="remove-away"]')
-      .forEach(btn => { if (btn.disabled !== missing) btn.disabled = missing; });
+  // A disk plugged in that the library never had (backend
+  // library_root.new_disks): Add takes the whole disk — the folder is where
+  // the search starts — or a folder on it through the sheet. Nothing of a
+  // disk passed over is kept: it is offered again at its next plug.
+  function _newDiskRow(d) {
+    const size = d.size_bytes ? escapeHtml(fmtBytes(d.size_bytes)) : '';
+    const files = `${fmtNum(d.audio_files)}${d.capped ? '+' : ''} audio file${d.audio_files === 1 ? '' : 's'}`;
+    return `
+      <div class="form-row stacked folder-row is-new">
+        <div class="row-stack"><span class="row-stack-label">${d.label ? escapeHtml(d.label) : 'USB disk'}</span>
+          <span class="folder-counts">${size}</span></div>
+        <div class="row-stack-value"><span class="folder-state">Plugged in — not in your library · </span><span class="folder-counts">${files}</span></div>
+        <div class="folder-actions">
+          <button class="profile-btn primary" type="button" data-action="add-disk" data-path="${escapeHtml(d.path)}">Add</button>
+          <button class="profile-btn secondary" type="button" data-action="choose-on-disk" data-path="${escapeHtml(d.path)}">Choose a folder…</button>
+        </div>
+      </div>`;
+  }
+  function _elsewhereRow(e) {
+    return `
+      <div class="form-row stacked folder-row is-out">
+        <div class="row-stack"><span class="row-stack-label">Elsewhere</span></div>
+        <div class="row-stack-value"><span class="folder-counts">${escapeProfileHtml(`${_count(e.albums, 'album', 'albums')} · ${_count(e.tracks, 'track', 'tracks')}`)}</span></div>
+        <div class="row-stack-sub">Albums from a folder no longer in your library.</div>
+        <div class="folder-actions"><button class="profile-btn secondary" type="button" data-action="forget-elsewhere">Forget them</button></div>
+      </div>`;
+  }
+  function _foldersBlock(lib) {
+    const folders = lib.folders || [];
+    const rows = (lib.new_disks || []).map(_newDiskRow).join('')
+      + folders.map(f => _folderRow(f, !!lib.streams)).join('')
+      + (lib.elsewhere ? _elsewhereRow(lib.elsewhere) : '');
+    const add = lib.music_folder === 'pick'
+      ? `<button class="manage-tokens-row" type="button" data-action="add-folder" data-guide="music_folder"><span class="add-folder">${PROFILE_ICONS.plus}Add a folder</span><span class="chev">›</span></button>`
+      : `<div class="helper-line">${escapeProfileHtml(FOLDERS_ADDED_ELSEWHERE[lib.music_folder] || '')}</div>`;
+    return `
+      <div data-library-folders data-library-drawn="${_libraryDrawn(lib)}">
+        <div class="profile-group-label" style="margin-top:calc(14*var(--px));">Music folders</div>
+        ${rows ? `<div class="form-group">${rows}</div>` : ''}
+        ${add}
+      </div>`;
+  }
+  // Scan for new and Rescan wait while no folder of the library answers —
+  // the node refuses a scan then; the Away row's Remove while every copy
+  // away waits for a disk that is out (`away.waiting`), with the line saying
+  // how many wait.
+  function paintLibraryFolders(lib) {
+    const folders = lib.folders || [];
+    const none = folders.length > 0 && folders.every(f => !f.connected);
+    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"]')
+      .forEach(btn => { if (btn.disabled !== none) btn.disabled = none; });
+    const away = lib.away || {};
+    const allWait = !!away.copies && away.waiting === away.copies;
+    const remove = document.querySelector('[data-action="remove-away"]');
+    if (remove && remove.disabled !== allWait) remove.disabled = allWait;
     const awayWhy = document.querySelector('[data-away-why]');
     if (awayWhy) {
-      const n = missing && notices.get('library.mount_missing');
-      const line = n ? NOTICE_COPY['library.mount_missing'](n).text : '';
-      if (awayWhy.dataset.line !== line) { awayWhy.innerHTML = line; awayWhy.dataset.line = line; }
+      const line = away.waiting
+        ? `${_count(away.waiting, 'copy waits', 'copies wait')} for a disk that is not connected.`
+        : '';
+      if (awayWhy.textContent !== line) awayWhy.textContent = line;
       awayWhy.hidden = !line;
     }
-    if (missing && row && !_nodeStreamsAsked) {
-      _nodeStreamsAsked = true;
-      fetch('/api/player/reach').then(r => (r.ok ? r.json() : null)).then(body => {
-        if (!body || !_nodeStreamsAsked) return;
-        _nodeStreams = !!body.streams;
-        if (notices.get('library.mount_missing')) paintMusicFolder(true);
-      }).catch(() => { _nodeStreamsAsked = false; });    // asked again at the next paint
+  }
+  // The one tap of a disk plugged in (its row's Add, the toast's "Add to
+  // library"), and the sheet's "Add this folder": the node stores the folder,
+  // watches it and scans it alone. Returns the node's refusal, if any.
+  async function addLibraryFolder(path) {
+    try {
+      const r = await fetch('/api/settings/library/folders', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) });
+      if (r.ok) return null;
+      const d = await r.json().catch(() => ({}));
+      return typeof d.detail === 'string' ? d.detail : `HTTP ${r.status}`;
+    } catch (err) {
+      return 'The node did not answer.';
     }
   }
 
@@ -19213,7 +19336,8 @@
       : `${escapeHtml(disk ? (p.label || fmtPathForDisplay(p.path)) : p.name)}${size ? ` ${dim(`— ${size}`)}` : ''}`;
     // An empty folder the library holds copies from lost them (`held`); one
     // it never read is new
-    const line = disk && p.read_only ? SAFE_TO_PULL
+    const line = p.in_library ? 'In your library.'
+      : disk && p.read_only ? SAFE_TO_PULL
       : !p.empty ? ''
       : p.held ? 'Empty — its disk is not mounted, or the folder was removed.'
       : 'Empty — nothing is in it yet.';
@@ -19235,15 +19359,18 @@
   }
 
   /* The folder sheet of a node that reads its music under roots (backend
-     library_root.py): the places a choice can start at — each disk plugged
-     in, each folder named at setup — then down through folders, and "Use
-     this folder". Every name is a stranger's text (a disk's label, a
+     library_root.py): the places an added folder can start at — each disk
+     plugged in, each folder named at setup — then down through folders, and
+     "Add this folder" (LIBRARY-FOLDERS-1: one folder more of the library;
+     one inside a folder of it is refused with its sentence, one around
+     folders of it takes them in, said before the tap). `startAt`: open at
+     that folder (a disk plugged in, its "Choose a folder…"). Every name is a stranger's text (a disk's label, a
      folder's name): escaped, never part of a path the page builds — the
      server hands each row's path, and resolves it again when it is sent.
      The list of places follows the mount table live: a disk plugged in
      while the sheet is open appears in it (the Library stream wakes it).
      Draft words for the owner's words review. */
-  function openMusicFolderSheet(onChosen) {
+  function openMusicFolderSheet(onChosen, startAt) {
     if (document.querySelector('[data-folder-sheet]')) return;
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
@@ -19258,7 +19385,8 @@
         <div class="add-gear-row">
           <div data-crumb style="font-size:calc(12.5*var(--px));color:var(--color-text-muted);line-height:1.5;"></div>
           <div data-list></div>
-          <button class="profile-btn primary" data-use hidden>Use this folder</button>
+          <div data-standing style="font-size:calc(12*var(--px));line-height:1.45;color:var(--color-text-muted);" hidden></div>
+          <button class="profile-btn primary" data-use hidden>Add this folder</button>
           <div data-msg style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12*var(--px));line-height:1.5;">
             Sautium reads the disks listed here and writes to none of them.
@@ -19269,6 +19397,7 @@
     const crumb = overlay.querySelector('[data-crumb]');
     const list = overlay.querySelector('[data-list]');
     const use = overlay.querySelector('[data-use]');
+    const standingLine = overlay.querySelector('[data-standing]');
     const msg = overlay.querySelector('[data-msg]');
     let at = null;                       // the folder shown, null = the places
     let drawnPlaces = null;              // the places' rows as drawn, null = a folder is shown
@@ -19281,7 +19410,7 @@
       const mine = ++seq;
       let data;
       try {
-        const r = await fetch('/api/settings/library/folders'
+        const r = await fetch('/api/settings/library/places'
           + (under ? `?under=${encodeURIComponent(under)}` : ''));
         data = await r.json().catch(() => ({}));
         if (mine !== seq) return;
@@ -19306,6 +19435,7 @@
         const places = data.places.map(_folderPlaceRow).join('');
         if (places !== drawnPlaces) list.innerHTML = drawnPlaces = places;
         use.hidden = true;
+        standingLine.hidden = true;
         return;
       }
       const count = `${fmtNum(data.folders.length)} folder${data.folders.length === 1 ? '' : 's'} · `
@@ -19316,7 +19446,15 @@
         <button class="manage-tokens-row" type="button" data-up><span>‹ Back</span><span></span></button>`
         + data.folders.map(f => row(f.name, f.path, '')).join('');
       list.querySelector('[data-up]').dataset.path = data.parent || '';
-      use.hidden = false;
+      // Where it stands against the library: inside a folder of it (read
+      // already: no Add), or around folders of it (taken in by the Add)
+      const st = data.standing || {};
+      const line = st.inside ? `It is already in your library, as part of ${st.inside}.`
+        : (st.holds || []).length ? `This folder holds ${_listed(st.holds)}, already in your library: from now on one folder.`
+        : '';
+      standingLine.textContent = line;
+      standingLine.hidden = !line;
+      use.hidden = !!st.inside;
     }
     list.addEventListener('click', e => {
       const btn = e.target.closest('[data-path]');
@@ -19331,20 +19469,16 @@
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     use.addEventListener('click', () => onceInFlight(overlay, async () => {
       try {
-        const r = await fetch('/api/settings/library/root', {
-          method: 'PUT', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ path: at }),
-        });
-        if (r.ok) { close(); onChosen(); return; }
-        const data = await r.json().catch(() => ({}));
+        const refused = await addLibraryFolder(at);
+        if (!refused) { close(); onChosen(); return; }
         msg.style.color = 'var(--color-negative)';
-        msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not chosen.';
+        msg.textContent = refused;
       } catch (err) {
         msg.style.color = 'var(--color-negative)';
         msg.textContent = String(err);
       }
     }));
-    show(null);
+    show(startAt || null);
   }
 
   async function renderLibrary(root) {
@@ -19368,23 +19502,9 @@
     const scanRunning   = !!(lib.scan   && lib.scan.running)   && !_terminalRe.test(scanProgress);
     const enrichRunning = !!(lib.enrich && lib.enrich.running) && !_terminalRe.test(enrichProgress);
     const isEmpty       = (lib.total_tracks || 0) === 0;
-    // Launcher writes MUSIC_LIBRARY_PATH= (blank) into .env when the
-    // user hasn't picked a folder yet; Pydantic then loads it as ''.
-    // Treat that — and the Docker default '/music' when nothing was
-    // bind-mounted — as "not configured" so we don't pretend a path
-    // exists.
-    // A node whose owner picks the folder here has none until they do. One
-    // whose .env names it holds a folder even where only the container's
-    // own mount point is known (no MUSIC_HOST_PATH): said as that.
-    const picksFolder   = lib.music_folder === 'pick';
-    const isPathSet     = !!(lib.music_path && (lib.music_path !== '/music' || lib.music_folder === 'setup'));
-    const pathFull      = !isPathSet ? ''
-      : lib.music_path === '/music' ? 'The folder named at setup' : fmtPathForDisplay(lib.music_path);
-    // With the folder button (Change / Choose) the label and the path stand
-    // one above the other and the button beside both: a few characters fewer
-    // fit, and the button is never the part that gives way.
-    const path          = isPathSet ? fmtPathTruncatedFromStart(pathFull, picksFolder ? 24 : 27)
-      : picksFolder ? 'Not chosen' : 'Not set';
+    // A node whose owner adds its folders here has none until they do; a
+    // launcher's are added in its window, a Docker node's named in its .env
+    const hasFolders    = (lib.folders || []).length > 0;
 
     const scanCancelling   = scanRunning   && !!(lib.scan   && lib.scan.cancel_requested);
     const enrichCancelling = enrichRunning && !!(lib.enrich && lib.enrich.cancel_requested);
@@ -19480,15 +19600,15 @@
     // A scan that runs over an empty library — the first one, started by a
     // tap, by the folder's choice or by the folder watcher — shows under
     // either message, with its Cancel.
-    const emptyState = !isEmpty ? '' : (!isPathSet ? `
+    const emptyState = !isEmpty ? '' : (!hasFolders ? `
       <div class="empty-library">
         <div class="icon">${SETTINGS_ICONS.vinyl}</div>
         <p class="empty-library-msg">
-          ${picksFolder
-            ? 'No music folder yet — Home and friends work without one. To add your own files, tap <b>Choose</b> above and pick the folder your music is in; files are only ever read.'
+          ${lib.music_folder === 'pick'
+            ? 'No music folder yet — Home and friends work without one. To add your own files, tap <b>Add a folder</b> above and pick the folder your music is in; files are only ever read.'
             : lib.music_folder === 'setup'
               ? 'No music folder yet — Home, streaming and friends work without one. To add your own files, name the folder in this node\'s <b>.env</b> (MUSIC_LIBRARY_PATH) and start the node again; files are only ever read.'
-              : 'No music folder yet — Home, streaming and friends work without one. To add your own files, open the <b>Desktop Launcher</b> and tap <b>Choose Music Folder</b>; files are only ever read.'}
+              : 'No music folder yet — Home, streaming and friends work without one. To add your own files, open the <b>Desktop Launcher</b> and tap <b>Add Music Folder</b>; files are only ever read.'}
         </p>
       </div>` : `
       <div class="empty-library">
@@ -19517,23 +19637,10 @@
       <section class="screen screen-settings">
         ${_settingsHeader('Library')}
 
-        <div class="form-group" style="margin-top:calc(14*var(--px));">
-          <div class="form-row stacked" data-music-path-row data-music-folder="${escapeProfileHtml(lib.music_folder || '')}" data-music-pullable="${lib.music_folder_pullable ? '1' : ''}" data-library-drawn="${_libraryDrawn(lib)}">
-            ${picksFolder ? `
-            <div class="row-stack">
-              <div class="row-stack-pair">
-                <span class="row-stack-label">Music path</span>
-                <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
-              </div>
-              <button class="profile-btn secondary" type="button" data-action="choose-folder" data-guide="music_folder">${isPathSet ? 'Change' : 'Choose'}</button>
-            </div>` : `
-            <div class="row-stack">
-              <span class="row-stack-label">Music path</span>
-              <span class="${isPathSet ? 'path-value' : 'form-value muted'}"${isPathSet ? ` title="${escapeProfileHtml(pathFull)}"` : ''}>${escapeProfileHtml(path)}</span>
-            </div>`}
-            <div class="row-stack-sub"></div>
-          </div>
-          ${isEmpty ? '' : `
+        ${_foldersBlock(lib)}
+
+        ${isEmpty ? '' : `
+          <div class="form-group" style="margin-top:calc(14*var(--px));">
             <div class="form-row">
               <span class="form-label">Storage</span>
               <span class="form-value mono" data-library-size>${escapeProfileHtml(fmtBytes(lib.total_size_bytes))}</span>
@@ -19547,8 +19654,7 @@
                 ? `<div class="row-stack-sub" data-library-last-scan-at style="font-family:var(--font-mono);letter-spacing:0.02em;">${escapeProfileHtml(fmtAbs(lib.last_scan_at))}</div>`
                 : ''}
             </div>
-          `}
-        </div>
+          </div>`}
 
         ${libraryStats}
         ${emptyState}
@@ -19556,12 +19662,31 @@
         ${actions}
       </section>
     `;
-    paintMusicFolder(!!notices.get('library.mount_missing'));
+    paintLibraryFolders(lib);
     _wireBack(root);
-    const chooseFolder = root.querySelector('[data-action="choose-folder"]');
-    if (chooseFolder) chooseFolder.addEventListener('click', () => openMusicFolderSheet(() => renderLibrary(root)));
 
     const onAction = (sel, fn) => root.querySelectorAll(sel).forEach(el => el.addEventListener('click', fn));
+    onAction('[data-action="add-folder"]', () => openMusicFolderSheet(() => render()));
+    onAction('[data-action="choose-on-disk"]', e => openMusicFolderSheet(() => render(), e.currentTarget.dataset.path));
+    onAction('[data-action="add-disk"]', e => onceInFlight(e.currentTarget, async () => {
+      const refused = await addLibraryFolder(e.currentTarget.dataset.path);
+      if (refused) notices.toast({ kind: 'error', key: 'library.folders', title: 'Not added', text: escapeProfileHtml(refused) });
+      render();
+    }));
+    // "Forget this disk (folder) and its albums": the node plans what it
+    // alone holds, and the plan is asked as every removal is (_askPrunePlan)
+    const forget = url => e => onceInFlight(e.currentTarget, async () => {
+      const r = await fetch(url, { method: 'POST' });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        notices.toast({ kind: 'error', key: 'library.prune', title: 'Forget',
+                        text: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+      }
+      render();
+    });
+    root.querySelectorAll('[data-action="forget-folder"]').forEach(el => el.addEventListener('click',
+      forget(`/api/settings/library/folders/${encodeURIComponent(el.dataset.folderId)}/forget`)));
+    onAction('[data-action="forget-elsewhere"]', forget('/api/settings/library/elsewhere/forget'));
     // A refused start says why: the folder unreachable, a scan already
     // running, the benchmark measuring.
     const startScan = query => e => onceInFlight(e.currentTarget, async () => {
@@ -19672,7 +19797,9 @@
   // the drawn screen (data-library-drawn) so a wake can tell.
   function _libraryDrawn(lib) {
     return encodeURIComponent(JSON.stringify([
-      lib.music_path || '', ((lib.away || {}).copies || 0) > 0, !!lib.last_scan_at]));
+      (lib.folders || []).map(f => [f.id, f.connected, f.albums, f.tracks, f.forgettable, f.pullable]),
+      (lib.new_disks || []).map(d => [d.path, d.audio_files]), lib.elsewhere || null, !!lib.streams,
+      ((lib.away || {}).copies || 0) > 0, !!lib.last_scan_at]));
   }
 
   // Whether the Library screen as drawn (`root`) shows another structure
@@ -19726,12 +19853,7 @@
         enrichLine.textContent = enrichProgress;
       }
       _refreshLibraryNumbers(root, lib, scanRunning);
-      // The folder's disk plugged in or pulled: its line, in place
-      const pathRow = root.querySelector('[data-music-path-row]');
-      if (pathRow && pathRow.dataset.musicPullable !== (lib.music_folder_pullable ? '1' : '')) {
-        pathRow.dataset.musicPullable = lib.music_folder_pullable ? '1' : '';
-        paintMusicFolder(!!notices.get('library.mount_missing'));
-      }
+      paintLibraryFolders(lib);
       _refreshEnrichRow(root, 'embeddings', lib.embeddings_done, lib.analysable_tracks);
       _refreshEnrichRow(root, 'features',   lib.features_done,   lib.analysable_tracks);
       _refreshEnrichRow(root, 'instruments', lib.instruments_done, lib.analysable_tracks);
@@ -20349,9 +20471,6 @@
       // Targeted updates only — the open screen keeps its DOM.
       const note = document.querySelector('[data-discography-pending]');
       if (note) note.innerHTML = discographyPendingText();
-      if (document.querySelector('[data-music-path-row]')) {
-        paintMusicFolder(!!notices.get('library.mount_missing'));
-      }
       if (parseHash().startsWith('more/sync')) {
         const content = screenRoot() && screenRoot().querySelector('[data-sync-content]');
         if (content) {

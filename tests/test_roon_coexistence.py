@@ -6294,13 +6294,13 @@ def _the_folder_went_unseen(monkeypatch) -> list:
     was waited for)."""
     import scanner
     from playback import substitute
-    for name, value in (("_folder_unreachable", False), ("_recorded", 0), ("_shown", False)):
-        monkeypatch.setattr(scanner, name, value)
+    monkeypatch.setattr(scanner, "_looks", {})
     looks: list = []
 
-    def look(wait=False):
+    def look(path=None, wait=False):
         looks.append(wait)
-        scanner._record(True, scanner._next_ticket(), wake=False)
+        folder = scanner._look_of(path or "E:/Music")
+        scanner._record(folder, True, scanner._next_ticket(folder), wake=False)
 
     def under_it(it) -> bool:
         return it.source.get("kind") == "file" and any(
@@ -6424,15 +6424,15 @@ def _a_music_folder_that_answers(monkeypatch, tmp_path, missing: tuple) -> list:
         if name not in missing:
             (root / name).write_bytes(b"fLaC")
     monkeypatch.setattr(settings, "music_library_path", str(root))
-    for name, value in (("_folder_unreachable", False), ("_recorded", 0), ("_shown", False)):
-        monkeypatch.setattr(scanner, name, value)
+    monkeypatch.setattr(scanner, "_looks", {})
     monkeypatch.setattr(scanner, "db_query_one", lambda *a, **kw: {"x": 1})
     monkeypatch.setattr(substitute, "_unopened", frozenset())
     looks: list = []
 
-    def look(wait=False):
+    def look(path=None, wait=False):
         looks.append(wait)
-        scanner._look(scanner._next_ticket(), wake=False)
+        folder = scanner._look_of(path)
+        scanner._record(folder, scanner._answer(path), scanner._next_ticket(folder), wake=False)
 
     def not_here(it) -> bool:
         path = it.source.get("path") if it.source.get("kind") == "file" else None

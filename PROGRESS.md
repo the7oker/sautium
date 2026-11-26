@@ -4738,6 +4738,63 @@ answers).
   starts at 0:00. A replay that left a slot out is another list: the page
   shows the blue dot then. The moved dot is the page's, never stored.
 
+### A library of several folders (2026-11-26)
+
+The library was ONE folder — the setup's `MUSIC_LIBRARY_PATH`, or the folder
+picked under the roots — and everything outside it was "away": on the box a
+second stick's albums read away while it was in, and the same disk at a new
+mount point did it to its own (PI-NODE-2C F14). The owner's rule: the folder
+is where the search starts, never the library's boundary; the library is
+every folder the person has given it, several at once
+(LIBRARY-FOLDERS-1, the design page and its answers in the private docs).
+
+- **`library_folders`, a folder a row**, its `path` as `media_files.file_path`
+  spells it: the prefix of every file it holds and its identity — under the
+  disks' folder the path carries the filesystem's UUID, so a disk keeps its
+  folder whoever mounts it. No folder inside another: the inner is refused
+  ("already in your library, as part of …"), the outer takes them in, the
+  disks' folder itself is no folder of music (adding it would join every
+  stick by itself). The backend is the one writer; its rows are kept in
+  memory and dropped at each write, so the play path asks the database
+  nothing.
+- **Each folder answers or not by its own look** — the look state and worker
+  that were the module's (`scanner`), now one per folder: a dead share stalls
+  its own look, never another's; `gone_prefixes` lists one entry a folder,
+  and every reader of it (HERE, `album_away`, `not_here_why`, the reach key)
+  is unchanged. A folder whose path is not there is not connected, whatever
+  it held; an empty one the catalogue holds nothing of is new.
+- **The judges judge only what was walked.** A scan walks the folders of its
+  scope that answer and names the others in its outcome; the Rescan's plan,
+  "Scan for new"'s set-aside and the yes's check take the walked folders'
+  prefixes. So **away** is one thing — a file a Rescan did not find where its
+  folder answers — and a folder that does not answer is **not connected**:
+  its albums play as a phantom does (PI-NODE-2D's rule), a warning toast at
+  its onset, its row dimmed in Settings › Library — never a red row that
+  stays for a friend's stick (the owner, Q9).
+- **A folder leaves by one confirmed removal, connected or not** ("Forget
+  this disk and its albums"): the plan of a Rescan's removal over the
+  folder's files, its row in the yes's transaction. "Stop reading it" with
+  its albums kept was rejected: it is the "outside the music folder" state
+  again.
+- **A disk the library never had joins by one tap** (the owner, Q1): the
+  mount watch counts its audio once a mount (bounded) and offers it — the
+  toast's "Add to library" takes the whole disk, the list's row also
+  "Choose a folder…"; a disk with no music is not offered, and nothing of
+  one passed over is kept (Q8). A disk holding a folder of the library
+  comes back with no tap. Joined by itself, a backup disk of duplicates
+  would double every album and a disk of audiobooks would be analysed and
+  offered to peers as music.
+- **The one folder of before became the first rows once**
+  (`library_folders_v1`): a roots node's choices, newest first — the newest,
+  and an earlier one holding copies that lies neither in nor around a kept
+  one (a narrowing is not undone: the outer's other copies are
+  "Elsewhere", forgotten by the owner); a launcher's `MUSIC_LIBRARY_PATH`
+  (the launcher then forgets its `music_path`); a Docker node's `.env`
+  folder, made sure of at every start. The launcher adds folders in its
+  window (the OS's dialog; the route takes the host's own signed call
+  alone); the Web UI lists, counts and forgets.
+
+
 ## Known Gotchas
 
 - **The Docker image took the node's secrets.** `./backend` is the build

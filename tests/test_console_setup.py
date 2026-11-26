@@ -723,7 +723,7 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_line_and_is_chosen_under
     assert "nofail" in built and "no effect" not in said               # §8.6: nothing said of the generator's warning
     # Not pasted (--yes never waits): never a root, and the setup says what to do and stops
     assert ("./sautium: the music disk is not set, so Sautium would not read /media/pi/Elements/Music: paste the "
-            "block above, then run ./sautium again and choose \"Elements\" › Music as the music folder in Sautium "
+            "block above, then run ./sautium again and add \"Elements\" › Music as a music folder in Sautium "
             "(More › Library)") in said
     assert machine_ready.ran == [] and not (machine_ready.root / ".env").exists()
     assert not (machine_ready.root / "host" / "compose.roots.yml").exists()
@@ -734,7 +734,7 @@ def test_a_folder_on_a_disk_the_desktop_mounts_gets_its_line_and_is_chosen_under
     assert setup.main(["--music", "/media/pi/Elements/Music", "--yes"]) == 0
     said = capsys.readouterr().out
     assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [setup.AUTOMOUNT_BASE]
-    assert "Then choose \"Elements\" › Music as the music folder in Sautium (More › Library).\n" in said
+    assert "Then add \"Elements\" › Music as a music folder in Sautium (More › Library).\n" in said
     assert "Music disk at /media/sautium/4A21-0000: " in said and "not set" not in said
     assert machine_ready.ran == ["build", "start", ("screen", "nano")]
     (machine_ready.root / ".env").unlink()
@@ -782,14 +782,14 @@ def test_a_disk_someone_mounted_by_hand_is_offered_the_line_and_taken_as_named_m
     # what follows the block, said beside it: the root forgotten (which binds the disks' folder and
     # makes the node again), the folder chosen at its new place
     assert (f"    sudo systemctl daemon-reload\n\nThen run:  ./sautium roots --forget {music}\n"
-            "and choose the disk as the music folder in Sautium (More › Library).\n") in said
+            "and add the disk as a music folder in Sautium (More › Library).\n") in said
     assert setup.held_roots(machine_ready.root / "host" / "compose.roots.yml") == [str(music), setup.AUTOMOUNT_BASE]
     # … and a later run with no folder named offers it again, with what follows it
     assert setup.main(["--yes"]) == 0
     said = capsys.readouterr().out
     assert said.count("── The music disk, mounted whenever it is plugged in") == 1
     assert f"Then run:  ./sautium roots --forget {music}\n" in said
-    assert "and choose the disk as the music folder in Sautium (More › Library).\n" in said
+    assert "and add the disk as a music folder in Sautium (More › Library).\n" in said
     monkeypatch.setattr(setup, "docker_state", lambda: ("ok", "Docker"))
     monkeypatch.setattr(setup.agent, "head", lambda root: "c" * 40)
     monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:local")
@@ -2514,13 +2514,13 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
     # each mount under the root it lies under (PI-NODE-2E H6)
     assert lines == [
         f"Music root {there}: there",
-        f"Music root {empty}: empty — its disk is not mounted, or the folder was removed. Its albums show as away. "
+        f"Music root {empty}: empty — its disk is not mounted, or the folder was removed. Its albums show as not connected. "
         f"To forget it: ./sautium roots --forget {empty}",
         # a root that is a mount point holds what was mounted there when the node started (§2.5)
         f"Music root {mounted}: a disk mounted at the root itself — Sautium sees it only as it was when Sautium "
         "started",
         f"  mounted: {mounted} exfat ro,nosuid",
-        f"Music root {gone}: gone — its disk is not mounted, or the folder was removed. Its albums show as away. "
+        f"Music root {gone}: gone — its disk is not mounted, or the folder was removed. Its albums show as not connected. "
         f"To forget it: ./sautium roots --forget {gone}",
         f"Music root {tmp_path}/plugged: plugged disks — the automount is not installed (./sautium shows how)",
         f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
@@ -2600,14 +2600,14 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     assert built == LINE_4A21 and max(len(line) for line in pasted) <= 76
     # the chosen folder moves with its files at the node's next start (PI-NODE-2E §2): nothing to choose
     assert "Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n\n" in said
-    assert "as the music folder" not in said
+    assert "as a music folder" not in said
     # a line of before the plug option gains it at its move; an older systemd keeps the line it has
     fstab.write_text(at_boot + "\n")
     said = _boot_mount_said(fstab, generated, roots=roots)
     pieces = [line[4:] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\''))]
     assert subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True,
                           text=True).stdout == LINE_4A21
-    assert "T=" not in said and "as the music folder" not in said     # no label known: none written
+    assert "T=" not in said and "as a music folder" not in said     # no label known: none written
     said = _boot_mount_said(fstab, generated, systemd=241, roots=roots)
     assert "── The music disk, mounted when the machine starts (optional) ──" in said
     assert " /media/sautium/4A21-0000 exfat " in "".join(
@@ -2718,8 +2718,9 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     # Forgotten: the override as a setup that never had it would write it, the node made again
     assert setup.main(["roots", "--forget", str(gone) + "/"]) == 0
     said = capsys.readouterr().out
-    assert f"Albums under {gone} will show as away in Sautium; nothing is removed." in said
-    assert "Choose another folder in More › Library." in said and "The folder itself is untouched." in said
+    assert f"Albums under {gone} will show as not connected in Sautium; nothing is removed." in said
+    assert "Forget them, or add another folder, in More › Library." in said
+    assert "The folder itself is untouched." in said
     left = [str(music), "/mnt/sautium-4A21-0000", setup.AUTOMOUNT_BASE]
     assert override.read_bytes() == setup.roots_override(left).encode() and started == ["start"]
     assert stat.S_IMODE(override.stat().st_mode) == 0o644
@@ -2736,7 +2737,7 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     # … and its disk's new line is in: the node finds the albums there at its start (PI-NODE-2E §2)
     assert ("Sautium finds the albums under /mnt/sautium-4A21-0000 at /media/sautium/4A21-0000 when it starts "
             "again; nothing is removed.") in said
-    assert "will show as away" not in said and "Choose another folder" not in said
+    assert "will show as not connected" not in said and "add another folder" not in said
     # … and where its disk has the line at the new point and is not mounted there (the node that held
     # the old mount point held the disk too), that is said
     assert "Its disk is not mounted at /media/sautium/4A21-0000 now: plug it in again" in said
@@ -2746,7 +2747,7 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     # it does not, and the albums are away
     for ready, words in ((True, "Sautium finds the albums under /mnt/sautium-5B32-0000 at "
                                 "/media/sautium/5B32-0000 when it starts again"),
-                         (False, "Albums under /mnt/sautium-5B32-0000 will show as away")):
+                         (False, "Albums under /mnt/sautium-5B32-0000 will show as not connected")):
         override.write_text(setup.roots_override(["/mnt/sautium-5B32-0000", setup.AUTOMOUNT_BASE]))
         monkeypatch.setattr(setup, "fstab_line", lambda point: None)
         monkeypatch.setattr(setup, "disks_folder_ready", lambda: ready)

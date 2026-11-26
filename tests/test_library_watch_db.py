@@ -33,6 +33,21 @@ _MOUNTS = """\
 """
 
 
+def _folder():
+    """The module's library: the folder its .env names (stored form)."""
+    import library_root
+    return library_root.env_folder()
+
+
+def _watch():
+    """The one folder's watch state."""
+    return library_watch.state()[_folder()]
+
+
+def _source():
+    return library_watch._watches[_folder()]["source"]
+
+
 def test_the_mount_says_whether_events_come():
     assert library_watch.linux_kind("/srv/music/Rock", _MOUNTS) is None
     assert library_watch.linux_kind("/srv/music", _MOUNTS) == "cifs"     # a share mounted inside
@@ -48,8 +63,8 @@ def test_a_bind_of_docker_desktop_is_not_watched(library, monkeypatch, cur):
     monkeypatch.setattr(library_watch, "mount_kind", lambda root: "9p")
     library_watch.start(lambda scopes, **kw: asked.append(scopes))
     try:
-        assert library_watch.state() == {"state": library_watch.NO_EVENTS, "why": "9p"}
-        assert asked == [{"": True}]                 # no whole walk under this reader yet
+        assert library_watch.state() == {_folder(): {"state": library_watch.NO_EVENTS, "why": "9p"}}
+        assert asked == [{_folder(): True}]          # no whole walk under this reader yet
     finally:
         library_watch.stop()
     cur.execute("INSERT INTO user_settings (key, value) VALUES (%s, %s::jsonb)",
@@ -78,7 +93,7 @@ def watching(library, monkeypatch, cur, main_module):
         return real(path)
     monkeypatch.setattr(scanner.LibraryScanner, "extract_metadata", staticmethod(counted))
     library_watch.start(main_module.request_scan)
-    assert library_watch.state()["state"] == library_watch.WATCHING
+    assert _watch()["state"] == library_watch.WATCHING
     yield reads
     library_watch.stop()
     _wait_until(lambda: not main_module._scan_state["running"], timeout=60)
@@ -173,8 +188,8 @@ def test_an_overflow_scans_the_whole_library(library, monkeypatch, cur):
     library_watch.start(request)
     try:
         asked.clear()                                   # the start's own walk
-        library_watch._source._event(-1, library_watch._Inotify.IN_Q_OVERFLOW, "")
-        assert asked == [{"": True}]
+        _source()._event(-1, library_watch._Inotify.IN_Q_OVERFLOW, "")
+        assert asked == [{_folder(): True}]
     finally:
         library_watch.stop()
 
@@ -193,8 +208,8 @@ def test_a_hard_link_is_imported_and_an_overflow_forgets_the_files_in_writing(
     assert _settled(main_module, lambda: True)
     os.link(src, dst)
     assert _settled(main_module, lambda: len(_rows(cur)) == 1)
-    library_watch._source.writing.add(str(library / "x.flac"))
-    library_watch._source._event(-1, library_watch._Inotify.IN_Q_OVERFLOW, "")
+    _source().writing.add(str(library / "x.flac"))
+    _source()._event(-1, library_watch._Inotify.IN_Q_OVERFLOW, "")
     assert library_watch.being_written() == set()
 
 
@@ -207,14 +222,16 @@ def test_a_music_folder_missing_at_the_start_of_an_empty_catalogue_is_armed_by_t
     _clean(cur)
     later = tmp_path / "later"
     monkeypatch.setattr(settings, "music_library_path", str(later))
+    monkeypatch.setattr(settings, "music_host_path", None)
     monkeypatch.setattr(library_watch, "mount_kind", lambda root: None)
     library_watch.start(lambda scopes, **kw: None)
     try:
-        assert library_watch.state()["state"] == library_watch.UNREACHABLE
-        assert scanner._folder_unreachable is False
+        assert _watch()["state"] == library_watch.UNREACHABLE
+        # a folder that is not there is not connected — and comes back with its first file
+        assert scanner._look_of(_folder()).unreachable is True
         _flac(template, later / "A" / "LP" / "01.flac", "T1", "Aurora", "LP")
         scanner.LibraryScanner().scan_and_import()
-        assert _wait_until(lambda: library_watch.state()["state"] == library_watch.WATCHING, timeout=20)
+        assert _wait_until(lambda: _watch()["state"] == library_watch.WATCHING, timeout=20)
     finally:
         library_watch.stop()
 
@@ -253,17 +270,17 @@ def test_a_disk_pulled_asks_no_scan_and_its_return_scans_it(
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger="main"):
-        _pull(library_watch._source)
-        assert _wait_until(lambda: scanner._folder_unreachable, timeout=20)
+        _pull(_source())
+        assert _wait_until(lambda: scanner._look_of(_folder()).unreachable, timeout=20)
         assert _settled(main_module, lambda: True)
 
     assert [r.getMessage() for r in caplog.records if r.name == "main"] == []
-    assert library_watch.state()["state"] == library_watch.UNREACHABLE
+    assert _watch()["state"] == library_watch.UNREACHABLE
     assert len(_rows(cur)) == 3
 
     pulled[0] = False
-    scanner.library_unreachable(wake=True)        # the mount table's wake, the disk back
-    assert _wait_until(lambda: library_watch.state()["state"] == library_watch.WATCHING, timeout=20)
+    scanner.look_all(wake=True)                   # the mount table's wake, the disk back
+    assert _wait_until(lambda: _watch()["state"] == library_watch.WATCHING, timeout=20)
     assert _settled(main_module, lambda: main_module._scan_state["progress"] == "Scan complete")
 
 
@@ -277,7 +294,7 @@ def test_a_mount_inside_the_library_that_goes_is_its_folder_scanned(library, mon
     monkeypatch.setattr(library_watch, "mount_kind", lambda root: None)
     library_watch.start(lambda scopes, **kw: asked.append(scopes))
     try:
-        source = library_watch._source
+        source = _source()
         share = {wd for wd, p in source.paths.items() if "/Share" in p}
         for wd in share:
             source.devs[wd] = source.dev + 1            # its own file system
@@ -286,8 +303,8 @@ def test_a_mount_inside_the_library_that_goes_is_its_folder_scanned(library, mon
         for wd in sorted(share, reverse=True):           # the kernel's order: Share/LP, then Share
             source._event(wd, i.IN_UNMOUNT | i.IN_ISDIR, "")
             source._event(wd, i.IN_IGNORED, "")
-        assert asked == [{"Share": True}]
-        assert library_watch.state()["state"] == library_watch.WATCHING
+        assert asked == [{f"{_folder()}/Share": True}]
+        assert _watch()["state"] == library_watch.WATCHING
         assert all("/Share" not in p for p in source.paths.values())
     finally:
         library_watch.stop()

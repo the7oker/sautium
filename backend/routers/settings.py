@@ -14,13 +14,14 @@ need to know about them directly.
 import asyncio
 import json
 import logging
+import os
 import secrets
 import shutil
 import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -838,6 +839,50 @@ def _phantom_section() -> Dict[str, Any]:
 # Reads
 # ============================================================
 
+def _folders_state() -> Dict[str, Any]:
+    """The library's folders as Settings › Library lists them, oldest first:
+    {id, path, name (its disk's label and the folder under it, else its
+    path), disk (it lies on a disk in the disks' folder), connected (it
+    answers by this process's recorded look — the one definition: a folder
+    not there reads not answering there too),
+    albums, tracks, away_copies, forgettable (not the folder a setup node's
+    .env names), pullable (on a disk mounted read-only)} — the counts in one
+    statement over the files by prefix — and `elsewhere`, the local copies
+    under no folder ({albums, tracks}, or None)."""
+    import library_root
+    from scanner import gone_prefixes
+    folders = library_root.given()
+    prefixes = [f["path"].rstrip("/") + "/" for f in folders]
+    counts = {r["p"]: r for r in db_query("""
+        SELECT f.p, count(DISTINCT av.album_id) AS albums, count(DISTINCT mf.track_id) AS tracks,
+               count(DISTINCT av.id) FILTER (WHERE av.absent_since IS NOT NULL) AS away_copies
+          FROM unnest(%(p)s::text[]) AS f(p)
+          LEFT JOIN media_files mf ON starts_with(mf.file_path, f.p)
+          LEFT JOIN album_variants av ON av.id = mf.album_variant_id
+         GROUP BY f.p""", {"p": prefixes})}
+    elsewhere = db_query_one("""
+        SELECT count(DISTINCT av.album_id) AS albums, count(DISTINCT mf.track_id) AS tracks
+          FROM media_files mf JOIN album_variants av ON av.id = mf.album_variant_id
+         WHERE NOT mf.file_path ^@ ANY(%(p)s::text[])""", {"p": prefixes})
+    gone = set(gone_prefixes())
+    env = library_root.env_folder()
+    disks = [r for r in library_root.roots() if library_root._disks_folder(r)]
+    listed = []
+    for f, prefix in zip(folders, prefixes):
+        c = counts.get(prefix) or {"albums": 0, "tracks": 0, "away_copies": 0}
+        connected = prefix not in gone
+        listed.append({"id": f["id"], "path": f["path"], "name": library_root.folder_name(f),
+                       "label": f["label"], "disk": any(prefix.startswith(d.rstrip("/") + "/") for d in disks),
+                       "connected": connected,
+                       "albums": int(c["albums"]), "tracks": int(c["tracks"]),
+                       "away_copies": int(c["away_copies"]),
+                       "forgettable": f["id"] is not None and f["path"] != env,
+                       "pullable": connected and library_root.pullable(f["path"])})
+    return {"folders": listed,
+            "elsewhere": ({"albums": int(elsewhere["albums"]), "tracks": int(elsewhere["tracks"])}
+                          if elsewhere["albums"] else None)}
+
+
 async def _library_state() -> Dict[str, Any]:
     """Stats + ongoing scan progress for the Library section.
 
@@ -870,16 +915,13 @@ async def _library_state() -> Dict[str, Any]:
         "progress":          _enrich_state.get("progress"),
     }
 
-    # Show the host-side music path (E:\Music etc.), not the
-    # container's /music bind-mount. MUSIC_HOST_PATH is set by the
-    # launcher when starting the container.
-    music_path = app_settings.music_host_path or app_settings.music_library_path
-
-    # The screen reads the folder's state from the notice set; opening it is
-    # a moment to look, as a producer — not waited for, so the screen never
-    # hangs on the folder: an answer that differs from what the notices show
-    # wakes them.
+    # The screen reads each folder's state from the looks; opening it is a
+    # moment to look, as a producer — not waited for, so the screen never
+    # hangs on a folder: an answer that differs from what the notices show
+    # wakes them, and the folder list is drawn again with it.
     check_folder()
+    # off the event loop: a folder's mount (a dead share) may stall what reads it
+    folders = await asyncio.to_thread(_folders_state)
     # Copies a Rescan found none of the files of: kept, and removed only from
     # the row these numbers make (the partial index holds only them). Of
     # their albums, those that are away — no copy holding a file is not
@@ -895,18 +937,25 @@ async def _library_state() -> Dict[str, Any]:
         FROM album_variants av WHERE av.absent_since IS NOT NULL""")
 
     import library_root
-    from claude_code import is_launcher_mode
+    from playback import substitute
     return {
-        "music_path":         music_path,
-        # Who names the music folder: "pick" — the owner, here, under the
-        # roots the console setup mounted (library_root; music_path is ""
-        # until a folder is chosen); "launcher" — the launcher's window;
-        # "setup" — the node's .env (a Docker node's MUSIC_LIBRARY_PATH)
-        "music_folder":       ("pick" if library_root.picks()
-                               else "launcher" if is_launcher_mode() else "setup"),
-        # The chosen folder is on a plugged disk the machine mounted
-        # read-only: it can be pulled at any time
-        "music_folder_pullable": library_root.pullable(music_path),
+        # The library's folders (library_root.given), each with its state
+        # and what it holds (_folders_state); `elsewhere` — the copies under
+        # no folder, a folder replaced before the library had several
+        "folders":            folders["folders"],
+        "elsewhere":          folders["elsewhere"],
+        # Who gives the library its folders: "pick" — the owner, here, under
+        # the roots the console setup mounted (library_root); "launcher" —
+        # the launcher's window; "setup" — the node's .env (a Docker node's
+        # MUSIC_LIBRARY_PATH)
+        "music_folder":       library_root.kind(),
+        # The disks plugged in that the library never had, for one tap
+        # (library_root.new_disks; nothing of one passed over is stored)
+        "new_disks":          await asyncio.to_thread(library_root.new_disks),
+        # What the owner's music with no file here plays as meanwhile: a
+        # stream, or nothing until its files are back (the words of a
+        # folder that is not connected)
+        "streams":            substitute.streams(),
         # Library counts (matches launcher's Library block 2×2)
         "total_tracks":       stats.get("total_tracks", 0),
         "total_artists":      stats.get("total_artists", 0),
@@ -932,10 +981,15 @@ async def _library_state() -> Dict[str, Any]:
         "last_scan_at":       _read("library.last_scan_at"),
         "scan":               scan,
         "enrich":             enrich,
-        "away":               {"albums": int(away["albums"]), "copies": int(away["copies"])},
-        # whether the folder watcher is armed (library_watch.state): watching,
-        # no_events with why, unreachable, not_set — no line in the Library
-        # block shows it (the owner, 2026-11-17); support and the tests read it
+        # `waiting`: of the copies away, those on a folder that is not
+        # connected now — their removal waits for it
+        "away":               {"albums": int(away["albums"]), "copies": int(away["copies"]),
+                               "waiting": sum(f["away_copies"] for f in folders["folders"]
+                                              if not f["connected"])},
+        # whether each folder's watcher is armed (library_watch.state):
+        # watching, no_events with why, unreachable, not_set — no line in the
+        # Library block shows it (the owner, 2026-11-17); support and the
+        # tests read it
         "watch":              library_watch.state(),
         # its estimate is synchronous DB work: off the event loop
         "instruments":        (await asyncio.to_thread(_instruments_state)
@@ -1447,10 +1501,10 @@ def _guidance_state() -> Dict[str, Any]:
     if unverified and _nano():
         tasks.append("verify_email")
 
-    # A node whose owner picks the music folder here has none yet: More tab,
-    # the Library row, the Music path row's Choose. Cleared by the choice.
+    # A node whose owner adds its music folders here has none yet: More tab,
+    # the Library row, its "Add a folder". Cleared by the first folder.
     import library_root
-    if library_root.picks() and not app_settings.music_library_path:
+    if library_root.picks() and not library_root.paths():
         tasks.append("music_folder")
 
     # A node born with a preset (db_migrate): its owner is shown, once, what
@@ -1568,9 +1622,10 @@ def _notice_items() -> List[Dict[str, Any]]:
     a condition exists lives here next to the workers that create it; the
     view layer owns the words and the clock. Derived, never stored — the
     cooldown ledger and the slice cycles' status rows are the sources, so a
-    condition ends the moment its source does. The music folder comes from
-    the readers' shared look (scanner.folder_unreachable_now), which waits a
-    few seconds at most — a look that takes longer reads as a dead mount —
+    condition ends the moment its source does. Each folder of the library
+    comes from the readers' shared look (scanner.folders_unreachable_now),
+    which waits a few seconds at most — a look that takes longer reads as a
+    dead mount —
     so no stream hangs on a dead network mount, and the derivation never
     wakes the channel itself.
 
@@ -1608,17 +1663,47 @@ def _notice_items() -> List[Dict[str, Any]]:
                          ("unserved", "pending", "pending_capped", "served",
                           "reason", "sources")},
             })
-    from scanner import folder_unreachable_now
-    since = _derived("library.mount_missing", folder_unreachable_now())
-    if since:
-        items.append({"key": "library.mount_missing", "kind": "error",
-                      "since": since, "until": None,
-                      "data": {"path": app_settings.library_db_root()}})
+    # A folder of the library that does not answer (its disk pulled, a share
+    # gone): a warning toast at its onset, and its row in Settings › Library
+    # its standing state — never an error that stays for a friend's stick
+    # out for months (the owner, LIBRARY-FOLDERS-1 Q9). One a folder, its
+    # onset when its look first said so.
+    import library_root
+    from scanner import folders_unreachable_now
+    answers = folders_unreachable_now()
+    out = [f for f in library_root.given() if answers.get(f["path"])]
+    held = {r["p"]: r["albums"] for r in db_query("""
+        SELECT f.p, count(DISTINCT av.album_id) AS albums FROM unnest(%(p)s::text[]) AS f(p)
+          JOIN media_files mf ON starts_with(mf.file_path, f.p)
+          JOIN album_variants av ON av.id = mf.album_variant_id
+         GROUP BY f.p""", {"p": [f["path"].rstrip("/") + "/" for f in out]})} if out else {}
+    keys = set()
+    for folder in out:
+        key = f"library.folder_out.{folder['id'] if folder['id'] is not None else 'env'}"
+        keys.add(key)
+        from playback import substitute
+        items.append({"key": key, "kind": "warning", "since": _derived(key, True), "until": None,
+                      "data": {"name": library_root.folder_name(folder),
+                               "albums": int(held.get(folder["path"].rstrip("/") + "/", 0)),
+                               "streams": substitute.streams()}})
+    for key in [k for k in _derived_since if k.startswith("library.folder_out.") and k not in keys]:
+        _derived(key, False)
+    # A disk plugged in that the library never had and that holds music
+    # (library_root.new_disks): offered for one tap while it is in, its
+    # onset the first derivation that saw it — gone with the disk, and new
+    # again at its next plug (nothing of one passed over is stored, Q8).
+    keys = set()
+    for disk in library_root.new_disks():
+        key = f"disk.new.{disk['uuid']}"
+        keys.add(key)
+        items.append({"key": key, "kind": "info", "since": _derived(key, True), "until": None,
+                      "data": {k: disk[k] for k in ("path", "label", "audio_files", "capped")}})
+    for key in [k for k in _derived_since if k.startswith("disk.new.") and k not in keys]:
+        _derived(key, False)
     # A volume plugged into this machine that nothing mounted (the
     # automount's own word, library_root.unread): there while its file is,
     # gone with the disk. Its onset is the file's, so the same disk plugged
     # in again is news.
-    import library_root
     for volume in library_root.unread():
         items.append({"key": f"disk.unread.{volume['device']}", "kind": "warning",
                       "since": volume["since"], "until": None,
@@ -2735,7 +2820,6 @@ async def post_restart():
     Only where such a policy holds the node (the image); a launcher's
     backend is the launcher's to restart. Any signed-in device may ask: it
     can already do everything a signed-in device can."""
-    import os
     import signal
     from claude_code_runner import IN_DOCKER
     if not IN_DOCKER:
@@ -3256,45 +3340,70 @@ def _dumps_held(*sections: Dict[str, Any]) -> bool:
 
 
 # ============================================================
-# The music folder, chosen under the node's roots (library_root.py)
+# The library's folders (library_root.py; LIBRARY-FOLDERS-1)
 # ============================================================
 
-@router.get("/library/folders")
-def get_library_folders(under: Optional[str] = Query(None, max_length=4096)) -> Dict[str, Any]:
-    """The folder sheet's listing: the places a choice can start at, or the
-    folders of `under`. Only what stays under a root is ever listed; every
-    name in the answer is a stranger's text."""
+@router.get("/library/places")
+def get_library_places(under: Optional[str] = Query(None, max_length=4096)) -> Dict[str, Any]:
+    """The folder sheet's listing: the places an added folder can start at,
+    or the folders of `under` and where it stands against the library. Only
+    what stays under a root is ever listed; every name in the answer is a
+    stranger's text."""
     import library_root
     try:
-        return library_root.folders(under)
+        return library_root.places(under)
     except library_root.Refused as e:
         raise HTTPException(status_code=400 if library_root.picks() else 409, detail=str(e))
 
 
-class LibraryRootChoice(BaseModel):
+class LibraryFolderAdd(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
 
-@router.put("/library/root")
-def put_library_root(req: LibraryRootChoice) -> Dict[str, Any]:
-    """"Use this folder": stored, the folder watcher armed on it, and the
-    library scanned for what is there. What the catalogue holds from another
-    folder is not touched — a Rescan asks about it, as for any music it no
-    longer finds."""
+@router.post("/library/folders")
+def add_library_folder(req: LibraryFolderAdd, request: Request) -> Dict[str, Any]:
+    """"Add this folder" (the sheet; a new disk's Add; the launcher's
+    window): stored, its watch armed, and the folder scanned for what is
+    there — the rest of the library is not walked. Folders it takes in go
+    with their watches. On a launcher the folder is any the OS gives, so
+    only the launcher's own call adds one — the person at the machine, the
+    OS's dialog — never a page's (LIBRARY-FOLDERS-1 Q5)."""
     import library_root
-    import library_watch
     from main import request_scan
+    from scanner import drop_look
+    if library_root.kind() == "launcher" and getattr(request.state, "signer", None) != "host":
+        raise HTTPException(status_code=403, detail="Folders are added in the Sautium window on this computer.")
     try:
-        path = library_root.choose(req.path)
+        added = library_root.add(req.path)
     except library_root.Refused as e:
-        raise HTTPException(status_code=400 if library_root.picks() else 409, detail=str(e))
-    library_watch.stop()
-    library_watch.start(request_scan)
+        raise HTTPException(status_code=409 if library_root.kind() == "setup" else 400, detail=str(e))
+    for path in added["merged"]:
+        library_watch.forget(path)
+        drop_look(path)
+    path = added["folder"]["path"]
+    library_watch.add(path)
     # Where the mount delivers no events the watch queues nothing: asked here
-    request_scan({"": True}, explicit=True)
+    request_scan({path: True}, explicit=True)
     db_execute("NOTIFY sautium_notices")
     notify_library_subscribers()
-    return {"music_path": path}
+    return {"folder": {**added["folder"], "name": library_root.folder_name(added["folder"])},
+            "merged": added["merged"]}
+
+
+@router.post("/library/folders/{folder_id}/forget")
+async def forget_library_folder(folder_id: int) -> Dict[str, Any]:
+    """"Forget this disk (folder) and its albums": the plan of what it alone
+    holds, asked as every removal is (scan.prune_plan, kind "folder")."""
+    from main import scan_forget
+    return await scan_forget(folder_id)
+
+
+@router.post("/library/elsewhere/forget")
+async def forget_elsewhere() -> Dict[str, Any]:
+    """The copies under no folder of the library ("Elsewhere"): the same
+    plan and question."""
+    from main import scan_forget
+    return await scan_forget(None)
 
 
 class PhantomPrefs(BaseModel):

@@ -133,6 +133,22 @@ def _role_decided(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _library_folders_as_read(request, monkeypatch):
+    """The library's folders as a process holds them (library_root's rows,
+    read once and dropped at each write): a test on a scratch database
+    starts with none read — its own rows are read at first use —, and a test
+    with no database behind it runs as a node whose table holds no row (the
+    folder its .env names is still one: library_root.given)."""
+    library_root = sys.modules.get("library_root")
+    if library_root is None:
+        try:
+            import library_root
+        except ImportError:
+            return                  # a test with no backend on its path reads no folder
+    monkeypatch.setattr(library_root, "_rows", None if "scratch_dsn" in request.fixturenames else [])
+
+
+@pytest.fixture(autouse=True)
 def _no_look_left_over():
     """What the play path's latest look observed of single files is process
     state (playback.substitute.observe), as a node's is: a test starts with

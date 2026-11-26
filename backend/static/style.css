@@ -263,7 +263,10 @@ body.sautium-base {
    away): the tile keeps its place, its cover dimmed under the one word. */
 .album-tile.is-not-here .album-cover img,
 .album-tile.is-not-here .album-title,
-.album-tile.is-not-here .album-artist {
+.album-tile.is-not-here .album-artist,
+.mosaic-tile.is-not-here .mosaic-cover img,
+.mosaic-tile.is-not-here .mosaic-title,
+.mosaic-tile.is-not-here .mosaic-artist {
   opacity: 0.45;
 }
 /* Edition count on a collapsed release-group tile. Amber (a CTA to explore the
@@ -7809,6 +7812,36 @@ html { -webkit-tap-highlight-color: transparent; }
   flex: none;
   white-space: nowrap;
 }
+/* The library's folders in Settings › Library (LIBRARY-FOLDERS-1): the
+   state dot before the disk's name, the folder under the disk in the
+   path's mono, the counts as the value; a folder that is not connected
+   keeps its row, its name dimmed — never a red row (the owner, Q9); its
+   action under the sentence. A disk plugged in that the library never had
+   stands out on top, for one tap. */
+.folder-row .row-stack-label { color: var(--color-text); display: inline-flex; align-items: center; min-width: 0; }
+.folder-row .folder-under {
+  font-family: var(--font-mono);
+  font-size: calc(12 * var(--px));
+  color: var(--color-blue);
+  letter-spacing: 0.02em;
+  margin-left: calc(6 * var(--px));
+}
+.folder-row .folder-counts { font-size: calc(12.5 * var(--px)); color: var(--color-text-muted); white-space: nowrap; }
+.folder-row .folder-state { color: var(--color-text-muted); }
+.folder-row.is-out .row-stack-label { color: var(--color-text-muted); }
+.folder-row.is-out .folder-under { color: var(--color-text-dim); }
+.folder-row .folder-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(8 * var(--px));
+  margin-top: calc(10 * var(--px));
+}
+.folder-row .folder-actions .profile-btn { height: calc(30 * var(--px)); font-size: calc(12.5 * var(--px)); }
+.folder-row.is-new { background: var(--color-amber-stripe); }
+.folder-row.is-new .row-stack-label { color: var(--color-amber); }
+.manage-tokens-row .add-folder { display: inline-flex; align-items: center; gap: calc(8 * var(--px)); }
+.manage-tokens-row .add-folder svg { display: block; }
+
 /* The path is cut at its head, where the JS put the ellipsis, so the
    folder's own name stays in sight. */
 .row-stack-pair .path-value {

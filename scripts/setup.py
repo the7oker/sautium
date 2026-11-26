@@ -857,7 +857,7 @@ def root_lines(roots: List[str], findmnt_rn: str, labels: Dict[str, str],
             lines.append(f"Music root {root}: empty — nothing is in it yet")
         else:
             lines.append(f"Music root {root}: {state} — its disk is not mounted, or the folder was removed. "
-                         f"Its albums show as away. To forget it: ./sautium roots --forget {shlex.quote(root)}")
+                         f"Its albums show as not connected. To forget it: ./sautium roots --forget {shlex.quote(root)}")
         lines += ["  mounted: " + printable(line) for line, of in zip(mounted, owner) if of == root]
     return lines + [f"A line of /etc/fstab mounts the disk {OLD_BOOT_MOUNT_POINT.fullmatch(point).group(1)} at "
                     f"{point}, where Sautium does not look: it never appears in Sautium (./sautium shows the step)"
@@ -890,7 +890,7 @@ def chosen_roots(music: Optional[str], held: List[str], docker_root: Optional[st
         if inside is None:
             roots.append(real)
         elif real != inside:
-            say(f"{music} is inside {inside}, which this node already reads: choose it as the music folder "
+            say(f"{music} is inside {inside}, which this node already reads: add it as a music folder "
                 "in Sautium (More › Library).")
     return roots + [AUTOMOUNT_BASE]
 
@@ -1755,8 +1755,8 @@ def moved_block(root: str, old: dict, label: str, systemd: int, forgotten: bool 
     """An install whose line mounts its disk at the root itself: the old
     line's undo and the line at the new point, as one step. The line keeps
     its own options; one written before the plug option gains it. The node
-    takes the files and the chosen folder along at its next start, by the
-    UUID both points carry (library_root.apply). `forgotten`: the root was
+    takes the files and the library's folder along at its next start, by
+    the UUID both points carry (library_root.apply). `forgotten`: the root was
     forgotten and the line left, so the disk is nowhere Sautium looks."""
     uuid = old["uuid"]
     point = f"{AUTOMOUNT_BASE}/{uuid}"
@@ -1864,12 +1864,12 @@ def follows(root: str, found: Optional[dict]) -> None:
     """What follows the block that moves a root's disk under the folder disks
     are mounted in: the root, an empty folder from then on, is forgotten —
     which writes the override again (the disks' folder bound, where the block
-    made it) and makes the node again — and `found`'s folder is chosen at its
+    made it) and makes the node again — and `found`'s folder is added at its
     new place. None after the move of the setup's own old line: the node
-    takes the chosen folder along with its files."""
+    takes the library's folder along with its files."""
     say(f"Then run:  ./sautium roots --forget {shlex.quote(root)}")
     if found is not None:
-        say(f"and choose {named(found)} as the music folder in Sautium (More › Library).")
+        say(f"and add {named(found)} as a music folder in Sautium (More › Library).")
     say()
 
 
@@ -2047,19 +2047,19 @@ def cmd_setup(args) -> int:
         # would be made by Docker whenever the disk is out — a folder of
         # root's in the desktop's own place for that disk. With the line
         # pasted its disk lies under the folder the node reads disks in, and
-        # the folder named is chosen there, in the Web UI. (A disk someone
+        # the folder named is added there, in the Web UI. (A disk someone
         # mounted by hand stays the root it was named as until it is
         # forgotten: `follows`.)
         moved = disk is not None and disk["desktop"] and fstab_line(disk["point"]) is not None
         if disk is not None and disk["desktop"] and not moved:
             raise Stop(f"the music disk is not set, so Sautium would not read {music}: paste the block above, "
-                       f"then run ./sautium again and choose {named(disk)} as the music folder in Sautium "
+                       f"then run ./sautium again and add {named(disk)} as a music folder in Sautium "
                        "(More › Library)")
         roots = chosen_roots(None if moved else music, held_roots(ROOT / ROOTS_OVERRIDE), m.get("docker_root"))
         write_roots(roots)
         boot_mount_steps(roots, held_labels(ROOT / ROOTS_OVERRIDE), shown=disk["point"] if disk else None)
         if moved:
-            say(f"Then choose {named(disk)} as the music folder in Sautium (More › Library).")
+            say(f"Then add {named(disk)} as a music folder in Sautium (More › Library).")
         elif disk is None and music and os.path.realpath(music) in roots:
             # A mount the setup has no line for (someone's own line of
             # /etc/fstab, a network share): taken as it is, and said. Never
@@ -2267,8 +2267,8 @@ def cmd_roots(args) -> int:
     if moved:
         say(f"Sautium finds the albums under {root} at {moved_to} when it starts again; nothing is removed.")
     else:
-        say(f"Albums under {root} will show as away in Sautium; nothing is removed. Choose another folder in "
-            "More › Library.")
+        say(f"Albums under {root} will show as not connected in Sautium; nothing is removed. Forget them, "
+            "or add another folder, in More › Library.")
     write_roots([r for r in roots if r != root])
     if node_running():
         start()
