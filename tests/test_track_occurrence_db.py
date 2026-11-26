@@ -284,6 +284,33 @@ def test_one_disc_of_a_box_kept_as_an_album_reads_its_own_medium_alone(cur, libr
     assert cur.fetchone()["t"] == str(track_uuid("I. Allegro", "Il Giardino"))
 
 
+def test_a_copy_lacking_a_middle_disc_reads_it_off_the_release(cur, library):
+    """Discs 1 and 3 of a three-disc release held, disc 2 not, an "I.
+    Allegro" on each: disc 3's is the third, as on a node holding all three
+    (review round 3, finding 1: disc 1's files sit below every lacking
+    position, so whether the copy holds another disc is read off its files)."""
+    from database import get_db_context
+    for table in ("mb_track", "mb_recording", "mb_medium"):
+        cur.execute(f"DELETE FROM {table}")
+    cur.execute("INSERT INTO mb_medium (id, release, position) VALUES (50, 5, 1), (51, 5, 2), (52, 5, 3)")
+    recs = {}
+    for rid, (medium, disc) in enumerate(((50, 1), (51, 2), (52, 3)), 1):
+        recs[disc] = str(uuid.uuid4())
+        cur.execute("INSERT INTO mb_recording (id, gid, name, artist_credit) VALUES (%s, %s, 'I. Allegro', 7)",
+                    (rid, recs[disc]))
+        cur.execute("""INSERT INTO mb_track (id, gid, recording, medium, position, number, name, artist_credit)
+                       VALUES (%s, %s, %s, %s, 1, '1', 'I. Allegro', 7)""", (rid, str(uuid.uuid4()), rid, medium))
+    _import([_md(library, "Concerti", "Concerti", 1, "I. Allegro", 300.0, "Il Giardino", disc=d) for d in (1, 3)])
+    for d in (1, 3):
+        cur.execute("UPDATE media_files SET recording_mbid = %s WHERE disc_number = %s", (recs[d], d))
+    with get_db_context() as db:
+        assert occurrence.settle_copies(db, complete=True)["moved"] == 1
+        db.commit()
+    cur.execute("SELECT disc_number AS d, track_id::text AS t FROM media_files ORDER BY disc_number")
+    assert [(r["d"], r["t"]) for r in cur.fetchall()] == [
+        (1, str(track_uuid("I. Allegro", "Il Giardino"))), (3, str(track_uuid("I. Allegro", "Il Giardino", 3)))]
+
+
 def test_a_rename_and_the_identity_rule_keep_the_place(cur, library, scratch_dsn, monkeypatch):
     """Every rule that recomputes a track's id from its row takes the
     occurrence: an artist's rename re-keys the closing Pulses to the second

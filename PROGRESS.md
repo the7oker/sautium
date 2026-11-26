@@ -4787,7 +4787,8 @@ Musicians: …": 27 rows for 14 positions (B-134). CANON-TRACKS-1-PROPOSAL
   node with the whole copy gives it. A file leaving a track two positions
   shared leaves no binding behind: that track's bindings and stamps go and
   the canon binds each movement on its own evidence, as the re-read's split
-  does; a file whose place alone changed takes its binding along. The
+  does; a file whose place alone changed takes this node's binding of its
+  recording along (a peer's is replaced by the canon's next binding). The
   phantom mint takes the rule, and `settle_slots` the slots minted or
   imported before (the seed's and a share's import run it; an owned copy's
   slots are its files'). Every rule that recomputes an id from
@@ -4814,8 +4815,9 @@ Musicians: …": 27 rows for 14 positions (B-134). CANON-TRACKS-1-PROPOSAL
   A remaster whose print differs stays apart though MusicBrainz keeps one
   recording (14 such pairs in copies of one album on the master); a track
   with no print of its own waits, and the sonic pass that gives it one
-  folds it; a group that would put two positions of one copy on one track
-  is left as it is. The keeper (`content._keeper`, shared with the credit
+  folds it; a group that would put two positions of one copy on one track,
+  or one title at two places (an album's second "Pulses" and a
+  compilation's first), is left as it is — the occurrence would undo it. The keeper (`content._keeper`, shared with the credit
   fold): the title the recording's MusicBrainz name is, else the smallest
   uuid. The release's step on a copy of the master (2026-11-26): 116
   tracks folded (348 pairs, 231 kept apart), the box's closing Pulses after

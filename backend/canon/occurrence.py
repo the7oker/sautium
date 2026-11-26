@@ -209,7 +209,9 @@ def _completion(db: Session, partial: List[Tuple[tuple, list]]) -> Dict[int, int
     position (the smallest such medium's id where several do); the earlier
     positions are that medium's before the file's, and — where the copy's
     disc is that medium's position on its release and the copy holds another
-    disc of that release — the release's earlier media whole. A position
+    disc — the release's earlier media whole (a copy of one disc alone is
+    that disc's tracklist: a box's disc kept as an album of its own, and the
+    residue, a copy holding the second disc of two alone). A position
     counts when titled alike (titled_alike) and credited as the file's own
     track is. Only files above a position the
     node lacks are read, and the recordings' rows once (mb_recording has no
@@ -261,9 +263,7 @@ def _completion(db: Session, partial: List[Tuple[tuple, list]]) -> Dict[int, int
         # the copy's discs are the release's media only where the copy holds
         # another disc of that release: one disc of a box kept as an album of
         # its own is that disc's tracklist alone
-        whole = f["pos"][0] == mpos and any(
-            d != f["pos"][0] and medium_of.get(m, (None,))[0] == release
-            for (fid, d), m in picked.items() if fid == id(files))
+        whole = f["pos"][0] == mpos and len({fl["pos"][0] for fl in files}) > 1
         held = {fl["pos"][:2] for fl in files}
         here = (mpos, f["n"])
         before = 0
@@ -350,10 +350,10 @@ def settle_copies(db: Session, variant_ids: Optional[Sequence[int]] = None,
     the one that takes its place. `complete` reads the positions a copy held
     in part lacks off MusicBrainz (_completion). Idempotent.
 
-    `fresh` names the files ((table, id)) this transaction wrote — an
-    import's: two positions on one track are a collapse to undo, its bindings
-    and stamps gone, only where two of them are older than this
-    transaction; a fresh file at a position its copy held already on that
+    `fresh` names the files ((table, id)) the caller wrote — an import's,
+    across its commits: two positions on one track are a collapse to undo,
+    its bindings and stamps gone, only where two of them are older than the
+    import; a fresh file at a position its copy held already on that
     track is no collapse, and the file whose place it changed keeps its
     binding."""
     st = {"copies": 0, "moved": 0, "unsplittable": 0}
