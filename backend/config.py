@@ -177,15 +177,10 @@ class Settings(BaseSettings):
     # The labels of the roots that are disks themselves, as the setup read
     # them (a JSON object, root → label; library_root._root_labels)
     sautium_library_root_labels: str = ""
-    p2p_username: str = ""
-    p2p_password: str = ""
-
-    p2p_email: str = ""
-    # Where the node's Ed25519 identity lives. The launcher passes its own
-    # path; a Docker node defaults to the bind-mounted data dir so an account
-    # created through onboarding survives container recreates. Env
-    # credentials (P2P_USERNAME/PASSWORD) remain the alternative for anyone
-    # who prefers configuring identity by hand.
+    # Where the node's Ed25519 identity lives — the only place an identity
+    # comes from (SEC-S5 §18). The launcher passes its own path; a Docker
+    # node defaults to the bind-mounted data dir so an account created
+    # through onboarding survives container recreates.
     p2p_identity_dir: str = "/app/data/node_identity"
     p2p_listen_port: int = 0   # Desktop sync server port (direct chat delivery)
 
@@ -325,7 +320,9 @@ settings = Settings()
 
 # The variables the settings read the node's credentials and the owner's
 # accounts from. A process that starts agent CLIs drops them from its
-# environment once the settings hold them (serving.hold_secrets).
+# environment once the settings hold them (serving.hold_secrets). P2P_*:
+# read by nothing since SEC-S5 §18, and still dropped — a .env written before
+# it holds a password there.
 SECRET_ENV = frozenset({
     "POSTGRES_USER", "POSTGRES_PASSWORD", "DATABASE_URL",
     "P2P_USERNAME", "P2P_PASSWORD", "P2P_EMAIL",

@@ -764,8 +764,8 @@ def _reseal_analysis_records() -> dict:
         # take for another author's.
         if not keys and db.execute(text(SEALED_FIRST_HAND_SQL)).scalar():
             logger.error("the analysis records are not re-sealed: records no imported source holds "
-                         "carry seals, and no key of this node resolves (P2P_USERNAME/P2P_PASSWORD, "
-                         "or the identity folder) — the node's own would go as another's; the next "
+                         "carry seals, and no key of this node resolves (its identity folder holds "
+                         "none) — the node's own would go as another's; the next "
                          "start tries again")
             return {"done": False, "keys": 0}
         p = {"keys": keys}

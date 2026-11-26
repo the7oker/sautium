@@ -8,6 +8,7 @@ import io
 import json
 import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -96,11 +97,10 @@ def test_describe_event_and_latest_backup(tmp_path):
                                                     "listened to, 3,757 owned")
     assert backup_task.latest_backup(tmp_path) is None
     from desktop import node_backup as nb
-    kdf = nb.KdfParams(time_cost=1, memory_cost=8 * 1024, parallelism=1)
     for name in ("old.sbk", "new.sbk"):
         with open(tmp_path / name, "wb") as fp:
-            w = nb.BackupWriter(fp, kek=nb.derive_kek("pw", "vale", kdf), username="vale",
-                                pubkey="ab" * 32, kdf=kdf, chunk_size=64, created_at="2026-09-14T00:00:00Z")
+            w = nb.BackupWriter(fp, seed=bytes(32), username="vale", chunk_size=64,
+                                created_at="2026-09-14T00:00:00Z")
             w.add_member(nb.MANIFEST_MEMBER, b"{}")
             w.finish()
     import os, time
@@ -134,57 +134,96 @@ def test_head_commit_reads_git_files_without_spawning(tmp_path):
     assert updater.head_commit(wt) == sha[:12]
 
 
-def test_the_password_named_leaves_the_environment_once_read(backup_mod, monkeypatch):
-    """The weekly task names its variable (`--password-env P2P_PASSWORD`), the
-    launcher passes SAUTIUM_BACKUP_PASSWORD: pg_dump and pg_restore, started
-    after, never carry the account password."""
-    import os
-    import subprocess
-    import types
-    monkeypatch.setenv("P2P_PASSWORD", "the-account-password")
-    args = types.SimpleNamespace(password_env="P2P_PASSWORD")
-    assert backup_mod._password(args, prompt="") == "the-account-password"
-    child = subprocess.run([sys.executable, "-c", "import os; print('P2P_PASSWORD' in os.environ)"],
-                           capture_output=True, text=True, check=True)
-    assert child.stdout.strip() == "False" and "P2P_PASSWORD" not in os.environ
+def test_the_cli_takes_no_password(backup_mod):
+    """The file is keyed on the node's own seed (SEC-S5): no subcommand
+    reads a password, from a variable, a pipe or a prompt."""
+    for argv in (["create", "--password-env", "P2P_PASSWORD"], ["create", "--password-stdin"],
+                 ["inspect", "x.sbk", "--no-password"], ["restore", "x.sbk", "--identity"],
+                 ["merge", "x.sbk", "--password-env", "P2P_PASSWORD"]):
+        with pytest.raises(SystemExit) as refused:
+            backup_mod.parser().parse_args(argv)
+        assert refused.value.code == 2, argv                     # argparse: no such option
+    assert backup_mod.parser().parse_args(["inspect", "x.sbk", "--manifest"]).manifest
+    source = Path(backup_mod.__file__).read_text(encoding="utf-8")
+    assert "getpass" not in source and "verify_password" not in source
+    assert "--password" not in Path(backup_task.__file__).read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="prctl is Linux's")
-def test_the_backup_cli_is_undumpable_from_its_start(backup_mod):
-    """Its password may sit in its environment from the start: no other
-    process of its user reads it there."""
+def test_the_backup_cli_holds_no_secret_where_its_user_reads_it(backup_mod):
+    """It holds the node's seed: it is undumpable, and drops the node's
+    credentials from its environment before pg_dump or pg_restore start."""
     import ctypes
     import os
     r, w = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(r)
+        os.environ["POSTGRES_PASSWORD"] = "a made-up database password"
         try:
             backup_mod.main(["--help"])
         except SystemExit:
             pass
-        os.write(w, str(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)).encode())
+        left = "POSTGRES_PASSWORD" in os.environ
+        os.write(w, f"{ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)} {left}".encode())
         os._exit(0)
     os.close(w)
-    out = os.read(r, 16).decode()
+    out = os.read(r, 32).decode()
     os.waitpid(pid, 0)
-    assert out == "0"
+    assert out == "0 False"
 
 
-def test_a_password_the_node_could_not_check_ends_the_backup_as_an_error(backup_mod, monkeypatch):
-    """A derivation that failed is no wrong password, and no traceback: the
-    backup ends with an error the caller reads."""
-    import asyncio
+class _Hold:
+    def __init__(self, _dsn):
+        pass
 
-    import device_auth
-    monkeypatch.setattr(backup_mod, "node", lambda: {"username": "owner"})
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    def sole_maker(self):
+        pass
 
-    async def failing(_password, **_kw):
-        raise device_auth.Busy()
-    monkeypatch.setattr(device_auth, "verify_password", failing)
-    with pytest.raises(backup_mod.nb.BackupError, match="could not be checked"):
-        backup_mod.create("the right one")
+    def wait(self, on_pause=None):
+        pass
+
+    def close(self):
+        pass
+
+
+def _key():
+    from desktop.node_identity import key_from_seed
+    return key_from_seed(bytes(range(32)))
+
+
+def test_create_keys_the_backup_on_the_nodes_own_seed_an_anonymous_ones_too(backup_mod, tmp_path,
+                                                                              monkeypatch):
+    import p2p_identity
+    from desktop import node_identity as ni
+    ni.write_account(tmp_path, ni.new_account("anon-1a2b", "", source="form", anonymous=True))
+    key = _key()
+    monkeypatch.setattr(p2p_identity, "load_signing_key", lambda _settings: key)
+    monkeypatch.setattr(backup_mod, "node", lambda: {"username": "anon-1a2b",
+                                                     "pubkey": ni.public_hex(key)})
+    monkeypatch.setattr(backup_mod, "identity_dir", lambda: tmp_path)
+    monkeypatch.setattr(backup_mod, "PlaybackHold", _Hold)
+    monkeypatch.setattr(backup_mod, "pg_target", lambda: None)
+    monkeypatch.setattr(backup_mod, "build_identity", lambda: {"commit": "c" * 40, "build": "test"})
+    made = []
+    monkeypatch.setattr(backup_mod.nb, "create_backup", lambda out, **kw: made.append(kw) or {})
+    backup_mod.create(out_dir=tmp_path / "out")
+    assert made[0]["seed"] == bytes(range(32)) and made[0]["username"] == "anon-1a2b"
+
+
+def test_a_node_with_no_key_yet_makes_no_backup_and_says_why(backup_mod, tmp_path, monkeypatch):
+    import p2p_identity
+    from desktop import node_identity as ni
+    monkeypatch.setattr(p2p_identity, "load_signing_key", lambda _settings: None)
+    monkeypatch.setattr(backup_mod, "identity_dir", lambda: tmp_path)
+    monkeypatch.setattr(backup_mod, "PlaybackHold", _Hold)
+    with pytest.raises(backup_mod.nb.Refused, match="no identity yet"):
+        backup_mod.create(out_dir=tmp_path / "out")
+    ni.write_account(tmp_path, ni.new_account("owner", "a made-up passphrase amber", source="form"))
+    with pytest.raises(backup_mod.nb.Refused,
+                       match="key is still being made — back up once it is ready"):
+        backup_mod.create(out_dir=tmp_path / "out")
+    assert not (tmp_path / "out").exists()
 
 
 def test_one_backup_of_a_node_is_made_at_a_time_whoever_makes_it(backup_mod, scratch_dsn, tmp_path, monkeypatch):
@@ -192,14 +231,10 @@ def test_one_backup_of_a_node_is_made_at_a_time_whoever_makes_it(backup_mod, scr
     processes: the second is refused while the first holds the making's lock,
     and the first's part file — which a starting maker clears as a dead job's
     — is left alone."""
-    import device_auth
+    import p2p_identity
+    key = _key()
+    monkeypatch.setattr(p2p_identity, "load_signing_key", lambda _settings: key)
     monkeypatch.setattr(backup_mod, "node", lambda: {"username": "owner", "pubkey": "ab" * 32})
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
-
-    async def right(_password, **_kw):
-        return True
-    monkeypatch.setattr(device_auth, "verify_password", right)
-    monkeypatch.setattr(backup_mod.nb, "derive_kek", lambda password, username: b"k" * 32)
     monkeypatch.setattr(type(backup_mod.settings), "database_url", property(lambda self: scratch_dsn))
     monkeypatch.setattr(backup_mod, "build_identity", lambda: {"commit": "c" * 40, "build": "test"})
     monkeypatch.setattr(backup_mod, "pg_target", lambda: None)
@@ -213,12 +248,12 @@ def test_one_backup_of_a_node_is_made_at_a_time_whoever_makes_it(backup_mod, scr
     first.sole_maker()
     try:
         with pytest.raises(backup_mod.nb.Refused, match="another backup of this node is being made"):
-            backup_mod.create("pw", out_dir=tmp_path)
+            backup_mod.create(out_dir=tmp_path)
         assert part.read_bytes() == b"the first maker's" and made == []
     finally:
         first.close()
     # The first ended (its session closed, however it ended): the next is made, a dead job's part cleared
-    assert backup_mod.create("pw", out_dir=tmp_path) == {"name": "x.sbk"}
+    assert backup_mod.create(out_dir=tmp_path) == {"name": "x.sbk"}
     assert made == [tmp_path] and not part.exists()
     # … and its own lock went with its session
     again = backup_mod.PlaybackHold(scratch_dsn)

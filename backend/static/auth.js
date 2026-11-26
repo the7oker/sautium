@@ -55,6 +55,11 @@
   // identity: the account being created may answer unsigned. The pin stays
   // as it is until the account made replaces it.
   let settingUp = false;
+  // The node's account exists and its key is still being made (SEC-S5: the
+  // status's `key`): its handshake is unsigned until then, and a browser signs
+  // in all the same; the pin waits for the first signed answer.
+  let unborn = false;
+  const PIN_PENDING_KEY = "sautium.pin_pending";
   const { sha256, hmacSha256, toHex } = window.Sautium.hash;
 
   function storedToken() {
@@ -83,6 +88,17 @@
     } catch {
       return "";
     }
+  }
+
+  function pinPending() {
+    try { return localStorage.getItem(PIN_PENDING_KEY) === "1"; } catch { return false; }
+  }
+
+  function setPinPending(on) {
+    try {
+      if (on) localStorage.setItem(PIN_PENDING_KEY, "1");
+      else localStorage.removeItem(PIN_PENDING_KEY);
+    } catch { /* no storage — the next sign-in is a first sign-in again */ }
   }
 
   function pinNode(pubkey) {
@@ -258,18 +274,45 @@
     const hs = await r.json();
     const eph = unb64(hs.eph);
     const pinned = pinnedNode();
+    const expires = new Uint8Array(8);
+    new DataView(expires.buffer).setBigUint64(0, BigInt(hs.expires));
+    const signed = new Uint8Array([...enc.encode("sautium-pair:v1"), ...eph, ...expires]);
+    // The device token's word on this answer (device_auth.open_channel's
+    // tag): only the node that issued the token makes it
+    const token = storedToken();
+    const vouched = !!token && typeof hs.tag === "string" && hs.tag.length > 0 &&
+      toHex(hmacSha256(enc.encode(token),
+                       new Uint8Array([...signed, ...enc.encode(hs.node_pubkey || "")]))) === hs.tag;
     if (hs.node_pubkey) {
       if (!KEY_FORM.test(hs.node_pubkey)) throw new Error("handshake identity malformed");
-      const expires = new Uint8Array(8);
-      new DataView(expires.buffer).setBigUint64(0, BigInt(hs.expires));
-      const signed = new Uint8Array([
-        ...enc.encode("sautium-pair:v1"), ...eph, ...expires]);
       if (!nacl.sign.detached.verify(signed, unhex(hs.sig), unhex(hs.node_pubkey))) {
         throw new Error("handshake signature invalid");
       }
       // A pinned identity the answer does not carry is the case the pin
       // exists for
       if (pinned && pinned !== hs.node_pubkey) throw new NodeChanged(hs.node_pubkey);
+      // The first signed answer of a node this browser signed in to before
+      // its key: pinned on the token's word, never on being first
+      if (!pinned && pinPending()) {
+        if (token && !vouched) throw new NodeChanged(hs.node_pubkey);
+        pinNode(hs.node_pubkey);
+        setPinPending(false);
+      }
+    } else if (!pinned && (vouched || (unborn && !token))) {
+      // An account whose key is being made (or whose making stopped)
+      // answers unsigned, as at its setup: a browser that holds its token
+      // takes the answer on the token's word alone, whatever the page last
+      // heard of the key; one with no token, on the status's word
+      setPinPending(true);
+    } else if (!pinned && unborn && token) {
+      throw new NodeChanged("");
+    } else if (pinned && unborn && !settingUp) {
+      // A node made anew, its key not made yet: the browser that knew the
+      // earlier identity is asked, as a node that changed — then set up
+      throw new NodeChanged("");
+    } else if (pinned && unborn && settingUp) {
+      pinNode("");
+      setPinPending(true);
     } else if (!creating) {
       // A node with an account always signs: an answer without is no node
       // this browser can sign in to
@@ -325,21 +368,17 @@
   }
 
   const BUSY = "The node is busy — try again in a moment.";
-  // Where the node wrote its setup code: a node whose host shows pairing
-  // codes (the launcher, `pin_door`) has its identity folder there, a Docker
-  // node its log. The status says which; the gate reads it before any form.
-  let hostShowsCodes = false;
-  const setupCodePlace = () => hostShowsCodes
+  // Where the node wrote its setup code: a launcher's node has its identity
+  // folder there, a Docker node its log. The status says which (`launcher`);
+  // the gate reads it before any form.
+  let launcherHost = false;
+  const setupCodePlace = () => launcherHost
     ? "On the computer that runs Sautium it is in setup_code.txt, in the identity folder that " +
       "Sautium's window names (a new one at each start)."
     : "It is on the last screen of the node's setup, and in the node's log (docker logs " +
       "sautium-backend; the node writes a new one at each start) or in setup_code.txt in its " +
       "identity folder — data/node_identity, or backend/data/node_identity under the WSL and Mac " +
       "compose files.";
-  // What createAccount answers when the nickname and password make another
-  // identity than the one the node's records were signed with: the gate
-  // says what a new one costs, and sends it again only on the person's word.
-  const ANOTHER_IDENTITY = Object.freeze({ anotherIdentity: true });
   // What a new identity does to the records the lost one signed, in both
   // states of a node: started on this version before its identity went
   // (the records' cutover ran with it), or not (the next start runs the
@@ -394,7 +433,8 @@
     forget: () => setToken(""),
     status: async () => {
       const st = await (await _origFetch("/api/auth/status")).json();
-      hostShowsCodes = st.pin_door === true;
+      launcherHost = st.launcher === true;
+      unborn = !!st.key && st.key !== "ready";
       return st;
     },
     // The gate's answer to NodeChanged: this is the node from now on — or,
@@ -415,34 +455,41 @@
       }
       return true;
     },
-    // `newIdentity`: the person's word that the pair is to make an identity
-    // other than the one this node's records were signed with — sent only
-    // after ANOTHER_IDENTITY came back and he was told what it costs.
     // `keep`: the person's word for a password one GPU would find within a
-    // year; `email`: the one typed beside it, a word the estimate tries
-    // first. A password under the door's edge resolves {weak: verdict}.
-    async createAccount(username, password, setupCode, newIdentity = false, keep = false, email = "") {
+    // year; `email`: the one typed beside it — a word the estimate tries
+    // first, and the account's address once its key is made. A password
+    // under the door's edge resolves {weak: verdict}. The account exists at
+    // once and its key follows (SEC-S5): this browser pins the node at its
+    // first signed answer; whether the pair is the identity the node's
+    // records name is asked when the key is made (askAnotherIdentity).
+    async createAccount(username, password, setupCode, keep = false, email = "") {
       const r = await boxedPost("/api/auth/create-account",
-                                { username, password, setup_code: setupCode,
-                                  new_identity: newIdentity, keep, email });
+                                { username, password, setup_code: setupCode, keep, email });
       if (r.ok && r.data.password) return { weak: r.data.password };
       if (r.ok) {
         setToken(r.data.token);
-        pinNode(r.data.public_key_hex);
+        // A node the gate was told to set up replaces the one this browser
+        // knew: pinned at its key's first signed answer
+        pinNode("");
+        setPinPending(true);
+        // A launcher's node makes the key in its own window: said once, by
+        // the page that loads next
+        if (r.data.key === "interrupted") {
+          try { sessionStorage.setItem(KEY_IN_LAUNCHER, "1"); } catch (_) { /* not said */ }
+        }
         return true;
-      }
-      if (r.status === 409 && r.resp.headers.get("X-Sautium-Auth-Error") === "another-identity") {
-        return ANOTHER_IDENTITY;
       }
       if (r.status === 409) return "This node already has an account — reload.";
       if (r.status === 403) return `That is not this node's setup code. ${setupCodePlace()}`;
       if (r.status === 429 && r.resp.headers.get("X-Sautium-Auth-Error") === "shut") {
         return `Too many wrong setup codes — the next try is taken in ${r.resp.headers.get("Retry-After")} s.`;
       }
-      if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _. Password: required.";
+      if (r.status === 422) return "Nickname: 3-32 Latin letters, digits, - or _.";
       return errorDetail(r, "Could not create the account.");
     },
     async pair(code) {
+      // Whether the node's key is still being made: its answer is unsigned then
+      await window.Sautium.auth.status();
       const r = await boxedPost("/api/auth/pair", { code });
       if (!r.ok) return failure(r);
       setToken(r.data.token);
@@ -485,6 +532,10 @@
           : await errorDetail(r, `HTTP ${r.status}`) };
       }
       if (r.data.password) return { ok: false, weak: r.data.password };
+      // A new password's key is made in the background: the old identity
+      // stands, and this browser stays signed in to it, until it lands —
+      // then every browser signs in again with the new password
+      if (r.data.key === "deriving") return { ok: true, deriving: true, ...r.data };
       setToken(r.data.token);
       pinNode(r.data.public_key_hex);
       return { ok: true, ...r.data };
@@ -579,10 +630,12 @@
       ${passwordField(id, placeholder, "new-password")}
       <p class="pw-meter" aria-live="polite"></p>
       <label class="pw-keep" hidden><input type="checkbox" data-pw-keep> I understand, keep it</label>
+      <p class="pw-what"></p>
       <p class="pw-note"></p>`;
     const field = root.querySelector("input.add-gear-input");
     const offer = root.querySelector(".pw-offer");
     const meter = root.querySelector(".pw-meter");
+    const what = root.querySelector(".pw-what");
     const keepRow = root.querySelector(".pw-keep");
     const keepBox = root.querySelector("[data-pw-keep]");
     let drawn = null;               // {phrase, words}
@@ -594,6 +647,9 @@
       meter.innerHTML = html;
       keepRow.hidden = zone !== "word";
       if (zone !== "word") keepBox.checked = false;
+      // Which identity the field makes (SEC-S5 §20): empty, a random key;
+      // typed, one its nickname and password make again anywhere
+      what.textContent = field.value ? PASSWORD_MAKES : randomIdentityWords();
     };
     const showOffer = (o) => {
       drawn = o;
@@ -655,6 +711,7 @@
       field.dispatchEvent(new Event("input"));
     });
     draw();
+    say("", "");
     return {
       field,
       keep: () => keepBox.checked,
@@ -666,6 +723,25 @@
         say(v.zone, htmlText(v.door));
       },
     };
+  }
+
+  // What the new-password field makes, in its two states (SEC-S5 §20; draft
+  // words for the owner's words review). Empty: the random identity, and
+  // where its copy and its other doors are — the launcher's window, or a
+  // Docker node's console. Typed: a mnemonic identity, and its price.
+  const PASSWORD_MAKES =
+    "Your nickname and this password make your identity again on any machine — and so does " +
+    "anyone who guesses it. The time above is how long one GPU would need.";
+  function randomIdentityWords() {
+    return launcherHost
+      ? "No password: your identity is a random key. Nobody can guess it or make it again — not " +
+        "even you. It lives on this machine and in the identity file you export (Settings › Backup " +
+        "& Restore); keep that file safe. Other browsers sign in with the pairing code this " +
+        "computer shows."
+      : "No password: your identity is a random key. Nobody can guess it or make it again — not " +
+        "even you. It lives on this node and in the identity file its console exports " +
+        "(./sautium identity export); keep that file safe. Other browsers sign in with the pairing " +
+        "code its console shows (./sautium pair, or python -m pairing in its container).";
   }
 
   window.Sautium.auth.newPassword = newPassword;
@@ -729,6 +805,7 @@
     // The create form's new-password block (newPassword)
     let newPass = null;
     let unnamedKey = false;
+    let older = false;
     let username = "";
     let emailRoad = false;
     // The setup code the address carried (#setup=, the QR on the setup's
@@ -751,12 +828,10 @@
         // account (username+password -> Argon2id -> Ed25519), not a local
         // login, so it also switches on sync, chat and analysis signing.
         msg.innerHTML =
-          "Choose a nickname and password. This is your identity on the " +
+          "Choose a nickname, and a password if you want one. This is your identity on the " +
           "Sautium network, not just a local login — the nickname sits inside " +
           "your invite code, so Latin letters, digits, - or _.<br><br>" +
-          "<b>The password is never stored</b> — it derives your keys. If you " +
-          "lose it you get a new identity, and your invite code and friends " +
-          "with it.<br><br>" +
+          "What the password field makes — with a password or without — is said under it.<br><br>" +
           "The setup code proves you run this node. " + setupCodePlace();
         // The email is optional everywhere. On a node that never earns its
         // identity by computing it is the way to one (draft words for the
@@ -812,25 +887,27 @@
         fields.innerHTML = passwordField("auth-pass", "password", "current-password");
       } else if (mode === "none") {
         // Nothing here can sign this browser in: a key with no account beside
-        // it, or an account with no password on a node no host shows a code
-        // for (Docker). Starting over is said for what it costs
-        msg.textContent = unnamedKey
-          ? "This node's identity folder holds a key without its account. To start over, stop the " +
-            "node, empty that folder and start it again; the first visit then sets it up."
-          : "This node's account has no password, and nothing here shows a pairing code, so no new " +
-            "browser can sign in. A browser already signed in keeps working: set a password from it " +
-            "(Profile). Starting over — emptying the node's identity folder — loses this identity, its " +
-            "invite code and its friends for good.";
+        // it, or an identity made before SEC-S5, whose password nothing checks
+        // (draft words for the owner's words review)
+        msg.textContent = older
+          ? "This node's identity was made by an older Sautium, and its password can no longer be " +
+            "checked. Make this node's account anew: stop the node, move its identity folder aside, " +
+            "start it again; the first visit sets it up, and the same nickname and password make a " +
+            "new key."
+          : "This node's identity folder holds a key without its account. To start over, stop the " +
+            "node, empty that folder and start it again; the first visit then sets it up.";
         fields.innerHTML = "";
       } else {
         // Nothing to ask for but the PIN: this node's account was created
         // without a password anyone has seen. Both host affordances end
         // here — "Open Web UI" signs a browser on that machine in outright,
         // and the QR carries the same code to a device elsewhere.
-        msg.textContent =
-          "This node has no account password. On the computer that runs " +
-          "Sautium press “Open Web UI”, or scan the QR code shown " +
-          "there with this device.";
+        msg.textContent = launcherHost
+          ? "This node has no account password. On the computer that runs " +
+            "Sautium press “Open Web UI”, or scan the QR code shown there with this device."
+          : "This node has no account password. On the machine that runs it, ./sautium pair " +
+            "(or docker compose exec backend python -m pairing) shows a QR code to scan and " +
+            "the link to open.";
         fields.innerHTML = input("auth-pin", "text", "the pairing link or code");
       }
       showForm();
@@ -877,8 +954,9 @@
 
     window.Sautium.auth.status().then((st) => {
       unnamedKey = !!st.unnamed_key;
+      older = !!st.older_identity;
       mode = st.onboarding ? (st.identity_missing ? "restore" : "create") : st.password_login ? "password"
-        : (unnamedKey || st.pin_door === false) ? "none" : "pin";
+        : (unnamedKey || older) ? "none" : "pin";
       username = st.username || "";
       emailRoad = !!st.email_road;
       buildForm();
@@ -928,25 +1006,18 @@
             msg.textContent = "That email does not look right. Correct it, or leave the field empty.";
             return;
           }
+          if (mode === "restore" && !given[1]) {
+            // No password brings an identity back: an empty one is a new random key
+            submit.disabled = false;
+            submit.textContent = prev;
+            msg.textContent = "Type that identity's password: no password brings an identity back.";
+            return;
+          }
           // The person's word for a password under a year: the block's box
           // on the create form, the restore form's own once a door asked
           const keepBox = fields.querySelector("[data-pw-keep]");
           const keep = newPass ? newPass.keep() : !!(keepBox && keepBox.checked);
-          let res = await window.Sautium.auth.createAccount(...given, false, keep, email);
-          if (res === ANOTHER_IDENTITY) {
-            const yes = await window.confirmDestructive({
-              title: "Another identity",
-              message: "That nickname and password make an identity other than the one this " +
-                "node signed with: a typo, another nickname, or a password changed since — or " +
-                "that identity never had a nickname and password (a new identity made in " +
-                "Sautium's window), and only a copy of its folder brings it back.<br><br>" +
-                NEW_IDENTITY_COSTS,
-              confirmText: "Make a new identity", cancelText: "Check them again",
-              focusCancel: true,
-            });
-            res = yes ? await window.Sautium.auth.createAccount(...given, true, keep, email)
-              : "Nothing was made. Check the nickname and password, then try again.";
-          }
+          let res = await window.Sautium.auth.createAccount(...given, keep, email);
           if (res && res.weak) {
             // Nothing was made: the door's words where the time is shown
             if (newPass) newPass.said(res.weak);
@@ -955,7 +1026,6 @@
           }
           ok = res === true;
           why = typeof res === "string" ? res : "Could not create the account.";
-          if (ok && email) await rememberEmail(email, given[1]);
         } else if (mode === "password") {
           const res = await window.Sautium.auth.login(
             overlay.querySelector("#auth-pass").value);
@@ -1038,13 +1108,26 @@
     group();
   }
 
-  // The email typed on the first-run form: set on the account just made (the
-  // password is still in hand, and the route asks for it), and the code's
-  // grant kept for the page that loads next, which opens the code's dialog
-  // (app-shell.js). A failure here loses nothing: the account exists, and
-  // the trail leads to Profile's Email row.
-  const EMAIL_GRANT_KEY = "sautium.first_run_email_grant";
+  // The key the setup made is not the identity this node's records name
+  // (the status's and the identity event's "another_identity"), or the
+  // key's making was stopped ("interrupted"): asked by the page then open
+  // (app-shell.js), with the account's password — who the node is changes
+  // only on the person's own word. `make`: the owner's answer to the first.
+  window.Sautium.auth.NEW_IDENTITY_COSTS = NEW_IDENTITY_COSTS;
+  window.Sautium.auth.decideNewIdentity = (make, password) =>
+    window.Sautium.auth.boxed("/api/auth/new-identity", { make }, { password });
+  window.Sautium.auth.resumeKey = (password) =>
+    window.Sautium.auth.boxed("/api/auth/resume-key", {}, { password });
   const PASSWORD_TOLD_KEY = "sautium.password_told";
+  const KEY_IN_LAUNCHER = "sautium.key_in_launcher";
+  window.Sautium.auth.takeKeyInLauncher = () => {
+    let said = false;
+    try {
+      said = sessionStorage.getItem(KEY_IN_LAUNCHER) === "1";
+      sessionStorage.removeItem(KEY_IN_LAUNCHER);
+    } catch (_) { /* no storage: nothing to say */ }
+    return said;
+  };
   window.Sautium.auth.takePasswordTold = () => {
     let told = null;
     try {
@@ -1053,24 +1136,6 @@
     } catch (_) { /* no storage: nothing to say */ }
     return told;
   };
-  async function rememberEmail(email, password) {
-    try {
-      const r = await window.Sautium.auth.boxed("/api/p2p/account/email", { email },
-                                                { method: "PUT", password });
-      if (r.ok && !r.data.email_verified && r.data.grant) {
-        sessionStorage.setItem(EMAIL_GRANT_KEY, r.data.grant);
-      }
-    } catch (_) { /* the Email row is the way from here */ }
-  }
-  window.Sautium.auth.takeFirstRunEmailGrant = () => {
-    let grant = "";
-    try {
-      grant = sessionStorage.getItem(EMAIL_GRANT_KEY) || "";
-      sessionStorage.removeItem(EMAIL_GRANT_KEY);
-    } catch (_) { /* no storage: the Email row is the way */ }
-    return grant;
-  };
-
   function fragmentCode() {
     const m = /(?:^|[#&])pair=([A-Za-z0-9-]+)/.exec(location.hash || "");
     return m ? m[1] : "";

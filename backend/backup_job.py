@@ -3,17 +3,16 @@
 The file stays on the node — `data/backup`, its own bind — and leaves by a
 disk the person plugs in or, later, a share; no route serves it. What runs is
 the one implementation of "make a backup": `python -m backup create
---password-stdin --progress-json --cancel-on-stdin` (backend/backup.py), a
-child of this process, as the launcher runs it (desktop/backup_task.py).
+--progress-json --cancel-on-stdin` (backend/backup.py), a child of this
+process, as the launcher runs it (desktop/backup_task.py). Nothing is typed:
+the file is keyed on the node's own seed (SEC-S5), so the route asks no
+password and no step-up (§14 Q9) — the file stays on the node.
 
-The account's password reaches the child as the first line of its pipe:
-no environment holds it, this process's or the child's, so no other process
-of the node's user (the assistant's CLI is one) can read it from /proc while
-the child starts. The child also gets back what the lifespan dropped from
-this process's environment (serving.hold_secrets) and a backup needs — the
-database's login and, for an account given in .env, the account itself —
-and nothing else of config.SECRET_ENV; it makes itself undumpable as it
-starts (backup.main).
+The child gets back what the lifespan dropped from this process's
+environment (serving.hold_secrets) and a backup needs — the database's login,
+and nothing else of config.SECRET_ENV; it drops it again and makes itself
+undumpable as it starts (backup.main). The key it opens the identity folder's
+node_ed25519.key for itself.
 
 One job at a time. Its progress is process memory, said on the Library
 stream; a cancel closes the child's stdin, which the child reads as the
@@ -51,29 +50,20 @@ def _wake() -> None:
 
 def _child_env() -> Dict[str, str]:
     """This process's environment and what a backup needs of the credentials
-    the lifespan dropped from it. Never the account's password: that goes
-    down the child's pipe."""
+    the lifespan dropped from it."""
     env = dict(os.environ)
     env["POSTGRES_USER"] = settings.postgres_user
     env["POSTGRES_PASSWORD"] = settings.postgres_password
-    # An account given in .env has no key on disk: the job derives it as
-    # this process did
-    for name, value in (("P2P_USERNAME", settings.p2p_username), ("P2P_PASSWORD", settings.p2p_password),
-                        ("P2P_EMAIL", settings.p2p_email)):
-        if value:
-            env[name] = value
     return env
 
 
 def _command() -> list:
-    return [sys.executable, "-m", "backup", "create", "--password-stdin",
-            "--progress-json", "--cancel-on-stdin"]
+    return [sys.executable, "-m", "backup", "create", "--progress-json", "--cancel-on-stdin"]
 
 
-def start(password: str) -> bool:
-    """Start the job; False when one is running. The password was checked at
-    the signed door by the caller; the job checks it again as its own first
-    step, as every caller's does."""
+def start() -> bool:
+    """Start the job; False when one is running. A node with no key yet is
+    the job's own first refusal, said as its error."""
     global _proc
     with _lock:
         if _state["running"]:
@@ -82,14 +72,6 @@ def start(password: str) -> bool:
             _command(), cwd=str(Path(__file__).resolve().parent), env=_child_env(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,      # stderr: the node's own log
             text=True, encoding="utf-8", errors="replace")
-        # The first line of the pipe is the password; what follows is the
-        # cancel channel. A child that died at once has no reader: its end
-        # is what _follow reports.
-        try:
-            proc.stdin.write(password + "\n")
-            proc.stdin.flush()
-        except OSError:
-            pass
         _proc = proc
         _state.update(running=True, phase="starting", bytes=None, total=None,
                       cancel_requested=False, error=None, done=None)

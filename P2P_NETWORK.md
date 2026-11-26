@@ -309,8 +309,8 @@ same identity (same keys, same invite code). A launcher start that finds no
 key makes none over what says the node had one (since 2026-11-11,
 `node_identity.ensure_identity`: its signing key of record, a seal of its own
 in the database, or the key its last P2P run held): P2P stays off, and its
-window offers the ways back — the folder from a copy, the same pair at the web
-interface's account setup, a backup's restore — and a new identity only on the
+window offers the ways back — the folder from a copy, its identity file, the
+same pair at the web interface's account setup — and a new identity only on the
 owner's choice, which leaves those records another author's. The web
 interface's account setup on such a node takes back only its signing key of
 record (`identity.signing_key`, the key it signed with: recorded at each start
@@ -321,8 +321,28 @@ release has none on record: the setup then takes the key its launcher's last
 P2P run held (`p2p.bound_identity`), else a key that sealed its records.
 
 ```
-username + password → Argon2id KDF (256MB, 4 iter) → 32-byte seed → Ed25519 keypair
+username + NFKC(password) → Argon2id (t=8000, 128 MiB, p=2) → 32-byte seed → Ed25519 keypair
 ```
+
+**The key costs minutes, and the account does not wait for it** (since
+2026-11-26, SEC-S5): a thousand times the first release's cost, 5–11 min on
+a desktop (11 measured on a loaded one, 2026-11-26), 12 on a 16 GB Pi 5 and 26
+on a 1 GB one. The account exists from
+its first second as `account.json` beside the identity — its nickname, a
+sign-in hash (Argon2id t=8 over 128 MiB, a salt of its own: what a sign-in
+checks, never the key again) and a random id the device token is derived from
+— and its key is derived once in the background (`desktop/identity_birth`),
+its estimate said at the start and its end an event; P2P, the notary's seals
+and the email's code wait for it, nothing else does. `desktop/node_identity.
+derive_seed` is the one derivation every road calls. An account made with no
+password (an empty field at any door — the Web UI's setup, the wizard, a
+change of identity — and the master's) has a random key, made at once: nothing would derive it again, and
+it comes back only from its identity file. An identity is the identity
+folder's alone: made by the account's creation, brought by an identity file,
+or random — no environment variable names one (since 2026-11-26, SEC-S5 §18;
+the master is such an anonymous node). A key with no `account.json` beside it
+was made before SEC-S5: nothing checks its password any more, and the node's
+account is made anew.
 
 **Invite Code**: `username#XXXX-XXXX-XXXX` where XXXX is `SHA-256(public_key)[:6]`
 in hex. Human-readable, and the hash part defends against forgery (a different
@@ -342,37 +362,43 @@ account takes it, nor a name that reads as it once case, `-`/`_` and the ASCII
 look-alikes (`0 1 l 5`) are folded (`node_identity.username_skeleton`; the
 shape rule admits no other script). The boundaries: the Web UI's setup (refused
 before any derivation, unless the key may decide — a node meant to be the
-master, or one whose records already name an identity), a rotation into the
-name, a start that makes its account from `P2P_USERNAME`, the launcher's
-account step, and the Worker's first binding of a key to a name (`admit`, 403
-`this name is reserved`). An account that holds it keeps it: signing in,
-restoring, a rotation that keeps the name, a node made by its `.env` before the
-reservation (with its key, or a new `P2P_PASSWORD`), a key the Worker already
-holds under it — the Worker binds a name to a key and knows no rotation, so a
+master, or one whose records already name an identity: then the account made
+is taken back when its key turns out another), a rotation into the name
+(checked before its key is made), the launcher's account step, and the
+Worker's first binding of a key to a name (`admit`, 403 `this name is
+reserved`). An account that holds it keeps it: signing in, restoring, a
+rotation that keeps the name, a key the Worker already holds under it — the Worker binds a name to a key and knows no rotation, so a
 holder's new key is refused there (an accepted gap). Support is told by its
 pinned key, never by this name; what the name alone carries is the Worker's
 mails ("`<name>` invites you to Sautium").
 
 **Key rotation** (name or password change — SHIPPED 2026-09-10). Both are
 KDF inputs, so either change is a new key; the old one is kept:
-1. `node_identity.rotate_identity(dir, name, password, anonymous)` derives
-   the new keypair, signs a canonical `key_rotation` notice with **both**
+1. `node_identity.rotate_identity(dir, name, key, anonymous, signin)` takes
+   the new key (derived in the background since SEC-S5 — the old identity
+   stands and signs in with the old password until it lands — or random for an
+   empty password), signs a canonical `key_rotation` notice with **both**
    keys (old = continuity, new = possession), moves the old key, node_info,
    certificate and proof into `node_identity/previous/<when>-<pubkey>/`
    next to `rotation.json`, and writes the new identity with
-   `email_verified: false` and a `previous` list. Empty password = minted
-   (`anonymous: true`, the PIN stays the only door), as in the wizard.
+   `email_verified: false` and a `previous` list; `account.json` takes the
+   new name, key and sign-in hash and keeps its id. Empty password = a random
+   key (`anonymous: true`, the host's code stays the only door), as in the
+   wizard.
 2. `POST /api/auth/change-identity` (signed; an account with a password has
    it typed again in the box, checked before anything is derived — since
-   2026-11-03) runs it under the account lock,
-   drops the process caches, bumps the token epoch, hands the caller a fresh
-   token (tokens are bound to the pubkey) and `NOTIFY sautium_identity_rotated`.
-   An identity the environment configures (`P2P_USERNAME`/`P2P_PASSWORD`, no
-   `node_info.json`) is changed there; the route answers 409.
-   The launcher restarts its P2P manager on the notify; a Docker node reports
-   `restart_required` — its peer surface's certificate and request check
-   follow the new key at once (since 2026-11-23, `p2p_identity.changed`), its
-   admission gate keeps the key the start built it on.
+   2026-11-03) runs it under the account lock. A new password's key is made
+   in the background (since 2026-11-26): the request answers at once, the old
+   identity stands until the key lands, and then the rotation bumps the token
+   epoch first (a token names the account's id, which a rotation keeps: the
+   epoch is what signs every browser out), drops the process caches and
+   `NOTIFY sautium_identity_rotated`; every browser signs in again with the
+   new password. A change to no password is a random key at once, and its
+   reply hands the caller a fresh token.
+   The launcher restarts its P2P manager on the notify; a Docker node's peer
+   surface's certificate and request check follow the new key at once (since
+   2026-11-23, `p2p_identity.changed`), its admission gate keeps the key the
+   start built it on until the backend restarts (`restart_required`).
 3. `friends.bound_identity` (delta 014) records which of OUR keys each
    friend binds our invite code to — set by `add_friend` on both surfaces,
    advanced when a notice is accepted. `_deliver_rotation_notices` runs on

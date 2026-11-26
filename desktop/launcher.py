@@ -52,15 +52,19 @@ IDENTITY_MISSING = (
     "a new one.\n\n"
     "To bring it back:\n"
     "•  put a copy of that folder back, then restart Sautium;\n"
+    "•  or import its identity file (Settings & Tools › Backup & Restore › Import identity…), "
+    "which Export identity… made on this node or another;\n"
     "•  or, if you chose this node's nickname and password, give the same pair in the web "
     "interface (Open Web UI): the same pair is the same identity. If you changed the nickname "
     "or password before, the record of the identities it replaced comes back only with a copy "
     "of the folder or a backup; without it, what they signed is another author's here. It asks "
-    "for the setup code, in setup_code.txt in that folder. Then restart Sautium;\n"
-    "•  or restore a backup (Settings & Tools › Backup & Restore), which is made only "
-    "for a node whose password you chose. It also replaces the database with the one in the "
-    "backup; the current one is kept beside it.\n"
-    "Without a password you chose, only the copy of the folder brings it back.\n\n"
+    "for the setup code, in setup_code.txt in that folder. Then restart Sautium: its window "
+    "makes the key, asking for that password once, for some minutes;\n"
+    "Once the identity is back, a backup of it (Settings & Tools › Backup & Restore) opens "
+    "and restores its database, the current one kept beside it; a backup never brings an "
+    "identity itself.\n"
+    "Without a password you chose, only the copy of the folder or the identity file brings it "
+    "back.\n\n"
     "A new identity made here has no nickname or password: a browser signs in to it only "
     "through Open Web UI or a QR code here, and chat, friends, the invite code, support "
     "requests and backups are off with it. {costs}")
@@ -124,8 +128,18 @@ class LauncherApp(ctk.CTk):
             self._get_local_db_dsn,
             lambda work: threading.Thread(target=work, daemon=True, name="node-identity").start(),
             self.ui_call, lambda: self._shutting_down,
-            ready=self._identity_ready, missing=self._identity_missing,
+            ready=self._identity_ready, unborn=self._identity_unborn, missing=self._identity_missing,
             unsettled=self._identity_unsettled, failed=self._identity_failed)
+        # The account's key, made in this process (desktop/identity_birth):
+        # by the wizard's account step, or by this window when a stop came
+        # before it was made. One process makes a node's key — in launcher
+        # mode its backend makes none (device_auth.births_here).
+        from desktop.identity_birth import Birth
+        self._birth = Birth()
+        self._key_asked = False       # the password asked once a start for a key not made
+        # The key's words while it is made: said where the window shows them,
+        # and by the window it builds after the wizard (_build_ui)
+        self._key_words = ""
         # Held by a P2P start from "not quitting?" through P2PManager.start(),
         # and by the quit's P2P stop: the start either finished before the
         # stop and is stopped, or sees the quit and does not begin.
@@ -146,6 +160,7 @@ class LauncherApp(ctk.CTk):
         self._folders: list = []      # the library's folders as the node last listed them
         self._qr_timer = None
         self._node_down = False       # _show_node_down's panel holds the QR block
+        self._services_ready = False  # _on_services_ready has run, and the node did not go down since
         self._session_start = None    # (data_dir, previous session) until node.started is recorded
         self._jobs: dict = {}         # kind ("backup" | "export" | "import") -> desktop/backup_task.CliRun
         self._job_listeners: list = []  # Settings & Tools windows watching those jobs (Tk thread)
@@ -320,6 +335,8 @@ class LauncherApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
         )
         self._progress_text.pack(pady=(5, 0))
+        if self._key_words:
+            self._progress_text.configure(text=self._key_words)
 
         # Quit button
         ctk.CTkButton(
@@ -486,6 +503,7 @@ class LauncherApp(ctk.CTk):
         if self._shutting_down:
             return
         self._node_down = False
+        self._services_ready = True
         port = self.config.get("ports", {}).get("web", 8000)
 
         # Check GPU status via backend Python (torch is in python312, not launcher)
@@ -698,6 +716,181 @@ class LauncherApp(ctk.CTk):
             self._set_status("running", "All services running")
             self._progress_text.configure(text="")
         self._start_p2p()
+
+    def make_key(self, username: str, password: str) -> bool:
+        """The account's key, derived in the background and placed beside its
+        account file (Tk thread). False when one is being made already. The
+        password's edge is read now, while it is in hand: a key that turns
+        out another identity than the records name is made only on the
+        owner's word, and not from a password under the setup's edge."""
+        from desktop import node_identity, password_strength
+        account = node_identity.read_account(node_identity._identity_dir())
+        verdict = password_strength.verdict(password, (username, account.get("email") or ""))
+        weak = verdict if (verdict["zone"] == "refused"
+                           or (verdict["zone"] == "word" and not account.get("kept"))) else None
+        return self._birth.start(
+            username, password, purpose="create",
+            done=lambda seed: self._key_derived(node_identity.key_from_seed(seed), weak),
+            said=lambda state: self.ui_call(lambda: self._key_said(state)),
+            failed=lambda e: self.ui_call(lambda: self._key_failed(e)))
+
+    def _key_derived(self, key, weak) -> None:
+        """A key's end, in the worker's thread (or a random key's): placed —
+        unless the database names another identity as this node's, which is
+        the owner's question first (_ask_another) — then the node settles on
+        it: the backend told (a launcher's backend makes no key of its own,
+        and its notary and records wait for this one), P2P started by the
+        check's ready."""
+        from desktop import node_identity
+        d = node_identity._identity_dir()
+        if node_identity.another_identity_at(self._get_local_db_dsn(),
+                                             node_identity.public_hex(key)):
+            self.ui_call(lambda: self._ask_another(key, weak))
+            return
+        node_identity.place_account_key(d, key, node_identity.read_account(d))
+        self.ui_call(self._key_placed)
+
+    def _ask_another(self, key, weak):
+        """The key made is not the identity this node's database names: made
+        on the owner's word (the records the lost one signed become another
+        author's), or the account taken back — the identity notice offers
+        the ways in again. Draft words for the owner's words review."""
+        from desktop import node_identity
+        self._key_words = ""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Another identity")
+        dialog.geometry("560x420")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        body = ctk.CTkTextbox(dialog, wrap="word")
+        body.pack(fill="both", expand=True, padx=18, pady=(16, 6))
+        body.insert("1.0", (
+            "The key this nickname and password make is an identity other than the one this node "
+            "signed with: a typo, another nickname, a password changed since, or an identity made "
+            "before this version of Sautium, which no password makes again.\n\n" + NEW_IDENTITY_COSTS
+            + ("\n\n" + weak["door"] + " A new identity is not made from it: set up again with "
+               "another." if weak else "")))
+        body.configure(state="disabled")
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(fill="x", padx=18, pady=(4, 14))
+
+        def again():
+            dialog.destroy()
+            (node_identity._identity_dir() / node_identity.ACCOUNT_FILENAME).unlink(missing_ok=True)
+            self._identity.check()
+
+        def make():
+            dialog.destroy()
+            d = node_identity._identity_dir()
+            node_identity.place_account_key(d, key, node_identity.read_account(d))
+            logger.warning("A new identity was made on the owner's word, over records the identity "
+                           "of record signed")
+            self._key_placed()
+
+        ctk.CTkButton(btns, text="Set up again", width=140, command=again).pack(side="right")
+        if weak is None:
+            ctk.CTkButton(btns, text="Make a new identity", width=170, command=make,
+                          fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", again)
+
+    def _key_placed(self):
+        self._key_words = ""
+        if hasattr(self, "_progress_text"):
+            self._progress_text.configure(text="")
+        if not self._services_ready:
+            return                     # the services' next start settles it
+        threading.Thread(target=self._tell_backend_key, daemon=True, name="key-born").start()
+        self._identity.check()
+
+    def _tell_backend_key(self) -> None:
+        import psycopg2
+        conn = psycopg2.connect(self._get_local_db_dsn(), connect_timeout=10)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("NOTIFY sautium_identity_born")
+        finally:
+            conn.close()
+
+    def _key_said(self, state: dict):
+        minutes = max(1, round((state.get("expected_s") or 0) / 60))
+        self._key_words = (f"Making your identity's key — about {minutes} min on this machine. "
+                           "Sautium plays and scans meanwhile; sharing and chat start when it is ready.")
+        if hasattr(self, "_progress_text"):            # the main window, once the wizard has gone
+            self._progress_text.configure(text=self._key_words)
+
+    def _key_failed(self, error):
+        self._key_words = f"Your identity's key could not be made: {str(error)[:160]}"
+        if hasattr(self, "_status_text"):
+            self._set_status("error", "Your identity's key could not be made")
+            self._progress_text.configure(text=self._key_words)
+
+    def _identity_unborn(self):
+        """The account is here and its key is not: being made in this
+        process (its words are said), or its making was stopped, or the Web
+        UI's setup made the account (a launcher's backend makes no key) —
+        then the password is asked once a start, checked by the account's
+        sign-in hash, and the key made (SEC-S5 Q5); an account with no
+        password gets its random key at once."""
+        from desktop import node_identity
+        if self._node_down or self._birth.state() is not None:
+            return
+        if node_identity.read_account(node_identity._identity_dir()).get("anonymous"):
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+            key = Ed25519PrivateKey.generate()
+            threading.Thread(target=self._key_derived, args=(key, None), daemon=True,
+                             name="key-random").start()
+            return
+        if not self._key_asked:
+            self._key_asked = True
+            self._ask_key_password()
+
+    def _ask_key_password(self):
+        from desktop import node_identity
+        account = node_identity.read_account(node_identity._identity_dir())
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Finish your identity")
+        dialog.geometry("480x260")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        ctk.CTkLabel(dialog, wraplength=430, justify="left", text=(
+            f"The key of your identity ({account['username']}) is not made yet — Sautium stopped "
+            "before it was, or the account was made in the web interface. Type its password to "
+            "make it now: it takes a few minutes, and Sautium plays and scans meanwhile.")).pack(
+            padx=20, pady=(18, 8))
+        field = ctk.CTkEntry(dialog, show="*", placeholder_text="password", width=300)
+        field.pack(pady=4)
+        caption = ctk.CTkLabel(dialog, text="", text_color="gray", wraplength=430)
+        caption.pack()
+        btns = ctk.CTkFrame(dialog, fg_color="transparent")
+        btns.pack(pady=10)
+
+        def checked(password: str, ok: bool):
+            if not dialog.winfo_exists():
+                return
+            if not ok:
+                go.configure(state="normal")
+                caption.configure(text="That is not this account's password.")
+                return
+            dialog.destroy()
+            self.make_key(account["username"], password)
+
+        def finish():
+            password = field.get()
+            if not password:
+                return
+            go.configure(state="disabled")
+            caption.configure(text="Checking…")
+            threading.Thread(target=lambda: (lambda ok: self.ui_call(lambda: checked(password, ok)))(
+                node_identity.signin_matches(account["signin"], password)), daemon=True,
+                name="key-password").start()
+
+        go = ctk.CTkButton(btns, text="Make the key", width=140, command=finish)
+        go.pack(side="right", padx=4)
+        ctk.CTkButton(btns, text="Later", width=100, command=dialog.destroy,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=4)
+        field.bind("<Return>", lambda _e: finish())
+        field.focus()
 
     def _identity_missing(self):
         """No identity, while the database says this node had one: nothing is
@@ -995,6 +1188,7 @@ class LauncherApp(ctk.CTk):
         if self._shutting_down:
             return
         self._node_down = True
+        self._services_ready = False
         # Out of the tray: a node that went down while the window was put
         # away (the watchdog gave up, a restart failed) is seen, with its way out.
         self.deiconify()
@@ -1243,7 +1437,9 @@ class LauncherApp(ctk.CTk):
             on_export_plan=self._export_plan,
             on_import=self._import_share,
             on_merge=self._merge_life,
-            subscribe_job=self._subscribe_job)
+            subscribe_job=self._subscribe_job,
+            identity_ops={"ui_call": self.ui_call, "another_identity": self._another_identity,
+                          "place": self._place_identity})
 
     def _subscribe_job(self, cb):
         """`cb(kind, event)` on the Tk thread for every event of a running
@@ -1294,20 +1490,20 @@ class LauncherApp(ctk.CTk):
             self._jobs.pop(kind, None)
             dispatch({"phase": "error", "message": f"could not start: {e}"})
 
-    def _create_backup(self, password: str):
+    def _create_backup(self):
         """Settings & Tools › Backup & Restore › Create backup…: the CLI on the backend
         interpreter, its events in the tab's row and on the progress line.
         The backend keeps serving — pg_dump reads a snapshot."""
         from desktop.backup_task import CliRun
-        self._run_cli("backup", CliRun.backup(self.service_manager, password, lambda _ev: None))
+        self._run_cli("backup", CliRun.backup(self.service_manager, lambda _ev: None))
 
-    def _merge_life(self, path: str, password: str):
+    def _merge_life(self, path: str):
         """Settings & Tools › Backup & Restore › Merge from backup…: `backup merge`
         on the backend interpreter — the keyed union of this account's life
         data out of another machine's backup. The backend keeps serving: the
         merge only adds rows and recomputes play stats from history."""
         from desktop.backup_task import CliRun
-        self._run_cli("merge", CliRun.merge(self.service_manager, path, password, lambda _ev: None))
+        self._run_cli("merge", CliRun.merge(self.service_manager, path, lambda _ev: None))
 
     def _export_plan(self, on_plan):
         """`export --plan` for the export dialog: how many albums each broad
@@ -1398,11 +1594,12 @@ class LauncherApp(ctk.CTk):
         return {kind: {"running": run.running, "last_event": run.last_event}
                 for kind, run in self._jobs.items()}
 
-    def _restore_from_backup(self, path, password, manifest):
-        """Settings & Tools › Backup & Restore: this node becomes the one in the backup.
-        The database is renamed under whoever holds a connection to it, so
-        everything that talks to it stops first — P2P, the backend — and
-        comes back on the restored database with the restored identity."""
+    def _restore_from_backup(self, path, manifest):
+        """Settings & Tools › Backup & Restore: this node's database becomes
+        the backup's — a backup of this node's identity, opened by the keys
+        it holds. The database is renamed under whoever holds a connection
+        to it, so everything that talks to it stops first — P2P, the backend
+        — and comes back on the restored database."""
         if any(run.running for run in self._jobs.values()):
             self._progress_text.configure(text="Wait for the running backup, export or import to finish")
             return
@@ -1414,7 +1611,6 @@ class LauncherApp(ctk.CTk):
             self.ui_call(lambda: self._progress_text.configure(text=msg))
 
         def _run():
-            from desktop import api_client as api_client_mod
             from desktop.restore import restore_launcher_node
             if self.p2p_manager:
                 try:
@@ -1426,8 +1622,7 @@ class LauncherApp(ctk.CTk):
             self.service_manager.stop_backend()
             failure = None
             try:
-                result = restore_launcher_node(path, password, config=self.config,
-                                               replace=True, identity=True,
+                result = restore_launcher_node(path, config=self.config, replace=True,
                                                progress=progress)
             except Exception as e:
                 logger.error(f"Restore failed: {e}", exc_info=True)
@@ -1435,9 +1630,6 @@ class LauncherApp(ctk.CTk):
                 self.ui_call(lambda: self._set_status("error", "Restore failed"))
                 self.ui_call(lambda: self._progress_text.configure(text=failure))
             else:
-                # The file may carry another node's .api_secret — re-read it
-                # before the first signed call to the restarted backend.
-                api_client_mod.forget_secret()
                 who = manifest["node"]["username"]
                 note = (f"Restored {who}'s node from {manifest['created_at'][:10]}"
                         + (" — the previous database is kept as sautium__previous"
@@ -1454,6 +1646,59 @@ class LauncherApp(ctk.CTk):
             self.ui_call(lambda: self._btn_settings.configure(state="normal"))
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _another_identity(self, pubkey: str) -> bool:
+        """Whether this node's database names an identity other than
+        `pubkey` as its own — the owner's question before an identity file's
+        import (desktop/identity_file's caller's duty). Off the Tk thread."""
+        from desktop.node_identity import another_identity_at
+        return another_identity_at(self._get_local_db_dsn(), pubkey)
+
+    def _place_identity(self, contents):
+        """Settings & Tools › Import identity…, once the file is open and the
+        owner said yes: everything built on the identity stops — P2P, the
+        backend — the file's identity is placed, and the services start on
+        it; their start's identity check starts P2P on the new key."""
+        if any(run.running for run in self._jobs.values()):
+            self._progress_text.configure(text="Wait for the running backup, export or import to finish")
+            return
+        self._set_status("starting", "Bringing the identity here...")
+        for btn in (self._btn_open, self._btn_scan, self._btn_settings):
+            btn.configure(state="disabled")
+
+        def progress(msg):
+            self.ui_call(lambda: self._progress_text.configure(text=msg))
+
+        def _run():
+            from desktop import identity_file
+            from desktop.node_identity import _identity_dir
+            manager, self.p2p_manager = self.p2p_manager, None
+            if manager is not None:
+                try:
+                    manager.stop()
+                except Exception as e:          # the services must come back up whatever P2P did
+                    logger.warning(f"P2P did not stop cleanly before the identity's import: {e}",
+                                   exc_info=True)
+            self.service_manager.stop_tracker()
+            self.service_manager.stop_backend()
+            failure = None
+            try:
+                placed = identity_file.place(_identity_dir(), contents)
+            except (identity_file.IdentityFileError, OSError) as e:
+                logger.error(f"The identity file was not placed: {e}")
+                failure = str(e)[:300]
+            else:
+                note = f"This node is {placed['invite_code'] or placed['public_key_hex'][:16]} now"
+                logger.info(note)
+                self.ui_call(lambda: self._progress_text.configure(text=note))
+            self.service_manager.start_backend(progress_cb=progress)
+            self.service_manager.start_tracker()
+            if failure:
+                self.ui_call(lambda: self._set_status("error", "The identity was not brought here"))
+                self.ui_call(lambda: self._progress_text.configure(text=failure))
+            self.ui_call(lambda: self._btn_settings.configure(state="normal"))
+
+        threading.Thread(target=_run, daemon=True, name="identity-import").start()
 
     def _on_settings_saved(self, new_config):
         self.config = new_config

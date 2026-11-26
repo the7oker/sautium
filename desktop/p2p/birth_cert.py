@@ -1,16 +1,14 @@
-"""Node-side identity (birth) certificate handling: verify, store, export,
-import.
+"""Node-side identity (birth) certificate handling: verify, store, request.
 
 A certificate is the network authority's signed statement {pubkey,
 issued_at, method, difficulty, params_version, [email_token, email_class]}
 — "the network first saw this identity then, under this policy". The node
-keeps its own certificate next to its identity files and can move it
-between devices as a plain JSON file: identity is portable (the Argon2id
-login+password derivation yields the same keypair everywhere), and the
-certificate follows it either by re-requesting from the Worker (issuance
-is idempotent — same certificate comes back; an email-verified identity
-gets its method:email certificate back too) or by this export/import
-path, which needs neither email nor connectivity.
+keeps its own certificate next to its identity files. It follows the
+identity to another machine either by re-requesting from the Worker
+(issuance is idempotent — same certificate comes back; an email-verified
+identity gets its method:email certificate back too) or inside the
+identity file with the key and the proof (desktop/identity_file, since
+2026-11-26), which needs neither email nor connectivity.
 
 Certificates are issued by the Cloudflare Worker (worker/verify.js) — the
 network's only always-on component. TRUSTED_AUTHORITIES and the payload
@@ -198,40 +196,6 @@ def save_certificate(cert: dict) -> bool:
     _write(cert)
     logger.info("identity cert stored (issued_at=%s method=%s)",
                 cert["issued_at"], cert["method"])
-    return True
-
-
-def export_certificate(dest_path: str) -> bool:
-    """Write this node's certificate + proof bundle to a user-chosen file.
-    The proof is the minutes of mining that made a pow certificate worth
-    something — it moves with the certificate, so the other device never
-    mines twice."""
-    cert = load_certificate()
-    if cert is None:
-        return False
-    bundle = {"certificate": cert, "proof": load_proof()}
-    Path(dest_path).write_text(json.dumps(bundle, indent=2), encoding="utf-8")
-    return True
-
-
-def import_certificate(src_path: str) -> bool:
-    """Adopt a certificate (+ proof) from a file moved from another device.
-    Accepts the export bundle or a bare certificate as the Worker returns
-    it; a proof that does not bind to the certificate is dropped."""
-    from desktop.p2p import identity_proof
-    try:
-        data = json.loads(Path(src_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.warning("birth cert import: unreadable file %s", src_path)
-        return False
-    if not isinstance(data, dict):
-        return False
-    cert = data.get("certificate", data)
-    if not save_certificate(cert):
-        return False
-    proof = data.get("proof")
-    if identity_proof.proof_binds(proof, cert):
-        identity_proof.save_proof(proof_path(), proof)
     return True
 
 

@@ -156,3 +156,5 @@ backend/seed/*.json.gz
 data/atlas/
 # the sync's staging files, left behind only when it is killed
 backend/.hqp_atlas*
+# An identity file holds a node's private key: never a file of the tree
+*.sautium-identity

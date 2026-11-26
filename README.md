@@ -99,8 +99,10 @@ Website and guides: https://sautium.net · Downloads: https://sautium.net/downlo
 - **Node backup and restore** — one encrypted `.sbk` file per node (the
   database without the MusicBrainz and ListenBrainz layers, plus the
   identity documents),
-  keyed by the account password through Argon2id in its own salt domain and
-  streamed through chunked XChaCha20-Poly1305. The launcher writes and
+  keyed on the node's own identity seed (HKDF) and streamed through chunked
+  XChaCha20-Poly1305: a node that holds the identity opens it, with no
+  password. The identity itself travels as its identity file (the key, its
+  certificate and proof, an optional passphrase). The launcher writes and
   restores it (Settings & Tools › Backup & Restore; the setup wizard restores too); a
   Docker node uses `python -m backup create|restore`. The same place exports
   the node's sealed records for another collector (`python -m backup export`)
@@ -258,7 +260,10 @@ never calls `sudo`: a step that needs root (lingering, mounting plugged
 disks read-only) is printed whole for you to paste. The music folder, the
 assistant and the output are then chosen in the Web UI. `./sautium status`,
 `roots` (since 2026-11-22: the folders it may read music from, and
-`--forget <folder>`), `pair`, `update` and `remove` are its other commands.
+`--forget <folder>`), `pair`, `identity export|import` (the identity file),
+`update` and `remove` are its other commands. On a Docker host `./sautium`
+does not serve, `docker compose exec backend python -m pairing` prints the
+pairing code's QR and its link.
 
 The CPU image (`backend/Dockerfile.mac`) takes three build arguments, read
 from `.env` by `docker-compose.pi.yml` and by the host agent's update:
@@ -320,7 +325,10 @@ on a Nano node, which never earns it by computing. The code dies with the accoun
 start over, stop the stack, empty that folder and start it again: the node
 writes a new code. A node whose database names the key it signed with —
 every node that started with one — then asks for that identity's nickname and
-password, which bring it back, and makes another identity only when told to.
+password, which bring it back (its key is made again, in the background, for
+some minutes), or takes its identity file (`./sautium identity import FILE`; an
+identity with no password comes back only that way), and makes another
+identity only when told to.
 
 (`/openapi.json` sits behind the request signing like the rest of the API,
 so a bare browser tab gets 401 there. FastAPI's interactive `/docs` pages
@@ -510,9 +518,9 @@ sautium/
 │   └── static/                     # Web UI (vanilla HTML/CSS/JS, no build)
 ├── desktop/
 │   ├── launcher.py                 # desktop launcher (CustomTkinter)
-│   ├── node_identity.py            # Ed25519 identity + account (Argon2id)
+│   ├── node_identity.py            # Ed25519 identity + account (Argon2id, NFKC)
 │   ├── sync_client.py              # import from remote + post-import classifiers
-│   ├── node_backup.py              # the `.sbk` format (Argon2id + XChaCha20-Poly1305)
+│   ├── node_backup.py              # the `.sbk` format (seed-keyed HKDF + XChaCha20-Poly1305)
 │   ├── migrations/001_initial.sql  # canonical schema + numbered deltas
 │   ├── installer/                  # Inno Setup script (build_windows.py compiles it)
 │   ├── windows/, macos/            # first-run bootstraps of the two packages
@@ -599,17 +607,19 @@ and launcher alike — and the deltas after it. Highlights:
   can safely rewrite UUIDs.
 
 Backups are a product feature, not a hand-run `pg_dump`: `docker exec
-sautium-backend python -m backup create --password-env P2P_PASSWORD` writes
+sautium-backend python -m backup create` writes
 `./data/backup/sautium-backup-<node>-<date>.sbk` (the launcher has the same
 under Settings & Tools › Backup & Restore), and
 
 ```bash
 docker compose stop backend
-docker compose run --rm --no-deps backend python -m backup restore /app/data/backup/<file> --replace --identity
+docker compose run --rm --no-deps backend python -m backup restore /app/data/backup/<file> --replace
 docker compose start backend
 ```
 
-rebuilds the node from it (`--db music_ai_test` restores beside the live
+rebuilds the node from it — on a node that holds its identity already (made
+anew from its nickname and password, or brought by its identity file): the
+backup opens by that key (`--db music_ai_test` restores beside the live
 database; `python -m backup selftest` round-trips and compares row counts).
 The `mb_*` and `lb_*` tables come back empty — the dump loaders or the P2P
 slice cycles refill them.

@@ -152,15 +152,13 @@ def test_the_setup_code_comes_from_the_address_and_is_grouped_as_typed():
     assert 'fill="#fff"' in svg and "M4 4h1v1h-1z" in svg and "<image" not in svg
 
 
-def test_the_first_run_form_offers_the_email_and_keeps_its_grant_for_the_next_page():
-    """The email is optional, validated before anything is made, set with
-    the password still in hand, and its code's grant handed to the page that
-    loads next — which opens the code's dialog with no second tap."""
+def test_the_first_run_form_offers_the_email_and_hands_it_to_the_account():
+    """The email is optional, validated before anything is made, and sent
+    with the account: it is kept there until the key is made (SEC-S5), and
+    its code goes from Profile then — no grant rides to the next page."""
     assert 'input("auth-email", "email", "email (optional)")' in AUTH
     assert "This machine is too small to earn its network identity by computing." in AUTH
     assert AUTH.index("That email does not look right") < AUTH.index(
-        "let res = await window.Sautium.auth.createAccount(...given, false, keep, email);")
-    assert 'if (ok && email) await rememberEmail(email, given[1]);' in AUTH
-    assert "sessionStorage.setItem(EMAIL_GRANT_KEY, r.data.grant)" in AUTH
-    assert "const firstRunGrant = window.Sautium.auth.takeFirstRunEmailGrant();" in SHELL
-    assert "if (firstRunGrant) openEmailVerifyFlow(firstRunGrant);" in SHELL
+        "let res = await window.Sautium.auth.createAccount(...given, keep, email);")
+    assert "rememberEmail" not in AUTH and "EMAIL_GRANT_KEY" not in AUTH
+    assert "takeFirstRunEmailGrant" not in SHELL

@@ -8561,7 +8561,8 @@
     _saidWaiting: false,
     waiting() {
       const s = this.state;
-      return !!(s && ['mining', 'paused', 'needs_email'].includes(s.status));
+      return !!(s && ['deriving', 'interrupted', 'another_identity', 'mining', 'paused',
+                      'needs_email'].includes(s.status));
     },
     supportOnly() {
       const s = this.state;
@@ -8570,6 +8571,7 @@
     apply(d) {
       const was = this.state;
       this.state = d;
+      if (d.status === 'another_identity' || d.status === 'interrupted') askAboutTheKey(d.status);
       if (d.status === 'ready') {
         this._saidWaiting = false;
         if (!d.initial && was && was.status && was.status !== 'ready') {
@@ -13651,13 +13653,15 @@
         fetch('/api/p2p/account'),
         fetch('/config'),
         fetch('/api/profile/scrobbling'),
-        fetch('/api/auth/status'),
+        // Through auth.js: it keeps what the status says of the node (its
+        // host, its key) for the boxes and the password field's words
+        window.Sautium.auth.status().catch(() => null),
       ]);
       if (pr.ok) profile = await pr.json();
       if (ar.ok) account = await ar.json();
       if (cr.ok) config = await cr.json();
       if (sr.ok) scrobbling = await sr.json();
-      if (au.ok) authStatus = await au.json();
+      authStatus = au;
     } catch (_) { /* fall through */ }
 
     if (!profile) {
@@ -14837,8 +14841,10 @@
      opened this page with, which no field asks for. */
   const STEP_UP_LABEL = 'Account password';
   const STEP_UP_HOST_NOTE = 'This node has no password, so the computer that runs Sautium vouches for this: ' +
-    'open this page from there, or scan its QR code, and do it within a few minutes.';
-  const STEP_UP_HOST_MISSING = 'Open this page from the computer that runs Sautium, or scan its QR code, then try again.';
+    'open this page from there (on a Docker node, the link ./sautium pair or python -m pairing prints), ' +
+    'or scan its QR code, and do it within a few minutes.';
+  const STEP_UP_HOST_MISSING = 'Open this page from the computer that runs Sautium (on a Docker node, the link ' +
+    './sautium pair prints), or scan its QR code, then try again.';
   async function stepUpField() {
     // Without the status the field is shown: a node whose host vouches
     // instead answers with the words that say so
@@ -15130,12 +15136,11 @@
   // change who the node is (routers/auth.py). Asked whenever the status is
   // unknown — the node says what it needs either way. One without a password
   // changes on its host's word: the pairing code a page opened from the host
-  // carries (auth.js). A node whose host shows no pairing code (Docker) keeps
-  // a password: it is the only way in.
+  // carries (auth.js) — every host shows one (a Docker node's console, since
+  // SEC-S5 §18).
   async function openChangeIdentityFlow(account, authStatus) {
     const current = (account && account.username) || '';
     const asksCurrent = !authStatus || authStatus.password_login !== false;
-    const needsPassword = !!authStatus && authStatus.pin_door === false;
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -15160,14 +15165,9 @@
             Latin letters, digits, - or _ — it sits inside your invite code.
           </p>
           <div style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
-            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${needsPassword ? 'Password' : 'Password — optional'}</span>
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Password — optional</span>
             <div id="idNewPass"></div>
           </div>
-          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">
-            ${needsPassword
-              ? 'This node is signed into by its password.'
-              : 'Makes this nickname yours on any device. Without it, the identity lives only on this machine.'}
-          </p>
           <label id="idConfirmRow" style="display:flex;flex-direction:column;gap:calc(4*var(--px));" hidden>
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">Confirm password</span>
             ${window.Sautium.auth.passwordField('idPass2', '', 'new-password')}
@@ -15215,7 +15215,6 @@
       const password = passInput.value;
       const currentPassword = currentInput ? currentInput.value : '';
       if (!/^[A-Za-z0-9_-]{3,32}$/.test(username)) return fail('Nickname: 3-32 Latin letters, digits, - or _.');
-      if (needsPassword && !password) return fail('Enter a password: this node is signed into by it.');
       if (password && password !== pass2Input.value) return fail("Passwords don't match.");
       if (currentInput && !currentPassword) return fail('Enter the current password.');
       if (!asksCurrent && !window.Sautium.auth.hasHostCode()) {
@@ -15239,6 +15238,17 @@
       }
       if (!result.ok) { confirmBtn.disabled = false; return fail(result.error); }
       close();
+      if (result.deriving) {
+        // Draft words for the owner's words review
+        await notifyDialog({
+          title: 'Your new key is being made',
+          kind: 'info',
+          message: 'It takes some minutes on this machine. Until it is ready this node is still its old ' +
+            'identity, and you stay signed in. Then every device signs in again with the new password' +
+            (result.restart_required ? '; restart the backend once then, for its admission gate to sign with the new key.' : '.'),
+        });
+        return;
+      }
       if (result.restart_required) {
         // Where the node's image holds it, the restart is one tap here
         let restartable = false;
@@ -17226,10 +17236,10 @@
     }));
   }
 
-  /* "Back up now" (backend/backup_job.py): the making only. The account's
-     password rides the credential box; the file stays on the node — said
-     where it is, with what that means — and nothing here downloads it. The
-     job's progress follows the Library stream. Old backups are counted, and
+  /* "Back up now" (backend/backup_job.py): the making only. Nothing is
+     typed — the file is keyed on the node's own key (SEC-S5); it stays on
+     the node — said where it is, with what that means — and nothing here
+     downloads it. The job's progress follows the Library stream. Old backups are counted, and
      "Keep the newest" is the owner's confirmed act, never the node's rule.
      Draft words for the owner's words review. */
   function backupLine(b) {
@@ -17246,7 +17256,7 @@
       if (r.ok) line.textContent = backupLine(await r.json());
     } catch (_) { /* the row keeps its last line */ }
   }
-  const BACKUP_PHASES = { starting: 'Checking the password…', counting: 'Counting what there is…',
+  const BACKUP_PHASES = { starting: 'Starting…', counting: 'Counting what there is…',
                           dumping: 'Writing the database…', identity: 'Adding the identity…',
                           paused: 'Paused while music plays…' };
   function backupJobLine(job) {
@@ -17267,7 +17277,7 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(12.5*var(--px));line-height:1.5;">
-            A backup holds your library's records, your listening history and this node's identity, encrypted with your account password.
+            A backup holds your library's records, your listening history and this node's identity documents, encrypted with this node's key. It opens on a node that holds this identity: on another machine, bring the identity there first.
           </p>
           <div data-state style="font-size:calc(13*var(--px));color:var(--color-text);line-height:1.5;"></div>
           <button class="profile-btn primary" data-start>Back up now</button>
@@ -17314,11 +17324,9 @@
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     start.addEventListener('click', () => onceInFlight(start, async () => {
       msg.textContent = '';
-      const res = await askStepUp({
-        title: 'Back up now', confirm: 'Back up',
-        text: 'Your account password encrypts the backup. Without it the file cannot be opened.',
-      }, password => window.Sautium.auth.boxed('/api/backup', {}, { password }));
-      if (res && res.ok) paint(res.data);
+      const r = await fetch('/api/backup', { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) paint(data); else msg.textContent = typeof data.detail === 'string' ? data.detail : 'Not started.';
     }));
     stop.addEventListener('click', () => onceInFlight(stop, async () => {
       const r = await fetch('/api/backup/cancel', { method: 'POST' });
@@ -17485,8 +17493,88 @@
   // (user_settings 'p2p.identity', desktop/p2p/identity_proof.py). The proof
   // is a background lottery, so progress is the odds so far, not a percent
   // of work done.
+  // The account's key, asked about once it is made or stopped (the identity
+  // event): another identity than the node's records name — make it, or set
+  // up again — or a making a stop cut short, made again on the password. Both
+  // on the person's own word, the account's password through the box
+  // (routers/auth: new-identity, resume-key). Closing the sheet decides
+  // nothing: the next load asks again. Draft words for the owner's words review.
+  let keySheetOpen = false;
+  async function askAboutTheKey(status) {
+    if (keySheetOpen) return;
+    keySheetOpen = true;
+    const another = status === 'another_identity';
+    // An account with no password (a random key) is vouched for by its host's code
+    const st = await window.Sautium.auth.status().catch(() => null);
+    const noPassword = !!st && st.password_login === false;
+    const overlay = document.createElement('div');
+    overlay.className = 'add-gear-overlay';
+    overlay.innerHTML = `
+      <div class="add-gear-sheet">
+        <div class="sheet-handle"></div>
+        <div class="add-gear-head">
+          <h2 class="add-gear-title">${another ? 'Another identity' : 'Finish your identity'}</h2>
+          <button class="icon-btn" data-cancel aria-label="close">${PROFILE_ICONS.close}</button>
+        </div>
+        <div class="add-gear-row">
+          <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">${another
+            ? (noPassword
+              ? 'With no password the new identity is a random key: it is not the one this node signed with, ' +
+                'which only that identity\'s file brings back.<br><br>'
+              : 'The key that nickname and password make is an identity other than the one this node signed with: ' +
+                'a typo, another nickname, or a password changed since — or that identity never had a nickname and ' +
+                'password, and only its identity file brings it back.<br><br>') + window.Sautium.auth.NEW_IDENTITY_COSTS
+            : "This node's key was not finished: it stopped before the key was made. Type the account's password " +
+              'to make it now — it takes some minutes, and Sautium plays and scans meanwhile.'}</p>
+          ${noPassword ? `
+          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">${STEP_UP_HOST_NOTE}</p>` : `
+          <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
+            <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">The account's password</span>
+            ${window.Sautium.auth.passwordField('', '', 'current-password', 'data-key-pass')}
+          </label>`}
+          <button class="profile-btn primary" data-go>${another ? 'Set up again' : 'Make the key'}</button>
+          ${another ? '<button class="profile-btn destructive" data-make>Make a new identity</button>' : ''}
+          <div data-line style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const line = overlay.querySelector('[data-line]');
+    const pass = overlay.querySelector('[data-key-pass]');
+    const close = () => { keySheetOpen = false; overlay.remove(); };
+    overlay.querySelector('[data-cancel]').addEventListener('click', close);
+    const act = async (button, call) => {
+      if (!noPassword && !pass.value) { line.textContent = "Type the account's password."; return; }
+      button.disabled = true;
+      const r = await call(noPassword ? '' : pass.value);
+      button.disabled = false;
+      if (!r.ok) { line.textContent = r.error || 'That did not go through — try again.'; return; }
+      if (r.data && r.data.password) { line.textContent = r.data.password.door + ' Set the node up again with another.'; return; }
+      close();
+      if (another && r.data && r.data.key === null) { window.Sautium.auth.forget(); location.reload(); }
+    };
+    const go = overlay.querySelector('[data-go]');
+    go.addEventListener('click', () => act(go, another
+      ? (pw) => window.Sautium.auth.decideNewIdentity(false, pw)
+      : (pw) => window.Sautium.auth.resumeKey(pw)));
+    const make = overlay.querySelector('[data-make]');
+    if (make) make.addEventListener('click', () => act(make, (pw) => window.Sautium.auth.decideNewIdentity(true, pw)));
+  }
+
+  // The key's making in words: its estimate and when it began, said once —
+  // Argon2 has no progress to tell, and a clock here would be a timer.
+  // Draft words for the owner's words review.
+  function keyBirthWords(st) {
+    const mins = Math.max(1, Math.round((st.expected_s || 0) / 60));
+    const since = st.started_at ? ` · since ${new Date(st.started_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : '';
+    return `${st.purpose === 'resume' ? 'making its key again' : 'making its key'} · about ${mins} min on this machine${since}`;
+  }
   function identityLabel(st) {
     if (!st || !st.status) return '—';
+    // The account's key, made once in the background (desktop/identity_birth):
+    // one estimate at its start, the page's own clock beside it
+    if (st.status === 'deriving') return keyBirthWords(st);
+    if (st.status === 'another_identity') return 'the key made is another identity — asked';
+    if (st.status === 'interrupted') return 'its key was not finished — your password makes it';
     if (st.status === 'ready') return st.detail === 'email' ? 'email-verified' : 'proof ready';
     if (st.status === 'checking') return 'checking proof…';
     if (st.status === 'mining') {
@@ -17506,6 +17594,10 @@
   }
   function identityDetail(st) {
     if (!st || !st.status) return '';
+    if (st.status === 'deriving') {
+      return 'Your account is made. Its key is being made now: until then Sautium plays, scans and ' +
+        'analyses as usual; sharing, chat and friends start when the key is ready.';
+    }
     const parts = [];
     if (st.method) parts.push(`method: ${st.method}`);
     if (st.difficulty) parts.push(`E = ${st.difficulty} attempts expected`);
@@ -20432,23 +20524,26 @@
     // Notices ride /api/events (player.js re-dispatches the snapshot); the
     // link state comes from the same stream's transport.
     window.addEventListener('sautium:notice', e => notices.apply(e.detail || {}));
-    // The email typed on the first-run form: its code was asked for as the
-    // account was made, and this is the page that loads next — the code's
-    // dialog opens here, with no second tap (auth.js rememberEmail)
-    const firstRunGrant = window.Sautium.auth.takeFirstRunEmailGrant();
-    if (firstRunGrant) openEmailVerifyFlow(firstRunGrant);
     // The sign-in just made said this account's password is under a year
     // of one GPU, the first time it was estimated (device_auth.told_once):
     // said once, here, and kept nowhere
+    // The account made in the Web UI on a launcher's node: its window makes
+    // the key (draft words for the owner's words review)
+    if (window.Sautium.auth.takeKeyInLauncher()) {
+      window.notifyDialog({
+        title: 'Restart Sautium to finish',
+        kind: 'info',
+        message: "Your account is made. Restart Sautium on the computer that runs it: its window " +
+          'makes the key — it asks for the password once — and sharing, chat and friends start then.',
+      });
+    }
     const told = window.Sautium.auth.takePasswordTold();
     if (told) {
       window.notifyDialog({
         title: 'This password can be found',
         kind: 'info',
         message: `One GPU would find this account's password in ${window.escapeProfileHtml(told.words)}. ` +
-          (told.env
-            ? "To change it: set a new P2P_PASSWORD in the node's .env and start it again. "
-            : 'To change it: Profile → Change nickname or password. ') +
+          'To change it: Profile → Change nickname or password. ' +
           'A new password is a new key and a new invite code: friends are told, and every device ' +
           'signs in again.',
       });

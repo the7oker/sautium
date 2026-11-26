@@ -284,11 +284,7 @@ async def set_account_email(opened=boxed(SetEmailRequest)) -> Dict[str, Any]:
         raise HTTPException(400, "Invalid email address")
 
     if not settings.p2p_identity_dir:
-        raise HTTPException(
-            400,
-            "Email is configured via the P2P_EMAIL environment variable "
-            "in this deployment — edit the .env and restart the backend.",
-        )
+        raise HTTPException(400, "This node has no identity folder (P2P_IDENTITY_DIR)")
 
     import json
     from pathlib import Path
@@ -1612,7 +1608,7 @@ async def email_send_code(opened=boxed(SendCodeRequest)) -> Dict[str, Any]:
     req, reply = opened
     identity = _get_identity()
     if not identity or not identity.get("email"):
-        raise HTTPException(400, "No email configured (set P2P_EMAIL in .env)")
+        raise HTTPException(400, "No email configured: set one in Profile first")
     if not device_auth.grant_holds("email", req.grant):
         await step_up(req)
 

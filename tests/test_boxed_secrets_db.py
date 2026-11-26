@@ -118,7 +118,7 @@ def worker():
 @pytest.fixture
 def node(scratch_dsn, tmp_path, monkeypatch, caplog):
     """The auth, settings and P2P routes over this module's database; an
-    account "owner" whose password is PASSWORD, checked by a real derivation
+    account "owner" whose password is PASSWORD, checked by its sign-in hash
     (Argon2 made cheap) at the signed door; a node_info.json in a tmp
     identity folder; every log line kept at DEBUG."""
     url = urlparse(scratch_dsn)
@@ -134,13 +134,11 @@ def node(scratch_dsn, tmp_path, monkeypatch, caplog):
         cur.execute("""INSERT INTO user_settings (key, value) VALUES ('ai.provider', '"anthropic"')""")
     # PUT /ai/key overlays the key on the process's settings, as a node does
     monkeypatch.setattr(settings, "anthropic_api_key", None)
-    monkeypatch.setattr(p2p_identity, "ARGON2_TIME_COST", 1)
-    monkeypatch.setattr(p2p_identity, "ARGON2_MEMORY_COST", 8 * 1024)
-    pubkey = p2p_identity.derive_identity("owner", PASSWORD)["public_key_hex"]
+    from desktop import node_identity
+    pubkey = "ab" * 32
+    node_identity.write_account(tmp_path, {**node_identity.new_account("owner", PASSWORD, source="form"),
+                                           "pubkey": pubkey})
     monkeypatch.setattr(device_auth, "_expected_pubkey", lambda: pubkey)
-    monkeypatch.setattr(device_auth, "account_username", lambda: "owner")
-    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
     monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
                                               for name in ("login", "signed")})
     monkeypatch.setattr(device_auth, "_derive_in_flight", 0)

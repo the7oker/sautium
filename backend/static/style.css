@@ -6545,12 +6545,12 @@ a.am-kind { text-decoration: none; }
   background: none; border: 0; color: var(--color-text-muted); cursor: pointer;
 }
 .pw-show[aria-pressed="true"] { color: var(--color-text); }
-.pw-offer, .pw-meter, .pw-note {
+.pw-offer, .pw-meter, .pw-what, .pw-note {
   margin: calc(6 * var(--px)) 0 0;
   font-size: calc(12 * var(--px)); line-height: 1.5;
   color: var(--color-text-muted);
 }
-.pw-note { color: var(--color-text-dim); }
+.pw-note, .pw-what { color: var(--color-text-dim); }
 .pw-phrase { color: var(--color-text); font-weight: 600; }
 .pw-meter:empty { display: none; }
 .pw-meter[data-zone="refused"] { color: var(--color-negative); }
