@@ -472,8 +472,9 @@ implementation details live in the code, DB and git history.
   folder from a copy; the same nickname and password at the web interface's
   account setup — the pair is the key, though not the record of the keys it
   retired, which only a folder copy or a backup brings back, and without
-  which their records are another author's; a backup's restore, which
-  replaces the database too and exists only for a password the owner chose)
+  which their records are another author's; since 2026-11-26 its identity
+  file, which a backup no longer replaces: a restore opens only once the
+  identity is here)
   and offers a new identity on the owner's choice. That one is random,
   without a nickname: browsers reach it only through Open Web UI or a QR
   code, and chat, friends, the invite code, support requests and backups are
@@ -2121,6 +2122,41 @@ implementation details live in the code, DB and git history.
   misspellings, ILIKE handles exact substrings. Single strategy left too many
   holes.
 
+### The key's cost ×1000, and the account before its key (SEC-S5, 2026-11-26)
+
+The key is Argon2id t=8000 over 128 MiB (SECURITY-PRE-RELEASE §9.13): a
+thousand times the first release's, half its memory and twice its passes —
+the same memory traffic a guess, room beside Nano on a 1 GB board. What it
+took to make a key cost minutes without the node waiting for it:
+
+- **The account is not its key.** `account.json` exists from the first
+  second — the nickname, a sign-in hash (t=8 over 128 MiB: what a sign-in
+  checks; the disk holds the key or the password anyway), and a random id the
+  device token is derived from in the key's place (so the creating browser is
+  signed in at once, and a node made anew still never admits the old one's
+  browsers). The key follows, derived once by one worker
+  (`desktop/identity_birth`) on every road; what speaks for the node (P2P,
+  the notary, the email's code) waits for it and starts on its arrival.
+- **Progress without a tick.** Argon2 says nothing until it ends: the worker
+  says one estimate at its start, from a short derivation at the same memory
+  (the same board measured 1.9× slower under a memory cap), and its end is the
+  second event.
+- **No reader derives.** The env road derived twice per process, inside the
+  lifespan — 25–50 minutes of a node answering nothing at every start at the
+  new cost; it is gone with the env road itself (one logic for every node:
+  the master too is an anonymous node, a random key in its folder).
+- **One derivation, NFKC first.** Three copies of the Argon2 call read the
+  password as typed; a "й" composed or not was two keys. `derive_seed` is the
+  one, `account_password` its one reading, the estimate's too.
+- **No version kept.** A key with no account file was made before: nothing
+  checks its password (the owner's word — only test nodes existed), and the
+  node is made anew; the same nickname and password then make a new key.
+- **The backup's key from the seed, the identity first.** A backup needs no
+  password; a restore opens by a key the node holds — the identity comes back
+  by its pair or by its identity file (the key with its certificate, its
+  proof and the keys it retired; a passphrase at the key's cost, offered
+  first and shown, never masked).
+
 ### Account & chat (P4)
 
 See `P2P_NETWORK.md` — "Account System" and "Security Considerations" sections
@@ -2540,8 +2576,12 @@ Superseded by signed releases (above). Kept for the rewrite lessons.
 Product A of `docs/design/BACKUP.md`: one encrypted `.sbk` per node — the
 `pg_dump` of everything but the `mb_*` data plus the identity documents —
 keyed by the account password through Argon2id in a salt domain of its own
-(`sautium-backup:v1:<username>`, never the identity seed's). What building
-it taught:
+(`sautium-backup:v1:<username>`, never the identity seed's). Since 2026-11-26
+(SEC-S5, format v2) the key is an HKDF of the identity's seed instead: a
+backup is made and restored with no password, by a node that holds the
+identity (whoever holds the seed opens its backups — the disk that holds the
+seed holds the database), and a v1 file is refused with its words. What
+building it taught:
 
 - **SecretBox has no associated data.** "Header authenticated as AAD" needs
   an AEAD; libsodium's XChaCha20-Poly1305 through `nacl.bindings` is in the
@@ -2569,6 +2609,9 @@ it taught:
 - **The private seed never enters the file** — re-derived from username +
   password at restore and written only when it reproduces the recorded
   public key. The rotation archive's private keys are the accepted loss.
+  (Since 2026-11-26 nothing is re-derived: the identity comes first — made
+  anew, or brought by its identity file, which carries the retired keys too —
+  and the backup opens by it.)
 - **Launcher and CLI, not the Web UI (2026-09-14).** The first cut had a
   Backup card in Settings › Library with a job inside the backend. Removed
   the day after: a browser cannot receive the file and the password belongs

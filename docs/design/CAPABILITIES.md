@@ -216,7 +216,8 @@ Not implemented — searched over `backend desktop mcp`, only the definitions ma
 
 ## 9. Network, identity, chat, sync, backup
 
-- [auto] Identity is derived, not stored: username + password → Argon2id → Ed25519; the same pair gives the same node anywhere — `desktop/node_identity.py: derive_seed`
+- [auto] Identity is derived from its pair: username + NFKC(password) → Argon2id (t=8000, 128 MiB) → Ed25519, once, in the background — the account exists before its key, signed into by its sign-in hash; the same pair gives the same node anywhere — `desktop/node_identity.py: derive_seed`; `desktop/identity_birth.py`
+- [UI] An identity moves as its identity file (the key, its certificate and proof, the retired keys; an optional passphrase), by the machine's own hands — Settings › Export/Import identity…; `./sautium identity export|import`; `desktop/identity_file.py`
 - [UI] Changing the name or password is a new key; the retired one signs the notice friends re-key on — `POST /api/auth/change-identity`; `desktop/node_identity.py: rotate_identity`
 - [auto] Identity certificate from the Worker, by proof of work or by email; the proof is mined in the background — `desktop/p2p/birth_cert.py: request_certificate`; `desktop/p2p/identity_pow.py: pow_mine`
 - [UI] Email verification, optional — `POST /api/p2p/email/send-code`, `/verify-code`

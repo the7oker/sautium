@@ -211,15 +211,9 @@ class SetupWizard(ctk.CTkToplevel):
     def _validate_step(self) -> bool:
         if self._step_name() == "_step_account":
             if self._restore:
-                # The account is the backup's: its password opened the file,
-                # so the pair derives the key the data is signed with.
-                node = self._restore["manifest"]["node"]
-                self.config["_account"] = {
-                    "username": node["username"],
-                    "password": self._restore["password"],
-                    "anonymous": False,
-                    "restore": True,
-                }
+                # The identity is here already, from its file; its backup,
+                # if one was chosen, is restored once the database exists
+                self.config["_account"] = {"restore": True}
                 return True
 
             # Phase 1: account fields
@@ -467,14 +461,35 @@ class SetupWizard(ctk.CTkToplevel):
         return self._minted
 
     def _restore_text(self) -> str:
+        if not self._restore:
+            return ""
         from desktop.restore import describe
-        return describe(self._restore["manifest"]) if self._restore else ""
+        placed = self._restore["identity"]
+        who = placed["invite_code"] or placed["public_key_hex"][:16] + "…"
+        if self._restore.get("manifest"):
+            return f"This machine is {who}; restoring {describe(self._restore['manifest'])}"
+        return f"This machine is {who} now."
+
+    def _pick_identity(self):
+        """The other way in: an existing identity, by its file (the identity
+        first — SEC-S5 §16), placed at once; a backup of it may follow. A new
+        installation's database names no identity, so nothing is asked."""
+        from desktop.settings import IdentityImportDialog
+        IdentityImportDialog(self, ops={"ui_call": self.ui_call, "another_identity": lambda _pubkey: False,
+                                        "place": self._identity_placed},
+                             on_placed=lambda: None)
+
+    def _identity_placed(self, contents):
+        from desktop import identity_file, node_identity
+        self._restore = {"identity": identity_file.place(node_identity._identity_dir(), contents)}
+        self._show_step()
 
     def _pick_backup(self):
+        """A backup of the identity just brought, opened by its key."""
         from desktop.restore import RestoreDialog
 
-        def ready(path, password, manifest):
-            self._restore = {"path": path, "password": password, "manifest": manifest}
+        def ready(path, manifest):
+            self._restore.update(path=path, manifest=manifest)
             self._show_step()
 
         RestoreDialog(self, on_ready=ready, confirm_replace=False)
@@ -639,21 +654,24 @@ class SetupWizard(ctk.CTkToplevel):
                 "is busy. If this machine is ever lost, the mailbox carries "
                 "your standing to the next identity.")
 
-        # The other way in: a backup of an existing node. Its identity and
-        # database replace whatever the fields above would have created.
+        # The other way in: an existing identity, by its identity file, and a
+        # backup of it if there is one. It replaces whatever the fields above
+        # would have created.
         restore_row = ctk.CTkFrame(fields, fg_color="transparent")
         restore_row.grid(row=14, column=0, sticky="ew", pady=(4, 0))
         self._restore_status = ctk.CTkLabel(
             restore_row, anchor="w", height=0, font=ctk.CTkFont(size=12),
             justify="left", wraplength=330,
-            text=("Restoring: " + self._restore_text()) if self._restore
-            else "Already have a Sautium backup?",
+            text=self._restore_text() if self._restore
+            else "Already have a Sautium identity? Bring its identity file.",
             text_color="#22c55e" if self._restore else "gray")
         self._restore_status.pack(side="left", fill="x", expand=True)
         ctk.CTkButton(
             restore_row, width=170,
-            text="Choose another…" if self._restore else "Restore from a backup…",
-            command=self._pick_backup, fg_color="transparent", border_width=1,
+            text=("Choose another backup…" if self._restore.get("manifest") else "Add a backup…")
+            if self._restore else "Bring an identity file…",
+            command=self._pick_backup if self._restore else self._pick_identity,
+            fg_color="transparent", border_width=1,
         ).pack(side="right")
 
         # A confirmation means nothing until there is a password, and a
@@ -1914,14 +1932,11 @@ class SetupWizard(ctk.CTkToplevel):
                     )
 
                 # The account identity: the account step yields one on every
-                # path (a chosen pair, a minted one, or the backup's). A start
-                # that finds none is the launcher's to settle, once the
-                # database it checks is up (node_identity.ensure_identity).
-                if account_data and account_data.get("restore"):
-                    # The identity is written by the restore below, from the
-                    # backup, once the database exists to restore into.
-                    pass
-                elif account_data:
+                # path (a chosen pair, a random key, or an identity file's,
+                # placed already). A start that finds none is the launcher's
+                # to settle, once the database it checks is up
+                # (node_identity.ensure_identity).
+                if account_data and not account_data.get("restore"):
                     self._make_account(account_data, progress)
 
                 # Initialize database
@@ -1933,15 +1948,14 @@ class SetupWizard(ctk.CTkToplevel):
                 full_init(password, port=port, progress_cb=progress)
 
                 if account_data and account_data.get("restore"):
-                    from desktop.restore import restore_launcher_node
-                    progress("Restoring from backup...")
-                    # full_init just created an empty database, so nothing is
-                    # replaced; identity=True writes the node's documents and
-                    # re-derives its key from the pair that opened the file.
-                    restore_launcher_node(
-                        self._restore["path"], self._restore["password"],
-                        config=self.config, replace=True, identity=True,
-                        progress=progress)
+                    if self._restore.get("path"):
+                        from desktop.restore import restore_launcher_node
+                        progress("Restoring from backup...")
+                        # full_init just created an empty database, so
+                        # nothing is replaced; the backup opens by the key
+                        # its identity file placed
+                        restore_launcher_node(self._restore["path"], config=self.config,
+                                              replace=True, progress=progress)
                     progress("Fetching birth certificate...")
                     from desktop.p2p.birth_cert import ensure_certificate
                     if ensure_certificate() is None:
