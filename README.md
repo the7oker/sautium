@@ -457,9 +457,10 @@ re-downloads every asset over the public URL and verifies it.
    catalogue step is pre-ticked when the disk has room (~21 GB in the
    background) — untick it for a quick trial. Finishing the wizard starts the
    backend, which installs the ML stack on first run (~1.3 GB, once).
-5. In the launcher: **Choose Music Folder** picks the music folder, **Open
-   Web UI** opens `http://localhost:18000`. On a local disk new music appears
-   by itself after that; on a network share use **Scan for new**.
+5. In the launcher: **Add Music Folder** adds a music folder — as many as
+   you like, a second disk included — and **Open Web UI** opens
+   `http://localhost:18000`. On a local disk new music appears by itself
+   after that; on a network share use **Scan for new**.
 
 #### Testing installs
 

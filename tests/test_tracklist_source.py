@@ -50,8 +50,8 @@ def library(tmp_path, monkeypatch):
     (root / "Elsewhere").mkdir(parents=True)
     monkeypatch.setattr(settings, "music_library_path", str(root))
     monkeypatch.setattr(settings, "music_host_path", (tmp_path / "host" / "Music").as_posix())
-    monkeypatch.setattr(scanner, "library_unreachable", lambda: False)
-    return settings.library_db_root()
+    monkeypatch.setattr(scanner, "folder_unreachable", lambda path, wake=True: False)
+    return settings.music_host_path
 
 
 @pytest.fixture

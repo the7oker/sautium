@@ -32,7 +32,7 @@ PRIVATE = {
     "credits_due",
     "diag_events", "diag_warrants", "external_api_cooldown",
     "friend_grant_rights", "friend_grants", "friend_requests", "friend_rights", "friends",
-    "host_requests", "hqp_ab_duels", "hqp_ab_sittings", "hqp_ab_slips", "library_roots",
+    "host_requests", "hqp_ab_duels", "hqp_ab_sittings", "hqp_ab_slips", "library_folders", "library_roots",
     "invite_token_rights", "invite_tokens", "lastfm_import", "lb_slice_blobs",
     "lb_slice_fetches", "lb_slice_requests", "mail_vouchers", "mb_refuted_bindings", "mb_slice_blobs",
     "mb_slice_fetches", "mbws_answers", "mbws_artist_aliases", "mbws_artist_genres",

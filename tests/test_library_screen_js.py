@@ -87,14 +87,14 @@ def test_an_analysis_no_row_can_show_never_asks_for_a_redraw():
 
 
 def test_a_redraw_follows_structure_and_never_the_numbers():
-    """What moves the screen's structure with no worker running: the folder,
-    an Away block to add or take away, a first scan's time. The counts, the
+    """What moves the screen's structure with no worker running: the folders
+    and their states, an Away block to add or take away, a first scan's time. The counts, the
     size and a later scan's time are written in place — they also move under
     an HQPlayer library's import and a background pass, whose wakes must not
     redraw the screen (review round 3)."""
     assert _run([
         {"shown": [], "tracks": 93, "now": {"away": {"albums": 200, "copies": 200}}, "was": 93},   # the Away block comes
-        {"shown": [], "tracks": 93, "now": {"music_path": "/media/sautium/X/Music"}, "was": 93},
+        {"shown": [], "tracks": 93, "now": {"folders": [{"id": 1, "connected": False}]}, "was": 93},
         {"shown": [], "tracks": 93, "now": {"last_scan_at": ""}, "was": 93},                        # no scan on record
         {"shown": [], "tracks": 8187, "was": 10187},                              # only the counts moved
         {"shown": [], "tracks": 93, "now": {"last_scan_at": "now"}, "was": 93},   # a later scan's time
@@ -159,28 +159,20 @@ DISKS = r"""
 const escapeHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const fmtBytes = n => n + ' B', fmtPathForDisplay = p => p;
-const MUSIC_FOLDER_LINES = { pick: '', setup: 'Named where this node was set up.' };
 %(safe)s
 %(copy)s
 %(row)s
 %(crumb)s
-%(paint)s
-const sub = { textContent: '', hidden: true };
-const pathRow = pullable => ({ dataset: { musicFolder: 'pick', musicPullable: pullable ? '1' : '' },
-  classList: { toggle() {} }, querySelector: () => sub });
-const painted = (pullable, missing) => { paintMusicPathRow(pathRow(pullable), missing);
-                                         return [sub.textContent, sub.hidden]; };
 console.log(JSON.stringify({
   copies: %(volumes)s.map(unreadDiskCopy),
   rows: %(places)s.map(_folderPlaceRow),
   crumbs: %(crumbs)s.map(c => _folderCrumb(c[0], c[1])),
-  path: [painted(true, false), painted(false, false), painted(true, true)],
   safe: SAFE_TO_PULL,
 }));
 """
 
-SAFE = ("Sautium only reads this disk and writes nothing to it. You can unplug it at any time: "
-        "its albums are away until it is back.")
+# its albums are not connected while it is out — never "away" (LIBRARY-FOLDERS-1)
+SAFE = "Sautium only reads this disk and writes nothing to it. You can unplug it at any time."
 READS = "Sautium reads FAT, exFAT, NTFS and ext4 disks."
 
 
@@ -189,7 +181,6 @@ def _disks(volumes=(), places=(), crumbs=()):
     script = DISKS % {"safe": SOURCE[start:SOURCE.index(";\n", start) + 1],
                       "copy": _function("unreadDiskCopy(d)"), "row": _function("_folderPlaceRow(p)"),
                       "crumb": _function("_folderCrumb(at, disk)"),
-                      "paint": _function("paintMusicPathRow(row, missing)"),
                       "volumes": json.dumps(list(volumes)), "places": json.dumps(list(places)),
                       "crumbs": json.dumps(list(crumbs))}
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
@@ -308,56 +299,57 @@ def test_the_sheets_foot_promises_only_what_the_sheet_shows():
     assert "can read every disk plugged into this machine" not in SOURCE
 
 
-def test_the_chosen_folders_row_says_it_can_be_pulled_while_it_is_on_a_plugged_disk():
-    path = _disks()["path"]
-    assert path == [[SAFE, False], ["", True],
-                    ["Not connected — your own tracks cannot play or be scanned until it is back.", False]]
+def test_a_place_of_the_library_says_so_in_the_sheet():
+    disk = {"path": "/media/sautium/4A21", "name": "4A21", "kind": "disk", "label": "Elements",
+            "size_bytes": 512, "read_only": True}
+    taken, free = _disks(places=[dict(disk, in_library="Elements · Music"), dict(disk, in_library=None)])["rows"]
+    assert "In your library." in taken and SAFE not in taken
+    assert SAFE in free
 
 
-# -- the Away row while the music folder does not answer (PI-NODE-2E F23, H3) ----------------------
+# -- the notices of a folder out and of a disk plugged in (LIBRARY-FOLDERS-1 §3.2, Q9) ------------
 
 def _block(start: str, end: str) -> str:
     at = SOURCE.index(start)
     return SOURCE[at:SOURCE.index(end, at) + len(end)]
 
 
-MOUNT_MISSING = _block("  NOTICE_COPY['library.mount_missing'] = n => ({", "\n  });")
-
-FOLDER = r"""
+NOTICES = r"""
 'use strict';
 const escapeHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-const fmtPathForDisplay = p => p;
+const fmtNum = n => String(n);
 const NOTICE_COPY = {};
+const added = [];
+const addLibraryFolder = async path => { added.push(path); return null; };
+const notices = { toast() {} };
 %(copy)s
-let _nodeStreams = null, _nodeStreamsAsked = false, _prunePlanHeld = null;
-let shown = null;
-const notices = { get: k => (k === 'library.mount_missing' ? shown : null) };
-const buttons = ['scan', 'scan-prune', 'remove-away'].map(action => ({ action, disabled: false }));
-const why = { innerHTML: '', hidden: true, dataset: {} };
-const document = {
-  querySelector: sel => (sel === '[data-away-why]' ? why : null),
-  querySelectorAll: sel => buttons.filter(b => sel.includes(`[data-action="${b.action}"]`)),
-};
-%(paint)s
-const seen = () => ({ disabled: buttons.map(b => b.disabled), why: why.innerHTML, hidden: why.hidden });
-shown = { data: { path: '/media/sautium/X/<Music>' } };
-paintMusicFolder(true);
-const out = seen();
-shown = null;
-paintMusicFolder(false);
-console.log(JSON.stringify({ out, back: seen(),
-                             copy: NOTICE_COPY['library.mount_missing']({ data: { path: '/media/sautium/X/<Music>' } }).text }));
+const out = %(items)s.map(noticeCopy);
+out[3].action.run().then(() => console.log(JSON.stringify(out.map(c => ({ title: c.title, text: c.text,
+  action: c.action ? c.action.label : null })).concat([{ added }]))));
 """
 
 
-def test_the_away_rows_remove_waits_for_the_folder_with_the_notices_sentence():
-    script = FOLDER % {"copy": MOUNT_MISSING, "paint": _function("paintMusicFolder(missing)")}
+def test_a_folder_out_is_a_warning_with_its_albums_and_a_new_disk_offers_its_one_tap():
+    items = [
+        {"key": "library.folder_out.3", "data": {"name": "STICK <B> · Music", "albums": 9, "streams": True}},
+        {"key": "library.folder_out.3", "data": {"name": "STICK B · Music", "albums": 1, "streams": False}},
+        {"key": "library.folder_out.env", "data": {"name": "/music", "albums": 0, "streams": False}},
+        {"key": "disk.new.4A21-0000", "data": {"path": "/media/sautium/4A21-0000", "label": "Archive <x>",
+                                               "audio_files": 4812, "capped": False}},
+    ]
+    copy = _block("  function noticeCopy(n) {", "\n  }\n")
+    script = NOTICES % {"copy": copy, "items": json.dumps(items)}
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
-    got = json.loads(out.stdout)
-    assert got["out"] == {"disabled": [True, True, True], "why": got["copy"], "hidden": False}
-    assert "/media/sautium/X/&lt;Music>" in got["copy"]           # the notice's own words, escaped
-    assert got["back"] == {"disabled": [False, False, False], "why": "", "hidden": True}
+    streams, waits, empty, disk, added = json.loads(out.stdout)
+    assert streams == {"title": "STICK &lt;B> · Music is not connected",
+                       "text": 'Its <span class="num">9</span> albums stream until it is back.', "action": None}
+    assert waits["text"] == 'Its <span class="num">1</span> album cannot play until it is back.'
+    assert empty["text"] == "Its music cannot play until it is back."
+    assert disk == {"title": "A disk with music was plugged in",
+                    "text": 'Archive &lt;x> holds <span class="num">4812</span> audio files.',
+                    "action": "Add to library"}
+    assert added == {"added": ["/media/sautium/4A21-0000"]}         # the one tap: the whole disk
 
 
 def test_the_away_rows_refusal_is_a_toast_as_the_yes_is():
@@ -371,12 +363,12 @@ ASK = r"""
 'use strict';
 const escapeProfileHtml = s => String(s);
 const _prunePlansAsked = new Set();
-let _prunePlanOpen = false, _prunePlanHeld = null;
+let _prunePlanOpen = false;
 const _prunePlanTitle = p => 't', _prunePlanMessage = p => 'm';
 const parseHash = () => 'home', render = () => {};
 const toasts = [];
-let missing = null;
-const notices = { toast: t => toasts.push(t), get: key => (key === 'library.mount_missing' ? missing : null) };
+const notices = { toast: t => toasts.push(t) };
+%(title)s
 let confirms = 0;
 const window = { confirmDestructive: async () => { confirms += 1; return true; } };
 %(sent)s
@@ -398,15 +390,13 @@ const fetch = async url => { atSend.push([..._pruneYesSent.keys()]);
   // a yes refused at the route: its own toast, nothing kept for the run
   answer = { ok: false, status: 409 };
   await _askPrunePlan({ id: 'p3', kind: 'rescan' });
-  // the folder out: a waiting question is not asked (its yes would only be refused) — asked once it is back
+  // its folders out: a waiting question is not asked (its yes would only be refused) — asked once one is back
   answer = { ok: true, status: 200 };
-  missing = { key: 'library.mount_missing' };
   const before = confirms;
-  await _askPrunePlan({ id: 'p4', kind: 'away' });
-  await _askPrunePlan({ id: 'p4', kind: 'away' });
+  await _askPrunePlan({ id: 'p4', kind: 'away', waits: true });
+  await _askPrunePlan({ id: 'p4', kind: 'away', waits: true });
   const whileOut = confirms - before;
-  missing = null;
-  await _askPrunePlan(_prunePlanHeld);                      // what paintMusicFolder(false) asks at the notice's end
+  await _askPrunePlan({ id: 'p4', kind: 'away', waits: false });   // the snapshot a folder's return sends
   console.log(JSON.stringify({ atSend, toasts, kept: [..._pruneYesSent.keys()], whileOut,
                                afterBack: confirms - before }));
 })();
@@ -417,7 +407,8 @@ def test_a_removal_refused_when_it_looked_is_said_once_to_the_tab_that_said_yes(
     start = SOURCE.index("\n  async function _askPrunePlan(plan) {\n") + 1
     ask = SOURCE[start:SOURCE.index("\n  }\n", start) + len("\n  }")]
     sent = _block("  const _pruneYesSent = ", ";")
-    script = ASK % {"sent": sent, "ask": ask, "say": _function("_sayPruneRefused(scan)")}
+    script = ASK % {"sent": sent, "ask": ask, "say": _function("_sayPruneRefused(scan)"),
+                    "title": _block("  const _planTitle = ", ";\n")}
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     got = json.loads(out.stdout)

@@ -27,6 +27,7 @@ import model_cache
 from database import get_db_context
 from db_pool import Listener, db_query
 from discovery_engine import RETRIEVE_K
+from sql_queries import album_away
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +139,8 @@ def shuffle_albums(
     # UUID inputs. Postgres can't index this expression usefully, but a
     # 3.5k-row seq scan + sort costs <50ms and avoids the seed-bleed
     # issues setseed has with pooled connections.
-    albums = db_query("""
+    from scanner import gone_prefixes
+    albums = db_query(f"""
         SELECT al.id::text AS id,
                al.title,
                al.release_year AS year,
@@ -163,7 +165,9 @@ def shuffle_albums(
                 JOIN album_variants av4 ON av4.id = mf4.album_variant_id
                 WHERE av4.album_id = al.id
                 ORDER BY mf4.disc_number, mf4.track_number
-                LIMIT 1) AS media_file_id
+                LIMIT 1) AS media_file_id,
+               -- none of its files opens here now: the tile's mark (B-152)
+               {album_away('al.id')} AS not_here
         FROM albums al
         WHERE EXISTS (
             SELECT 1 FROM album_variants av
@@ -173,7 +177,7 @@ def shuffle_albums(
         ORDER BY md5(al.id::text || %(seed)s::text)
         OFFSET %(offset)s
         LIMIT %(limit)s
-    """, {"limit": limit, "seed": seed, "offset": offset})
+    """, {"limit": limit, "seed": seed, "offset": offset, "gone": gone_prefixes()})
 
     next_cursor = None
     if len(albums) == limit:

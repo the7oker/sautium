@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Sequence, Set, Tuple
 
 import mutagen
@@ -78,27 +78,23 @@ def link_admitted(path: str) -> bool:
     return not library_root.picks() or library_root.within(path) is not None
 
 
-def scope_has_drive(rel: str) -> bool:
-    """`rel` as Windows reads it names a drive or a root (`C:/Windows`,
-    `C:Windows`, `\\\\server\\share`): joining it to a folder leaves that folder."""
-    windows = PureWindowsPath(rel)
-    return bool(windows.drive or windows.root)
-
-
-def scope_admitted(library_path, rel: str) -> bool:
-    """Whether a scan's scope names a folder inside the library: no `..` on
-    its way anywhere, and — on a node that reads its music under roots — no
-    link that leaves them. The walk judges the entries inside a scope
-    (link_admitted); this judges the scope's own folder, which a request
-    names."""
-    if ".." in rel.replace("\\", "/").split("/"):
-        return False
-    # A scope with a root or — on Windows — a drive of its own is no folder
-    # of the library: joined to the library's path it would replace it
-    if os.path.isabs(rel) or (os.name == "nt" and scope_has_drive(rel)):
-        return False
+def scope_admitted(scope: str, folders: Optional[Sequence[str]] = None) -> Optional[str]:
+    """The folder of the library (one of `folders`, every folder by default)
+    a scan's scope lies in — a stored path, as media_files spells it — when
+    it names a folder inside one: no `..` on its way anywhere, and — on a
+    node that reads its music under roots — no link that leaves them. None
+    otherwise. The walk judges the entries inside a scope (link_admitted);
+    this judges the scope's own folder, which a request names."""
     import library_root
-    return not library_root.picks() or library_root.within(os.path.join(str(library_path), rel)) is not None
+    scope = scope.replace("\\", "/")
+    if ".." in scope.split("/"):
+        return None
+    folder = library_root.folder_of(library_root._norm(scope), folders)
+    if folder is None:
+        return None
+    if library_root.picks() and library_root.within(settings.translate_to_local_path(scope)) is None:
+        return None
+    return folder
 
 
 # What a refused scan says, by the way the node is given its music folder —
@@ -128,226 +124,298 @@ def unreachable_words() -> str:
                        else "launcher" if is_launcher_mode() else "setup"]
 
 
-def library_unreachable(wake: bool = True) -> bool:
-    """The library path is set but holds nothing while the catalog knows
-    owned files: a drvfs mount that dropped under a running node, a forgotten
-    drive, a Docker bind that came up on an empty directory. An unreadable
-    path counts as empty; no folder chosen yet is not this. The one rule
-    behind the library.mount_missing notice, Library's Music path row, the
-    scan's refusal and the prune's last check — a walk over such a folder
-    finds nothing and reads as a scan, or as every file deleted.
-
-    A look, taken where it is called (a scan's refusal, the prune): its
-    answer is recorded unless a look that started later recorded first, and
-    `wake` wakes the notices when it differs from what they show."""
-    return _look(_next_ticket(), wake)
-
-
-def _look(ticket: int, wake: bool) -> bool:
-    root = settings.music_library_path
-    if not root or not db_query_one("SELECT 1 AS x FROM media_files LIMIT 1"):
-        answer = False
-    else:
-        try:
-            with os.scandir(root) as it:
-                answer = next(it, None) is None
-        except OSError:
-            answer = True
-    _record(answer, ticket, wake)
-    return answer
-
-
-# The folder's state, two ways: the last answer recorded (looks and
-# observations, ordered by when they started) — what gone_prefixes reads, and
-# a change of it is the queue's event (playback.manager.reach_changed) — and
-# what the notices were last given. The notices derive on every wake of every stream, so they share one
-# look, run by a worker thread, and wait for it a few seconds at most — a look
-# that takes longer reads as a dead mount. Their look never wakes the channel:
-# on a share that flaps it would wake itself without end, so a change only a
-# request's derivation saw reaches the tabs already open with the next wake.
-# Producers do wake it, when their answer differs from what the notices show:
-# a scan's refusal, the prune, Library opened, a library file served or found
-# missing, the folder watcher's loss, the first file of a new queue missing. And a look the readers gave up on wakes them if the folder answered
-# after all: a disk spinning up is not a dead mount.
+# Each folder of the library has its state, two ways (LIBRARY-FOLDERS-1: a
+# look per folder; before it, one music folder): the last answer recorded
+# (looks and observations, ordered by when they started) — what gone_prefixes
+# reads, and a change of it is the queue's event (playback.manager.
+# reach_changed) — and what the notices were last given. The notices derive on
+# every wake of every stream, so they share one look per folder, run by that
+# folder's worker thread, and wait for them a few seconds at most — a look that
+# takes longer reads as a dead mount; a dead mount stalls its own folder's look,
+# never another's. Their look never wakes the channel: on a share that flaps it
+# would wake itself without end, so a change only a request's derivation saw
+# reaches the tabs already open with the next wake. Producers do wake it, when
+# their answer differs from what the notices show: a scan's refusal, the prune,
+# Library opened, a library file served or found missing, the folder watcher's
+# loss, the first file of a new queue missing, the mount table's change. And a
+# look the readers gave up on wakes them if the folder answered after all: a
+# disk spinning up is not a dead mount.
 LOOK_PATIENCE_S = 3.0
-_folder = threading.Condition()
-_folder_unreachable = False
-_shown = False
-_ticket = 0
-_recorded = 0                 # the ticket the recorded answer is from
-_look_wanted = False          # the worker's queue of one,
-_look_wakes_wanted = False    # asked for by a producer
-_looking = False              # the worker's look under way:
-_look_ticket = 0              #   its ticket,
-_look_started = 0.0           #   its start (monotonic),
-_look_wakes = False           #   a producer's,
-_look_given_up = False        #   a reader read "unreachable" rather than wait longer
-_looks_done = 0
-_worker: Optional[threading.Thread] = None
 
 
-def _next_ticket() -> int:
-    global _ticket
-    with _folder:
-        _ticket += 1
-        return _ticket
+class _Look:
+    """One folder's state and its worker (the comment above)."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.cond = threading.Condition()
+        self.unreachable = False
+        self.shown = False
+        self.ticket = 0
+        self.recorded = 0             # the ticket the recorded answer is from
+        self.wanted = False           # the worker's queue of one,
+        self.wakes_wanted = False     # asked for by a producer
+        self.looking = False          # the worker's look under way:
+        self.look_ticket = 0          #   its ticket,
+        self.look_started = 0.0       #   its start (monotonic),
+        self.look_wakes = False       #   a producer's,
+        self.given_up = False         #   a reader read "unreachable" rather than wait longer
+        self.done = 0
+        self.dropped = False          # the folder left the library: its worker ends
+        self.worker: Optional[threading.Thread] = None
 
 
-def _record(unreachable: bool, ticket: int, wake: bool) -> None:
-    global _folder_unreachable, _recorded, _shown
-    with _folder:
-        if ticket < _recorded:
+_looks: Dict[str, "_Look"] = {}
+_looks_lock = threading.Lock()
+
+
+def _look_of(path: str) -> "_Look":
+    with _looks_lock:
+        look = _looks.get(path)
+        if look is None:
+            look = _looks[path] = _Look(path)
+        return look
+
+
+def drop_look(path: str) -> None:
+    """A folder left the library (forgotten): its state goes with it — a
+    folder that did not answer no longer narrows what opens."""
+    with _looks_lock:
+        look = _looks.pop(path, None)
+    if look is None:
+        return
+    with look.cond:
+        look.dropped = True
+        look.cond.notify_all()
+    if look.unreachable:
+        _reach_moved()
+
+
+def _holds(path: str) -> bool:
+    """Whether the catalogue holds a file under the folder: what tells a
+    folder that lost its music from one with nothing in it yet."""
+    return bool(db_query_one("SELECT EXISTS (SELECT 1 FROM media_files WHERE starts_with(file_path, %s)) AS x",
+                             (path.rstrip("/") + "/",))["x"])
+
+
+def _answer(path: str) -> bool:
+    """The look itself: the folder is not there (a disk pulled, its mount
+    point gone with it; a folder removed), or is there and holds nothing
+    while the catalogue knows files under it — a drvfs mount that dropped
+    under a running node, a Docker bind that came up on an empty directory.
+    An unreadable path counts as not there. A walk over such a folder finds
+    nothing and reads as a scan, or as every file deleted. An empty folder
+    the catalogue holds nothing of is a folder with nothing in it yet."""
+    try:
+        with os.scandir(settings.translate_to_local_path(path)) as it:
+            empty = next(it, None) is None
+    except OSError:
+        return True
+    return empty and _holds(path)
+
+
+def _next_ticket(look: "_Look") -> int:
+    with look.cond:
+        look.ticket += 1
+        return look.ticket
+
+
+def _reach_moved() -> None:
+    # What opens here changed (gone_prefixes): the queue reads its slots'
+    # ways in again — in a process that holds one, off this thread — and the
+    # Library's folder list is drawn again
+    playback = sys.modules.get("playback.manager")
+    if playback is not None:
+        threading.Thread(target=playback.reach_changed, daemon=True, name="queue-reach").start()
+    router = sys.modules.get("routers.settings")
+    if router is not None:
+        router.notify_library_subscribers()
+
+
+def _record(look: "_Look", unreachable: bool, ticket: int, wake: bool) -> None:
+    with look.cond:
+        if ticket < look.recorded:
             return
-        _recorded = ticket
-        back = _folder_unreachable and not unreachable
-        moved = _folder_unreachable != unreachable
-        _folder_unreachable = unreachable
-        wake = wake and unreachable != _shown
+        look.recorded = ticket
+        back = look.unreachable and not unreachable
+        moved = look.unreachable != unreachable
+        look.unreachable = unreachable
+        wake = wake and unreachable != look.shown
         if wake:
-            _shown = unreachable
+            look.shown = unreachable
     if wake:
         db_execute("NOTIFY sautium_notices")
     if back:
         # The folder answers again: a watch it lost is placed again
         import library_watch
-        threading.Thread(target=library_watch.folder_back, daemon=True,
+        threading.Thread(target=library_watch.folder_back, args=(look.path,), daemon=True,
                          name="library-watch-rearm").start()
     if moved:
-        # What opens here changed (gone_prefixes): the queue reads its
-        # slots' ways in again — in a process that holds one, off this thread
-        playback = sys.modules.get("playback.manager")
-        if playback is not None:
-            threading.Thread(target=playback.reach_changed, daemon=True,
-                             name="queue-reach").start()
+        _reach_moved()
 
 
-def of_music_folder(local_path: str) -> bool:
-    """Whether a file, by the path this process opens it at, lies in the
-    music folder as it is now. Only such a file speaks for the folder: a
-    row of a folder the library has left (another one picked, its rows
-    there until a Rescan) served or found missing says nothing of this
-    one."""
-    root = settings.translate_to_local_path(settings.library_db_root())
-    root = root.replace("\\", "/").rstrip("/")
-    return bool(root) and str(local_path).replace("\\", "/").startswith(root + "/")
+def folder_unreachable(path: str, wake: bool = True) -> bool:
+    """A look at one folder, taken where it is called (a scan's refusal,
+    the prune): its answer is recorded unless a look that started later
+    recorded first, and `wake` wakes the notices when it differs from what
+    they show."""
+    look = _look_of(path)
+    ticket = _next_ticket(look)          # ordered by when it started, not when it ended
+    answer = _answer(path)
+    _record(look, answer, ticket, wake)
+    return answer
 
 
-def folder_seen(unreachable: bool) -> None:
+def look_all(wake: bool = True) -> Dict[str, bool]:
+    """A look at every folder of the library: {path: unreachable}."""
+    import library_root
+    return {path: folder_unreachable(path, wake) for path in library_root.paths()}
+
+
+def folder_of(local_path: str) -> Optional[str]:
+    """The folder of the library a file, by the path this process opens it
+    at, lies in: only such a file speaks for its folder — a row of no folder
+    (one forgotten since) served or found missing says nothing of any."""
+    import library_root
+    return library_root.folder_of(settings.translate_to_host_path(str(local_path)).replace("\\", "/"))
+
+
+def folder_seen(path: str, unreachable: bool) -> None:
     """A producer's observation that needs no look (a library file served:
-    the folder answers), recorded like a look that started now."""
-    _record(unreachable, _next_ticket(), wake=True)
+    its folder answers), recorded like a look that started now."""
+    look = _look_of(path)
+    _record(look, unreachable, _next_ticket(look), wake=True)
 
 
 def gone_prefixes() -> List[str]:
     """The stored-path prefixes (as media_files.file_path spells them) of
-    the folders this node knows unreachable now: none, or the music
-    folder's one — a list, so several folders are several entries. A file
-    under one opens nowhere here (sql_queries.HERE): it is no way in for a
-    queue slot, and its album says so.
+    the folders this node knows unreachable now — one entry a folder. A
+    file under one opens nowhere here (sql_queries.HERE): it is no way in
+    for a queue slot, and its album says so.
 
     The list is this process's recorded observation (_record), never a look
     at the disk — a reader on the play path does not wait on a dead mount —
     and never stored: it is made again at each start, by a look taken
     before the first queue is read (PlaybackManager.init_from_settings),
-    and kept by the events that record the folder's state after it."""
-    with _folder:
-        gone = _folder_unreachable
-    return [settings.library_db_root() + "/"] if gone else []
+    and kept by the events that record each folder's state after it."""
+    with _looks_lock:
+        looks = list(_looks.values())
+    return sorted(look.path.rstrip("/") + "/" for look in looks if look.unreachable)
 
 
-def check_folder(wait: bool = False) -> None:
+def check_folder(path: Optional[str] = None, wait: bool = False) -> None:
     """A producer's look (Library opened, a library file found missing, the
-    folder watcher's loss): the worker looks and wakes the notices if the
-    answer differs from what they show. Nobody waits for it but the play
-    path (`wait`): the file a new queue starts with is missing, and what
-    opens instead is read once the folder has answered — waited for no
-    longer than LOOK_PATIENCE_S; a slower answer is recorded when it
-    comes, and that record is the queue's event."""
-    global _look_wanted, _look_wakes_wanted
-    _ensure_worker()
-    with _folder:
-        _look_wanted = _look_wakes_wanted = True
-        _folder.notify_all()
-        if wait:
-            # a look under way began before this miss: the one after it
-            after = _looks_done + (1 if _looking else 0)
-            _folder.wait_for(lambda: _looks_done > after, timeout=LOOK_PATIENCE_S)
+    folder watcher's loss): the folder's worker — every folder's, with no
+    `path` — looks and wakes the notices if the answer differs from what
+    they show. Nobody waits for it but the play path (`wait`): the file a
+    new queue starts with is missing, and what opens instead is read once
+    its folder has answered — waited for no longer than LOOK_PATIENCE_S; a
+    slower answer is recorded when it comes, and that record is the queue's
+    event."""
+    import library_root
+    for folder in ([path] if path is not None else library_root.paths()):
+        look = _look_of(folder)
+        _ensure_worker(look)
+        with look.cond:
+            look.wanted = look.wakes_wanted = True
+            look.cond.notify_all()
+            if wait:
+                # a look under way began before this miss: the one after it
+                after = look.done + (1 if look.looking else 0)
+                look.cond.wait_for(lambda: look.done > after or look.dropped, timeout=LOOK_PATIENCE_S)
 
 
-def folder_unreachable_now() -> bool:
-    """The folder's state for the notices: they share the worker's look and
-    wait for it no longer than LOOK_PATIENCE_S from its start. A look that
-    takes longer reads as a dead mount, unless a word newer than it says the
-    folder answers (a library file served)."""
-    global _look_wanted, _look_given_up, _shown
-    _ensure_worker()
-    with _folder:
-        if not _looking and not _look_wanted:
-            _look_wanted = True
-            _folder.notify_all()
-        done = _looks_done
-        started = _look_started if _looking else time.monotonic()
-        remaining = started + LOOK_PATIENCE_S - time.monotonic()
-        if remaining > 0 and _folder.wait_for(lambda: _looks_done != done, timeout=remaining):
-            answer = _folder_unreachable
-        elif _recorded > _look_ticket:
-            answer = _folder_unreachable
-        else:
-            _look_given_up = True
-            answer = True
-        _shown = answer
-    return answer
+def folders_unreachable_now() -> Dict[str, bool]:
+    """Each folder's state for the notices: they share the workers' looks
+    and wait for them no longer than LOOK_PATIENCE_S from their start — all
+    at once, so one bound covers every folder. A look that takes longer
+    reads as a dead mount, unless a word newer than it says the folder
+    answers (a library file served)."""
+    import library_root
+    looks = [_look_of(path) for path in library_root.paths()]
+    asked = []
+    for look in looks:
+        _ensure_worker(look)
+        with look.cond:
+            if not look.looking and not look.wanted:
+                look.wanted = True
+                look.cond.notify_all()
+            asked.append((look, look.done, look.look_started if look.looking else time.monotonic()))
+    answers = {}
+    for look, done, started in asked:
+        with look.cond:
+            remaining = started + LOOK_PATIENCE_S - time.monotonic()
+            if look.dropped:
+                answer = False      # it left the library meanwhile: nothing of it to say
+            elif remaining > 0 and look.cond.wait_for(lambda: look.done != done or look.dropped, timeout=remaining):
+                answer = look.unreachable and not look.dropped
+            elif look.recorded > look.look_ticket:
+                answer = look.unreachable
+            else:
+                look.given_up = True
+                answer = True
+            look.shown = answer
+        answers[look.path] = answer
+    return answers
 
 
-def _ensure_worker() -> None:
-    global _worker
-    with _folder:
-        if _worker is None or not _worker.is_alive():
-            _worker = threading.Thread(target=_look_worker, daemon=True,
-                                       name="music-folder-look")
-            _worker.start()
+def _ensure_worker(look: "_Look") -> None:
+    with look.cond:
+        if look.dropped:
+            return              # the folder left the library: nobody looks for it again
+        if look.worker is None or not look.worker.is_alive():
+            look.worker = threading.Thread(target=_look_worker, args=(look,), daemon=True,
+                                           name="music-folder-look")
+            look.worker.start()
 
 
-def _look_worker() -> None:
-    global _look_wanted, _look_wakes_wanted, _looking, _look_ticket, _look_started
-    global _look_wakes, _look_given_up, _looks_done, _shown, _ticket
+def _look_worker(look: "_Look") -> None:
     while True:
-        with _folder:
-            _folder.wait_for(lambda: _look_wanted)
-            _look_wanted = False
-            _look_wakes, _look_wakes_wanted = _look_wakes_wanted, False
-            _look_given_up = False
-            _ticket += 1
-            _looking, _look_ticket, _look_started = True, _ticket, time.monotonic()
+        with look.cond:
+            look.cond.wait_for(lambda: look.wanted or look.dropped)
+            if look.dropped:
+                return
+            look.wanted = False
+            look.look_wakes, look.wakes_wanted = look.wakes_wanted, False
+            look.given_up = False
+            look.ticket += 1
+            look.looking, look.look_ticket, look.look_started = True, look.ticket, time.monotonic()
         try:
-            answer = _look(_look_ticket, wake=False)
+            answer = _answer(look.path)
+            _record(look, answer, look.look_ticket, wake=False)
         except Exception as e:
             logger.error(f"Music folder look failed: {e}", exc_info=True)
             answer = None
-        with _folder:
-            wake = (answer is not None and _recorded == _look_ticket
-                    and answer != _shown
-                    and (_look_wakes or (_look_given_up and not answer)))
+        with look.cond:
+            wake = (answer is not None and look.recorded == look.look_ticket
+                    and answer != look.shown
+                    and (look.look_wakes or (look.given_up and not answer)))
             if wake:
-                _shown = answer
-            _looking = False
-            _looks_done += 1
-            _folder.notify_all()
+                look.shown = answer
+            look.looking = False
+            look.done += 1
+            look.cond.notify_all()
         if wake:
             db_execute("NOTIFY sautium_notices")
 
 
 class LibraryUnreachable(RuntimeError):
-    """A scan refused: the folder library_unreachable() names. An expected
-    condition, not a failure of the scan."""
+    """A scan refused: no folder of its scope answers (folder_unreachable).
+    An expected condition, not a failure of the scan."""
 
 
-def refuse_if_unreachable() -> None:
+def refuse_if_unreachable(folders: Optional[Sequence[str]] = None) -> List[str]:
     """Every scan's refusal, whoever starts it (the Library button, the
-    launcher, cli.py, a walk that came back empty). Its look at the folder
-    wakes the notices when the answer changed, so every open tab learns."""
-    if library_unreachable():
+    launcher, cli.py, a walk that came back empty): of `folders` (every
+    folder of the library by default) those that answer now — refused only
+    when none does. Its looks wake the notices when an answer changed, so
+    every open tab learns."""
+    import library_root
+    folders = list(library_root.paths() if folders is None else folders)
+    answering = [path for path in folders if not folder_unreachable(path)]
+    if folders and not answering:
         raise LibraryUnreachable(unreachable_words())
+    return answering
 
 
 @dataclass(frozen=True)
@@ -1492,34 +1560,23 @@ class LibraryScanner:
     """Scanner for music library audio files."""
 
     def __init__(self, library_path: Optional[str] = None):
-        """Initialize scanner with library path."""
-        if not (library_path or settings.music_library_path):
-            # Path("") is the working directory: never a library
+        """A scanner of the library's folders — or of the one folder
+        `library_path` names, walked alone (a stored or a local path)."""
+        import library_root
+        self.folders = [library_root.stored(library_path)] if library_path else library_root.paths()
+        if not self.folders:
+            # no folder at all: nothing to walk — never the working directory
             raise ValueError("No music folder is chosen")
-        self.library_path = Path(library_path or settings.music_library_path)
-
-        if not self.library_path.exists():
-            if library_path is None:
-                # The library's own folder gone under a catalogue that knows
-                # files — a disk pulled, its mount point removed with it — is
-                # the unreachable library every scan refuses (an expected
-                # condition, said in the Library row), not a failed scan.
-                refuse_if_unreachable()
-                # A folder the owner picked under the roots is never a wrong
-                # setting: gone before its first file was read, its disk is
-                # away all the same.
-                import library_root
-                if library_root.picks():
-                    raise LibraryUnreachable(unreachable_words())
-            raise ValueError(f"Library path does not exist: {self.library_path}")
-
-        logger.info(f"Initialized scanner for: {self.library_path}")
         # Host paths of the last FULL discovery and the folders it could not
         # read, for the prune that closes a scan run (see scan_and_import).
         self.last_disk_paths: Optional[Set[str]] = None
         self.last_unread: List[str] = []
         # The scopes whose folder was gone at the last walk (find_audio_files).
         self.last_gone: List[str] = []
+        # The scopes the last scan walked, and the folders of its scope that
+        # did not answer — not walked, named in its outcome
+        self.last_scopes: List[Tuple[str, bool]] = []
+        self.last_out: List[str] = []
 
     @staticmethod
     def extract_metadata(file_path: Path) -> Optional[Dict[str, Any]]:
@@ -1640,27 +1697,27 @@ class LibraryScanner:
     def find_audio_files(
         self,
         limit: Optional[int] = None,
-        subpath: Optional[str] = None,
         cancel_check: Optional[callable] = None,
         scopes: Optional[Sequence[Tuple[str, bool]]] = None,
         stats: Optional[Dict[str, "file_stat.FileStat"]] = None,
         gone: Optional[List[str]] = None,
     ) -> Tuple[List[Path], List[Path], List[str]]:
         """
-        Recursively find all audio files (and cue sheets) in library.
+        Recursively find all audio files (and cue sheets) in the scanner's
+        folders, or in `scopes`.
 
         Args:
             limit: Maximum number of audio files to return (for testing).
-            subpath: Optional subdirectory within library to scan.
             cancel_check: Optional callable returning True if the
                           enclosing scan was cancelled. Discovery can
                           take minutes on a large library over drvfs;
                           checking per folder lets a Cancel tap take
                           effect immediately instead of waiting until
                           extraction phase.
-            scopes: (folder relative to the library, recursive) pairs to
-                    walk instead of `subpath` — the folders a watcher
-                    found changed; a folder not recursive is listed alone.
+            scopes: (folder, recursive) pairs to walk — stored paths, each
+                    inside a folder of the scanner (a folder a watcher
+                    found changed, a folder of the library); a folder not
+                    recursive is listed alone. None: every folder, whole.
             stats: filled with each audio file's and cue sheet's stat by
                    its walk path (file_stat: from the listing on POSIX, the
                    one handle Windows needs for the change time).
@@ -1676,16 +1733,7 @@ class LibraryScanner:
             not read it as deleted.
         """
         if scopes is None:
-            if subpath:
-                scan_path = self.library_path / subpath
-                if not scope_admitted(self.library_path, subpath):
-                    raise ValueError(f"Subpath is not inside the library: {subpath}")
-                if not scan_path.exists():
-                    raise ValueError(f"Subpath does not exist: {scan_path}")
-                logger.info(f"Searching for audio files in {scan_path} (subpath: {subpath})")
-            else:
-                logger.info(f"Searching for audio files in {self.library_path}")
-            scopes = [(subpath or "", True)]
+            scopes = [(folder, True) for folder in self.folders]
 
         audio_files: List[Path] = []
         cue_files: List[Path] = []
@@ -1709,15 +1757,16 @@ class LibraryScanner:
         # says where not) but never into a folder. Absolute from the root, as
         # every path the prune compares.
         folders = []
-        for rel, recursive in scopes:
-            root = (self.library_path / rel) if rel else self.library_path
-            if rel and not scope_admitted(self.library_path, rel):
-                logger.warning("scan scope %s is not inside the library — not walked", rel)
+        for scope, recursive in scopes:
+            if scope_admitted(scope, self.folders) is None:
+                logger.warning("scan scope %s is not inside the library — not walked", scope)
                 continue
-            if rel and not root.is_dir():
+            root = Path(settings.translate_to_local_path(scope))
+            if not root.is_dir():
                 if gone is not None:
-                    gone.append(rel)
+                    gone.append(scope)
                 continue
+            logger.info(f"Searching for audio files in {root}")
             folders.append((str(root.absolute()), recursive))
         while folders:
             if cancel_check and cancel_check():
@@ -1844,7 +1893,6 @@ class LibraryScanner:
         self,
         limit: Optional[int] = None,
         skip_existing: bool = True,
-        subpath: Optional[str] = None,
         progress_cb: Optional[callable] = None,
         cancel_check: Optional[callable] = None,
         scopes: Optional[Sequence[Tuple[str, bool]]] = None,
@@ -1871,10 +1919,13 @@ class LibraryScanner:
             limit: Maximum number of files to scan (for testing).
             skip_existing: Skip files whose stat did not move; False reads
                            every file again.
-            subpath: Optional subdirectory within library to scan.
             progress_cb: Callback(msg, stats) for progress reporting.
             cancel_check: Callback() -> bool, returns True if cancel requested.
-            scopes: (folder, recursive) pairs to walk instead of `subpath`.
+            scopes: (folder, recursive) pairs to walk, stored paths; None is
+                    every folder of the scanner. A folder that does not
+                    answer is not walked: its files keep their state, and
+                    it is named in `last_out`; refused (LibraryUnreachable)
+                    when none of the scope's folders answers.
             leave: walk paths a watcher knows a writer still holds: their
                    close brings them back.
 
@@ -1905,7 +1956,13 @@ class LibraryScanner:
         def _cancelled() -> bool:
             return cancel_check and cancel_check()
 
-        refuse_if_unreachable()
+        wanted = list(scopes) if scopes is not None else [(folder, True) for folder in self.folders]
+        of = {scope: scope_admitted(scope, self.folders) for scope, _r in wanted}
+        answering = refuse_if_unreachable(sorted({f for f in of.values() if f is not None}))
+        self.last_out = sorted({f for f in of.values() if f is not None and f not in answering})
+        if self.last_out:
+            logger.info("Not scanned, not connected: %s", ", ".join(self.last_out))
+        self.last_scopes = [(scope, r) for scope, r in wanted if of[scope] in answering]
 
         # ── Discover files ──────────────────────────────────────────
         if progress_cb:
@@ -1913,7 +1970,7 @@ class LibraryScanner:
         disk_stats: Dict[str, file_stat.FileStat] = {}
         gone: List[str] = []
         audio_files, cue_files, unread = self.find_audio_files(
-            limit=limit, subpath=subpath, cancel_check=cancel_check, scopes=scopes,
+            limit=limit, cancel_check=cancel_check, scopes=self.last_scopes,
             stats=disk_stats, gone=gone)
         stats["unread"] = len(unread)
         self.last_unread = unread
@@ -2220,7 +2277,7 @@ class LibraryScanner:
                         f"{stats['skipped']} skipped, {stats['errors']} errors")
         else:
             stats["processed"] = total_files
-            if not scopes and not subpath and not limit:
+            if not limit and not self.last_out and set(self.folders) <= {s for s, r in self.last_scopes if r}:
                 # a whole walk read every file it met under this reader: the
                 # re-read a start queues where no events come is done
                 # (library_watch.start), whatever it could not read
@@ -2375,19 +2432,44 @@ def _set_aside(missing_ids: List[int], stats: Dict[str, Any]) -> List[int]:
     return [i for i in missing_ids if i not in kept]
 
 
-def set_aside_missing(scopes: Optional[Sequence[Tuple[str, bool]]], walked: Set[str],
+def _judged_prefixes(scopes: Sequence[Tuple[str, bool]]) -> List[str]:
+    return [scope.rstrip("/") + "/" for scope, _r in scopes]
+
+
+def _still_answering(scopes: Sequence[Tuple[str, bool]]) -> List[Tuple[str, bool]]:
+    """The walked scopes whose folder answers still: a folder that left
+    during the walk handed in a part, and nothing of it is judged."""
+    import library_root
+    out = {}
+    kept = []
+    for scope, recursive in scopes:
+        folder = library_root.folder_of(scope)
+        if folder is None:
+            continue
+        if folder not in out:
+            out[folder] = folder_unreachable(folder)
+        if not out[folder]:
+            kept.append((scope, recursive))
+    return kept
+
+
+def set_aside_missing(scopes: Sequence[Tuple[str, bool]], walked: Set[str],
                       unread: Sequence[str], gone: Sequence[str]) -> int:
     """After a walk that asks no question ("Scan for new", a watcher's
     folders): a copy none of whose files it found in the folders it walked
     is away — the Rescan's own rule (_set_aside), reversible, nothing
     removed and nothing asked; the Rescan's question and the Away row stay
-    the only removals. A folder walked alone judges only its own files; a
-    folder that is gone judges everything under it; what lies under a
-    folder the walk could not read keeps its state. Returns how many copies
-    were set aside."""
-    if library_unreachable():
+    the only removals. Only what the walk walked is judged (`scopes`, the
+    scanner's last_scopes): a folder of the library that was not walked, or
+    does not answer, keeps every copy's state — its albums are never away
+    for it (LIBRARY-FOLDERS-1: away is a file not found where its folder
+    answers). A folder walked alone judges only its own files; a folder that
+    is gone judges everything under it; what lies under a folder the walk
+    could not read keeps its state. Returns how many copies were set
+    aside."""
+    scopes = _still_answering(scopes)
+    if not scopes:
         return 0
-    root = settings.library_db_root()
     unverified = {settings.translate_to_host_path(p) for p in unread}
 
     def judged(path: str) -> bool:
@@ -2396,24 +2478,18 @@ def set_aside_missing(scopes: Optional[Sequence[Tuple[str, bool]]], walked: Set[
             if folder in unverified:
                 return False
             folder = folder.rpartition("/")[0]
-        if scopes is None:
-            return True
-        for rel, recursive in scopes:
-            base = f"{root}/{rel}" if rel else root
-            if (recursive or rel in gone) and path.startswith(base + "/"):
+        for base, recursive in scopes:
+            base = base.rstrip("/")
+            if (recursive or base in gone) and path.startswith(base + "/"):
                 return True
             if path.rpartition("/")[0] == base:
                 return True
         return False
 
     with get_db_context() as db:
-        if scopes is None:
-            rows = db.execute(text("SELECT id, file_path FROM media_files")).fetchall()
-        else:
-            prefixes = [(f"{root}/{rel}" if rel else root) + "/" for rel, _r in scopes]
-            rows = db.execute(text("""SELECT id, file_path FROM media_files
-                                       WHERE file_path ^@ ANY(CAST(:p AS text[]))"""),
-                              {"p": prefixes}).fetchall()
+        rows = db.execute(text("""SELECT id, file_path FROM media_files
+                                   WHERE file_path ^@ ANY(CAST(:p AS text[]))"""),
+                          {"p": _judged_prefixes(scopes)}).fetchall()
     missing = [r.id for r in rows if r.file_path not in walked and judged(r.file_path)]
     stats = _prune_stats()
     _set_aside(missing, stats)
@@ -2423,7 +2499,7 @@ def set_aside_missing(scopes: Optional[Sequence[Tuple[str, bool]]], walked: Set[
 
 def plan_prune(
     progress_cb: Optional[callable] = None,
-    subpath: Optional[str] = None,
+    scopes: Optional[Sequence[Tuple[str, bool]]] = None,
     cancel_check: Optional[callable] = None,
     disk_paths: Optional[Set[str]] = None,
     unread: Sequence[str] = (),
@@ -2436,6 +2512,10 @@ def plan_prune(
     files it would remove (`file_ids`) — the plan a person says yes to, its
     counts read off the very statements that would delete. The yes is
     prune_missing_files(file_ids).
+
+    Only what the walk walked is judged (`scopes`: the walk's scopes, every
+    folder that answers by default): a folder of the library that does not
+    answer keeps every file — its albums are not connected, never missing.
 
     Uses a single directory scan + set difference instead of per-file exists()
     calls, which is orders of magnitude faster on WSL2/network mounts.
@@ -2451,12 +2531,15 @@ def plan_prune(
     stats = _prune_stats()
     stats["file_ids"] = []
 
+    if scopes is None:
+        import library_root
+        scopes = [(folder, True) for folder in library_root.paths()]
     if disk_paths is None:
         if progress_cb:
             progress_cb("Discovering files on disk...")
 
         scanner = LibraryScanner()
-        disk_files, _cues, unread = scanner.find_audio_files(subpath=subpath, cancel_check=cancel_check)
+        disk_files, _cues, unread = scanner.find_audio_files(scopes=scopes, cancel_check=cancel_check)
         if cancel_check and cancel_check():
             logger.info("Prune cancelled during discovery")
             return stats
@@ -2480,23 +2563,26 @@ def plan_prune(
             folder = folder.rpartition("/")[0]
         return False
 
-    # An empty tree is an unmounted library, never a library the owner emptied
-    # — every DB record would read as missing. The folder is asked again right
-    # before the delete: a drive that left during the walk handed in a part.
-    if not disk_paths or library_unreachable():
-        logger.error("Prune aborted: no audio files under "
-                     f"{settings.music_library_path} — library not mounted?")
+    # An empty tree is an unmounted folder, never a folder the owner emptied
+    # — every DB record under it would read as missing. Each folder is asked
+    # again right before the plan: a drive that left during the walk handed
+    # in a part, and nothing of it is judged.
+    judged = []
+    for scope, recursive in _still_answering(scopes):
+        prefix = scope.rstrip("/") + "/"
+        if not any(p.startswith(prefix) for p in disk_paths):
+            logger.error(f"Prune skips {scope}: no audio files under it — not mounted?")
+            continue
+        judged.append((scope, recursive))
+    if not judged:
         if progress_cb:
             progress_cb("Prune skipped: no files found on disk")
         return stats
 
     with get_db_context() as db:
-        query = db.query(MediaFile.id, MediaFile.file_path)
-        if subpath:
-            # the walk covered <root>/<subpath> alone: rows elsewhere are not its to judge
-            prefix = f"{settings.library_db_root()}/{subpath.replace(chr(92), '/').strip('/')}/"
-            query = query.filter(MediaFile.file_path.startswith(prefix, autoescape=True))
-        all_files = query.all()
+        all_files = db.execute(text("""SELECT id, file_path FROM media_files
+                                         WHERE file_path ^@ ANY(CAST(:p AS text[]))"""),
+                               {"p": _judged_prefixes(judged)}).fetchall()
         stats["checked"] = len(all_files)
 
         if progress_cb:
@@ -2516,20 +2602,99 @@ def plan_prune(
                         progress_cb=progress_cb, cancel_check=cancel_check)
 
 
+def away_folders() -> List[str]:
+    """The folders of the library that hold copies away."""
+    import library_root
+    folders = library_root.paths()
+    rows = db_query("""SELECT DISTINCT av.directory_path FROM album_variants av
+                        WHERE av.absent_since IS NOT NULL AND av.location = 'local'""")
+    return sorted({f for f in (library_root.folder_of(r["directory_path"], folders) for r in rows) if f})
+
+
 def plan_away_removal() -> Dict[str, Any]:
     """The owner's removal of the copies that are away: every file of every
-    absent copy, planned as a Rescan's removal is (rolled back, its counts)
-    and removed only at the yes — as the prune removed them before copies
-    could be away: the files, the tracks only they held, the copy, the album
-    and its own rows when nothing else holds it."""
+    absent copy whose folder answers now, planned as a Rescan's removal is
+    (rolled back, its counts) and removed only at the yes — as the prune
+    removed them before copies could be away: the files, the tracks only
+    they held, the copy, the album and its own rows when nothing else holds
+    it. Those whose folder does not answer wait for it (`waiting`, copies):
+    the yes could not see they are still missing."""
+    import library_root
     stats = _prune_stats()
     with get_db_context() as db:
-        file_ids = list(db.execute(text("""
-            SELECT mf.id FROM media_files mf
+        rows = db.execute(text("""
+            SELECT mf.id, mf.file_path, av.id AS vid FROM media_files mf
             JOIN album_variants av ON av.id = mf.album_variant_id
-            WHERE av.absent_since IS NOT NULL ORDER BY mf.id""")).scalars())
+            WHERE av.absent_since IS NOT NULL ORDER BY mf.id""")).fetchall()
+    folders = library_root.paths()
+    out: Dict[str, bool] = {}
+    file_ids, waiting = [], set()
+    for r in rows:
+        folder = library_root.folder_of(r.file_path, folders)
+        if folder is not None and folder not in out:
+            out[folder] = folder_unreachable(folder)
+        if folder is not None and out[folder]:
+            waiting.add(r.vid)
+        else:
+            file_ids.append(r.id)
     stats["checked"] = len(file_ids)
+    stats["waiting"] = len(waiting)
     return _prune_files(file_ids, stats, dry_run=True, progress_cb=None, cancel_check=None)
+
+
+def _files_of(folder: Optional[str]) -> List[int]:
+    """The files a folder of the library holds — or, with None, the local
+    files under no folder of it ("Elsewhere": a folder replaced before the
+    library had several)."""
+    import library_root
+    if folder is not None:
+        # its own files: never those of a folder that lies in it (no row does;
+        # the rule is the deepest folder's, as folder_of's)
+        inner = [p.rstrip("/") + "/" for p in library_root.paths()
+                 if p != folder and library_root._under(p, folder)]
+        return list(db_query_one("""SELECT coalesce(array_agg(id ORDER BY id), '{}') AS ids FROM media_files
+                                     WHERE starts_with(file_path, %s) AND NOT file_path ^@ ANY(%s::text[])""",
+                                 (folder.rstrip("/") + "/", inner))["ids"])
+    return list(db_query_one("""SELECT coalesce(array_agg(id ORDER BY id), '{}') AS ids FROM media_files
+                                 WHERE NOT file_path ^@ ANY(%s::text[])""",
+                             ([p.rstrip("/") + "/" for p in library_root.paths()],))["ids"])
+
+
+def plan_folder_removal(folder: Optional[str]) -> Dict[str, Any]:
+    """"Forget this disk (folder) and its albums": what it alone holds,
+    planned as every removal is — rolled back, its counts — and removed
+    only at the owner's yes (remove_folder). Its files whether its folder
+    answers or not: the files stay where they are, the library stops
+    holding them (LIBRARY-FOLDERS-1 §4). None: the copies under no folder."""
+    stats = _prune_stats()
+    ids = _files_of(folder)
+    stats["checked"] = len(ids)
+    return _prune_files(ids, stats, dry_run=True, progress_cb=None, cancel_check=None)
+
+
+def remove_folder(folder: Optional[Dict[str, Any]], counts: Dict[str, int],
+                  progress_cb: Optional[callable] = None,
+                  cancel_check: Optional[callable] = None) -> Dict[str, Any]:
+    """The owner's yes to a folder's removal: its files as they are now (a
+    file added since is the folder's too), and the folder's row in the same
+    transaction. Held to what the question named: when it would now take
+    more tracks, albums or artists, nothing goes and the stats come back
+    with `grew`, a plan to ask again (prune_missing_files' rule). None: the
+    copies under no folder, no row."""
+    stats = _prune_stats()
+    ids = _files_of(folder["path"] if folder else None)
+    stats["checked"] = len(ids)
+    def drop_row(db):
+        db.execute(text("DELETE FROM library_folders WHERE id = :id"), {"id": folder["id"]})
+    import library_root
+    out = _prune_files(ids, stats, dry_run=False, bound=counts,
+                       then=drop_row if folder is not None and folder.get("id") is not None else None,
+                       committed=library_root.invalidate,
+                       progress_cb=progress_cb, cancel_check=cancel_check)
+    if not out.get("grew"):
+        logger.info("music folder %s forgotten: %s", folder["path"] if folder else "(elsewhere)",
+                    {k: v for k, v in out.items() if k != "file_ids"})
+    return out
 
 
 def prune_missing_files(file_ids: Sequence[int], counts: Dict[str, int],
@@ -2555,69 +2720,77 @@ def prune_missing_files(file_ids: Sequence[int], counts: Dict[str, int],
 
 def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
     """Of a plan's files, those still in the catalog and still missing now,
-    judged as the plan's walk judged them: from the music folder down, every
+    judged as the plan's walk judged them: from its folder down, every
     folder of the path listed by its exact name as a folder (not a link to
     one, which the walk never enters) and the file by its exact name. A path
-    outside the current root is missing; a case-only rename on a
+    under no folder of the library is missing; a case-only rename on a
     case-insensitive disk, or a folder swapped for a link, leaves the old
     spelling openable but not walked, so it is missing too. A folder that
     cannot be listed keeps what lies under it, as the walk keeps unread
-    folders. The music folder is asked first: gone as a whole, nothing may
-    go."""
-    if library_unreachable():
-        # the yes's route refused this already (main.scan_prune): only a
-        # folder gone since then reaches here — an expected state
-        logger.warning("Prune aborted at the yes: the music folder is unreachable")
-        stats["refused"] = unreachable_words()
-        return []
+    folders. Each folder is asked first: one that does not answer keeps
+    every file of it — and where no file's folder answers, nothing goes and
+    the refusal is said (`refused`)."""
+    import library_root
     with get_db_context() as db:
         rows = db.query(MediaFile.id, MediaFile.file_path).filter(
             MediaFile.id.in_(list(file_ids))).all()
     stats["checked"] = len(rows)
-    root = settings.library_db_root() + "/"
-    local_root = str(Path(settings.music_library_path).absolute())
+    folders = library_root.paths()
+    out: Dict[str, bool] = {}
+    for _id, path in rows:
+        folder = library_root.folder_of(path, folders)
+        if folder is not None and folder not in out:
+            out[folder] = folder_unreachable(folder)
+    if out and all(out.values()):
+        # the yes's route refused this already (main.scan_prune): only a
+        # folder gone since then reaches here — an expected state
+        logger.warning("Prune aborted at the yes: no folder of its files answers")
+        stats["refused"] = unreachable_words()
+        return []
     listings: Dict[Tuple[str, ...], Optional[Dict[str, str]]] = {}
 
     def listing(parts: Tuple[str, ...]) -> Optional[Dict[str, str]]:
         if parts not in listings:
             kinds: Optional[Dict[str, str]] = {}
             try:
-                with os.scandir(os.path.join(local_root, *parts)) as it:
+                with os.scandir(os.path.join(*parts)) as it:
                     for entry in it:
                         kinds[entry.name] = ("dir" if entry.is_dir(follow_symlinks=False)
                                              else "file" if entry.is_file() else "other")
             except (FileNotFoundError, NotADirectoryError):
                 kinds = {}
             except OSError as e:
-                logger.warning(f"Prune at the yes keeps what {os.path.join(*parts or ('.',))} "
-                               f"holds: {e}")
+                logger.warning(f"Prune at the yes keeps what {os.path.join(*parts)} holds: {e}")
                 kinds = None
             listings[parts] = kinds
         return listings[parts]
 
-    def walked(path: str) -> Optional[bool]:
-        if not path.startswith(root):
-            return False
-        *folders, name = path[len(root):].split("/")
-        for depth in range(len(folders) + 1):
-            kinds = listing(tuple(folders[:depth]))
+    def walked(path: str, folder: str) -> Optional[bool]:
+        top = str(Path(settings.translate_to_local_path(folder)).absolute())
+        *names, name = path[len(folder.rstrip("/")) + 1:].split("/")
+        for depth in range(len(names) + 1):
+            kinds = listing((top, *names[:depth]))
             if kinds is None:
                 return None
-            want = folders[depth] if depth < len(folders) else name
-            if kinds.get(want) != ("dir" if depth < len(folders) else "file"):
+            want = names[depth] if depth < len(names) else name
+            if kinds.get(want) != ("dir" if depth < len(names) else "file"):
                 return False
         return True
 
     missing = []
     for mf_id, path in rows:
-        there = walked(path)
+        folder = library_root.folder_of(path, folders)
+        if folder is None:
+            missing.append(mf_id)
+            continue
+        there = None if out[folder] else walked(path, folder)
         if there is None:
             stats["kept_unread"] += 1
         elif not there:
             missing.append(mf_id)
     if len(missing) < len(file_ids):
         logger.info(f"Prune at the yes: {len(file_ids) - len(missing)} of the plan's "
-                    f"{len(file_ids)} files are back, unread or already gone, and are left")
+                    f"{len(file_ids)} files are back, unread, not connected or already gone, and are left")
     return missing
 
 
@@ -2658,11 +2831,22 @@ def drop_tag_slots(db: Session, album_ids: Sequence[Any], track_ids: Sequence[An
 
 def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool,
                  progress_cb: Optional[callable], cancel_check: Optional[callable],
-                 bound: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+                 bound: Optional[Dict[str, int]] = None,
+                 then: Optional[callable] = None,
+                 committed: Optional[callable] = None) -> Dict[str, Any]:
+    """`then(db)`: a last statement of the removal's own transaction (a
+    folder's row, which goes with its files or not at all); `committed()`,
+    what follows its commit at once (the folders' rows read again)."""
     if dry_run:
         stats["file_ids"] = missing_ids
     if not missing_ids:
         logger.info("Prune: no missing files found")
+        if then is not None and not dry_run:
+            with get_db_context() as db:
+                then(db)
+                db.commit()
+            if committed is not None:
+                committed()
         return stats
 
     stats["pruned"] = len(missing_ids)
@@ -2776,7 +2960,11 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         """), {"ids": [str(t) for t in track_ids]}).scalars()]
         for tid in still_held:
             elect_analysis_source(db, tid)
+        if then is not None:
+            then(db)
         db.commit()
+    if committed is not None:
+        committed()
 
     # The elected file may be the analysed material at another path (a folder
     # the same Rescan found moved): its analysis follows it. The removal is

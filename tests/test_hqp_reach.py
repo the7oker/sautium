@@ -62,9 +62,8 @@ def node(fake, listens, scratch_dsn, monkeypatch, caplog):
     from playback import substitute
     caplog.set_level(logging.INFO, logger="playback")       # what the node did, beside a failure
     monkeypatch.setattr(substitute, "native_plays", _native_plays)
-    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
-    for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0)):
-        monkeypatch.setattr(scanner, name, value)
+    assert _wait(lambda: all(not look.looking and not look.wanted for look in list(scanner._looks.values())))
+    monkeypatch.setattr(scanner, "_looks", {})
     pool = psycopg2.pool.ThreadedConnectionPool(1, 6, dsn=scratch_dsn, options="-c timezone=UTC")
     monkeypatch.setattr(db_pool, "_pool", pool)
     conn = psycopg2.connect(scratch_dsn)
@@ -108,7 +107,7 @@ def node(fake, listens, scratch_dsn, monkeypatch, caplog):
     mgr.lane.attach(proxy)
 
     def gone(flag: bool, *, told: bool = True) -> None:
-        monkeypatch.setattr(scanner, "_folder_unreachable", flag)
+        scanner._look_of("E:/Music").unreachable = flag
         if told:
             mgr.reach_changed()
 

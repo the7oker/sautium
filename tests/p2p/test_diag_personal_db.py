@@ -96,7 +96,7 @@ class _Backend(diag_bundle.BackendReads):
             "/health": {"status": "degraded", "checks": {
                 "database": "error: could not open '/home/someone/pgdata/postmaster.pid' at 192.0.2.20",
                 "gpu": {"available": False},
-                "music_library": {"path": "/home/someone/Music", "exists": True},
+                "music_library": {"folders": 2, "answering": 1},
                 "dht": {"available": True, "running": True, "nodes": 120},
             }},
         }.get(path)
@@ -116,7 +116,7 @@ def test_the_facts_sent_at_every_start_carry_states_not_paths_or_addresses(conn,
     assert facts["backend"] == {
         "status": "degraded",
         "database": "error: could not open '…/postmaster.pid' at [private address]",
-        "music_library_exists": True,
+        "music_folders": {"folders": 2, "answering": 1},
         "dht": {"available": True, "running": True, "nodes": 120},
     }
     assert facts["settings"]["p2p.reachability"] == "reachable"

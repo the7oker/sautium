@@ -728,6 +728,9 @@ def fake(monkeypatch):
     monkeypatch.setattr(settings, "hqplayer_port", f.port)
     monkeypatch.setattr(settings, "music_library_path", "/music")
     monkeypatch.setattr(settings, "music_host_path", "E:/Music")
+    # the library's folders: the one the settings name, no table asked (no database here)
+    import library_root
+    monkeypatch.setattr(library_root, "_rows", [])
     monkeypatch.setattr(settings, "media_proxy_advertised_host", "127.0.0.1")
     monkeypatch.setattr(streaming_service, "_proxy",
                         MediaProxy(port=0, advertised_host="127.0.0.1", file_token_key=b"k"))
@@ -763,7 +766,7 @@ def fake(monkeypatch):
     # session database and log it. tests/test_reach_db.py drives the real
     # look; a test of a folder that went gives its own (test_roon_coexistence).
     import scanner
-    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: None)
+    monkeypatch.setattr(scanner, "check_folder", lambda path=None, wait=False: None)
     # The playback trace is process-wide — the hand-over ledger, the attempts,
     # the failing run, a refusal's notice, the client's failures: each test
     # starts and leaves them empty, whatever order the tests run in.
