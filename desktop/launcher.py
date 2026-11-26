@@ -58,8 +58,8 @@ IDENTITY_MISSING = (
     "interface (Open Web UI): the same pair is the same identity. If you changed the nickname "
     "or password before, the record of the identities it replaced comes back only with a copy "
     "of the folder or a backup; without it, what they signed is another author's here. It asks "
-    "for the setup code, in setup_code.txt in that folder; its key is then made in the "
-    "background for some minutes — restart Sautium once the web interface says it is ready;\n"
+    "for the setup code, in setup_code.txt in that folder. Then restart Sautium: its window "
+    "makes the key, asking for that password once, for some minutes;\n"
     "Once the identity is back, a backup of it (Settings & Tools › Backup & Restore) opens "
     "and restores its database, the current one kept beside it; a backup never brings an "
     "identity itself.\n"
@@ -784,9 +784,10 @@ class LauncherApp(ctk.CTk):
         dialog.resizable(False, False)
         dialog.transient(self)
         ctk.CTkLabel(dialog, wraplength=430, justify="left", text=(
-            f"The key of your identity ({account['username']}) was not finished: Sautium stopped "
-            "before it was made. Type your password to make it now — it takes a few minutes, "
-            "and Sautium plays and scans meanwhile.")).pack(padx=20, pady=(18, 8))
+            f"The key of your identity ({account['username']}) is not made yet — Sautium stopped "
+            "before it was, or the account was made in the web interface. Type its password to "
+            "make it now: it takes a few minutes, and Sautium plays and scans meanwhile.")).pack(
+            padx=20, pady=(18, 8))
         field = ctk.CTkEntry(dialog, show="*", placeholder_text="password", width=300)
         field.pack(pady=4)
         caption = ctk.CTkLabel(dialog, text="", text_color="gray", wraplength=430)

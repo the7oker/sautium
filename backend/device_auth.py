@@ -850,6 +850,11 @@ async def create_account(username: str, password: str, setup_code: str,
         _setup_code = None
         (d / SETUP_CODE_FILE).unlink(missing_ok=True)
         _loop = asyncio.get_running_loop()
+        if not births_here():
+            # A launcher's node: its window makes the key, asking the
+            # password once at its next start — one process makes a key
+            logger.info("The account is made; the launcher makes its key at its next start")
+            return {"username": username, "key": "interrupted"}
         _start_birth(username, password, "create",
                      _born(account, held and not new_identity, weak))
         return {"username": username, "key": "deriving"}
