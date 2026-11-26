@@ -1051,6 +1051,9 @@ def build(state: dict, env: Dict[str, str]) -> None:
     if state.get("built") == key and out(run(["docker", "image", "inspect", "--format", "{{.Id}}",
                                              agent.image_of(ROOT)])):
         return
+    refusal = machine_tier.image_build_refusal(machine_tier.machine_memory_kib())
+    if refusal:
+        raise Stop(refusal + ": Sautium cannot be set up on it yet")
     host = agent.host_dir(ROOT)
     log, code = host / "setup-build.log", host / "setup-build.exit"
     running = state.get("build") or {}

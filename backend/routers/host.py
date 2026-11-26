@@ -3,8 +3,10 @@
 
 - POST /api/host/{verb} — any signed-in device: leaves the request. The
   confirm before an update is the page's (PI-NODE-2B); a node an attacker
-  controls skips it, which is why every verb costs at most minutes and
-  megabytes (PI-NODE-1 F2).
+  controls skips it, which is why every verb's cost is bounded (PI-NODE-1
+  F2): a check or diagnostics minutes and megabytes, an update at most once
+  a day and only to a verified release — its build compiles Python once per
+  pin, most of an hour on a small board.
 - POST /api/host/answer — the agent alone: the middleware admits the
   channel's key on this path and nowhere else, and this route takes no other
   signer. The answer is kept per verb, the page woken (the library stream's

@@ -4444,14 +4444,17 @@ device on the network; none of them may hold for it more than a bound.
   which nothing pinned and nothing backed up: two of five builds on a Pi
   failed on its 503. Now a stage both Dockerfiles share word for word builds
   CPython at a pinned version and digest with PGO + LTO, both bases are
-  named by digest, and every apt layer retries. python-build-standalone,
+  named by digest, and the CUDA base's own NVIDIA list is removed (apt's
+  three retries were already jammy's default). python-build-standalone,
   which needs no compile, was measured and refused: its interpreter ran
   bytecode 30–45 % slower than deadsnakes' on amd64, where python.org's
   source at Debian's optimisation matched it. The price is the compile —
   about 7 min on four desktop cores, 1.6 GB at the LTO link — paid once per
-  pin, the stage's layer being kept across releases; a board under about
-  2.5 GB cannot build the image until a prebuilt one, named by digest in the
-  signed release, takes the build off the boxes.
+  pin, the stage's layer being kept across releases. A machine with under
+  3 GB of memory cannot build the image: the setup and the host agent's
+  update say so before any build (`machine_tier.image_build_refusal`),
+  until a prebuilt image, named by digest in the signed release, takes the
+  build off the boxes.
 - **Every process tests its fpcalc before it analyses.** It fingerprints a
   12 s synthetic signal shipped in the tree (`backend/fingerprint_probe/`,
   made by `scripts/make_fingerprint_probe.py`) and compares the print with

@@ -12,8 +12,6 @@ FROM ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac3
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
-# A net under every apt layer: a mirror's passing 503 is tried again
-RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
 
 # -- CPython, built once per pin ---------------------------------------------
@@ -44,6 +42,7 @@ RUN curl -fsSLo /tmp/python.tar.xz \
     && cd / && rm -rf /tmp/python /tmp/python.tar.xz \
     && find /usr/local/lib/python3.11 -depth -type d -name test -prune -exec rm -rf '{}' + \
     && find /usr/local -name 'libpython*.a' -delete \
+    && find /usr/local/lib/python3.11 -name '*.opt-[12].pyc' -delete \
     && find /usr/local/lib -name '*.so*' -type f -exec strip --strip-unneeded '{}' + \
     && ln -s python3 /usr/local/bin/python \
     && /usr/local/bin/python3 -c "import ssl, sqlite3, ctypes, lzma, bz2, zlib, uuid, decimal, hashlib"
@@ -54,14 +53,19 @@ FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04@sha256:739e0bde7bafdb2ed9057865f5308
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
-RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
 # Set Python version
 ENV PYTHON_VERSION=3.11
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    # The interpreter's own libraries (the python stage built against them)
+# Install system dependencies. The CUDA base lists NVIDIA's own apt
+# repository; this image installs nothing from it, and left in place every
+# apt layer would read one more archive nothing here pins.
+RUN rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list \
+    && apt-get update && apt-get install -y \
+    # The interpreter's own libraries (the python stage built against them),
+    # and the MIME table its mimetypes reads (the Web UI's fonts are served
+    # by type)
+    media-types \
     libssl3 \
     zlib1g \
     libbz2-1.0 \

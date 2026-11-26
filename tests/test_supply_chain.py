@@ -456,15 +456,16 @@ def _code(text: str) -> str:
 
 def test_no_build_of_an_image_rests_on_a_package_archive_without_a_pin():
     """The deadsnakes PPA had no pin and no second source, and two of five
-    builds on a Pi failed on its 503 (IMAGE-BUILD-1): no image adds an apt
-    source but PGDG's (its key checked by digest), and every base an image
-    starts from outside the file is named by its digest, so a base that
-    moves reaches nodes in a release."""
+    builds on a Pi failed on its 503 (IMAGE-BUILD-1): no image reads an apt
+    source but Ubuntu's and PGDG's (its key checked by digest) — the CUDA
+    base's own NVIDIA list is removed before its first apt layer — and every
+    base an image starts from outside the file is named by its digest, so a
+    base that moves reaches nodes in a release."""
     for name in ("Dockerfile", "Dockerfile.mac"):
         code = _code(_dockerfile(name))
         for banned in ("ppa:", "add-apt-repository", "software-properties-common", "deadsnakes"):
             assert banned not in code, (name, banned)
-        assert code.count("/etc/apt/sources.list.d/") == 1 and "jammy-pgdg main" in code
+        assert code.count("> /etc/apt/sources.list.d/") == 1 and "jammy-pgdg main" in code
         stages = set()
         for line in code.splitlines():
             if line.startswith("FROM "):
@@ -473,10 +474,12 @@ def test_no_build_of_an_image_rests_on_a_package_archive_without_a_pin():
                     assert "@sha256:" in words[1], (name, line)
                 if len(words) == 4:
                     stages.add(words[3])
-        # The net beside the fix: every apt layer of every stage tries a
-        # mirror's 503 again
-        assert code.count("echo 'Acquire::Retries \"3\";' > /etc/apt/apt.conf.d/80-retries") == (
-            2 if name == "Dockerfile" else 1)
+        # Python's mimetypes reads the system's table: without it the Web
+        # UI's fonts are served as text/plain
+        assert code.count("    media-types \\\n") == 1, name
+    cuda = _stages(_code(_dockerfile("Dockerfile")))[""]
+    first_update = cuda.index("apt-get update")
+    assert cuda.index("rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list") < first_update
 
 
 def test_both_images_build_the_same_interpreter_from_pythons_own_source():
@@ -521,9 +524,10 @@ def _stages(text: str) -> dict:
 
 
 def test_the_cpu_image_leaves_its_compilers_in_the_build_stage():
-    """No variant of the image carries compilers or headers (PI-NODE-1 A4:
-    372 MB of 5.5 GB): pip runs in a stage that has them, and the image takes
-    what pip wrote."""
+    """No variant of the image carries compilers or the libraries' headers
+    (PI-NODE-1 A4: 372 MB of 5.5 GB): the interpreter and pip run in stages
+    that have them, and the image takes what they wrote — Python's own
+    headers (a few MB) ride along in /usr/local with the interpreter."""
     stages = _stages(_code(_dockerfile("Dockerfile.mac")))
     for package in ("build-essential", "-dev"):
         assert package in stages["build"] and package in stages["python"], package

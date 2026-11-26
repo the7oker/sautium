@@ -317,7 +317,11 @@ query: sound features and artist recognition arrive from other nodes, and
 Sound, Bio and Lyrics search are not offered. Its identity comes from a
 verified email, never a mined proof. Measured at rest on a 16 GB Raspberry
 Pi 5: 445 MiB (the backend 255, PostgreSQL 190). Smaller boards are not
-measured yet.
+measured yet. Since 2026-11-26 a node's image is built on the machine with
+its Python compiled there (1.6 GB in one process at its optimised link), so
+the console setup and the host agent's update refuse a machine with under
+3 GB of memory (`machine_tier.image_build_refusal`) until a prebuilt image
+takes the build off the board.
 
 **Minimum ("Lite" — listener node):** x86-64 w/ AVX2, 4 cores / any Apple
 Silicon / a 64-bit Arm Linux board such as a Raspberry Pi 5 (Docker,
