@@ -632,8 +632,11 @@ def _start_birth(username: str, password: str, purpose: str, done) -> bool:
     identity until it lands); a rotation's are not — the old identity stands
     meanwhile, and the change's own sheet said what is being made."""
     def failed(error: BaseException) -> None:
-        if purpose != "rotate":
-            _publish_birth({"status": "failed", "detail": "key", "purpose": purpose})
+        # A first key that failed is one not made: its password makes it
+        # again (the page's sheet). A rotation's failure leaves the old
+        # identity whole; its error is the log's (identity_birth)
+        if purpose != "rotate" and key_state() == "interrupted":
+            _publish_birth({"status": "interrupted", "purpose": "resume"})
 
     said = _publish_birth if purpose != "rotate" else (lambda state: None)
     return _birth.start(username, password, purpose=purpose, done=done, said=said,
@@ -839,6 +842,9 @@ async def create_account(username: str, password: str, setup_code: str,
             await asyncio.to_thread(check_new_password, password, username, email, keep)
         account = await asyncio.to_thread(new_account, username, password, source="form",
                                           email=email)
+        # The person's word for a password under a year: a key made again
+        # after a stop holds it to the same edge (resume_birth)
+        account["kept"] = bool(keep)
         await asyncio.to_thread(write_account, d, account)
         _account_written(account)
         _setup_code = None
@@ -914,10 +920,30 @@ def say_key_at_start() -> None:
     key's end left there ("deriving", or the owner's question, whose held
     key went with the process) is not the truth any more — and the page
     asks for the password to make it again (POST /api/auth/resume-key)."""
-    if births_here() and key_state() == "interrupted":
-        logger.warning("The account's key was not made before the node stopped: the next "
-                       "sign-in with its password makes it again")
-        _publish_birth({"status": "interrupted", "purpose": "resume"})
+    global _held
+    if not births_here() or key_state() != "interrupted":
+        return
+    account = _account()
+    if account.get("anonymous"):
+        # A random key loses nothing by being made again: at once, held again
+        # for the owner's word over records of another identity
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        from desktop.node_identity import place_account_key, public_hex
+        key = Ed25519PrivateKey.generate()
+        if _holds_identity():
+            _held = {"key": key, "account": account, "weak": None}
+            _publish_birth({"status": "another_identity", "weak": None})
+            return
+        place_account_key(_identity_dir(), key, account)
+        _record_signing_key(public_hex(key))
+        import p2p_identity
+        p2p_identity.forget_cached()
+        logger.warning("The account's random key was not placed before the node stopped: made again")
+        return
+    logger.warning("The account's key was not made before the node stopped: the next "
+                   "sign-in with its password makes it again")
+    _publish_birth({"status": "interrupted", "purpose": "resume"})
 
 
 def resume_birth(password: str) -> bool:
@@ -935,7 +961,8 @@ def resume_birth(password: str) -> bool:
     verdict = password_strength.verdict(password, (account["username"], account.get("email") or ""))
     # A password the setup took only because the identity of record comes
     # back whatever its password: another identity made from it is refused
-    weak = verdict if verdict["zone"] == "refused" else None
+    weak = verdict if (verdict["zone"] == "refused"
+                       or (verdict["zone"] == "word" and not account.get("kept"))) else None
     return _start_birth(account["username"], password, "resume",
                         _born(account, _holds_identity(), weak))
 
@@ -1086,10 +1113,12 @@ def _after_rotation(pubkey: str) -> None:
     import p2p_identity
     from db_pool import db_execute
     from routers import p2p as p2p_router
+    global _followed
     # First: a token names the account's id, which a rotation keeps — the
     # epoch's bump is what ends every browser the old password signed in,
     # and nothing below may fail before it
     bump_epoch()
+    _followed = pubkey                   # this process's own key: nothing to follow
     p2p_identity.forget_cached()
     p2p_router.forget_identity()
     p2p_chat.forget_service()
@@ -1221,7 +1250,8 @@ async def password_tried(password: str, *, signed: bool = False) -> bool:
     held = _delay(door["failures"] + 1)
     if held and door["in_flight"]:
         raise Shut(held)
-    if not password or account_anonymous() or not account_configured():
+    if (not password or not account_configured()
+            or (not password_door() and not older_identity())):
         return False
     door["in_flight"] += 1
     try:

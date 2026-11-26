@@ -138,7 +138,8 @@ class StepUp(BaseModel):
 
 
 HOST_CODE_NEEDED = ("This node has no password: open this page from the computer that runs "
-                    "Sautium, or scan its QR code, and do it within a few minutes")
+                    "Sautium (on a Docker node, the link ./sautium pair or python -m pairing "
+                    "prints), or scan its QR code, and do it within a few minutes")
 
 
 async def step_up(req: StepUp) -> None:

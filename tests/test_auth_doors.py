@@ -659,6 +659,7 @@ def login_door(doors, monkeypatch):
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
     monkeypatch.setattr(device_auth, "account_configured", lambda: True)
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth, "password_door", lambda: True)
     monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
                                               for name in ("login", "signed")})
     monkeypatch.setattr(device_auth.time, "time", lambda: clock[0])
@@ -775,7 +776,8 @@ def test_a_node_with_no_identity_signs_no_browser_in_and_pins_nothing():
     account's key at its first signed answer, once the key is made."""
     for scenario, door in (("return await window.Sautium.auth.login('x')", "/api/auth/login"),
                            ("return await window.Sautium.auth.pair('ABCD-EFGH')", "/api/auth/pair")):
-        out = _page(scenario, unsigned=True, store=dict(_SIGNED_IN), replies={door: [[200]]})
+        # A node with no account makes no tag (device_auth.open_channel)
+        out = _page(scenario, unsigned=True, issued="", store=dict(_SIGNED_IN), replies={door: [[200]]})
         assert out["thrown"] == "NodeUnset: This node presents no identity — it is not set up yet.", out
         assert door not in out["asked"] and "sautium.node_pubkey" not in out["store"]
     create = "return await window.Sautium.auth.createAccount('owner', 'a password', 'AAAA-BBBB-CCCC')"
@@ -870,9 +872,9 @@ def test_only_a_derivation_that_did_not_match_is_a_wrong_password(login_door, mo
     nothing; a derivation that failed is a busy node — none is counted."""
     login, _clock, derived, store, _woken = login_door
     assert login("").status_code == 401 and derived == []
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
+    monkeypatch.setattr(device_auth, "password_door", lambda: False)
     assert login("a guess").status_code == 401 and derived == []
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth, "password_door", lambda: True)
 
     async def failing(password, **_kw):
         raise device_auth.Busy()
@@ -1648,3 +1650,31 @@ def test_the_new_password_field_says_which_identity_it_makes():
     assert "in the identity file you export" in js
     wizard = (ROOT / "desktop" / "wizard.py").read_text(encoding="utf-8")
     assert "what.configure(text=PASSWORD_MAKES if text else RANDOM_IDENTITY)" in wizard
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_signed_in_page_answers_about_the_key_on_the_tokens_word():
+    """Review round 2: a page that booted with its token never asked the
+    status; the node, its key being made or stopped, answers unsigned — the
+    token vouches for that answer, and only for the node's."""
+    out = _page("return await window.Sautium.auth.resumeKey('pw')", unsigned=True, store=dict(_SIGNED_IN),
+                replies={"/api/auth/resume-key": [[200, None, {"key": "deriving"}]]})
+    assert out["result"] == {"ok": True, "data": {"key": "deriving"}}
+    assert out["store"]["sautium.pin_pending"] == "1"
+    out = _page("return await window.Sautium.auth.resumeKey('pw')", unsigned=True, store=dict(_SIGNED_IN),
+                issued="", replies={"/api/auth/resume-key": [[200]]})
+    assert "/api/auth/resume-key" not in out["asked"]
+
+
+def test_a_node_with_no_password_door_counts_no_wrong_password(monkeypatch):
+    """An account a plain identity file brought (no sign-in hash): a password
+    at its login is refused for nothing — no count, no notice, no shut door."""
+    from desktop import node_identity
+    account = {**node_identity.new_account("owner", "x", source="file"), "signin": None, "anonymous": False}
+    monkeypatch.setattr(device_auth, "_account", lambda: account)
+    monkeypatch.setattr(device_auth, "older_identity", lambda: False)
+    monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
+                                              for name in ("login", "signed")})
+    monkeypatch.setattr(device_auth, "_record_failure", lambda *a: pytest.fail("counted"))
+    assert asyncio.run(device_auth.password_tried("a guess")) is False
+    assert device_auth._doors["login"]["failures"] == 0

@@ -298,11 +298,14 @@
         pinNode(hs.node_pubkey);
         setPinPending(false);
       }
-    } else if (unborn && !pinned) {
-      // An account whose key is being made answers unsigned, as at its
-      // setup; a browser that holds its token takes only the node's answer
-      if (token && !vouched) throw new NodeChanged("");
+    } else if (!pinned && (vouched || (unborn && !token))) {
+      // An account whose key is being made (or whose making stopped)
+      // answers unsigned, as at its setup: a browser that holds its token
+      // takes the answer on the token's word alone, whatever the page last
+      // heard of the key; one with no token, on the status's word
       setPinPending(true);
+    } else if (!pinned && unborn && token) {
+      throw new NodeChanged("");
     } else if (!creating) {
       // A node with an account always signs: an answer without is no node
       // this browser can sign in to
@@ -989,6 +992,13 @@
             submit.disabled = false;
             submit.textContent = prev;
             msg.textContent = "That email does not look right. Correct it, or leave the field empty.";
+            return;
+          }
+          if (mode === "restore" && !given[1]) {
+            // No password brings an identity back: an empty one is a new random key
+            submit.disabled = false;
+            submit.textContent = prev;
+            msg.textContent = "Type that identity's password: no password brings an identity back.";
             return;
           }
           // The person's word for a password under a year: the block's box

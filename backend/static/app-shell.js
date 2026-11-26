@@ -13619,13 +13619,15 @@
         fetch('/api/p2p/account'),
         fetch('/config'),
         fetch('/api/profile/scrobbling'),
-        fetch('/api/auth/status'),
+        // Through auth.js: it keeps what the status says of the node (its
+        // host, its key) for the boxes and the password field's words
+        window.Sautium.auth.status().catch(() => null),
       ]);
       if (pr.ok) profile = await pr.json();
       if (ar.ok) account = await ar.json();
       if (cr.ok) config = await cr.json();
       if (sr.ok) scrobbling = await sr.json();
-      if (au.ok) authStatus = await au.json();
+      authStatus = au;
     } catch (_) { /* fall through */ }
 
     if (!profile) {
@@ -14784,8 +14786,10 @@
      opened this page with, which no field asks for. */
   const STEP_UP_LABEL = 'Account password';
   const STEP_UP_HOST_NOTE = 'This node has no password, so the computer that runs Sautium vouches for this: ' +
-    'open this page from there, or scan its QR code, and do it within a few minutes.';
-  const STEP_UP_HOST_MISSING = 'Open this page from the computer that runs Sautium, or scan its QR code, then try again.';
+    'open this page from there (on a Docker node, the link ./sautium pair or python -m pairing prints), ' +
+    'or scan its QR code, and do it within a few minutes.';
+  const STEP_UP_HOST_MISSING = 'Open this page from the computer that runs Sautium (on a Docker node, the link ' +
+    './sautium pair prints), or scan its QR code, then try again.';
   async function stepUpField() {
     // Without the status the field is shown: a node whose host vouches
     // instead answers with the words that say so
@@ -17445,6 +17449,9 @@
     if (keySheetOpen) return;
     keySheetOpen = true;
     const another = status === 'another_identity';
+    // An account with no password (a random key) is vouched for by its host's code
+    const st = await window.Sautium.auth.status().catch(() => null);
+    const noPassword = !!st && st.password_login === false;
     const overlay = document.createElement('div');
     overlay.className = 'add-gear-overlay';
     overlay.innerHTML = `
@@ -17456,15 +17463,20 @@
         </div>
         <div class="add-gear-row">
           <p style="margin:0;color:var(--color-text-muted);font-size:calc(13*var(--px));line-height:1.5;">${another
-            ? 'The key that nickname and password make is an identity other than the one this node signed with: ' +
-              'a typo, another nickname, or a password changed since — or that identity never had a nickname and ' +
-              'password, and only its identity file brings it back.<br><br>' + window.Sautium.auth.NEW_IDENTITY_COSTS
+            ? (noPassword
+              ? 'With no password the new identity is a random key: it is not the one this node signed with, ' +
+                'which only that identity\'s file brings back.<br><br>'
+              : 'The key that nickname and password make is an identity other than the one this node signed with: ' +
+                'a typo, another nickname, or a password changed since — or that identity never had a nickname and ' +
+                'password, and only its identity file brings it back.<br><br>') + window.Sautium.auth.NEW_IDENTITY_COSTS
             : "This node's key was not finished: it stopped before the key was made. Type the account's password " +
               'to make it now — it takes some minutes, and Sautium plays and scans meanwhile.'}</p>
+          ${noPassword ? `
+          <p style="margin:0;color:var(--color-text-dim);font-size:calc(12*var(--px));line-height:1.5;">${STEP_UP_HOST_NOTE}</p>` : `
           <label style="display:flex;flex-direction:column;gap:calc(4*var(--px));">
             <span style="color:var(--color-text-muted);font-size:calc(12*var(--px));">The account's password</span>
             ${window.Sautium.auth.passwordField('', '', 'current-password', 'data-key-pass')}
-          </label>
+          </label>`}
           <button class="profile-btn primary" data-go>${another ? 'Set up again' : 'Make the key'}</button>
           ${another ? '<button class="profile-btn destructive" data-make>Make a new identity</button>' : ''}
           <div data-line style="font-size:calc(12*var(--px));color:var(--color-text-dim);min-height:calc(16*var(--px));"></div>
@@ -17476,9 +17488,9 @@
     const close = () => { keySheetOpen = false; overlay.remove(); };
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     const act = async (button, call) => {
-      if (!pass.value) { line.textContent = "Type the account's password."; return; }
+      if (!noPassword && !pass.value) { line.textContent = "Type the account's password."; return; }
       button.disabled = true;
-      const r = await call(pass.value);
+      const r = await call(noPassword ? '' : pass.value);
       button.disabled = false;
       if (!r.ok) { line.textContent = r.error || 'That did not go through — try again.'; return; }
       if (r.data && r.data.password) { line.textContent = r.data.password.door + ' Set the node up again with another.'; return; }

@@ -249,3 +249,18 @@ def test_the_handshake_is_vouched_for_by_the_device_token(tmp_path, monkeypatch)
     token = device_auth.current_token(b"secret").encode()
     assert hs["tag"] == hmac_mod.new(token, signed, hashlib.sha256).hexdigest()
     assert hs["tag"] != hmac_mod.new(b"another token", signed, hashlib.sha256).hexdigest()
+
+
+def test_a_random_key_not_placed_before_a_stop_is_made_again_at_the_start(unborn, monkeypatch):
+    """A random key loses nothing by being made again: at the start, placed —
+    or held again for the owner's word over another identity's records."""
+    ni.write_account(unborn.folder, {**ni.new_account("owner", "", source="form", anonymous=True)})
+    device_auth.say_key_at_start()
+    assert (unborn.folder / "node_ed25519.key").exists() and unborn.said == []
+    assert ni.read_account(unborn.folder)["pubkey"] == ni.pubkey_on_disk(unborn.folder)
+    (unborn.folder / "node_ed25519.key").unlink()
+    (unborn.folder / "node_info.json").unlink()
+    monkeypatch.setattr(device_auth, "_holds_identity", lambda pubkey=None: True)
+    device_auth.say_key_at_start()
+    assert unborn.said == [{"status": "another_identity", "weak": None}]
+    assert device_auth._held is not None and not (unborn.folder / "node_ed25519.key").exists()
