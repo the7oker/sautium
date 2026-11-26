@@ -102,9 +102,13 @@
     if (st.state === 'buffering') {
       return st.progress != null ? `Buffering ${Math.round(st.progress * 100)} %` : 'Buffering…';
     }
-    // a station's own file, not here now: no stream was asked for it
-    // (playback.substitute._stream_play) — it is passed until its file is back
-    if (st.state === 'failed' && st.reason === 'not_here') return 'Its file is not here now';
+    // the owner's own copy, not here now: no stream was asked for it — where
+    // nothing streams, said as the album page says it (`why`: the disk out,
+    // the copy away); a station's own file, passed until it is back, has none
+    // (playback.substitute._stream_play)
+    if (st.state === 'failed' && st.reason === 'not_here') {
+      return st.why ? notHereWords(st.why).title : 'Its file is not here now';
+    }
     if (st.state === 'failed') return `Doesn't stream here — ${streamReason(st.reason)}`;
     return '';
   }
@@ -172,31 +176,31 @@
   // local copy again when its file is back. 'waits': nothing streams here,
   // so the row waits for its file — dimmed, no tap. `lines`: the track's
   // own lines under its title, drawn by the screen.
-  function albumOutRow(t, rowKind, albumId, lines) {
+  function albumOutRow(t, rowKind, albumId, lines, attrs = '') {
     if (rowKind === 'stream') {
       return `
             <div class="track-row is-phantom-track" data-track-id="${escapeHtml(t.track_id || '')}"
-                 data-album-id="${escapeHtml(albumId)}">
+                 data-album-id="${escapeHtml(albumId)}"${attrs}>
               <span class="track-rank">${t.track_number || ''}</span>
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
                 ${lines}
                 <div class="track-buffering" hidden></div>
               </div>
-              <span class="track-dur"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
+              <span class="track-dur" data-dur="${escapeHtml(fmtDuration(t.duration))}"><span class="track-excerpt" hidden>30s</span><span class="track-dur-num">${fmtDuration(t.duration)}</span></span>
               <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
             </div>
           `;
     }
     if (rowKind === 'waits') {
       return `
-            <div class="track-row is-out-track">
+            <div class="track-row is-out-track"${attrs}>
               <span class="track-rank">${t.track_number || ''}</span>
               <div class="track-info">
                 <div class="track-title-line">${escapeHtml(t.title || '')}</div>
                 ${lines}
               </div>
-              <span class="track-dur">${fmtDuration(t.duration)}</span>
+              <span class="track-dur" data-dur="${escapeHtml(fmtDuration(t.duration))}">${fmtDuration(t.duration)}</span>
               <span class="track-add" aria-hidden="true"></span>
             </div>
           `;
@@ -2058,7 +2062,7 @@
       this.tracks.forEach((t, idx) => {
         const st = states.get(`${idx + 1}|${t.track_id}`);
         if (!st || !t.stream) return;
-        t.stream = { state: st.state, progress: st.progress, reason: st.reason };
+        t.stream = { state: st.state, progress: st.progress, reason: st.reason, why: st.why };
         if (!this.isOpen) return;
         const row = this.list.querySelector(`.q-row[data-index="${idx + 1}"]`);
         const line = row && row.querySelector('.q-stream');
@@ -4287,16 +4291,16 @@
     // The three AI scopes exist only where a model runs: a node whose models
     // are off or absent never loads one, so it offers none of them (the
     // chips sit in the closed filters panel, so nothing is seen to go).
-    const scopes = fetch('/api/settings/hardware')
-      .then(r => r.ok ? r.json() : null)
+    // The same answer says whether the MusicBrainz scope's words may point
+    // at the offline databases (mbScopeWords, mbCooldownWords).
+    const scopes = nodeHardware(true)
       .then(hw => {
         if (!hw || hw.detected.ml_available) return;
         for (const value of ['bio', 'sound', 'lyrics']) {
           const chip = screen.querySelector(`#discoveryScopeRow .f-chip[data-value="${value}"]`);
           if (chip) chip.hidden = true;
         }
-      })
-      .catch(err => console.warn('hardware profile failed:', err));
+      });
     const mbStatus = fetch('/api/discovery/mb-status')
       .then(r => r.ok ? r.json() : { available: false, state: 'none' })
       .then(s => {
@@ -4314,6 +4318,36 @@
   // words review.
   const DISCOVERY_NO_MODELS = 'This search needs AI models, and none runs on this node.'
     + ' Search by names and titles instead.';
+
+  // Why the MusicBrainz scope cannot be searched now, by the chip's state.
+  // `offered`: this node offers the offline databases (dumpsOffered) — where
+  // it does not, the network's road is the only one named. Draft words for
+  // the owner's words review: 'off', and every Nano sentence.
+  function mbScopeWords(state, offered) {
+    if (state === 'off') {
+      return 'P2P sharing is off, so this node asks no other node about artists. Turn it on in '
+        + '<b>More → Sync &amp; P2P</b>' + (offered
+          ? ', or download the catalog yourself in <b>More → Offline databases</b>.'
+          : ', and it searches the network\'s catalog nodes.');
+    }
+    if (state === 'searching') {
+      return 'Looking for MusicBrainz catalog nodes on the network — give it a minute.'
+        + (offered ? ' Or download the catalog yourself in <b>More → Offline databases</b>.' : '');
+    }
+    return offered
+      ? 'No MusicBrainz catalog nodes are reachable, and the optional local dump is not loaded. '
+        + 'Download it in <b>More → Offline databases</b>.'
+      : 'No MusicBrainz catalog nodes are reachable right now.';
+  }
+
+  // A network search past its rate limit. Network search is a shared
+  // volunteer resource — the client rate-limits itself; where the node
+  // offers the offline databases the wait doubles as the pitch for the
+  // unlimited local option.
+  function mbCooldownWords(seconds, offered) {
+    return `Network search is rate-limited (shared volunteer nodes) — retry in ~${seconds}s${
+      offered ? ', or download the catalog in More → Offline databases for unlimited local search' : ''}.`;
+  }
 
   function applyMbChipState(chip, s) {
     chip.dataset.mbState = s.state || (s.available ? 'local' : 'none');
@@ -4359,21 +4393,9 @@
             // Only the MB scope chip disables (no dump) — tapping it must
             // say why instead of dying silently.
             if (chip.id === 'discoveryMbChip') {
-              const mbState = chip.dataset.mbState;
-              // Draft words for the owner's words review: 'off'.
               window.notifyDialog({
                 title: 'MusicBrainz search', kind: 'info',
-                message: mbState === 'off'
-                  ? 'P2P sharing is off, so this node asks no other node about '
-                    + 'artists. Turn it on in <b>More → Sync &amp; P2P</b>, or download the '
-                    + 'catalog yourself in <b>More → Offline databases</b>.'
-                  : mbState === 'searching'
-                  ? 'Looking for MusicBrainz catalog nodes on the network — '
-                    + 'give it a minute. Or download the catalog yourself in '
-                    + '<b>More → Offline databases</b>.'
-                  : 'No MusicBrainz catalog nodes are reachable, and the '
-                    + 'optional local dump is not loaded. Download it in '
-                    + '<b>More → Offline databases</b>.',
+                message: mbScopeWords(chip.dataset.mbState, dumpsOffered()),
               });
             }
             return;
@@ -4921,10 +4943,7 @@
           if (mbBtn) mbBtn.hidden = true;
           const emptyP = empty.querySelector('p');
           if (emptyP) emptyP.textContent = data.cooldown
-            // Network search is a shared volunteer resource — the client
-            // rate-limits itself; the wait message doubles as the pitch
-            // for the unlimited local option.
-            ? `Network search is rate-limited (shared volunteer nodes) — retry in ~${data.cooldown}s, or download the catalog in More → Offline databases for unlimited local search.`
+            ? mbCooldownWords(data.cooldown, dumpsOffered())
             : data.available === false
               ? 'MusicBrainz dump is not loaded on this device, and no catalog nodes are reachable.'
               : 'No matches in MusicBrainz.';
@@ -6052,7 +6071,11 @@
     const base = specs && tail ? `${specs} · ${tail}` : (specs || tail || ('Variant ' + v.variant_id));
     // Where the copy lives: a rip held at an HQPlayer names it; a local rip
     // says nothing, as before.
-    return v.location === 'hqplayer' ? `${base} · at ${v.hqp_label || 'HQPlayer'}` : base;
+    const at = v.location === 'hqplayer' ? `${base} · at ${v.hqp_label || 'HQPlayer'}` : base;
+    // A copy that does not open here now says why, in the album page's word
+    // (albums.py: `away`, `here`) — two copies a move left alike read apart.
+    const out = v.away ? 'away' : v.here === false ? 'disk' : null;
+    return out ? `${at} · ${notHereWords(out).mark}` : at;
   }
 
   const ALL_VARIANTS_LABEL = 'All variants · best per track';
@@ -6589,6 +6612,54 @@
     return d.toLocaleDateString('en-GB', opts);
   }
 
+  // What a Listening history session's rows read of his tracks with no file
+  // here now (home.py: each track's `here` by the album route's rule, the
+  // session's `streams`): null while every one is here, else whether those
+  // rows stream — albumOut's answer for the rows alone, since a session's
+  // Play is the session's own (a refusal is its toast).
+  function sessionOut(d) {
+    return (d.tracks || []).some(t => t.here === false) ? { streams: !!d.streams } : null;
+  }
+
+  // One row of the session, row `n`. His track with no file here now is the
+  // album page's out row (albumRowKind, albumOutRow): it streams by track
+  // uuid under the slot's album, or waits, dimmed. Otherwise a phantom
+  // (streamed) row carries is-phantom-track + data-track-id so the shared
+  // handlers route it (click → play-phantom-track, [+] → queue); an owned
+  // row keeps data-media-file-id. data-album-id is the album the slot was
+  // queued from, so a click plays THIS edition of the track. A slot of his
+  // own with no file id (held at the HQPlayer, its file gone since, or
+  // streamed for want of it) is a held row: its "+" queues the track by
+  // uuid, the backend picking the copy. data-position is the slot (what a
+  // replay's start names), whatever the row is: a tap here chooses where
+  // Play starts (B-158), on every kind of row alike. `lines`: the row's
+  // lines under its title.
+  function sessionTrackRow(t, n, out, lines) {
+    const position = ` data-position="${escapeHtml(String(t.position))}"`;
+    const outRow = albumOutRow({ ...t, track_number: n, duration: t.duration_seconds },
+                               albumRowKind(t, out), t.album_id || '', lines, position);
+    if (outRow) return outRow;
+    const attrs = (t.is_phantom
+      ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
+        + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
+      : t.media_file_id
+        ? `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id))}"`
+        : `class="track-row is-held-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`)
+      + position;
+    return `
+          <button ${attrs} type="button">
+            <span class="track-rank">${n}</span>
+            <div class="track-info">
+              <div class="track-title-line">${escapeHtml(t.title || '')}</div>
+              ${lines}
+              ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
+            </div>
+            <span class="track-dur" data-dur="${escapeHtml(fmtDuration(t.duration_seconds))}">${fmtDuration(t.duration_seconds)}</span>
+            <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
+          </button>
+        `;
+  }
+
   // Listening-history session detail. Modelled on renderAlbum's
   // .detail-screen — the same hero / title / artist / meta / actions /
   // tracklist anatomy — but the context comes from the snapshot's CONTENT,
@@ -6670,6 +6741,7 @@
     const sessionArtist = (top && top.track_count * 2 >= tracksList.length)
       ? { id: top.id, name: top.name } : null;
 
+    const out = sessionOut(d);
     const trackParts = [];
     let n = 0;
     for (const g of groups) {
@@ -6696,36 +6768,8 @@
           t.key ? (t.key + (modeShort(t.mode) ? ' ' + modeShort(t.mode) : '')) : null,
           t.bpm ? Math.round(t.bpm) + ' bpm' : null,
         ].filter(Boolean).join(' · ');
-        // Phantom (streamed) rows carry is-phantom-track + data-track-id so the
-        // shared handlers route them (click → play-phantom-track, [+] → queue);
-        // owned rows keep data-media-file-id. data-album-id is the album the
-        // slot was queued from, so a click plays THIS edition of the track.
-        // data-position is the slot (what a replay's start names), whatever
-        // the row is: a tap here chooses where Play starts (B-158), on every
-        // kind of row alike.
-        // A slot of his own with no file id (held at the HQPlayer, its file
-        // gone since, or streamed for want of it) is a held row: its "+"
-        // queues the track by uuid, the backend picking the copy.
-        const attrs = (t.is_phantom
-          ? `class="track-row is-phantom-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`
-            + (t.album_id ? ` data-album-id="${escapeHtml(t.album_id)}"` : '')
-          : t.media_file_id
-            ? `class="track-row" data-media-file-id="${escapeHtml(String(t.media_file_id))}"`
-            : `class="track-row is-held-track" data-track-id="${escapeHtml(String(t.track_id || ''))}"`)
-          + ` data-position="${escapeHtml(String(t.position))}"`;
-        trackParts.push(`
-          <button ${attrs} type="button">
-            <span class="track-rank">${n}</span>
-            <div class="track-info">
-              <div class="track-title-line">${escapeHtml(t.title || '')}</div>
-              ${artistLine}
-              ${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}
-              ${t.is_phantom ? '<div class="track-buffering" hidden>Buffering…</div>' : ''}
-            </div>
-            <span class="track-dur" data-dur="${escapeHtml(fmtDuration(t.duration_seconds))}">${fmtDuration(t.duration_seconds)}</span>
-            <span class="track-add" aria-label="Add to queue">${SVG_PLUS}</span>
-          </button>
-        `);
+        trackParts.push(sessionTrackRow(t, n, out,
+          `${artistLine}${sub ? `<div class="track-sub">${escapeHtml(sub)}</div>` : ''}`));
       }
     }
 
@@ -9760,6 +9804,7 @@
       // corrected by the event instead of by a re-open.
       document.addEventListener('np-update', () => this._syncOutputRows());
       this._syncOutputRows();
+      this._syncDatabasesRow(false);
     },
     open() {
       if (!this.el) this.init();
@@ -9774,6 +9819,7 @@
       });
       updateFabVisibility(currentRoute);
       this._refreshHqpStatus();
+      this._syncDatabasesRow(true);
       guide.paint();
     },
     close() {
@@ -9796,6 +9842,15 @@
       const hqpRow = this.el.querySelector('#hqpHint').closest('.more-row');
       hqpRow.hidden = out.type !== 'hqplayer';
       this.el.querySelector('#outputHint').textContent = out.label || '';
+    },
+    // "Offline databases" is drawn only where the node offers them
+    // (dumpsOffered): at once from the answer the page holds, then from the
+    // node's own — read at the drawer's build and again at each open, for a
+    // dump loaded or removed meanwhile.
+    async _syncDatabasesRow(fresh) {
+      const row = this.el.querySelector('[data-go="more/databases"]');
+      row.hidden = !dumpsOffered();
+      row.hidden = !dumpsOffered(await nodeHardware(fresh));
     },
     async _refreshHqpStatus() {
       const hint = this.el && this.el.querySelector('#hqpHint');
@@ -16437,7 +16492,9 @@
   }
 
   // AI canonization tier — toggle + "Run now" + live progress/reasoning log.
-  function _renderAiCanon(ai) {
+  // `offered`: the node offers the offline databases (dumpsOffered) — the
+  // catalogue's need then says where to download it.
+  function _renderAiCanon(ai, offered) {
     const c = ai.canonization;
     if (!c || !c.available) return '';
     const job = c.job || {};
@@ -16462,7 +16519,7 @@
         </div>
         ${noDump ? `
           <div class="form-row stacked">
-            <div class="row-stack-sub">Needs the local MusicBrainz catalogue — canonization resolves names against it. Download it in <b>Offline databases</b>.</div>
+            <div class="row-stack-sub">Needs the local MusicBrainz catalogue — canonization resolves names against it.${offered ? ' Download it in <b>Offline databases</b>.' : ''}</div>
           </div>` : ''}
       </div>
       ${running ? `
@@ -18178,8 +18235,34 @@
 
   const DUMPS_NOT_ON_NANO = 'Not offered on this node. The MusicBrainz catalogue alone is a 7.5 GB download '
     + 'that takes about 21 GB in the database and hours to load — more than a Nano node is set up for. This node '
-    + 'settles artist and album names, and listening statistics, from other Sautium nodes\' answers instead. '
-    + 'Turning the AI models on (More › Profile) makes this a full node, and the databases are offered again.';
+    + 'settles artist and album names, and listening statistics, from other Sautium nodes\' answers instead.';
+  // Under the models row on More › Profile, where the databases are not offered
+  const DUMPS_ON_A_FULL_NODE = 'Offline databases (the MusicBrainz catalogue, 7.5 GB) are offered on a full node: turning the AI models on makes this one.';
+
+  // The node's hardware answer (GET /api/settings/hardware) as the page last
+  // read it, for the places that need only whether the dumps are offered.
+  // One ask is shared until a caller wants the node's word again (`fresh`);
+  // a failed ask leaves the answer held as it was.
+  let _hardware = null, _hardwareAsk = null;
+  function nodeHardware(fresh = false) {
+    if (fresh || !_hardwareAsk) {
+      _hardwareAsk = fetch('/api/settings/hardware')
+        .then(r => r.ok ? r.json() : null)
+        .then(hw => { if (hw) _hardware = hw; return _hardware; })
+        .catch(err => { console.warn('hardware profile failed:', err); _hardwareAsk = null; return _hardware; });
+    }
+    return _hardwareAsk;
+  }
+
+  // A Nano node is not offered the dumps: a download of tens of GB and
+  // hours of loading on a machine set up to do neither. One it already
+  // holds (a restore, an owner who loaded it before) is shown as anywhere —
+  // `dumps_held`, the node's one rule (routers/settings.py). `hw`: the
+  // hardware answer or the Offline databases screen's own; none read yet
+  // offers them.
+  function dumpsOffered(hw = _hardware) {
+    return !(hw && hw.nano && !hw.dumps_held);
+  }
 
   async function renderDatabases(root) {
     const data = await _fetchDumps();
@@ -18189,14 +18272,7 @@
       return;
     }
     const families = Object.keys(DUMP_FAMILIES);
-    // A Nano node is not offered the dumps: a download of tens of GB and
-    // hours of loading on a machine set up to do neither. One it already
-    // holds (a restore, an owner who loaded it before) is shown as anywhere.
-    const held = families.some(f => {
-      const d = data[DUMP_FAMILIES[f].key] || {};
-      return d.loaded || (d.update && d.update.running);
-    });
-    if (data.nano && !held) {
+    if (!dumpsOffered(data)) {
       root.innerHTML = `
         <section class="screen screen-settings">
           ${_settingsHeader('Offline databases')}
@@ -18290,6 +18366,8 @@
   // of desktop/machine_tier.py's NANO_BELOW_* rule, the disk the setup asks
   // for the full node). Draft words for the owner's words review.
   function hwModelsRow(hw) {
+    const dumps = dumpsOffered(hw) ? ''
+      : `<div class="row-stack-sub">${escapeProfileHtml(DUMPS_ON_A_FULL_NODE)}</div>`;
     if (hw.models === 'absent') {
       const why = !hw.restartable ? 'Not available: no AI models exist for this machine.'
         : hw.birth_preset === 'nano'
@@ -18299,7 +18377,7 @@
             + '25 GB of free disk and 8 GB of memory to work well).'
           : 'Off — this install was set up without the models. On the machine, run: ./sautium setup --preset full';
       return `<div class="form-row stacked"><div class="row-stack"><span class="row-stack-label">AI models</span></div>
-        <div class="row-stack-sub">${escapeProfileHtml(why)}</div></div>`;
+        <div class="row-stack-sub">${escapeProfileHtml(why)}</div>${dumps}</div>`;
     }
     const on = !!hw.models_switch;
     const pending = hw.restart_required
@@ -18311,7 +18389,7 @@
             <span class="row-stack-value">${hw.models === 'on' ? 'On' : 'Off on this machine'}</span>
           </div>
           <button class="profile-btn secondary" type="button" data-action="models-switch" data-on="${on ? '0' : '1'}">${on ? 'Turn off' : 'Turn on'}</button>
-        </div>${pending}</div>`;
+        </div>${pending}${dumps}</div>`;
   }
 
   // The "Sautium" row: what runs here, and the one control the host agent's
@@ -18931,11 +19009,40 @@
     return lines.join(' ');
   }
   let _prunePlanOpen = false;
+  // The Away row's count: the copies away, and of them the albums no other
+  // copy holds (lib.away.albums) — what a removal takes with them.
+  function _awayCount(away) {
+    const copies = `${_count(away.copies, 'copy', 'copies')} away`;
+    return away.albums
+      ? `${copies} — ${_count(away.albums, 'album has', 'albums have')} no other copy`
+      : `${copies} — each album has another copy`;
+  }
+  // The yeses this tab sent (plan id → kind) until the run that answers one
+  // ends: a removal the node refused when it looked — the folder gone
+  // between the yes and the removal — is said once, here, where yes was
+  // said. Kept before the yes is sent: the run can end before its answer.
+  const _pruneYesSent = new Map();
+  function _sayPruneRefused(scan) {
+    const r = scan && scan.result;
+    if (!r || !_pruneYesSent.has(r.plan_id)) return;
+    const kind = _pruneYesSent.get(r.plan_id);
+    _pruneYesSent.delete(r.plan_id);
+    if (r.prune && r.prune.refused) {
+      notices.toast({ kind: 'error', key: 'library.prune',
+                      title: kind === 'away' ? 'Albums away' : 'Rescan',
+                      text: escapeProfileHtml(r.prune.refused) });
+    }
+  }
+  let _prunePlanHeld = null;       // the question the folder's absence holds back
   async function _askPrunePlan(plan) {
     // One question at a time: a plan that arrives while one is open (another
     // device's Rescan, a yes that had to ask again) waits for the render that
-    // follows the answer.
+    // follows the answer. With the music folder out the node refuses any yes
+    // (PI-NODE-2E F23): the question waits, and the snapshot the folder's
+    // return sends asks it.
     if (!plan || _prunePlanOpen || _prunePlansAsked.has(plan.id)) return;
+    if (notices.get('library.mount_missing')) { _prunePlanHeld = plan; return; }
+    _prunePlanHeld = null;
     _prunePlansAsked.add(plan.id);
     _prunePlanOpen = true;
     const remove = await window.confirmDestructive({
@@ -18946,6 +19053,7 @@
       focusCancel: true,
     }).finally(() => { _prunePlanOpen = false; });
     let detail = null, waiting = false;
+    if (remove) _pruneYesSent.set(plan.id, plan.kind);
     try {
       const r = await fetch('/api/settings/library/scan/prune?plan_id='
         + encodeURIComponent(plan.id) + '&remove=' + remove, { method: 'POST' });
@@ -18961,6 +19069,7 @@
       waiting = true;
     }
     if (detail) {
+      _pruneYesSent.delete(plan.id);
       notices.toast({ kind: 'error', key: 'library.prune',
                       title: plan.kind === 'away' ? 'Albums away' : 'Rescan',
                       text: escapeProfileHtml(detail) });
@@ -19003,22 +19112,32 @@
     sub.hidden = !line;
   }
   // The Library screen under the notice library.mount_missing (`missing`):
-  // the Music path row's sentence, and — a scan of a folder that does not
-  // answer is refused by the node — "Scan for new" and "Rescan" waiting for
-  // the folder under it; both come back with the notice's end. Whether this
+  // the Music path row's sentence, and — a scan or a removal of a folder
+  // that does not answer is refused by the node — "Scan for new", "Rescan"
+  // and the Away row's Remove waiting for the folder under it, the notice's
+  // own sentence under Remove; all come back with the notice's end. Whether this
   // node streams meanwhile is asked once a stretch (GET /api/player/reach).
   let _nodeStreams = null;        // null: not known for this stretch
   let _nodeStreamsAsked = false;
   function paintMusicFolder(missing) {
-    if (!missing) { _nodeStreams = null; _nodeStreamsAsked = false; }
+    if (!missing) {
+      _nodeStreams = null; _nodeStreamsAsked = false;
+      if (_prunePlanHeld) _askPrunePlan(_prunePlanHeld);
+    }
     const row = document.querySelector('[data-music-path-row]');
     if (row) {
       row.dataset.musicStreams = _nodeStreams ? '1' : '';
       paintMusicPathRow(row, missing);
     }
-    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"]').forEach(btn => {
-      if (btn.disabled !== missing) btn.disabled = missing;
-    });
+    document.querySelectorAll('[data-action="scan"], [data-action="scan-prune"], [data-action="remove-away"]')
+      .forEach(btn => { if (btn.disabled !== missing) btn.disabled = missing; });
+    const awayWhy = document.querySelector('[data-away-why]');
+    if (awayWhy) {
+      const n = missing && notices.get('library.mount_missing');
+      const line = n ? NOTICE_COPY['library.mount_missing'](n).text : '';
+      if (awayWhy.dataset.line !== line) { awayWhy.innerHTML = line; awayWhy.dataset.line = line; }
+      awayWhy.hidden = !line;
+    }
     if (missing && row && !_nodeStreamsAsked) {
       _nodeStreamsAsked = true;
       fetch('/api/player/reach').then(r => (r.ok ? r.json() : null)).then(body => {
@@ -19291,7 +19410,7 @@
         <div class="form-row stacked">
           <div class="row-stack">
             <span class="row-stack-label">Away</span>
-            <span class="row-stack-value" data-library-away>${escapeProfileHtml(_count(away.albums, 'album', 'albums'))}</span>
+            <span class="row-stack-value" data-library-away>${escapeProfileHtml(_awayCount(away))}</span>
           </div>
           <div class="row-stack-sub">Their files were not found at the last Rescan. They stay in your library until you remove them, and come back by themselves when a scan finds their files.</div>
         </div>
@@ -19299,7 +19418,8 @@
       ${scanRunning ? '' : `
       <div class="btn-row single">
         <button class="btn btn-secondary" data-action="remove-away">Remove albums that are away</button>
-      </div>`}
+      </div>
+      <div class="helper-line" data-away-why hidden></div>`}
     `;
 
     // No ML runtime → no button: the run would be a no-op there (analysis
@@ -19459,8 +19579,8 @@
       const r = await fetch('/api/settings/library/away/remove', { method: 'POST' });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        await window.notifyDialog({ title: 'Nothing removed', kind: 'error',
-          message: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+        notices.toast({ kind: 'error', key: 'library.prune', title: 'Albums away',
+                        text: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
       }
       render();
     }));
@@ -19543,7 +19663,7 @@
       set('[data-library-last-scan]', fmtRelative(lib.last_scan_at));
       if (lib.last_scan_at) set('[data-library-last-scan-at]', fmtAbs(lib.last_scan_at));
     }
-    set('[data-library-away]', _count((lib.away || {}).albums, 'album', 'albums'));
+    set('[data-library-away]', _awayCount(lib.away || {}));
   }
 
   // What decides the Library screen's structure beyond its workers and its
@@ -19625,6 +19745,7 @@
       }
       _refreshEnrichRow(root, 'lastfm',     lib.lastfm_done,     lib.lastfm_total);
       _refreshEnrichRow(root, 'lyrics',     lib.lyrics_done,     lib.present_tracks);
+      _sayPruneRefused(lib.scan);
       _askPrunePlan(lib.scan && lib.scan.prune_plan);
 
       // The screen is drawn again only where its structure no longer says
@@ -19804,6 +19925,9 @@
   // again. The screen's own re-renders (a stream wake, a canon batch, the
   // sign-in notice coming or going) read the verdict it holds.
   async function renderAI(root, { look = true } = {}) {
+    // The answer the page already asked for at its start: the canonization's
+    // need names the offline databases only where they are offered
+    const hardware = nodeHardware();
     let ai = null;
     try {
       const r = await fetch('/api/settings/ai');
@@ -19818,6 +19942,7 @@
     // Gear research runs on Claude Code whatever answers the chat, so its
     // sign-in is shown here whenever the queue waits for it — the notice
     // points at this screen.
+    const hw = await hardware;
     const researchNeedsClaude = ai.provider !== 'claude_code' && !!notices.get('claude_code.signed_out');
     let claudeState = null;
     if (ai.provider === 'claude_code' || researchNeedsClaude) {
@@ -19842,7 +19967,7 @@
         ${researchNeedsClaude && claudeState ? `
           <div class="profile-group-label">Claude Code · gear research</div>
           <div class="form-group">${_renderClaudeCodeBlock(claudeState)}</div>` : ''}
-        ${_renderAiCanon(ai)}
+        ${_renderAiCanon(ai, dumpsOffered(hw))}
       </section>
     `;
     _wireBack(root);

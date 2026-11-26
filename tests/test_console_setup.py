@@ -1019,6 +1019,139 @@ def test_a_first_start_has_no_log_to_keep(checkout, monkeypatch):
     assert docker.asked == ["ps", "up"] and not (checkout / "host" / "logs").exists()
 
 
+# -- the release the setup leaves the folder on (PI-NODE-2E F22) ----------------------------
+# The setup moves a checkout only forward, and only before the host agent
+# exists: on 2D's evening a setup run again after an update checked out the
+# clone's own newest tag — older than the release the agent had installed —
+# and the node ran v0.2.11's code over a v0.2.14 database.
+
+class _Moved(Exception):
+    pass
+
+
+def _g(root: Path, *args: str) -> str:
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@t", GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    return subprocess.run(["git", *args], cwd=root, env=env, check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def _commit(root: Path, version: str, setup_file: bool = True) -> str:
+    (root / "desktop").mkdir(exist_ok=True)
+    (root / "desktop" / "build_common.py").write_text(f'VERSION = "{version}"\n')
+    if setup_file:
+        (root / "scripts").mkdir(exist_ok=True)
+        (root / "scripts" / "setup.py").write_text(f"# {version}\n")
+    _g(root, "add", "-A")
+    _g(root, "commit", "-q", "--allow-empty", "-m", version)
+    return _g(root, "rev-parse", "HEAD")
+
+
+@pytest.fixture
+def releases(checkout, monkeypatch):
+    """A clone whose own tags are v0.2.11; releases above it as the host
+    agent's fetch keeps them (refs/sautium/releases/), and `main` past them."""
+    root = checkout
+    _g(root, "init", "-q", "-b", "main")
+    (root / ".gitignore").write_text("host/\ndata/\n")
+    commits = {}
+    for version in ("0.2.11", "0.2.12", "0.2.13", "0.2.14"):
+        commits[version] = _commit(root, version)
+        _g(root, "tag", "-a", "-m", version, f"v{version}")
+    for version in ("0.2.12", "0.2.13", "0.2.14"):
+        _g(root, "update-ref", f"{setup.agent.RELEASE_REFS}v{version}", _g(root, "rev-parse", f"v{version}"))
+        _g(root, "tag", "-d", f"v{version}")
+    commits["main"] = _commit(root, "0.2.14")
+    monkeypatch.setattr(setup.os, "execv", lambda *a: (_ for _ in ()).throw(_Moved(a)))
+    return commits
+
+
+def _on(root: Path, commit: str) -> None:
+    _g(root, "-c", "advice.detachedHead=false", "checkout", "-q", "--detach", commit)
+
+
+def _agent_installed(root: Path) -> None:
+    (root / "host" / "agent.env").write_text("SAUTIUM_HOST_CHANNEL_KEY=" + "ab" * 32 + "\n")
+
+
+def test_a_setup_run_again_after_the_agents_update_leaves_the_checkout_on_its_release(releases, checkout, capsys):
+    _on(checkout, releases["0.2.14"])
+    _agent_installed(checkout)
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+    said = capsys.readouterr().out
+    assert "on the release v0.2.14" in said and "./sautium update" in said and "v0.2.11" not in said
+    assert f"verify-tag {setup.agent.RELEASE_REFS}v0.2.14" in said      # a ref git resolves
+
+
+def test_with_the_agent_installed_the_setup_moves_no_checkout_even_forward(releases, checkout, capsys):
+    _on(checkout, releases["0.2.11"])
+    _agent_installed(checkout)
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.15", releases["main"])     # a tag the person fetched himself
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.11"]
+    assert "./sautium update" in capsys.readouterr().out
+
+
+def test_with_the_agent_installed_a_checkout_on_no_release_is_said_as_its_commit(releases, checkout, capsys):
+    _on(checkout, releases["main"])
+    _agent_installed(checkout)
+    setup.release_step()
+    said = capsys.readouterr().out
+    assert releases["main"][:12] in said and "on no release" in said and "./sautium update" in said
+
+
+def test_without_the_agent_the_setup_never_moves_below_the_version_head_states(releases, checkout, capsys):
+    _on(checkout, releases["0.2.14"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+    assert "on the release v0.2.14" in capsys.readouterr().out
+
+
+def test_a_fresh_clones_first_setup_still_moves_to_its_newest_release(releases, checkout):
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.14", _g(checkout, "rev-parse", f"{setup.agent.RELEASE_REFS}v0.2.14"))
+    for version in ("0.2.12", "0.2.13", "0.2.14"):
+        _g(checkout, "update-ref", "-d", f"{setup.agent.RELEASE_REFS}v{version}")
+    _g(checkout, "checkout", "-q", "main")
+    with pytest.raises(_Moved):
+        setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+
+
+def test_the_agents_fetched_refs_are_never_a_release_the_setup_moves_to(releases, checkout):
+    _on(checkout, releases["0.2.11"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.11"]
+
+
+def test_without_the_agent_a_newer_tag_of_the_persons_own_clone_is_taken_forward(releases, checkout):
+    _on(checkout, releases["0.2.11"])
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.14", _g(checkout, "rev-parse", f"{setup.agent.RELEASE_REFS}v0.2.14"))
+    with pytest.raises(_Moved):
+        setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+
+
+def test_a_tag_named_above_head_on_a_tree_that_states_less_is_never_moved_to(releases, checkout):
+    """The floor reads the version the tag's tree states, not its name: a
+    tag named v0.2.15 on v0.2.11's commit is no way forward (review round 1)."""
+    _on(checkout, releases["0.2.14"])
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.15", releases["0.2.11"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.14"]
+
+
+def test_a_release_without_the_setup_is_never_moved_to(releases, checkout):
+    _on(checkout, releases["0.2.11"])
+    (checkout / "scripts" / "setup.py").unlink()
+    _g(checkout, "add", "-A")
+    _g(checkout, "commit", "-q", "-m", "no setup")
+    _g(checkout, "tag", "-a", "-m", "x", "v0.2.12", "HEAD")
+    _on(checkout, releases["0.2.11"])
+    setup.release_step()
+    assert _g(checkout, "rev-parse", "HEAD") == releases["0.2.11"]
+
+
 # -- the roots ---------------------------------------------------------------------------
 
 def test_a_root_is_a_folder_of_music_never_a_part_of_the_system(checkout, tmp_path):
@@ -1412,17 +1545,32 @@ case "$col:$dev" in
   NAME:/dev/loop0) echo loop0; cat "$STUB/partitions" 2>/dev/null ;;
   NAME:*) echo "${dev#/dev/}"; cat "$STUB/siblings" 2>/dev/null ;;
   SIZE:*) cat "$STUB/size" 2>/dev/null || echo 15500000000 ;;
-  PARTTYPE:*) cat "$STUB/parttype" 2>/dev/null ;;
+  PARTTYPE:*) ;;    # udev's property: none for a partition its probe found no filesystem on (F24)
 esac
 ''',
-    # `blkid -p`: the low-level probe's exit alone (2: nothing found, as on a
-    # blank volume) — or the real blkid's on an image, where a test has one
+    # `blkid -p`: the low-level probe's exit alone, which tells nothing apart:
+    # 2 for a blank volume and, on util-linux 2.41, for two marks; 8 for two
+    # marks before it
     "blkid": '''#!/bin/sh
-if [ "$1" = -p ]; then
-  if [ -e "$STUB/image" ]; then exec "$(cat "$STUB/real-blkid")" -p "$STUB/image"; fi
-  exit "$(cat "$STUB/probe" 2>/dev/null || echo 2)"
-fi
+[ "$1" != -p ] || exit "$(cat "$STUB/probe" 2>/dev/null || echo 2)"
 cat "$STUB/blkid-$4" 2>/dev/null
+''',
+    # the signatures on the device, one TYPE a line as wipefs lists them (a
+    # filesystem at each offset it is found at) — or the real wipefs's on an
+    # image, where a test has one
+    "wipefs": '''#!/bin/sh
+[ "$*" = "--no-act --noheadings --parsable --output TYPE /dev/loop0" ] || exit 64
+[ ! -e "$STUB/wipefs-fails" ] || exit 1
+if [ -e "$STUB/image" ]; then exec "$(cat "$STUB/real-wipefs")" "$1" "$2" "$3" "$4" "$5" "$STUB/image"; fi
+[ ! -e "$STUB/signatures" ] || cat "$STUB/signatures"
+''',
+    # the partition table of the disk `pkname` names: `table`'s lines "N TYPE",
+    # the type right-aligned as partx prints it
+    "partx": '''#!/bin/sh
+echo "$*" >> "$STUB/partx-calls"
+[ "$1 $2 $3 $4 $6" = "-g -o TYPE -n /dev/$(cat "$STUB/pkname")" ] || exit 64
+[ -e "$STUB/table" ] || exit 0
+while read -r n type; do [ "$n" != "$5" ] || echo " $type"; done < "$STUB/table"
 ''',
     "mount": '''#!/bin/sh
 echo "$*" >> "$STUB/mount-calls"
@@ -1436,7 +1584,7 @@ echo "$*" >> "$STUB/umount-calls"
 }
 # What the script uses of the system besides: linked into the stubs' folder,
 # so that the PATH is the test's own (an ntfs-3g this machine has is not found)
-PLAIN_TOOLS = ("cat", "head", "tr", "wc", "grep", "mkdir", "rmdir", "rm", "mv")
+PLAIN_TOOLS = ("cat", "head", "tr", "wc", "grep", "sort", "mkdir", "rmdir", "rm", "mv")
 
 
 @pytest.fixture
@@ -1454,7 +1602,9 @@ def automount(tmp_path, monkeypatch):
         (bin_dir / name).chmod(0o755)
     for name in PLAIN_TOOLS:
         (bin_dir / name).symlink_to(shutil.which(name))
-    files = setup.automount_files(tmp_path / "out", 1000, 1000, base=str(base), state=str(state))
+    sysfs = tmp_path / "sys"                   # the kernel's: a partition's number, by its name
+    files = setup.automount_files(tmp_path / "out", 1000, 1000, base=str(base), state=str(state),
+                                  sysfs=str(sysfs))
     env = {"PATH": str(bin_dir), "STUB": str(stub)}
     sh = shutil.which("sh")
 
@@ -1470,8 +1620,17 @@ def automount(tmp_path, monkeypatch):
     def ntfs_3g():
         (bin_dir / "ntfs-3g").write_text("#!/bin/sh\n")
         (bin_dir / "ntfs-3g").chmod(0o755)
+
+    def partition(number, disk="sda", siblings=("sda1", "sda2"), table=()):
+        """The plugged volume as partition `number` of `disk`, beside
+        `siblings`, its disk's table `table`'s (number, type) pairs."""
+        (sysfs / "class" / "block" / "loop0").mkdir(parents=True, exist_ok=True)
+        (sysfs / "class" / "block" / "loop0" / "partition").write_text(f"{number}\n")
+        (stub / "pkname").write_text(disk + "\n")
+        (stub / "siblings").write_text("".join(f"{s}\n" for s in siblings))
+        (stub / "table").write_text("".join(f"{n} {t}\n" for n, t in table))
     return types.SimpleNamespace(plug=plug, calls=calls, base=base, state=state, stub=stub, files=files,
-                                 ntfs_3g=ntfs_3g, unread=base / ".unread" / "loop0")
+                                 ntfs_3g=ntfs_3g, partition=partition, unread=base / ".unread" / "loop0")
 
 
 def test_the_automounts_shell_parses_and_carries_the_owner(automount):
@@ -1760,46 +1919,74 @@ def test_a_card_after_another_in_the_same_reader_gets_its_own_start(automount):
     assert automount.calls()[-1].endswith(f"/dev/loop0 {automount.base / '0398-3084'}") and len(automount.calls()) == 2
 
 
-def _nothing_named(automount, **stub):
-    """A plugged volume blkid names no type on; the stub's files as given."""
+def _nothing_named(automount, signatures=(), **stub):
+    """A plugged volume blkid names no type on, wipefs listing `signatures`;
+    the stub's other files as given."""
+    (automount.stub / "signatures").write_text("".join(f"{s}\n" for s in signatures))
     for name, text in stub.items():
         (automount.stub / name.replace("_", "-")).write_text(str(text) + "\n")
     return automount.plug(TYPE="", UUID="", LABEL="")
 
 
-@pytest.mark.parametrize("probe, said, why", [
-    (8, "ambivalent", "it carries the marks of more than one filesystem"),
-    (2, "unknown", "no filesystem is found on it")])
-def test_a_volume_with_no_one_filesystem_is_said_to_the_node(automount, probe, said, why):
-    """`blkid -p` tells the two apart: 8 — more than one signature (a quick
-    format over an older filesystem), 2 — none. Either way the file keeps its
-    four lines; there is no label to give and no driver was tried (F18)."""
+# A quick NTFS format over an ext2 stick, as wipefs lists it (PI-NODE-2E §10.9):
+# the old superblock, the new boot sector, and that sector's 0x55AA, which
+# libblkid reads as a DOS partition table
+TWO_MARKS = ("ext2", "ntfs", "dos")
+
+
+@pytest.mark.parametrize("signatures, probe, said, why", [
+    (TWO_MARKS, 2, "ambivalent", "it carries the marks of more than one filesystem"),       # util-linux 2.41
+    (TWO_MARKS, 8, "ambivalent", "it carries the marks of more than one filesystem"),       # before it
+    (("vfat", "vfat", "vfat", "ext2"), 2, "ambivalent", "it carries the marks of more than one filesystem"),
+    ((), 2, "unknown", "no filesystem is found on it"),
+    ((), 8, "unknown", "no filesystem is found on it"),
+    (("dos",), 8, "unknown", "no filesystem is found on it"),            # a partition table's mark alone
+    (("PMBR", "gpt"), 8, "unknown", "no filesystem is found on it")])
+def test_a_volume_with_no_one_filesystem_is_said_to_the_node(automount, signatures, probe, said, why):
+    """wipefs's list tells the two apart: two filesystems or more (a quick
+    format over an older one) — a filesystem it finds at several offsets is
+    one, a partition table's own signature none — or no filesystem at all.
+    `blkid -p`'s exit, which told them apart until PI-NODE-2E, says 2 for
+    both on util-linux 2.41 (F24). Either way the file keeps its four lines;
+    there is no label to give and no driver was tried (F18)."""
     if not BOOT_ID.exists():
         pytest.skip("no boot id on this system")
-    result = _nothing_named(automount, probe=probe)
+    result = _nothing_named(automount, signatures, probe=probe)
     assert result.returncode == 0 and f"loop0 ({said}) is not mounted: {why}" in result.stderr
     assert automount.unread.read_text() == f"{BOOT_ID.read_text().strip()}\n{said}\n\n-\n"
     assert automount.calls() == [] and not (automount.state / "loop0").exists()
     assert automount.plug("unmount").returncode == 0 and not automount.unread.exists()      # gone at the pull
 
 
+@pytest.mark.parametrize("signatures", [("ntfs", "dos"), ("vfat", "vfat", "vfat"), ("iso9660",)])
+def test_one_filesystem_blkid_did_not_name_is_the_journals_alone(automount, signatures):
+    """A signature the full probe finds and plain blkid did not: a volume
+    with one filesystem is no "disk Sautium cannot tell" — its boot sector's
+    `dos` mark is not a second one."""
+    result = _nothing_named(automount, signatures, probe=8)
+    assert result.returncode == 0 and f"loop0: no filesystem named, and wipefs finds {signatures[0]}" in result.stderr
+    assert not (automount.base / ".unread").exists() and automount.calls() == []
+
+
 def test_what_is_no_volume_of_files_is_never_said(automount):
     def silent(name="loop0", **stub):
-        for leftover in ("probe", "size", "pkname", "siblings", "parttype", "partitions"):
+        for leftover in ("probe", "size", "pkname", "siblings", "table", "partitions", "signatures",
+                         "wipefs-fails"):
             (automount.stub / leftover).unlink(missing_ok=True)
         for key, text in stub.items():
             (automount.stub / key).write_text(str(text) + "\n")
         result = automount.plug(name=name, TYPE="", UUID="", LABEL="")
         assert result.returncode == 0, result.stderr
         return not (automount.base / ".unread").exists() and automount.calls() == []
-    assert not silent(probe=2)                                    # the case itself: said
+    assert not silent()                                           # the case itself: said
     shutil.rmtree(automount.base / ".unread")
     assert silent(size=0) and silent(size=1024) and silent(size=1048575)       # an empty slot; an extended
     assert not silent(size=1048576)                                             # partition's container
     shutil.rmtree(automount.base / ".unread")
     assert silent(size="")                                         # no size to read: not a volume
     assert silent(partitions="loop0p1")                            # a whole disk that holds partitions
-    assert silent(probe=4) and silent(probe=0)                     # the probe failed, or found what plain blkid did not
+    assert silent(signatures="ntfs")                               # what plain blkid did not name
+    assert silent(**{"wipefs-fails": ""})                          # nothing listed: nothing to say it by
     # an eMMC's own areas never were volumes of files (the names are the kernel's)
     script = automount.files["script"].read_text()
     assert 'case "$name" in mmcblk*boot*|mmcblk*rpmb) exit 0 ;; esac' in script
@@ -1818,12 +2005,11 @@ def test_a_disk_windows_partitioned_is_one_mount_and_no_unread_row(automount):
     no filesystem beside the NTFS one. Every plug of such a disk would have
     said "a disk Sautium cannot tell" of a partition nobody put music on
     (PI-NODE-2D §14, Q10)."""
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\nsda2\n")
-    (automount.stub / "parttype").write_text(MSR + "\n")
+    automount.partition(1, table=[(1, MSR), (2, BASIC_DATA)])
     assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0           # the reserved partition
     assert automount.calls() == [] and not (automount.base / ".unread").exists()
-    (automount.stub / "parttype").write_text(BASIC_DATA + "\n")
+    assert automount.calls("partx") == ["-g -o TYPE -n 1 /dev/sda"]             # its type from the table
+    automount.partition(2, table=[(1, MSR), (2, BASIC_DATA)])
     automount.ntfs_3g()
     assert automount.plug(TYPE="ntfs", UUID="01DC5A7E6B2F4C10", LABEL="Music").returncode == 0
     (call,) = automount.calls()                                                   # one mount
@@ -1833,37 +2019,47 @@ def test_a_disk_windows_partitioned_is_one_mount_and_no_unread_row(automount):
 @pytest.mark.parametrize("parttype, said", [
     (MSR, False), (EFI_SYSTEM, False), ("21686148-6449-6e6f-744e-656564454649", False),        # BIOS boot
     ("426f6f74-0000-11aa-aa11-00306543ecac", False), ("52637672-7900-11aa-aa11-00306543ecac", False),  # Apple's
-    ("0x5", False), ("0xef", False), ("", False), ("a type; reboot", False),
+    ("0x5", False), ("0xef", False), ("0x27", False), ("", False), ("a type; reboot", False),  # 0x27: recovery
     (BASIC_DATA, True), (BASIC_DATA.upper(), True), ("0fc63daf-8483-4772-8e79-3d69d8477de4", True),
     ("48465300-0000-11aa-aa11-00306543ecac", True), ("0x7", True), ("0xc", True), ("0x83", True)])
 def test_beside_other_partitions_only_one_for_data_is_said_as_unknown(automount, parttype, said):
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\nsda2\n")
-    (automount.stub / "parttype").write_text(parttype + "\n")
-    assert _nothing_named(automount, probe=2).returncode == 0
+    """The type is the partition table's, read by partx: udev exports no
+    PARTTYPE for a partition its probe found no filesystem on — exactly the
+    partition asked about here — so the lsblk column it was read from was
+    empty on a real disk, and an NTFS partition quick-formatted over another
+    was silent (F24; the fake lsblk answers that column empty)."""
+    automount.partition(2, table=[(1, "0xc"), (2, parttype)])
+    assert _nothing_named(automount).returncode == 0
     assert automount.unread.exists() is said
+    assert automount.calls("partx") == ["-g -o TYPE -n 2 /dev/sda"]
     if said:
         assert automount.unread.read_text().splitlines()[1:] == ["unknown", "", "-"]
+
+
+@pytest.mark.parametrize("number", ["", "2; reboot", "../1", "-n 1", "x"])
+def test_a_partition_number_that_is_no_number_is_never_handed_to_partx(automount, number):
+    automount.partition(number, table=[(1, BASIC_DATA), (2, BASIC_DATA)])
+    assert _nothing_named(automount).returncode == 0
+    assert automount.calls("partx") == [] and not (automount.base / ".unread").exists()
 
 
 def test_a_disks_only_volume_is_said_whatever_its_partition_type(automount):
     """A blank stick with its one partition, and an unpartitioned one: the
     person plugged a disk in and is owed why it shows nothing."""
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\n")
-    assert _nothing_named(automount, probe=2, parttype=MSR).returncode == 0
+    automount.partition(1, siblings=("sda1",), table=[(1, MSR)])
+    assert _nothing_named(automount).returncode == 0
     assert automount.unread.read_text().splitlines()[1] == "unknown"
+    assert automount.calls("partx") == []                                          # no type to ask
     automount.plug("unmount")
     (automount.stub / "pkname").write_text("")                                    # a whole disk, no table
     (automount.stub / "siblings").unlink()
-    assert _nothing_named(automount, probe=2).returncode == 0
+    assert _nothing_named(automount).returncode == 0
     assert automount.unread.read_text().splitlines()[1] == "unknown"
 
 
 def test_the_marks_of_two_filesystems_are_said_wherever_they_are_met(automount):
-    (automount.stub / "pkname").write_text("sda\n")
-    (automount.stub / "siblings").write_text("sda1\nsda2\n")
-    assert _nothing_named(automount, probe=8, parttype=MSR).returncode == 0
+    automount.partition(1, table=[(1, MSR), (2, BASIC_DATA)])
+    assert _nothing_named(automount, TWO_MARKS).returncode == 0
     assert automount.unread.read_text().splitlines()[1] == "ambivalent"
 
 
@@ -1883,37 +2079,34 @@ def _image(tmp_path, first, second):
     return image, superblock
 
 
-@pytest.mark.parametrize("second", [["mkntfs", "-Q", "-F", "-L", "16Gb"], ["mkfs.vfat", "-F", "32", "-n", "STICK"]],
+@pytest.mark.parametrize("over, second", [("ntfs", ["mkntfs", "-Q", "-F", "-L", "16Gb"]),
+                                          ("vfat", ["mkfs.vfat", "-F", "32", "-n", "STICK"])],
                          ids=["ntfs over ext2", "fat over ext2"])
-def test_the_real_blkid_tells_two_signatures_from_none(automount, tmp_path, second):
-    """The script's branch rests on what the system's own blkid answers: run
+def test_the_real_wipefs_tells_two_signatures_from_none(automount, tmp_path, over, second):
+    """The script's branch rests on what the system's own wipefs lists: run
     here on a real two-signature image and on a blank one, through the
-    script (the stub hands `blkid -p` to the real one over the image)."""
+    script (the stub hands the question to the real wipefs over the image)."""
     tools = {name: shutil.which(name, path=os.environ["PATH"] + ":/usr/sbin:/sbin")
-             for name in ("blkid", "mkfs.ext2", second[0])}
+             for name in ("blkid", "wipefs", "mkfs.ext2", second[0])}
     if not all(tools.values()) or not BOOT_ID.exists():
         pytest.skip("no " + ", ".join(name for name, path in tools.items() if not path) + " on this system")
     image, superblock = _image(tmp_path, tools["mkfs.ext2"], [tools[second[0]]] + second[1:])
-    blkid = tools["blkid"]
-
-    def probe():
-        return subprocess.run([blkid, "-p", str(image)], capture_output=True, text=True)
-    assert probe().returncode == 0                                 # one format: named
     with open(image, "r+b") as f:
         f.seek(1024)
         f.write(superblock)
-    answered = probe()
-    assert answered.returncode == 8 and "ambivalent result" in answered.stderr
-    plain = subprocess.run([blkid, "-c", "/dev/null", "-o", "value", "-s", "TYPE", str(image)], capture_output=True)
+    listed = subprocess.run([tools["wipefs"], "--no-act", "--noheadings", "--parsable", "--output", "TYPE",
+                             str(image)], capture_output=True, text=True, check=True).stdout.split()
+    assert {"ext2", over} <= set(listed)                           # each at one offset or several
+    plain = subprocess.run([tools["blkid"], "-c", "/dev/null", "-o", "value", "-s", "TYPE", str(image)],
+                           capture_output=True)
     assert plain.returncode == 2 and plain.stdout == b""           # what the script's first question gets
-    (automount.stub / "real-blkid").write_text(blkid)
+    (automount.stub / "real-wipefs").write_text(tools["wipefs"])
     shutil.copy(image, automount.stub / "image")
     assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0
     assert automount.unread.read_text().splitlines()[1:] == ["ambivalent", "", "-"]
     automount.plug("unmount")
     with open(automount.stub / "image", "wb") as f:                # a blank volume
         f.truncate(64 * 1024 * 1024)
-    assert subprocess.run([blkid, "-p", str(automount.stub / "image")], capture_output=True).returncode == 2
     assert automount.plug(TYPE="", UUID="", LABEL="").returncode == 0
     assert automount.unread.read_text().splitlines()[1:] == ["unknown", "", "-"]
 
@@ -2224,6 +2417,30 @@ def _boot_mount_said(fstab, generated, systemd=257, roots=("/srv/music", "/media
     return said.getvalue()
 
 
+def _roots_said(fstab, roots):
+    """say_roots over an fstab of the test's own; nothing is mounted, and
+    the node gives no answer."""
+    import contextlib
+    import io
+    real, saved = setup.run, (setup.held_roots, setup.held_labels, setup.held_by_the_node)
+
+    def run(args, **kw):
+        if args[:2] == ["findmnt", "--fstab"]:
+            return real(args[:2] + ["-F", str(fstab)] + args[2:], **kw)
+        if args[:2] == ["systemctl", "--version"]:
+            return subprocess.CompletedProcess(args, 0, b"systemd 257 (x)\n", b"")
+        return subprocess.CompletedProcess(args, 1, b"", b"")
+    setup.run = run
+    setup.held_roots, setup.held_labels, setup.held_by_the_node = (lambda o: list(roots)), (lambda o: {}), (lambda: None)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            setup.say_roots()
+    finally:
+        setup.run = real
+        setup.held_roots, setup.held_labels, setup.held_by_the_node = saved
+    return said.getvalue().splitlines()
+
+
 @pytest.mark.skipif(shutil.which("findmnt") is None, reason="no findmnt on this system")
 def test_a_boot_mount_line_of_before_is_offered_its_replacement(tmp_path):
     """PI-NODE-2B's line acts at a start of the machine only. The setup that
@@ -2294,6 +2511,7 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
     roots = [str(there), str(empty), str(mounted), str(gone), setup.AUTOMOUNT_BASE]
     table = f"/ ext4 rw\n{mounted} exfat ro,nosuid\n{tmp_path}/plugged/4A21-0000 vfat ro\n"
     lines = setup.root_lines(roots, table, {str(mounted): "Elements <b>", str(gone): "Old"})
+    # each mount under the root it lies under (PI-NODE-2E H6)
     assert lines == [
         f"Music root {there}: there",
         f"Music root {empty}: empty — its disk is not mounted, or the folder was removed. Its albums show as away. "
@@ -2301,10 +2519,11 @@ def test_a_root_is_there_or_empty_or_gone_and_says_how_to_forget_it(tmp_path, mo
         # a root that is a mount point holds what was mounted there when the node started (§2.5)
         f"Music root {mounted}: a disk mounted at the root itself — Sautium sees it only as it was when Sautium "
         "started",
+        f"  mounted: {mounted} exfat ro,nosuid",
         f"Music root {gone}: gone — its disk is not mounted, or the folder was removed. Its albums show as away. "
         f"To forget it: ./sautium roots --forget {gone}",
         f"Music root {tmp_path}/plugged: plugged disks — the automount is not installed (./sautium shows how)",
-        f"  mounted: {mounted} exfat ro,nosuid", f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
+        f"  mounted: {tmp_path}/plugged/4A21-0000 vfat ro"]
     (tmp_path / "plugged").mkdir()                   # installed, no disk plugged in: not a library gone
     assert f"Music root {tmp_path}/plugged: there  (plugged disks)" in setup.root_lines(roots, "", {})
     # An empty root the node never read a copy under is a new folder, not a library that is away
@@ -2367,8 +2586,8 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     assert said.count("Paste into a terminal that may use sudo:") == 1                 # one block
     assert ("The line of /etc/fstab that mounts the music disk at /mnt/sautium-4A21-0000 gives Sautium the\n"
             "mount point itself: a disk pulled or put back while Sautium runs is not seen. This moves it to\n"
-            "/media/sautium/4A21-0000, where Sautium sees it come and go. Its albums will show as away\n"
-            "once and be found again at the new place; nothing is analysed again.\n") in said
+            "/media/sautium/4A21-0000, where Sautium sees it come and go. Sautium finds its albums at the new\n"
+            "place by itself; nothing is read or analysed again.\n") in said
     pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
     undo = pasted.index("P=/media/sautium/4A21-0000")
     assert [line for line in pasted[:undo] if not line.startswith("L=")] == [
@@ -2379,22 +2598,45 @@ def test_an_install_whose_line_mounts_its_disk_at_the_root_itself_is_named_and_m
     pieces = [line for line in pasted[:undo] if line.startswith("L=")]
     built = subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True, text=True).stdout
     assert built == LINE_4A21 and max(len(line) for line in pasted) <= 76
-    assert ("Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n"
-            'and choose "Elements" as the music folder in Sautium (More › Library).\n') in said
+    # the chosen folder moves with its files at the node's next start (PI-NODE-2E §2): nothing to choose
+    assert "Then run:  ./sautium roots --forget /mnt/sautium-4A21-0000\n\n" in said
+    assert "as the music folder" not in said
     # a line of before the plug option gains it at its move; an older systemd keeps the line it has
     fstab.write_text(at_boot + "\n")
     said = _boot_mount_said(fstab, generated, roots=roots)
     pieces = [line[4:] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\''))]
     assert subprocess.run(["sh", "-c", "\n".join(pieces) + '\nprintf %s "$L"'], capture_output=True,
                           text=True).stdout == LINE_4A21
-    assert "T=" not in said and "and choose the disk as the music folder" in said     # no label known: none written
+    assert "T=" not in said and "as the music folder" not in said     # no label known: none written
     said = _boot_mount_said(fstab, generated, systemd=241, roots=roots)
     assert "── The music disk, mounted when the machine starts (optional) ──" in said
     assert " /media/sautium/4A21-0000 exfat " in "".join(
         line[4:].split("'")[1] for line in said.splitlines() if line.startswith(("    L='", '    L="$L"\'')))
     assert "device-timeout=10s" in said.replace("'\n    L=\"$L\"'", "")
-    # the root forgotten, its line left in fstab: nothing printed here (`roots --forget` printed its undo)
-    assert _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"]) == ""
+    # the root forgotten, its line left in fstab: its disk never appears in Sautium. Said, with the move
+    # block and no forget after it — the root is gone already, and the node takes the files along (H10)
+    said = _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"])
+    assert ("A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not\n"
+            "look: it never appears in Sautium. The block below mounts it where Sautium sees it.\n"
+            "Sautium finds its albums at the new place when it starts again; nothing is read or analysed again.\n"
+            ) in said
+    assert said.count("Paste into a terminal that may use sudo:") == 1 and "--forget" not in said
+    pasted = [line[4:] for line in said.splitlines() if line.startswith("    ")]
+    assert pasted[:2] == ["P=/mnt/sautium-4A21-0000", 'sudo umount "$P"'] and "U=4A21-0000" in pasted
+    # … and `status` and `roots` say it, where the setup has the step
+    assert _roots_said(fstab, ["/srv/music", "/media/sautium"])[-1] == (
+        "A line of /etc/fstab mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000, where Sautium does not look: "
+        "it never appears in Sautium (./sautium shows the step)")
+    assert not any("A line of /etc/fstab" in line for line in _roots_said(fstab, roots))      # a root names it
+    # … and where the disk's line at the new point is in already, the old line alone is taken out:
+    # no second line for the disk (review round 1, L2)
+    fstab.write_text(at_boot + "\n" + LINE_4A21 + "\n")
+    said = _boot_mount_said(fstab, generated, roots=["/srv/music", "/media/sautium"])
+    assert ("A line of /etc/fstab still mounts the disk 4A21-0000 at /mnt/sautium-4A21-0000 as well as at\n"
+            "/media/sautium/4A21-0000, where Sautium sees it: the block takes the old line out.") in said
+    before, undo = said.split("To undo it later:")
+    assert "tee -a /etc/fstab" not in before and max(len(line[4:]) for line in undo.splitlines()) <= 76
+    fstab.write_text(at_boot + "\n")
     # a line at that point the setup did not write is the person's own: no step — one that names the
     # disk otherwise, and one that would mount it for writing or run what is on it (the node's bind
     # does not make a mount that arrives later read-only)
@@ -2485,14 +2727,31 @@ def test_roots_lists_them_and_forgets_one_leaving_the_folder(installed, tmp_path
     # A root the setup's own fstab line mounts: that line's undo is printed, for the person
     monkeypatch.setattr(setup, "fstab_line", lambda point: {"source": "UUID=4A21-0000", "fstype": "exfat", "options": "ro"})
     monkeypatch.setattr(setup, "node_running", lambda: False)
+    # (the node re-points where its disks' folder holds the labels' folder: the automount's or the line's)
+    monkeypatch.setattr(setup, "disks_folder_ready", lambda: True)
     assert setup.main(["roots", "--forget", "/mnt/sautium-4A21-0000"]) == 0
     said = capsys.readouterr().out
     assert "    P=/mnt/sautium-4A21-0000" in said and '    sudo sed -i "\\|^UUID=[^ ]* $P |d" /etc/fstab' in said
     assert "from its next start" in said and started == ["start"]          # a stopped node is not started
+    # … and its disk's new line is in: the node finds the albums there at its start (PI-NODE-2E §2)
+    assert ("Sautium finds the albums under /mnt/sautium-4A21-0000 at /media/sautium/4A21-0000 when it starts "
+            "again; nothing is removed.") in said
+    assert "will show as away" not in said and "Choose another folder" not in said
     # … and where its disk has the line at the new point and is not mounted there (the node that held
     # the old mount point held the disk too), that is said
     assert "Its disk is not mounted at /media/sautium/4A21-0000 now: plug it in again" in said
     assert setup.held_roots(override) == [str(music), setup.AUTOMOUNT_BASE]
+    # The node's own condition, not the line's (review M2): with the automount alone — the old line
+    # undone, no new line — the node re-points as well, and the setup says so; with no disks' folder
+    # it does not, and the albums are away
+    for ready, words in ((True, "Sautium finds the albums under /mnt/sautium-5B32-0000 at "
+                                "/media/sautium/5B32-0000 when it starts again"),
+                         (False, "Albums under /mnt/sautium-5B32-0000 will show as away")):
+        override.write_text(setup.roots_override(["/mnt/sautium-5B32-0000", setup.AUTOMOUNT_BASE]))
+        monkeypatch.setattr(setup, "fstab_line", lambda point: None)
+        monkeypatch.setattr(setup, "disks_folder_ready", lambda: ready)
+        assert setup.main(["roots", "--forget", "/mnt/sautium-5B32-0000"]) == 0
+        assert words in capsys.readouterr().out
     # The empty folder Docker made where a root's folder was is root's: its rmdir is the person's
     made = tmp_path / "Made"
     made.mkdir()

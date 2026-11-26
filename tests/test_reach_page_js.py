@@ -100,7 +100,33 @@ def test_an_album_partly_out_reads_each_row_by_its_own_file_and_keeps_play():
     assert streams["rows"] == ["stream", "file"] and streams["out"]["noPlay"] is False
 
 
-ROWS = WORDS + "\n" + _block("function albumOutRow(t, rowKind, albumId, lines) {") + r"""
+LINE = "\n".join([
+    _block("const STREAM_REASONS = {", "\n  };\n"),
+    _block("function streamReason(code) {"),
+    _block("function streamLine(st) {"),
+    WORDS,
+])
+
+
+def test_a_queue_row_of_his_copy_that_is_not_here_says_the_album_pages_words():
+    """H1: a queued slot of his own copy that nothing here can play says what
+    the album page says of it — never words of a stream; a not-owned slot
+    where nothing streams says streaming's own; a fill's gap with no `why`
+    keeps its line."""
+    lines = _node(LINE + """
+console.log(JSON.stringify([
+  { state: 'failed', reason: 'not_here', why: 'away' },
+  { state: 'failed', reason: 'not_here', why: 'disk' },
+  { state: 'failed', reason: 'not_here' },
+  { state: 'failed', reason: 'off' },
+  { state: 'waiting' },
+].map(streamLine)));
+""")
+    assert lines == ["Your copy is away", "On a disk that is not connected", "Its file is not here now",
+                     "Doesn't stream here — streaming is off on this node", "Waiting"]
+
+
+ROWS = WORDS + "\n" + _block("function albumOutRow(t, rowKind, albumId, lines, attrs = '') {") + r"""
 const escapeHtml = s => String(s).replace(/</g, '&lt;').replace(/"/g, '&quot;');
 const fmtDuration = s => `${s}s`;
 const SVG_PLUS = '+';
@@ -113,7 +139,7 @@ console.log(JSON.stringify(d.tracks.map(t => {
   const open = html.slice(0, html.indexOf('>') + 1);
   return { open, tap: /data-(track|media-file)-id=/.test(open), lines: html.includes('<i>lines</i>'),
            title: (html.match(/track-title-line">([^<]*)</) || [])[1],
-           dur: (html.match(/track-dur-num">([^<]*)</) || html.match(/track-dur">([^<]*)</) || [])[1],
+           dur: (html.match(/track-dur-num">([^<]*)</) || html.match(/track-dur"[^>]*>([^<]*)</) || [])[1],
            add: html.includes('aria-label="Add to queue"'),
            state: html.includes('class="track-buffering"') }; })));
 """
@@ -144,6 +170,83 @@ def test_the_album_screen_draws_a_row_that_streams_as_a_not_owned_tracks_and_one
     assert waits[0] == {"open": '<div class="track-row is-out-track">', "tap": False, "lines": True,
                         "title": "One &quot;quoted&quot;", "dur": "200s", "add": False, "state": False}
     assert _rows({**payload, "away_part": None, "tracks": [{**track, "here": True}]}) == [None]
+
+
+VARIANTS = WORDS + "\n" + _block("function variantLabel(v) {") + r"""
+console.log(JSON.stringify(VARIANTS.map(variantLabel)));
+"""
+
+
+def test_the_variant_picker_names_a_copy_that_is_away_or_not_connected():
+    """PI-NODE-2E H2: two copies a move left with the same specs and the
+    same folder names read apart by their state, in the album page's
+    words; a copy that is here reads as before."""
+    rip = {"variant_id": 1, "sample_rate": 44100, "bit_depth": 16, "file_format": "FLAC",
+           "location": "local", "directory_path": "/music/Mamanet/Frisson"}
+    said = _node(VARIANTS.replace("VARIANTS.map", json.dumps([
+        {**rip, "away": False, "here": True},
+        {**rip, "away": True, "here": False},
+        {**rip, "away": False, "here": False},
+        rip,                                                   # a payload of before the fields
+        {**rip, "location": "hqplayer", "hqp_label": "Box", "away": False, "here": True},
+    ]) + ".map"))
+    base = "44.1 kHz · 16-bit · FLAC · Mamanet/Frisson"
+    assert said == [base, f"{base} · away", f"{base} · not connected", base, f"{base} · at Box"]
+
+
+SESSION_ROWS = r"""
+const escapeHtml = s => String(s).replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const fmtDuration = s => `${s}s`;
+const SVG_PLUS = '+';
+const d = %(payload)s;
+const out = sessionOut(d);
+console.log(JSON.stringify(d.tracks.map((t, i) => {
+  const html = sessionTrackRow(t, i + 1, out, '<i>lines</i>').replace(/\s+/g, ' ').trim();
+  return { open: html.slice(0, html.indexOf('>') + 1), lines: html.includes('<i>lines</i>'),
+           rank: (html.match(/track-rank">([^<]*)</) || [])[1],
+           dur: (html.match(/track-dur-num">([^<]*)</) || html.match(/track-dur"[^>]*>([^<]*)</) || [])[1],
+           add: html.includes('aria-label="Add to queue"') }; })));
+"""
+
+
+def _session_rows(payload: dict) -> list:
+    fns = "\n".join([WORDS] + [_block(head) for head in (
+        "function albumOutRow(t, rowKind, albumId, lines, attrs = '') {", "function sessionOut(d) {",
+        "function sessionTrackRow(t, n, out, lines) {")])
+    return _node(fns + SESSION_ROWS.replace("%(payload)s", json.dumps(payload)))
+
+
+def test_a_sessions_rows_draw_his_track_with_no_file_here_as_the_album_page_does():
+    """PI-NODE-2E H5: in a Listening history session his own track with no
+    file here now is the album page's out row — dimmed, no tap, no [+]
+    where nothing streams; by track uuid under the slot's album where the
+    node streams — and every other row is drawn as before."""
+    owned = {"position": 1, "track_id": "t-1", "media_file_id": 7, "album_id": "al-1", "title": "One",
+             "duration_seconds": 200, "is_phantom": False}
+    phantom = {"position": 3, "track_id": "t-9", "media_file_id": None, "album_id": "al-2", "title": "Nine",
+               "duration_seconds": 180, "is_phantom": True, "here": None, "why": None}
+    here = {**owned, "here": True, "why": None}
+    out = {**owned, "position": 2, "here": False, "why": "disk"}
+    waits = _session_rows({"streams": False, "tracks": [here, out, phantom]})
+    assert waits == [
+        {"open": '<button class="track-row" data-media-file-id="7" data-position="1" type="button">',
+         "lines": True, "rank": "1", "dur": "200s", "add": True},
+        # every row carries its slot, an out row too: a tap chooses where Play starts (PLAYBACK-UI-1 B-158)
+        {"open": '<div class="track-row is-out-track" data-position="2">', "lines": True, "rank": "2",
+         "dur": "200s", "add": False},
+        {"open": '<button class="track-row is-phantom-track" data-track-id="t-9" data-album-id="al-2" '
+                 'data-position="3" type="button">', "lines": True, "rank": "3", "dur": "180s", "add": True},
+    ]
+    streams = _session_rows({"streams": True, "tracks": [here, out]})
+    assert streams[0] == waits[0]
+    assert streams[1] == {
+        "open": '<div class="track-row is-phantom-track" data-track-id="t-1" data-album-id="al-1" data-position="2">',
+        "lines": True, "rank": "2", "dur": "200s", "add": True}
+    # every row here, or a payload of before the fields: the session as it was
+    assert _session_rows({"tracks": [{**owned}, phantom]})[0] == waits[0]
+    assert _session_rows({"streams": True, "tracks": [here]}) == [waits[0]]
+    # the screen draws its rows by the function
+    assert "trackParts.push(sessionTrackRow(t, n, out," in SOURCE
 
 
 TOAST = WORDS + "\n" + _block("async function reportPlaybackResult(resp, body, word) {") + r"""
@@ -194,6 +297,7 @@ PATH_ROW = "\n".join([
     _block("function paintMusicPathRow(row, missing) {"),
     "let _nodeStreams = null;",
     "let _nodeStreamsAsked = false;",
+    "let _prunePlanHeld = null;",
     _block("function paintMusicFolder(missing) {"),
 ])
 
@@ -202,13 +306,15 @@ const classes = new Set();
 const sub = { textContent: '', hidden: true };
 const row = { classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) },
               dataset: { musicFolder: 'setup' }, querySelector: () => sub };
-const buttons = [{ disabled: false }, { disabled: false }];
+const buttons = [{ disabled: false }, { disabled: false }, { disabled: false }];
 let notice = null, asked = 0, answer;
 const notices = { get: () => notice };
 const document = { querySelectorAll: sel => {
-    if (sel !== '[data-action="scan"], [data-action="scan-prune"]') throw new Error(sel);
+    if (sel !== '[data-action="scan"], [data-action="scan-prune"], [data-action="remove-away"]') throw new Error(sel);
     return buttons; },
-  querySelector: sel => { if (sel !== '[data-music-path-row]') throw new Error(sel); return row; } };
+  querySelector: sel => {
+    if (sel === '[data-away-why]') return null;          // the Away row is not on this screen's stub
+    if (sel !== '[data-music-path-row]') throw new Error(sel); return row; } };
 const fetch = url => { asked += 1; if (url !== '/api/player/reach') throw new Error(url);
   return Promise.resolve({ ok: true, json: () => Promise.resolve(answer) }); };
 const seen = () => ({ line: sub.textContent, disabled: buttons.map(b => b.disabled),
@@ -234,15 +340,15 @@ STREAMS = ("Not connected — your own tracks stream or wait, and nothing can be
 
 @pytest.mark.parametrize("streams, said", [(True, STREAMS), (False, WAITS)])
 def test_the_scan_buttons_wait_for_the_folder_under_the_rows_sentence(streams, said):
-    """F13: "Scan for new" and "Rescan" are disabled while the notice
-    stands, and back with its end; the row says whether the albums stream
-    meanwhile, asked once."""
+    """F13: "Scan for new", "Rescan" and the Away row's Remove (2E F23) are
+    disabled while the notice stands, and back with its end; the row says
+    whether the albums stream meanwhile, asked once."""
     steps = _node(PATH_ROW_DRIVER % {"streams": json.dumps(streams)})
-    assert steps[0] == {"line": "setup", "disabled": [False, False], "error": False, "asked": 0}
-    assert steps[1] == {"line": WAITS, "disabled": [True, True], "error": True, "asked": 1}
-    assert steps[2] == {"line": said, "disabled": [True, True], "error": True, "asked": 1}
+    assert steps[0] == {"line": "setup", "disabled": [False] * 3, "error": False, "asked": 0}
+    assert steps[1] == {"line": WAITS, "disabled": [True] * 3, "error": True, "asked": 1}
+    assert steps[2] == {"line": said, "disabled": [True] * 3, "error": True, "asked": 1}
     assert steps[3] == steps[2]
-    assert steps[4] == {"line": "setup", "disabled": [False, False], "error": False, "asked": 1}
+    assert steps[4] == {"line": "setup", "disabled": [False] * 3, "error": False, "asked": 1}
     # the three places that paint the row paint the buttons with it
     assert SOURCE.count("paintMusicFolder(!!notices.get('library.mount_missing'));") == 3
 

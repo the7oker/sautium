@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from config import settings
-from db_pool import db_execute, db_query_one
+from db_pool import db_execute, db_query, db_query_one
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,12 @@ _FORMATS = {"vfat": ("FAT", True), "exfat": ("exFAT", True), "ntfs": ("NTFS", Tr
             "btrfs": ("Btrfs", False), "xfs": ("XFS", False), "ext2": ("ext2/3", False),
             "ext3": ("ext2/3", False)}
 _NO_ONE_FILESYSTEM = frozenset({"ambivalent", "unknown"})
+# Where the setup's line of /etc/fstab mounted a music disk until 2026-11-24:
+# a point of its own, which was the root (scripts/setup.py's
+# OLD_BOOT_MOUNT_POINT); since then the disks' folder's point for it,
+# `<disks' folder>/<UUID>`. Both name the filesystem's UUID, written by root's
+# own lines — the proof that the two are one disk, never a label or a name.
+OLD_BOOT_MOUNT_POINT = re.compile(r"/mnt/sautium-([0-9A-Za-z-]{4,40})")
 
 
 class Refused(ValueError):
@@ -123,11 +129,15 @@ def chosen() -> Optional[str]:
 
 def apply() -> None:
     """At the node's start, after the migrations: the stored choice becomes
-    the library's folder. A choice whose root is no longer mounted (the setup
-    ran again with other folders) is no folder: the Library row says "Not
-    chosen" again, and nothing stored is touched."""
+    the library's folder. A disk the setup's old line mounted at a root of its
+    own, now mounted in the disks' folder, takes its files, copies, covers and
+    the choice along first (_follow_moved_disks), so its folder stays chosen.
+    Any other choice whose root is no longer mounted (the setup ran again with
+    other folders) is no folder: the Library row says "Not chosen" again, and
+    nothing stored is touched."""
     if not picks():
         return
+    _follow_moved_disks()
     path = chosen()
     if path is not None and within(path) is None:
         logger.warning("the chosen music folder %s lies under no root this node is given now", path)
@@ -147,6 +157,100 @@ def apply() -> None:
                            root, shlex.quote(root))
         else:
             logger.info("music root %s is empty: nothing is in it yet", root)
+
+
+# The move of a disk from its old point to its new one, in one statement. A
+# copy moves whole with its files, or stays as it was where a row holds its
+# new place already (a scan read the disk there first): away, for the owner's
+# Away row (PI-NODE-2E Q5). The stat columns stay, so the start's scan finds
+# each file unchanged at its new path; no id changes, so tracks, analysis,
+# listens and the queue are untouched. A choice at the new place already is
+# the same place: one row, the newer choice.
+_MOVE_SQL = """
+    WITH moves AS (
+        SELECT old, uuid, %(disks)s::text || '/' || uuid AS new
+          FROM unnest(%(olds)s::text[], %(uuids)s::text[]) AS m(old, uuid)),
+    old_variants AS (
+        SELECT v.id, v.album_id, m.new || substr(v.directory_path, length(m.old) + 1) AS path
+          FROM album_variants v JOIN moves m
+            ON v.directory_path = m.old OR starts_with(v.directory_path, m.old || '/')
+         WHERE v.location = 'local'),
+    old_files AS (
+        SELECT f.id, f.album_variant_id, f.cue_start_seconds, m.old,
+               m.new || substr(f.file_path, length(m.old) + 1) AS path
+          FROM media_files f JOIN moves m ON starts_with(f.file_path, m.old || '/')),
+    taken AS (
+        SELECT f.id, f.album_variant_id FROM old_files f
+         WHERE EXISTS (SELECT 1 FROM media_files o
+                        WHERE o.file_path = f.path AND o.cue_start_seconds IS NOT DISTINCT FROM f.cue_start_seconds)),
+    stays AS (
+        SELECT v.id FROM old_variants v
+         WHERE EXISTS (SELECT 1 FROM album_variants o
+                        WHERE o.directory_path = v.path AND o.album_id = v.album_id AND o.hqp_endpoint_id IS NULL)
+            OR EXISTS (SELECT 1 FROM taken t WHERE t.album_variant_id = v.id)),
+    files AS (
+        UPDATE media_files mf SET file_path = f.path
+          FROM old_files f
+         WHERE mf.id = f.id
+           AND f.id NOT IN (SELECT id FROM taken)
+           AND f.album_variant_id NOT IN (SELECT id FROM stays)
+        RETURNING f.old),
+    variants AS (
+        UPDATE album_variants av SET directory_path = v.path
+          FROM old_variants v
+         WHERE av.id = v.id AND v.id NOT IN (SELECT id FROM stays)),
+    -- a file's own path, or an embedded picture's `<suffix>:<path>#<index>`
+    pictures AS (
+        UPDATE covers c
+           SET source_path = CASE WHEN starts_with(c.source_path, m.old || '/')
+                                  THEN m.new || substr(c.source_path, length(m.old) + 1)
+                                  ELSE split_part(c.source_path, ':', 1) || ':' || m.new
+                                       || substr(c.source_path, length(split_part(c.source_path, ':', 1))
+                                                                + length(m.old) + 2) END
+          FROM moves m
+         WHERE starts_with(c.source_path, m.old || '/')
+            OR (c.source_type = 'embedded'
+                AND starts_with(c.source_path, split_part(c.source_path, ':', 1) || ':' || m.old || '/'))),
+    places AS (
+        SELECT r.id, r.chosen_at, s.subpath,
+               EXISTS (SELECT 1 FROM library_roots o WHERE o.mount = %(disks)s AND o.subpath = s.subpath) AS there
+          FROM library_roots r JOIN moves m ON r.mount = m.old
+         CROSS JOIN LATERAL (SELECT m.uuid || CASE WHEN r.subpath = '' THEN '' ELSE '/' || r.subpath END
+                                    AS subpath) s),
+    places_moved AS (
+        UPDATE library_roots r SET mount = %(disks)s, subpath = p.subpath
+          FROM places p WHERE r.id = p.id AND NOT p.there),
+    places_kept AS (
+        UPDATE library_roots o SET chosen_at = GREATEST(o.chosen_at, p.chosen_at)
+          FROM places p WHERE p.there AND o.mount = %(disks)s AND o.subpath = p.subpath),
+    places_dropped AS (
+        DELETE FROM library_roots r USING places p WHERE r.id = p.id AND p.there)
+    SELECT m.old, m.new, count(f.old) AS files
+      FROM moves m LEFT JOIN files f ON f.old = m.old
+     GROUP BY m.old, m.new
+"""
+
+
+def _follow_moved_disks() -> None:
+    """A choice stored under an old-shape point that is no root now, while a
+    root is the folder disks are mounted in: the disk is mounted there, at
+    its UUID (the move block of PI-NODE-2D, then `roots --forget`), and every
+    path stored under the old point is rewritten to the new one. Nothing is
+    read from the disk, so a disk that is out moves too — its copy is then
+    "not connected", which is true. A second start finds no choice under the
+    old point: nothing to do."""
+    disks = next((root for root in roots() if _disks_folder(root)), None)
+    if disks is None:
+        return
+    given = roots()
+    moves = {row["mount"]: match.group(1)
+             for row in db_query("SELECT DISTINCT mount FROM library_roots")
+             for match in [OLD_BOOT_MOUNT_POINT.fullmatch(row["mount"])]
+             if match and row["mount"] not in given}
+    if not moves:
+        return
+    for row in db_query(_MOVE_SQL, {"olds": list(moves), "uuids": list(moves.values()), "disks": disks}):
+        logger.info("music folder moved with its disk: %d files from %s to %s", row["files"], row["old"], row["new"])
 
 
 def choose(path: str) -> str:

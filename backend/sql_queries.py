@@ -70,6 +70,17 @@ def here(mf: str = "mf", av: str = "av") -> str:
 HERE = here()
 
 
+def not_here_why(f: str) -> str:
+    """SQL expression: why the copy `f` (a row carrying `here` and
+    `absent_since`) does not open here now — NULL where it does, 'away'
+    where a Rescan set it aside, else 'disk' (its folder does not answer).
+    Ranked with the copies that are here first and the away ones last, the
+    first row's is the track's: what an album page's row and a play's
+    refusal say."""
+    return (f"CASE WHEN {f}.here THEN NULL WHEN {f}.absent_since IS NOT NULL THEN 'away' "
+            f"ELSE 'disk' END")
+
+
 def album_away(album: str, variant: str = "NULL") -> str:
     """SQL expression: why no file of the album `album` (an albums.id
     expression) opens here now — 'disk' where a copy of it lies under a
@@ -177,21 +188,26 @@ QUALITY_GATE = (
     "= ANY(CAST(:quality_above AS text[]))))")
 
 
-# One track's files (%(tid)s) from both places files live — the per-track
-# form of ALBUM_FILES below, for a play/queue by track uuid.
-TRACK_FILES = f"""
+# One track's files from both places files live — the per-track form of
+# ALBUM_FILES below. `track`: a tracks.id expression; TRACK_FILES names it
+# by the param %(tid)s, for a play/queue by track uuid.
+def track_files(track: str) -> str:
+    return f"""
     SELECT mf.id, av.location, av.hqp_endpoint_id, av.absent_since, {HERE} AS here,
            mf.is_lossless, mf.sample_rate, mf.bit_depth
     FROM media_files mf
     JOIN album_variants av ON av.id = mf.album_variant_id
-    WHERE mf.track_id = %(tid)s::uuid
+    WHERE mf.track_id = {track}
     UNION ALL
     SELECT hf.id, av.location, av.hqp_endpoint_id, av.absent_since, true,
            hf.is_lossless, hf.sample_rate, hf.bit_depth
     FROM hqp_library_files hf
     JOIN album_variants av ON av.id = hf.album_variant_id
-    WHERE hf.track_id = %(tid)s::uuid
+    WHERE hf.track_id = {track}
 """
+
+
+TRACK_FILES = track_files("%(tid)s::uuid")
 
 # Every file of one album (%(id)s) from both places files live — a row per
 # media_files / hqp_library_files entry with the variant's location and

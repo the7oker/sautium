@@ -858,6 +858,9 @@ async def _library_state() -> Dict[str, Any]:
         "cancel_requested":  bool(_scan_state.get("cancel_requested")),
         "progress":          _scan_state.get("progress"),
         "stats":             _scan_state.get("stats"),
+        # the last run's outcome: a removal refused when it looked
+        # (result.prune.refused) is said by the page that said yes
+        "result":            _scan_state.get("result"),
         "prune_plan":        (_prune_plan_counts(_scan_state["prune_plan"])
                               if _scan_state.get("prune_plan") else None),
     }
@@ -878,10 +881,18 @@ async def _library_state() -> Dict[str, Any]:
     # wakes them.
     check_folder()
     # Copies a Rescan found none of the files of: kept, and removed only from
-    # the row these numbers make (the partial index holds only them).
+    # the row these numbers make (the partial index holds only them). Of
+    # their albums, those that are away — no copy holding a file is not
+    # (sql_queries.album_away's rule): what a removal would take with them.
     away = db_query_one("""
-        SELECT count(*) AS copies, count(DISTINCT album_id) AS albums
-        FROM album_variants WHERE absent_since IS NOT NULL""")
+        SELECT count(*) AS copies,
+               count(DISTINCT av.album_id) FILTER (WHERE NOT EXISTS (
+                   SELECT 1 FROM album_variants o
+                    WHERE o.album_id = av.album_id AND o.absent_since IS NULL
+                      AND (EXISTS (SELECT 1 FROM media_files m WHERE m.album_variant_id = o.id)
+                           OR EXISTS (SELECT 1 FROM hqp_library_files h
+                                       WHERE h.album_variant_id = o.id)))) AS albums
+        FROM album_variants av WHERE av.absent_since IS NOT NULL""")
 
     import library_root
     from claude_code import is_launcher_mode
@@ -2640,6 +2651,9 @@ def _hardware_state() -> Dict[str, Any]:
     # A node a restart policy holds (the image) can be restarted from here
     from claude_code_runner import IN_DOCKER
     state["restartable"] = IN_DOCKER
+    # Whether an offline database is here: More's list and the pointers to
+    # it offer a Nano node the screen only then
+    state["dumps_held"] = _dumps_held(mb_job.section(), lb_job.section())
     return state
 
 
@@ -3229,7 +3243,16 @@ def get_databases() -> Dict[str, Any]:
     screen wakes on every load-progress tick. A new dump family is a key
     here and an entry in the UI's DUMP_FAMILIES."""
     # `nano`: the screen says why the dumps are not offered there
-    return {"musicbrainz": mb_job.section(), "listenbrainz": lb_job.section(), "nano": _nano()}
+    mb, lb = mb_job.section(), lb_job.section()
+    return {"musicbrainz": mb, "listenbrainz": lb, "nano": _nano(), "dumps_held": _dumps_held(mb, lb)}
+
+
+def _dumps_held(*sections: Dict[str, Any]) -> bool:
+    """A dump family loaded, or its load on the way (a running job's
+    progress is the screen's to show): what a Nano node is offered the
+    Offline databases screen for — a restore, an owner who loaded one
+    before. `sections`: DumpJob.section() of each family."""
+    return any(s["loaded"] or s["update"]["running"] for s in sections)
 
 
 # ============================================================

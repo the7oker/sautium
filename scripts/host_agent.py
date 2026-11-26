@@ -145,6 +145,11 @@ KEPT_NAME = re.compile(r"backend-\d{8}-\d{6}-(?:update|undo|setup)\.log")
 # as one that held a code (PI-NODE-2C F5: the setup's kept log, checked so).
 SETUP_CODE = re.compile(r"[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){1}")
 SCRUBBED = "[setup code removed]"
+# What the scrub takes: a code standing alone, of two groups or — before
+# 2026-11-19 — three. Never a run of an invite code (a name, `#`, three groups
+# of upper-case hex): its groups are of the code's alphabet whenever they hold
+# no 0 or 1, and the form unbounded took two of them (PI-NODE-2E H8).
+STANDING_SETUP_CODE = re.compile(r"(?<![A-Za-z0-9#-])[A-HJ-NP-Z2-9]{4}(?:-[A-HJ-NP-Z2-9]{4}){1,2}(?![A-Za-z0-9-])")
 
 UNIT = "sautium-host-agent"
 STARTER_NAME = "sautium-host-agent"
@@ -981,7 +986,7 @@ def resume(state: dict, now: float, root: Path = None) -> Optional[Tuple[str, st
 
 
 def _scrub(text: str) -> str:
-    return SETUP_CODE.sub(SCRUBBED, text)
+    return STANDING_SETUP_CODE.sub(SCRUBBED, text)
 
 
 def _tail_cut(text: str, limit: int) -> str:

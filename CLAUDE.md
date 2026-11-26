@@ -716,16 +716,22 @@ See:
   keeps its path whoever mounts it, and a disk added later changes no
   override. An install whose line mounts at `/mnt/sautium-<UUID>` (that point
   its root) is named by `status` and `roots` and offered the move as one
-  block; a `--music` folder that is someone's own mount point is taken as
+  block, and since 2026-11-25 (PI-NODE-2E) the node re-points its files at
+  its next start (`library_root.apply`: the stored paths, copies, covers and
+  the chosen folder under the old point move to the new one by the UUID both
+  carry, a queued slot's path with them — nothing read again; a copy whose
+  new place a scan filled already stays as it was, away); a `--music` folder that is someone's own mount point is taken as
   named and said — never its parent, which the person did not name; the
   setup's own line is offered only for a disk a person pulls (USB storage, a
   card in the slot, by `machine_tier.storage_medium`) that nobody set up a
   mount for (a line of fstab, a `.mount`/`.automount` unit, autofs). The
   automount says a volume blkid names no filesystem on, too: the type line of
-  its `.unread` file is then `ambivalent` (`blkid -p` exits 8: the marks of
-  more than one filesystem, a quick format over an older one) or `unknown`
-  (it exits 2: none found) — the latter only of a disk's only volume, or
-  beside other partitions of one whose partition type is for data (a
+  its `.unread` file is then `ambivalent` (`wipefs` lists the marks of more
+  than one filesystem, a quick format over an older one — by its list since
+  2026-11-25: `blkid -p`'s exit is 2 for both on util-linux 2.41) or
+  `unknown` (it lists none) — the latter only of a disk's only volume, or
+  beside other partitions of one whose partition type (the table's, by
+  `partx`, since 2026-11-25) is for data (a
   Windows-partitioned disk's reserved partition, a boot or recovery one, an
   eMMC's own areas, a reader's empty slot and anything under 1 MiB are
   silent). The unit ends with the medium, not the reader: a USB card reader
@@ -993,7 +999,7 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
-| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`; the automount's rule, unit and script, and the `/etc/fstab` line that mounts one music disk at the automount's own point for it, since 2026-11-24): standard library, never root, root steps printed and never run |
+| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release — never one older than the version HEAD's tree states, and none at all once the host agent is installed: then the release is the agent's, since 2026-11-25 —, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`; the automount's rule, unit and script, and the `/etc/fstab` line that mounts one music disk at the automount's own point for it, since 2026-11-24): standard library, never root, root steps printed and never run |
 | `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type — or, since 2026-11-24, `ambivalent` / `unknown` for a volume no one filesystem is found on —, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
 | `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |

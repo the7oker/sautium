@@ -2565,8 +2565,10 @@ def _still_missing(file_ids: Sequence[int], stats: Dict[str, Any]) -> List[int]:
     folders. The music folder is asked first: gone as a whole, nothing may
     go."""
     if library_unreachable():
-        logger.error("Prune aborted at the yes: the music folder is unreachable")
-        stats["unreachable"] = True
+        # the yes's route refused this already (main.scan_prune): only a
+        # folder gone since then reaches here — an expected state
+        logger.warning("Prune aborted at the yes: the music folder is unreachable")
+        stats["refused"] = unreachable_words()
         return []
     with get_db_context() as db:
         rows = db.query(MediaFile.id, MediaFile.file_path).filter(

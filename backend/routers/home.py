@@ -30,8 +30,9 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from db_pool import Listener, db_query, db_query_one, db_query_with_ef_search
+from playback import substitute
 from playback.queue import gone_prefixes
-from sql_queries import album_away
+from sql_queries import album_away, not_here_why, track_files
 
 logger = logging.getLogger(__name__)
 
@@ -811,7 +812,11 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
         ORDER BY track_count DESC, min(st.position)
     """, {"id": session_id})
 
-    session["tracks"] = db_query("""
+    # `here` / `why`: the album page's rule for each of his tracks — the
+    # track's best copy across every copy opens now, or why not (NULL both
+    # for a track he never owned); `streams` whether this node streams one
+    # that does not meanwhile, as the album payload says.
+    session["tracks"] = db_query(f"""
         SELECT st.position,
                st.media_file_id,
                st.track_id::text AS track_id,
@@ -836,6 +841,8 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
                 LIMIT 1) AS cover_url,
                NOT EXISTS (SELECT 1 FROM owned_files f
                            WHERE f.track_id = st.track_id) AS is_phantom,
+               reach.here,
+               reach.why,
                af.key,
                af.mode,
                af.bpm::float AS bpm,
@@ -844,6 +851,12 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
         JOIN tracks t ON t.id = st.track_id
         LEFT JOIN albums al ON al.id = st.album_id
         LEFT JOIN media_files mf ON mf.id = st.media_file_id
+        LEFT JOIN LATERAL (
+            SELECT f.here, {not_here_why('f')} AS why
+            FROM ({track_files('st.track_id')}) f
+            ORDER BY f.here DESC, (f.absent_since IS NOT NULL)
+            LIMIT 1
+        ) reach ON TRUE
         LEFT JOIN LATERAL (
             SELECT a.id, a.name
             FROM track_artists ta
@@ -855,7 +868,8 @@ def get_listening_session(session_id: str) -> dict[str, Any]:
         LEFT JOIN audio_features af ON af.track_id = t.id
         WHERE st.session_id = %(id)s::uuid
         ORDER BY st.position
-    """, {"id": session_id})
+    """, {"id": session_id, "gone": gone_prefixes()})
+    session["streams"] = substitute.streams()
 
     session["total_duration"] = sum(
         t["duration_seconds"] or 0 for t in session["tracks"]

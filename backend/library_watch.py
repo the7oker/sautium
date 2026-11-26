@@ -126,15 +126,21 @@ class _Inotify:
             raise OSError(ctypes.get_errno(), "inotify_init1 failed")
         self._stop_r, self._stop_w = os.pipe()
         self.paths: Dict[int, str] = {}
+        self.devs: Dict[int, int] = {}     # each watched folder's file system
         self.writing: Set[str] = set()
         self._lock = threading.Lock()
         try:
+            self.dev = os.stat(root).st_dev
             self.add_tree(root)
         except OSError:
             self.close()                # the watches placed so far go with the fd
             raise
 
     def _add(self, path: str) -> None:
+        try:
+            dev = os.stat(path).st_dev
+        except (FileNotFoundError, NotADirectoryError):
+            return                      # gone, or no longer a folder, since the listing
         wd = self._libc.inotify_add_watch(self.fd, os.fsencode(path), self.MASK)
         if wd < 0:
             err = ctypes.get_errno()
@@ -145,6 +151,7 @@ class _Inotify:
                 return                  # the walk names it unread, as it does today
             raise OSError(err, os.strerror(err), path)
         self.paths[wd] = path
+        self.devs[wd] = dev
 
     def add_tree(self, top: str) -> None:
         """A watch on `top` and every folder below it, before its walk: what
@@ -165,6 +172,7 @@ class _Inotify:
             if path == top or path.startswith(top + "/"):
                 self._libc.inotify_rm_watch(self.fd, wd)
                 self.paths.pop(wd, None)
+                self.devs.pop(wd, None)
 
     def run(self) -> None:
         while True:
@@ -194,15 +202,24 @@ class _Inotify:
         folder = self.paths.get(wd)
         if mask & self.IN_IGNORED:
             self.paths.pop(wd, None)
+            self.devs.pop(wd, None)
             return
         if folder is None:
             return
         if mask & self.IN_UNMOUNT:
-            if folder == self.root:
+            # Every watched folder of the file system unmounted hears it, the
+            # newest first: the music folder's own is the watch's loss (no
+            # folder of it is a scan to ask — the box's pull asked two, both
+            # refused, PI-NODE-2E H9); one mounted inside the library is
+            # judged whole once, from the top folder of it the watch holds
+            dev = self.devs.get(wd)
+            if dev == self.dev:
                 self.on_lost("unmounted")
-            else:                       # a mount inside the library went: judged whole
-                self._drop_under(folder)
-                self.on_dirty(folder, True)
+                return
+            top = min((p for w, p in self.paths.items() if self.devs.get(w) == dev
+                       and (folder == p or folder.startswith(p + "/"))), key=len)
+            self._drop_under(top)
+            self.on_dirty(top, True)
             return
         if mask & (self.IN_DELETE_SELF | self.IN_MOVE_SELF) and folder == self.root:
             self.on_lost("the music folder went away")

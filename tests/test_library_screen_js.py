@@ -111,12 +111,13 @@ const escapeProfileHtml = s => String(s);
 const _count = (n, one, many) => `${n || 0} ${n === 1 ? one : many}`;
 const _statCell = (label, value) => `[${label}=${value}]`;
 %(cells)s
+%(away)s
 %(numbers)s
 const made = sel => ({ textContent: 'old', innerHTML: 'old', dataset: {}, sel });
 const els = {};
 const root = { querySelector: sel => (els[sel] = els[sel] || made(sel)) };
 const lib = { total_tracks: 8187, total_artists: 58, total_albums: 223, total_genres: 13, total_size_bytes: 4096,
-              last_scan_at: 'T1', away: { albums: 200, copies: 200 } };
+              last_scan_at: 'T1', away: { albums: 180, copies: 200 } };
 _refreshLibraryNumbers(root, lib, false);
 const first = { stats: els['[data-library-stats]'].innerHTML, size: els['[data-library-size]'].textContent,
                 scan: els['[data-library-last-scan]'].textContent, at: els['[data-library-last-scan-at]'].textContent,
@@ -133,13 +134,14 @@ console.log(JSON.stringify({ first, again: els['[data-library-stats]'].innerHTML
 
 
 def test_the_numbers_are_written_where_they_stand_and_only_when_they_moved():
-    script = NUMBERS % {"cells": _function("_libraryStatCells(lib)"),
+    script = NUMBERS % {"cells": _function("_libraryStatCells(lib)"), "away": _function("_awayCount(away)"),
                         "numbers": _function("_refreshLibraryNumbers(root, lib, scanRunning)")}
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout) == {
         "first": {"stats": "[Tracks=8187][Artists=58][Albums=223][Genres=13]", "size": "4096 B",
-                  "scan": "rel:T1", "at": "abs:T1", "away": "200 albums"},
+                  "scan": "rel:T1", "at": "abs:T1",
+                  "away": "200 copies away — 180 albums have no other copy"},
         "again": "untouched", "running": "running…"}
 
 
@@ -310,3 +312,137 @@ def test_the_chosen_folders_row_says_it_can_be_pulled_while_it_is_on_a_plugged_d
     path = _disks()["path"]
     assert path == [[SAFE, False], ["", True],
                     ["Not connected — your own tracks cannot play or be scanned until it is back.", False]]
+
+
+# -- the Away row while the music folder does not answer (PI-NODE-2E F23, H3) ----------------------
+
+def _block(start: str, end: str) -> str:
+    at = SOURCE.index(start)
+    return SOURCE[at:SOURCE.index(end, at) + len(end)]
+
+
+MOUNT_MISSING = _block("  NOTICE_COPY['library.mount_missing'] = n => ({", "\n  });")
+
+FOLDER = r"""
+'use strict';
+const escapeHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+const fmtPathForDisplay = p => p;
+const NOTICE_COPY = {};
+%(copy)s
+let _nodeStreams = null, _nodeStreamsAsked = false, _prunePlanHeld = null;
+let shown = null;
+const notices = { get: k => (k === 'library.mount_missing' ? shown : null) };
+const buttons = ['scan', 'scan-prune', 'remove-away'].map(action => ({ action, disabled: false }));
+const why = { innerHTML: '', hidden: true, dataset: {} };
+const document = {
+  querySelector: sel => (sel === '[data-away-why]' ? why : null),
+  querySelectorAll: sel => buttons.filter(b => sel.includes(`[data-action="${b.action}"]`)),
+};
+%(paint)s
+const seen = () => ({ disabled: buttons.map(b => b.disabled), why: why.innerHTML, hidden: why.hidden });
+shown = { data: { path: '/media/sautium/X/<Music>' } };
+paintMusicFolder(true);
+const out = seen();
+shown = null;
+paintMusicFolder(false);
+console.log(JSON.stringify({ out, back: seen(),
+                             copy: NOTICE_COPY['library.mount_missing']({ data: { path: '/media/sautium/X/<Music>' } }).text }));
+"""
+
+
+def test_the_away_rows_remove_waits_for_the_folder_with_the_notices_sentence():
+    script = FOLDER % {"copy": MOUNT_MISSING, "paint": _function("paintMusicFolder(missing)")}
+    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert got["out"] == {"disabled": [True, True, True], "why": got["copy"], "hidden": False}
+    assert "/media/sautium/X/&lt;Music>" in got["copy"]           # the notice's own words, escaped
+    assert got["back"] == {"disabled": [False, False, False], "why": "", "hidden": True}
+
+
+def test_the_away_rows_refusal_is_a_toast_as_the_yes_is():
+    handler = _block("onAction('[data-action=\"remove-away\"]'", "\n    }));")
+    assert "notices.toast({ kind: 'error', key: 'library.prune'" in handler
+    assert "notifyDialog" not in handler
+    assert 'data-away-why hidden' in SOURCE
+
+
+ASK = r"""
+'use strict';
+const escapeProfileHtml = s => String(s);
+const _prunePlansAsked = new Set();
+let _prunePlanOpen = false, _prunePlanHeld = null;
+const _prunePlanTitle = p => 't', _prunePlanMessage = p => 'm';
+const parseHash = () => 'home', render = () => {};
+const toasts = [];
+let missing = null;
+const notices = { toast: t => toasts.push(t), get: key => (key === 'library.mount_missing' ? missing : null) };
+let confirms = 0;
+const window = { confirmDestructive: async () => { confirms += 1; return true; } };
+%(sent)s
+const atSend = [];
+let answer = { ok: true, status: 200 };
+const fetch = async url => { atSend.push([..._pruneYesSent.keys()]);
+                             return Object.assign({ json: async () => ({ detail: 'refused here' }) }, answer); };
+%(ask)s
+%(say)s
+(async () => {
+  await _askPrunePlan({ id: 'p1', kind: 'away' });
+  // the run ends refused; the snapshot is read twice (two wakes), and once by a tab that never asked
+  _sayPruneRefused({ running: false, result: { plan_id: 'p1', prune: { pruned: 0, refused: 'Not connected.' } } });
+  _sayPruneRefused({ running: false, result: { plan_id: 'p1', prune: { pruned: 0, refused: 'Not connected.' } } });
+  _sayPruneRefused({ running: false, result: { plan_id: 'p9', prune: { pruned: 0, refused: 'Not connected.' } } });
+  // a yes the node takes and runs to the end: nothing to say, nothing kept
+  await _askPrunePlan({ id: 'p2', kind: 'rescan' });
+  _sayPruneRefused({ running: false, result: { plan_id: 'p2', prune: { pruned: 3 } } });
+  // a yes refused at the route: its own toast, nothing kept for the run
+  answer = { ok: false, status: 409 };
+  await _askPrunePlan({ id: 'p3', kind: 'rescan' });
+  // the folder out: a waiting question is not asked (its yes would only be refused) — asked once it is back
+  answer = { ok: true, status: 200 };
+  missing = { key: 'library.mount_missing' };
+  const before = confirms;
+  await _askPrunePlan({ id: 'p4', kind: 'away' });
+  await _askPrunePlan({ id: 'p4', kind: 'away' });
+  const whileOut = confirms - before;
+  missing = null;
+  await _askPrunePlan(_prunePlanHeld);                      // what paintMusicFolder(false) asks at the notice's end
+  console.log(JSON.stringify({ atSend, toasts, kept: [..._pruneYesSent.keys()], whileOut,
+                               afterBack: confirms - before }));
+})();
+"""
+
+
+def test_a_removal_refused_when_it_looked_is_said_once_to_the_tab_that_said_yes():
+    start = SOURCE.index("\n  async function _askPrunePlan(plan) {\n") + 1
+    ask = SOURCE[start:SOURCE.index("\n  }\n", start) + len("\n  }")]
+    sent = _block("  const _pruneYesSent = ", ";")
+    script = ASK % {"sent": sent, "ask": ask, "say": _function("_sayPruneRefused(scan)")}
+    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+    assert got["atSend"] == [["p1"], ["p2"], ["p3"], ["p4"]]       # known before the run can end
+    assert got["toasts"] == [
+        {"kind": "error", "key": "library.prune", "title": "Albums away", "text": "Not connected."},
+        {"kind": "error", "key": "library.prune", "title": "Rescan", "text": "refused here"}]
+    assert got["kept"] == ["p4"]
+    assert got["whileOut"] == 0 and got["afterBack"] == 1          # PI-NODE-2E Q6: waits, asked when back
+
+
+AWAY = r"""
+'use strict';
+const fmtNum = n => String(n);
+const _count = (n, one, many) => `${fmtNum(n)} ${n === 1 ? one : many}`;
+%(away)s
+console.log(JSON.stringify(%(cases)s.map(_awayCount)));
+"""
+
+
+def test_the_away_count_says_the_copies_and_the_albums_no_other_copy_holds():
+    cases = [{"copies": 27, "albums": 18}, {"copies": 1, "albums": 1}, {"copies": 3, "albums": 0}]
+    script = AWAY % {"away": _function("_awayCount(away)"), "cases": json.dumps(cases)}
+    out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert json.loads(out.stdout) == ["27 copies away — 18 albums have no other copy",
+                                      "1 copy away — 1 album has no other copy",
+                                      "3 copies away — each album has another copy"]

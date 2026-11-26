@@ -690,12 +690,98 @@ def test_his_queue_whose_folder_went_where_nothing_streams_is_said_once_too(node
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
     scanner.folder_seen(True)
     assert _wait(lambda: all(it.opener().get("kind") == "unplayable" for it in items))
-    assert _wait(lambda: [(s["state"], s["reason"]) for s in mgr.slots_message()["slots"]]
-                 == [("failed", "off")] * 2)
+    assert _wait(lambda: [(s["state"], s["reason"], s.get("why")) for s in mgr.slots_message()["slots"]]
+                 == [("failed", "not_here", "disk")] * 2)
     assert _wait(lambda: mgr.latest_status.get("stream_event") is not None)
     event = mgr.latest_status["stream_event"]
-    assert (event["all"], event["reason"]) == (True, "off")
+    assert (event["all"], event["reason"]) == (True, "not_here")
     assert [it.source["kind"] for it in items] == ["file", "file"]
+
+
+def _his_ten(node) -> list:
+    """A queue of ten slots of his own files (the album five times over),
+    nothing played."""
+    from playback.queue import items_for_media_ids
+    items = [it for _ in range(5) for it in items_for_media_ids(node["files"])]
+    node["mgr"].replace_queue(items, play=False)
+    assert len(node["mgr"].queue) == 10
+    return items
+
+
+def _rows(mgr) -> list:
+    return [(s["index"], s["state"], s.get("reason"), s.get("why"))
+            for s in mgr.slots_message()["slots"]]
+
+
+def test_where_nothing_streams_every_slot_of_his_away_copy_says_so_at_once(node, caplog):
+    """H1 (PI-NODE-2D §10.6): on a node that streams nothing no fetch is
+    asked, so the lead window — which bounds the fetches — bounds nothing:
+    every slot of his copy set away settles at once, each saying why in the
+    album page's words (not_here, `away`), never "streaming is off" for
+    some and "Waiting" for ever for the rest. One line in the log says how
+    many."""
+    import logging
+    mgr, cur = node["mgr"], node["cur"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    items = _his_ten(node)
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    with caplog.at_level(logging.INFO, logger="playback.substitute"):
+        mgr.rebind_files()                          # as the Rescan's notify does
+        assert _wait(lambda: _rows(mgr) == [(i, "failed", "not_here", "away") for i in range(1, 11)]), \
+            _rows(mgr)
+    assert all(it.opener()["kind"] == "unplayable" for it in items)
+    assert [r["stream"] for r in mgr.playlist()["tracks"]] == [
+        {"state": "failed", "reason": "not_here", "why": "away"}] * 10
+    said = [r.getMessage() for r in caplog.records
+            if r.name == "playback.substitute" and r.levelno >= logging.INFO]
+    assert len(said) == 1 and said[0].startswith("10 queued slot(s)"), said
+    assert node["prov"].asked == []
+
+
+def test_where_nothing_streams_a_slot_on_a_disk_that_is_out_says_disk(node):
+    """The same where his copy lies under a folder that does not answer:
+    `disk`, the album page's "On a disk that is not connected"."""
+    mgr = node["mgr"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    _his_ten(node)
+    node["gone"](True)
+    mgr.reach_changed()
+    assert _wait(lambda: _rows(mgr) == [(i, "failed", "not_here", "disk") for i in range(1, 11)]), \
+        _rows(mgr)
+
+
+def test_where_nothing_streams_a_track_he_has_no_copy_of_is_off_past_the_window_too(node):
+    """A not-owned track's slot settles as `off` — streaming's own words —
+    wherever it lies in the queue, at once."""
+    mgr, player = node["mgr"], node["player"]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    queries = player._phantom_track_queries(node["phantoms"])
+    items = [it for _ in range(3)
+             for it in player.queue_mod.items_for_streamed([queries[t] for t in node["phantoms"]])]
+    mgr.replace_queue(items, play=False)
+    assert _wait(lambda: _rows(mgr) == [(i, "failed", "off", None) for i in range(1, 10)]), _rows(mgr)
+
+
+def test_streaming_coming_up_asks_again_for_every_slot_it_settled(node):
+    """revive: streaming up, every slot settled for want of it — his own
+    away copy's and a not-owned track's, inside the window or past it — is
+    a stream to come again, and the window's are asked for."""
+    mgr, player, cur = node["mgr"], node["player"], node["cur"]
+    up = {"on": False}
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: up["on"])
+    items = _his_ten(node)
+    queries = player._phantom_track_queries(node["phantoms"][:1])
+    tail = player.queue_mod.items_for_streamed([queries[node["phantoms"][0]]])
+    mgr.append(tail)
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    mgr.rebind_files()
+    assert _wait(lambda: [s.get("reason") for s in mgr.slots_message()["slots"]] == ["not_here"] * 10 + ["off"]), \
+        _rows(mgr)
+    up["on"] = True
+    mgr.lane.revive()
+    assert all(it.opener()["kind"] in ("pending", "proxy") for it in items + tail), \
+        [it.opener() for it in items + tail]
+    assert _wait(lambda: set(node["tracks"]) <= set(node["prov"].asked))
 
 
 def test_a_new_queue_while_the_folder_is_gone_reads_its_file_slots(node):
@@ -815,7 +901,9 @@ def test_a_play_of_a_file_the_look_did_not_find_where_nothing_streams_is_refused
     # with a slot beside it that opens the queue plays, and the slot is passed
     items = _queue(node, play=True)
     assert out.replaced == [["pending", "file"]]
-    assert _wait(lambda: (items[0].play or {}).get("code") == "off")    # its row says why
+    # its row says why, as the refusal does
+    assert _wait(lambda: ((items[0].play or {}).get("code"), (items[0].play or {}).get("why"))
+                 == ("not_here", "away"))
 
 
 def test_next_and_previous_take_the_look_at_the_slot_they_would_start(node):
@@ -1376,6 +1464,61 @@ def test_the_album_payload_says_what_is_here_and_whether_this_node_streams_it(no
     away = albums.get_album(node["owned"], variant_id=None)
     assert [(t["here"], t["why"]) for t in away["tracks"]] == [(True, None), (False, "away")]
     assert away["away_part"] == {"why": "away", "streams": False}
+
+
+def test_the_album_payloads_variants_say_which_copy_is_away_and_which_is_not_connected(node):
+    """PI-NODE-2E H2: each variant the picker offers carries `away` (its
+    copy set aside by a Rescan) and `here` (a file of it opens now — the
+    album's own rule, sql_queries.album_away, over that copy alone)."""
+    from routers import albums
+    cur = node["cur"]
+    cur.execute("SELECT album_variant_id FROM media_files WHERE id = %s",
+                (node["copy"](0, "Elsewhere/01.flac"),))
+    other = cur.fetchone()[0]
+
+    def variants() -> dict:
+        return {v["variant_id"]: (v["away"], v["here"])
+                for v in albums.get_album(node["owned"], variant_id=None)["variants"]}
+
+    assert variants() == {node["variant"]: (False, True), other: (False, True)}
+    node["gone"](True)                                 # the music folder's disk is out
+    assert variants() == {node["variant"]: (False, False), other: (False, True)}
+    node["gone"](False)
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    assert variants() == {node["variant"]: (True, False), other: (False, True)}
+
+
+def test_a_sessions_tracks_say_what_is_here_by_the_album_pages_rule(node):
+    """PI-NODE-2E H5: a Listening history session's owned tracks carry
+    `here` and `why` as the album payload's rows do — the track's best copy
+    across every copy — and the session whether this node streams; a track
+    never owned says neither."""
+    from routers import home
+    cur = node["cur"]
+    cur.execute("INSERT INTO listening_sessions (origin, track_count, ended_at) "
+                "VALUES ('mix', 3, now()) RETURNING id::text")
+    session = cur.fetchone()[0]
+    slots = [(node["tracks"][0], node["files"][0], node["owned"]),
+             (node["tracks"][1], node["files"][1], node["owned"]),
+             (node["phantoms"][0], None, node["streamed"])]
+    for n, (track, file, album) in enumerate(slots):
+        cur.execute("INSERT INTO session_tracks (session_id, position, track_id, media_file_id, album_id) "
+                    "VALUES (%s, %s, %s, %s, %s)", (session, n, track, file, album))
+
+    def said() -> tuple:
+        d = home.get_listening_session(session)
+        return [(t["here"], t["why"]) for t in d["tracks"]], d["streams"]
+
+    assert said() == ([(True, None), (True, None), (None, None)], True)
+    node["gone"](True)
+    assert said() == ([(False, "disk"), (False, "disk"), (None, None)], True)
+    node["copy"](0, "Elsewhere/01.flac")               # another copy of the first track opens
+    assert said()[0][:2] == [(True, None), (False, "disk")]
+    node["gone"](False)
+    cur.execute("UPDATE album_variants SET absent_since = now() WHERE id = %s", (node["variant"],))
+    assert said()[0][:2] == [(True, None), (False, "away")]
+    node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
+    assert said()[1] is False
 
 
 def test_the_pages_ask_whether_this_node_streams(node):

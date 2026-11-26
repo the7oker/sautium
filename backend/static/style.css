@@ -2830,10 +2830,20 @@ body.sautium-base {
 }
 /* Disabled playback/queue button — faded + inert while its action is in flight
    (the in-flight guard sets `disabled` to block double-clicks). */
-.btn-primary:disabled,
 .btn-secondary:disabled,
 .track-confirm-btn:disabled {
   opacity: 0.5;
+  cursor: default;
+}
+/* A disabled primary button: half an amber fill still read as one to tap, so
+   it takes a disabled chip's look instead — dim text on the recessed fill,
+   inside a hairline (.hqp-chip-btn:disabled). The invite form's own primary
+   rule outranks the bare selector, hence its own here. */
+.btn-primary:disabled,
+.invite-form .btn-primary:disabled {
+  background: var(--color-surface-lo);
+  color: var(--color-text-dim);
+  border: 1px solid var(--color-divider);
   cursor: default;
 }
 .btn-secondary {
