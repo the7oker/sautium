@@ -29,7 +29,6 @@ from pydantic import BaseModel, Field, ValidationError
 
 import device_auth
 from auth_hmac import ensure_secret
-from serving import EventStream
 
 logger = logging.getLogger(__name__)
 
@@ -47,19 +46,30 @@ class LoginRequest(BaseModel):
     password: str = Field(default="", max_length=256)
 
 
+# A pairing code: 7 groups of 4 and their hyphens (device_auth.PIN_GROUPS)
+PIN_MAX = 64
+
+
 class PairRequest(BaseModel):
-    code: str = Field(default="", max_length=32)
+    code: str = Field(default="", max_length=PIN_MAX)
 
 
 class ChangeIdentityRequest(BaseModel):
     username: str = Field(default="", max_length=32)
     # Empty = minted, as in the wizard: the identity stays this machine's.
     password: str = Field(default="", max_length=256)
+    # The person's word for a password one GPU would find within a year,
+    # given after the time was said (device_auth.check_new_password)
+    keep: bool = False
     # The account's password as it is now — a device token alone does not
     # change who the node is. An anonymous account has none anyone knows:
     # its host vouches instead, by the pairing code it shows now.
     current_password: str = Field(default="", max_length=256)
-    pin: str = Field(default="", max_length=32)
+    pin: str = Field(default="", max_length=PIN_MAX)
+
+
+class EmptyPayload(BaseModel):
+    pass
 
 
 class BoxedRequest(BaseModel):
@@ -124,7 +134,7 @@ class StepUp(BaseModel):
     make (device_auth.step_up): the account's password, or on an anonymous
     account the pairing code its host shows now."""
     password: str = Field(default="", max_length=256)
-    pin: str = Field(default="", max_length=32)
+    pin: str = Field(default="", max_length=PIN_MAX)
 
 
 HOST_CODE_NEEDED = ("This node has no password: open this page from the computer that runs "
@@ -211,7 +221,11 @@ async def device_links(request: Request) -> dict:
 
 class CreateAccountRequest(BaseModel):
     username: str = Field(default="", max_length=32)
-    password: str = Field(default="", min_length=8, max_length=256)
+    password: str = Field(default="", min_length=1, max_length=256)
+    # The email typed beside it, read here only as a word an attacker would
+    # try first (the form sets it on the account once it exists)
+    email: str = Field(default="", max_length=254)
+    keep: bool = False
     # The code the node wrote to its log and its identity folder at start —
     # or a line pasted around it, which the code is read out of
     setup_code: str = Field(default="", max_length=256)
@@ -243,7 +257,9 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
         # The check lives inside create_account, under its lock — testing it
         # out here as well would only re-open the race it exists to close.
         info = await device_auth.create_account(req.username, req.password, req.setup_code,
-                                                req.new_identity)
+                                                req.new_identity, req.keep, req.email)
+    except device_auth.WeakPassword as e:
+        return reply(_weak(e))
     except device_auth.AccountExists:
         raise HTTPException(status_code=409, detail="account already exists")
     except device_auth.AnotherIdentity:
@@ -288,6 +304,83 @@ async def create_account(opened=boxed(CreateAccountRequest)) -> dict:
                   "public_key_hex": info.get("public_key_hex")})
 
 
+def _weak(e: "device_auth.WeakPassword") -> dict:
+    """A door's answer to a password under its edge, sealed: a 200 whose
+    body says `password` — the time in the clear would tell a LAN listener
+    the password is near the top of the lists. A refusal brings a phrase."""
+    from desktop import password_strength
+    said = dict(e.verdict)
+    if said["zone"] == "refused":
+        said["offer"] = password_strength.phrase_offer()
+    return {"password": said}
+
+
+class EstimateRequest(BaseModel):
+    password: str = Field(default="", max_length=256)
+    username: str = Field(default="", max_length=32)
+    email: str = Field(default="", max_length=254)
+
+
+# The setup form's meter is unsigned (no token exists yet): one estimate at a
+# time for it, so a LAN neighbour buys at most one of zxcvbn's bounded runs
+_setup_estimates = 0
+
+
+def _onboarding() -> bool:
+    return not device_auth.account_configured() and not device_auth.identity_key_on_disk()
+
+
+@router.post("/setup-estimate")
+async def setup_estimate(opened=boxed(EstimateRequest)) -> dict:
+    """The first-run form's meter: the time one GPU would take to find the
+    password typed, as the setup door will read it. Only while the node has
+    no account; the words an attacker tries first are what the request
+    carries — the nickname and email typed beside it — never the node's own."""
+    global _setup_estimates
+    req, reply = opened
+    if not _onboarding():
+        raise HTTPException(status_code=409, detail="account already exists")
+    if _setup_estimates:
+        raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "1"})
+    from desktop import password_strength
+    _setup_estimates += 1
+    try:
+        return reply(await asyncio.to_thread(password_strength.verdict, req.password,
+                                             (req.username, req.email)))
+    finally:
+        _setup_estimates -= 1
+
+
+@router.post("/estimate")
+async def estimate(opened=boxed(EstimateRequest)) -> dict:
+    """The meter of a signed form (a new password for this account): as the
+    setup's, with the account's own email among the words tried first."""
+    req, reply = opened
+    from desktop import password_strength
+    return reply(await asyncio.to_thread(
+        password_strength.verdict, req.password, (req.username, device_auth.account_email())))
+
+
+@router.post("/setup-phrase")
+async def setup_phrase(opened=boxed(EmptyPayload)) -> dict:
+    """A phrase for the first-run form, drawn by `secrets` on the node, with
+    the draw's own count; sealed, as a password is. Only while the node has
+    no account."""
+    _, reply = opened
+    if not _onboarding():
+        raise HTTPException(status_code=409, detail="account already exists")
+    from desktop import password_strength
+    return reply(password_strength.phrase_offer())
+
+
+@router.post("/phrase")
+async def phrase(opened=boxed(EmptyPayload)) -> dict:
+    """A phrase for a signed form (a new password for this account)."""
+    _, reply = opened
+    from desktop import password_strength
+    return reply(password_strength.phrase_offer())
+
+
 def _shut(e: "device_auth.Shut") -> HTTPException:
     return HTTPException(status_code=429, detail="too many wrong passwords",
                          headers={"Retry-After": str(e.seconds), "X-Sautium-Auth-Error": "shut"})
@@ -308,14 +401,18 @@ async def login(opened=boxed(LoginRequest)) -> dict:
         raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
     if not ok:
         raise HTTPException(status_code=401, detail="invalid credentials")
-    return reply({"token": device_auth.current_token(_secret())})
+    # The first sign-in of this key's password since S2: its time, said
+    # once when it is under a year (the page shows it, nothing keeps it)
+    told = await asyncio.to_thread(device_auth.told_once, req.password)
+    return reply({"token": device_auth.current_token(_secret()),
+                  **({"password": told} if told else {})})
 
 
 @router.post("/pair")
 async def pair(opened=boxed(PairRequest)) -> dict:
-    """Exchange a host-displayed PIN for a device token. A code pairs until it
-    expires (device_auth.redeem_pin); a wrong one costs one of
-    MAX_PIN_ATTEMPTS."""
+    """Exchange a host-displayed pairing code for a device token. A code
+    pairs until it expires (device_auth.redeem_pin); a wrong one is told to
+    the owner."""
     req, reply = opened
     if not await device_auth.redeem_pin(req.code):
         raise HTTPException(status_code=401, detail="invalid or expired code")
@@ -344,12 +441,13 @@ async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
     username = req.username.strip()
     if not username:
         raise HTTPException(status_code=422, detail="Nickname required")
-    if req.password and len(req.password) < 8:
-        raise HTTPException(status_code=422, detail="Password: 8+ characters")
     if not req.password and not device_auth.pin_door():
         raise HTTPException(status_code=422, detail="Password required: this node is signed into by its password")
     try:
-        info = await device_auth.rotate_identity(username, req.password, req.current_password, req.pin)
+        info = await device_auth.rotate_identity(username, req.password, req.current_password, req.pin,
+                                                 req.keep)
+    except device_auth.WeakPassword as e:
+        return reply(_weak(e))
     except device_auth.Busy:
         raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "5"})
     except device_auth.Shut as e:
@@ -386,10 +484,6 @@ async def change_identity(opened=boxed(ChangeIdentityRequest)) -> dict:
     })
 
 
-class EmptyPayload(BaseModel):
-    pass
-
-
 @router.post("/logout-all")
 async def logout_all(opened=boxed(EmptyPayload)) -> dict:
     """Invalidate every device token, including the caller's — then hand the
@@ -421,35 +515,3 @@ async def get_pin(request: Request) -> dict:
     secret; a browser's device token is refused."""
     _host_only(request)
     return device_auth.current_pin()
-
-
-@router.get("/pin/stream")
-async def pin_stream(request: Request) -> EventStream:
-    """SSE wake channel for the host displaying the code.
-
-    The host knows when the code expires — it was told — so expiry needs no
-    channel. What it cannot foresee is the code being burned by someone
-    guessing at /pair, which would otherwise leave a dead QR on screen until
-    the next scheduled refresh. Wake-event only; the code itself is pulled
-    over the signed API. The host's alone, as the code is."""
-    _host_only(request)
-    entry = device_auth.pin_subscribe()
-    evt = entry[0]
-
-    async def event_generator():
-        try:
-            yield "data: {}\n\n"
-            while True:
-                try:
-                    await asyncio.wait_for(evt.wait(), timeout=20.0)
-                    evt.clear()
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-                    continue
-                yield "data: {}\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            device_auth.pin_unsubscribe(entry)
-
-    return EventStream(event_generator())

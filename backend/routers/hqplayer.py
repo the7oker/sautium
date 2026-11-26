@@ -114,6 +114,10 @@ class BenchmarkEntry(BaseModel):
 class BenchmarkRequest(BaseModel):
     mode: Optional[str] = None          # 'pcm' | 'sdm'; None = the mode HQPlayer is in
     entry: Optional[BenchmarkEntry] = None      # one entry alone, in the mode HQPlayer is in
+    # The points at a rate of another family than their source's, planned only
+    # at the owner's ask (BENCH-GUARD-1): their builds can take hours, and one
+    # took a 16 GB Pi's memory whole
+    across: bool = False
     fixed_volume_ok: bool = False       # the owner turned the amplifier down: HQPlayer cannot
 
 
@@ -472,6 +476,16 @@ def _benchmark_block(ep: Optional[dict], state: Optional[dict], lists: dict,
     asks = grid.asks()
     out["estimate"] = {"mode": mode, "points": asks,
                        "seconds": round(asks * hqp_benchmark.pace(ep["id"]))}
+    if grid.across_left:
+        # What a run leaves out unless the owner asks: the points across rate
+        # families, the conversions they are (source → output rate), and
+        # whether the owner's rate is Auto — playing across families there,
+        # HQPlayer's Auto rate family is off
+        auto = not any(r["index"] == state["rate"] and r["rate"] > 0 for r in lists["rates"])
+        out["estimate"]["across"] = {
+            "points": len(grid.across_left), "auto": auto,
+            "conversions": [{"source": src, "rate": rate}
+                            for src, rate in sorted(set(grid.across_left))]}
     return out
 
 
@@ -739,7 +753,8 @@ def start_benchmark(req: BenchmarkRequest) -> Dict[str, Any]:
             raise HTTPException(status_code=400, detail="a run measures one entry on a PCM stereo source only")
         entry = hqp_benchmark.Entry(e.kind, e.name, e.src_rate, e.src_channels)
     try:
-        return hqp_benchmark.start(req.mode, fixed_volume_ok=req.fixed_volume_ok, entry=entry)
+        return hqp_benchmark.start(req.mode, fixed_volume_ok=req.fixed_volume_ok, entry=entry,
+                                   across=req.across)
     except hqp_benchmark.BenchmarkRefused as e:
         raise HTTPException(status_code=409, detail=str(e))
 

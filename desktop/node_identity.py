@@ -57,6 +57,17 @@ ARGON2_MEMORY_COST = 262144  # 256 MB
 ARGON2_PARALLELISM = 2
 ARGON2_HASH_LEN = 32
 
+# One GPU's guesses a second against this derivation, at the cost it was
+# counted for (SECURITY-PRE-RELEASE §9.2, §9.10): 86 measured on an RTX 4090
+# Laptop GPU at t=4 and 256 MiB, rounded up to 300 for one top desktop card,
+# so a time counted from it errs short. A guess is t passes over m, so the
+# rate at another cost scales by t·m (a little long below 256 MiB: at 128 a
+# card measured 9–18 % more guesses, not twice). The password estimate reads
+# it beside the constants above (desktop/password_strength), so a new cost
+# moves the time shown and nothing else.
+ONE_GPU_GUESSES_PER_SECOND = 300
+ONE_GPU_COUNTED_AT = (4, 262144)          # (time cost, memory cost in KiB)
+
 
 def _identity_dir() -> Path:
     """Return the directory for identity files."""

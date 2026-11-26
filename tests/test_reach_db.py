@@ -51,11 +51,11 @@ class _Output(PlayerBackend):
     def previous(self): return True
     def select(self, index, track_id=None): return True
 
-    def queue_replace(self, items, *, play):
+    def queue_replace(self, items, *, play, start=None):
         self.replaced.append([it.opener().get("kind") for it in items])
-        return super().queue_replace(items, play=play)
+        return super().queue_replace(items, play=play, start=start)
 
-    def queue_changed(self, kind, *, play=False):
+    def queue_changed(self, kind, *, play=False, start=None):
         self.changed.append(kind)
 
 
@@ -1278,7 +1278,7 @@ def test_an_album_half_out_is_read_per_track(node):
     player, mgr = node["player"], node["mgr"]
     other = node["copy"](0, "NW/01.flac")
     node["gone"](True)
-    segments, missing, left = player._entity_segments(_album_ref(node).items)
+    segments, missing, left, _tids = player._entity_segments(_album_ref(node).items)
     assert [(kind, len(rows)) for kind, rows in segments] == [("owned", 1), ("phantom", 1)]
     assert [(r["id"], r["location"]) for r in segments[0][1]] == [(other, "local")]
     assert (segments[1][1][0].track_id, segments[1][1][0].album_id) == (node["tracks"][1], node["owned"])

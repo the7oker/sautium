@@ -249,7 +249,7 @@ def _ready(state: dict) -> bool:
     return state.get("status") == "ready"
 
 
-def _account(node, username="owner", password="a password") -> dict:
+def _account(node, username="owner", password="a password amber lanterns ford") -> dict:
     """An account on disk, as the Web UI's setup leaves it."""
     return device_auth._write_identity(node.folder, username, password)
 
@@ -277,7 +277,7 @@ def test_an_account_made_in_the_web_ui_earns_its_proof_with_no_restart(node, scr
     app.include_router(auth.router)
     with TestClient(app) as web:
         r = web.post("/api/auth/create-account", json=_seal(web.get("/api/auth/handshake").json(), {
-            "username": "owner", "password": "a password", "setup_code": code}))
+            "username": "owner", "password": "a password amber lanterns ford", "setup_code": code}))
         assert r.status_code == 200, r.text
         assert (node.folder / "node_info.json").exists()
         state = _await_identity(scratch_dsn, _ready)
@@ -320,7 +320,7 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
     thread has returned."""
     import notary
     monkeypatch.setattr(notary, "drain_witness", lambda: None)
-    old = _account(node, "first", "first password")["public_key_hex"]
+    old = _account(node, "first", "first password amber lanterns ford")["public_key_hex"]
     node.worker.difficulty[old] = 1 << 40               # the old key's proof is never done
     published = []
     rotating, release = threading.Event(), threading.Event()
@@ -342,7 +342,7 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
             workers.append(first)
             await asyncio.to_thread(_await_identity, scratch_dsn, lambda s: s.get("attempts", 0) > 2)
             rotating.set()
-            info = await device_auth.rotate_identity("second", "second password", "first password")
+            info = await device_auth.rotate_identity("second", "second password amber lanterns ford", "first password amber lanterns ford")
             await asyncio.sleep(1)
             held = (node.worker.asked_for(info["public_key_hex"].lower()),
                     any(s["difficulty"] == EASY for s in published), first.mining.done())
@@ -464,7 +464,7 @@ def test_an_email_verified_ends_the_mining_and_says_ready(node, scratch_dsn, mon
                 assert answer["verified"]
             else:
                 answer = await p2p_router.set_account_email(opened=(
-                    p2p_router.SetEmailRequest(email="owner@example.org", password="a password"),
+                    p2p_router.SetEmailRequest(email="owner@example.org", password="a password amber lanterns ford"),
                     lambda body: body))
                 assert answer["email_verified"]
             await asyncio.to_thread(_await_identity, scratch_dsn,

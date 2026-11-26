@@ -121,6 +121,15 @@ DO $$ BEGIN
                                           'unstarted', 'slow_start', 'implied', 'failed');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- How a slow start's silence ended, once the node saw it (BENCH-GUARD-1,
+-- 2026-11-25): 'answered' = HQPlayer came out of the build by itself;
+-- 'ended' = it did not — it went away or was restarted while it prepared
+-- the point (the kernel ending it for memory, or a person out of the
+-- build): too heavy here.
+DO $$ BEGIN
+    CREATE TYPE hqp_build_end AS ENUM ('answered', 'ended');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 DO $$ BEGIN
     CREATE TYPE cover_source_type AS ENUM ('external', 'embedded', 'sentinel');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -600,7 +609,10 @@ CREATE INDEX IF NOT EXISTS idx_hqp_dsp_samples_sampled_at ON hqp_dsp_samples(sam
 -- of the asked key. 'slow_start': HQPlayer answered nothing past the run's
 -- build limit after its Play — never asked again on that engine, CUDA
 -- state and mode; 'implied': a rung of a ladder never asked, a neighbour
--- answering for it, for the sheet (HQP-BENCH-63).
+-- answering for it, for the sheet (HQP-BENCH-63). A slow start's end, once
+-- seen (BENCH-GUARD-1): `build_end` and `build_s`, the seconds from its Play
+-- to that end — HQPlayer answering, or gone. Planning reads `result` alone;
+-- the readers that show a point read 'ended' as "too heavy here".
 CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     id BIGSERIAL PRIMARY KEY,
     run_id INTEGER NOT NULL REFERENCES hqp_benchmark_runs(id) ON DELETE CASCADE,
@@ -619,8 +631,12 @@ CREATE TABLE IF NOT EXISTS hqp_benchmark_points (
     -- below it does not)
     implied_from INTEGER,
     implied_ok BOOLEAN,
+    build_end hqp_build_end,
+    build_s REAL,
     CONSTRAINT chk_hqp_benchmark_points_implied CHECK (
-        (result::text = 'implied') = (implied_from IS NOT NULL AND implied_ok IS NOT NULL))
+        (result::text = 'implied') = (implied_from IS NOT NULL AND implied_ok IS NOT NULL)),
+    CONSTRAINT chk_hqp_benchmark_points_build_end CHECK (
+        build_end IS NULL OR result::text = 'slow_start')
 );
 CREATE INDEX IF NOT EXISTS idx_hqp_benchmark_points_run ON hqp_benchmark_points(run_id);
 
@@ -1973,6 +1989,12 @@ CREATE TABLE IF NOT EXISTS session_tracks (
     track_id       UUID NOT NULL REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE,
     media_file_id  INTEGER REFERENCES media_files(id) ON DELETE SET NULL,
     album_id       UUID REFERENCES albums(id) ON DELETE SET NULL ON UPDATE CASCADE,
+    -- Where the session's listen stopped: the second of this slot that last
+    -- sounded (playback.tracker.stop_in), on one slot of a session at most;
+    -- NULL on every slot when it was heard to its end, never played, or
+    -- archived before 2026-11-25. On the slot, so the slot's deletion takes
+    -- it along. Life data: the history page's blue dot and its Resume.
+    stop_seconds   NUMERIC(10, 2) CHECK (stop_seconds >= 0),
     PRIMARY KEY (session_id, position)
 );
 
@@ -2270,6 +2292,8 @@ CREATE INDEX IF NOT EXISTS idx_session_tracks_track
     ON session_tracks(track_id);
 CREATE INDEX IF NOT EXISTS idx_session_tracks_album
     ON session_tracks(album_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_session_tracks_one_stop
+    ON session_tracks(session_id) WHERE stop_seconds IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_listening_sessions_seed_track
     ON listening_sessions(seed_track_id);
 

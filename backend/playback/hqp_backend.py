@@ -824,6 +824,9 @@ STATE_NAMES = {
 # served until this many polls fail in a row (~30 s with the 2,4,8,15 s
 # backoff), then "disconnected" is emitted.
 STATUS_FAILURE_THRESHOLD = 5
+# A silent build after one of these is a start's: the held rate check names
+# its setting and source (HqpBackend._long_build)
+_START_COMMANDS = frozenset({"Play", "SelectTrack", "Next", "Previous", "Seek"})
 
 # Every N poll ticks: read HQPlayer's playlist and compare against the
 # canonical queue (drift canary). One-way mirror per §2.6 — an edit made in
@@ -1396,6 +1399,11 @@ class HqpBackend(PlayerBackend):
         # and whether it said a start under way: the poller's alone
         self._said: Optional[PlaybackStatus] = None
         self._said_starting = False
+        # A long build HQPlayer went away in: its word, said with the next
+        # status (BENCH-GUARD-1 C4d), then gone
+        self._build_lost: Optional[dict] = None
+        # The silent build said long here, and its word: (its `since`, the facts)
+        self._long_said: Optional[tuple] = None
         # The position on the clock of the take HQPlayer plays (_clocked):
         # the poller's alone; and this node's newest Seek HQPlayer took, as
         # (second, sent at, the attempt whose start sent it — None for the
@@ -2847,6 +2855,9 @@ class HqpBackend(PlayerBackend):
         link = self._link
         tick = 0
         said_unfinished = said_silent = None
+        # The silent build the long word is read for: (its `since`, the
+        # moment it turns long here, what it says) — BENCH-GUARD-1
+        long_build: Optional[tuple] = None
         while self._running:
             silent = link.silent_since
             if silent is not None and silent != said_silent:
@@ -2856,16 +2867,40 @@ class HqpBackend(PlayerBackend):
                 said_silent = silent
                 self._emit_silence({"not_answering": NOT_ANSWERING})
             building = link.build.state
+            if building is None and long_build is not None:
+                # The long build is over: gone in it, that is said until
+                # HQPlayer answers again (C4d, Q9); answered, nothing is
+                if link.build.last_end() == "lost" and self._long_said is not None:
+                    self._build_lost = {**self._long_said[1], "since": self._long_said[0]}
+                long_build = self._long_said = None
             if building is not None and building["silent"]:
                 # HQPlayer answers nothing while it builds: said from the
-                # watch, not asked — the watch wakes the poller at the end.
-                # One it did not finish is said once, then asked: HQPlayer
-                # may be back, and its answer ends it (_register_failure
-                # says it again on each silence, an HQPlayer gone is counted).
+                # watch, not asked — the watch wakes the poller at the end,
+                # and once at the moment the build turns long here (the
+                # longest start this host's Benchmark measured within a
+                # rate family, LONG_BUILD_FLOOR_S at least), when its word
+                # says what such a change took here and how to leave it
+                # (BENCH-GUARD-1). One it did not finish is said once, then
+                # asked: HQPlayer may be back, and its answer ends it
+                # (_register_failure says it again on each silence, an
+                # HQPlayer gone is counted).
                 unfinished = building.get("unfinished")
+                quiet = building.get("not_answering")
+                if not quiet and (long_build is None or long_build[0] != building["since"]):
+                    # a build begun before the poller saw the last one end:
+                    # that one's long word is no longer said (review round 2
+                    # M2) — gone in it, that is said (round 3)
+                    if self._long_said is not None and link.build.last_end() == "lost":
+                        self._build_lost = {**self._long_said[1], "since": self._long_said[0]}
+                    long_build, self._long_said = self._long_build(building), None
+                long = long_build is not None and time.monotonic() >= long_build[1]
+                if long:
+                    # kept with the build: every word of it says it from here,
+                    # a miss's past the build limit included (_register_failure)
+                    self._long_said = (long_build[0], long_build[2])
                 if not unfinished or building is not said_unfinished:
                     try:
-                        if building.get("not_answering"):
+                        if quiet:
                             # The Status a switch away holds: no build of ours
                             self._emit_silence({"not_answering": NOT_ANSWERING})
                         else:
@@ -2875,7 +2910,9 @@ class HqpBackend(PlayerBackend):
                     if unfinished:
                         said_unfinished = building
                 if not unfinished:
-                    self._wake.wait()
+                    left = (None if long or long_build is None
+                            else max(0.0, long_build[1] - time.monotonic()))
+                    self._wake.wait(left)
                     self._wake.clear()
                     continue
             status = read_at = None
@@ -5317,8 +5354,51 @@ class HqpBackend(PlayerBackend):
             self._say(PlaybackStatus(state="disconnected"))
 
     def _emit_building(self, state: dict) -> None:
-        """The last status again, with the build HQPlayer is in."""
+        """The last status again, with the build HQPlayer is in — long here
+        once the poller said so (`long`, BENCH-GUARD-1)."""
+        long = self._long_said
+        if long is not None and long[0] == state["since"]:
+            state = {**state, "long": long[1]}
         self._emit_silence({"building": state})
+
+    def _long_build(self, building: dict) -> tuple:
+        """When a silent build turns long on this host, and what its word
+        says (BENCH-GUARD-1, read once a build, in one query): the usual
+        build here, what the Benchmark measured across rate families, and —
+        for a start, whose setting and source the held rate check names —
+        whether the build is across families and this setting's own answer
+        here. A change's build is said without them: the held check reads
+        the setting the change replaces until it is through."""
+        # A start's setting and source, from the held rate check — only while
+        # it was judged for this queue and for the slot the start goes to: a
+        # new album's Play, or another slot of a mixed queue, builds before a
+        # tick judges the check again (_rate_notice_now's guard)
+        check = self._rate_check
+        command, slot = building.get("command"), self._start_slot()
+        if (command not in _START_COMMANDS or check is None
+                or self._rate_gen != self._queue.generation
+                or not (slot == self._rate_slot or (slot is None and command == "Play"))):
+            check = None
+        setting: Dict[str, Any] = {}
+        cross = None
+        if check is not None and check.rate and check.first:
+            cross = not hqp_rate_check.same_family(check.rate, check.first)
+            mode, rate, x1, nx, modulator, _ = check.key
+            setting = {"rate_out": rate, "src_rate": check.first,
+                       "filter": x1 if check.first < 50000 else nx,
+                       "shaper": modulator if mode == "sdm" else None}
+        try:
+            facts = hqp_load.build_facts(self.endpoint_id, **setting)
+        except psycopg2.Error as e:
+            # A database that cannot answer costs the word its facts, never the poll
+            logger.warning("This HQPlayer's build times were not read: %s", e)
+            facts = {"usual_s": hqp_load.LONG_BUILD_FLOOR_S, "measured": False, "across": None,
+                     "own": None}
+        facts.update(cross=cross, source=setting.get("src_rate"), rate=setting.get("rate_out"),
+                     source_name=hqp_atlas.rate_name(check.first) if setting else None,
+                     rate_name=hqp_atlas.rate_name(check.rate) if setting else None)
+        waited = max(0.0, time.time() - building["since"])
+        return building["since"], time.monotonic() + max(0.0, facts["usual_s"] - waited), facts
 
     def _emit_silence(self, why: dict) -> None:
         """The last status again — HQPlayer said nothing new — with why."""
@@ -5334,6 +5414,9 @@ class HqpBackend(PlayerBackend):
         pass (_poll_loop). Called on the poller."""
         self._said = status
         self._said_starting = self._start_under_way()
+        lost, self._build_lost = self._build_lost, None
+        if lost is not None:
+            status = replace(status, extra={**status.extra, "build_lost": lost})
         self._emit(replace(status, extra={**status.extra, "starting": True,
                                           "start_slot": self._start_slot()})
                    if self._said_starting else status)
@@ -6796,7 +6879,8 @@ class HqpBackend(PlayerBackend):
                     "transcode" if src.get("transcode") else "preview")
         return src["uri"], "foreign"
 
-    def queue_changed(self, kind: str, *, play: bool = False) -> None:
+    def queue_changed(self, kind: str, *, play: bool = False,
+                      start: Optional[tuple] = None) -> None:
         """Every mutation is mirrored in the queue_* hooks, before its commit.
         A re-bind happens under the queue — files left the library
         (PlaybackManager.rebind_files), or what opens here changed
@@ -7034,7 +7118,7 @@ class HqpBackend(PlayerBackend):
             raise Dropped("its track left the queue")
         return self._start_at(index, position, fallback=True, item=start, spends=held)
 
-    def queue_replace(self, items: list, *, play: bool) -> list:
+    def queue_replace(self, items: list, *, play: bool, start: Optional[tuple] = None) -> list:
         """HQPlayer's playlist becomes what it holds of `items` — a new queue
         (intent queue), each slot's way in read for it — and the queue all of
         them (mirror-first): a slot it cannot open, or refuses while it takes
@@ -7060,14 +7144,22 @@ class HqpBackend(PlayerBackend):
         no clear, no add until that slot is known to open — the start waits
         on it in the node, and its landing hands HQPlayer the queue afresh.
         With no other controller a streamed first slot empties the playlist
-        at the tap, as before."""
+        at the tap, as before. `start` — (an item of `items`, a second) —
+        plays from there instead of the first slot (an album from the track
+        chosen, a history session from its stop): the whole queue is
+        handed, the horizon placed from it, and the start goes to it — or to
+        the first slot after it HQPlayer took, from 0 — as a rebuild's
+        resume does (_start_item)."""
         if not items:
             return []
         # Refused before it is numbered or watched: it supersedes nothing
         self._link.refuse_edits()
         self._ways_in(items)
         saved = self._horizon_state()
-        self._place_horizon(items, None)
+        head, second = (start[0], int(start[1])) if start is not None else (items[0], 0)
+        head_slot = next(i for i, it in enumerate(items) if it is head) + 1
+        ahead = items[head_slot - 1:]
+        self._place_horizon(items, head if start is not None else None)
         try:
             layout = self._layout(items)
             # Nothing it holds yet, every slot up to the first one it can open
@@ -7078,8 +7170,13 @@ class HqpBackend(PlayerBackend):
                 self._restore_horizon(saved)
                 raise OutputRefused(f"none of these tracks is on {self.label} — {self.gap(items[0])}")
             if self._taken() or self._rests_on_another():
-                first = (layout.handed[0] if layout.handed
-                         else next(it for it in items if it.opener().get("kind") == "pending"))
+                handed = {id(it) for it in layout.handed}
+                first = next((it for it in ahead if id(it) in handed
+                              or it.opener().get("kind") == "pending"), None)
+                if first is None:
+                    first = (layout.handed[0] if layout.handed
+                             else next(it for it in items if it.opener().get("kind") == "pending"))
+                at = second if first is head else 0
                 to_come = self._bytes_away(first)
                 if not play or to_come is not None:
                     # Played with its first slot's stream still to come, it
@@ -7090,22 +7187,29 @@ class HqpBackend(PlayerBackend):
                     self._drifted("another controller holds HQPlayer")
                     if play:
                         self._owe_start(None, self._link.item("start", self._link.accept("queue")),
-                                        lambda it: self._park(first, 0, to_come, start=it, press=True))
+                                        lambda it: self._park(first, at, to_come, start=it, press=True))
                     return list(items)
             # From here HQPlayer is stopped before it says whether it opens
             # what it is handed: a file the node can read and HQPlayer refuses
             # (a format it does not open) still answers after the Stop — on
             # an HQPlayer another controller holds too
             uris = [self._uri_for(it) for it in layout.handed]
-            att = (self._watch("replace", slot=1, uris=uris, items=list(layout.handed))
+            given = {id(it) for it in layout.handed}
+            # the attempt's slot is HQPlayer's entry: the first one handed from
+            # the start on (a gap before it — a slot HQPlayer does not hold —
+            # numbers its entries apart from the queue's slots)
+            from_start = {id(a) for a in ahead}
+            entry = next((i + 1 for i, it in enumerate(layout.handed) if id(it) in from_start), 1)
+            att = (self._watch("replace", slot=entry, uris=uris, items=list(layout.handed))
                    if play and uris else None)
             if att is not None:
                 # Played while another controller holds HQPlayer, as a play press
                 # made then (_press): read before its hand-over clears the playlist
                 att.taken_back = self._taken()
                 att.held_paused = att.taken_back and self._held_paused
-            with self._handing(layout.items, stops=True,
-                               base=(layout.handed[0], 0) if layout.handed else None, owes=play,
+            base = next(((it, second if it is head else 0) for it in ahead if id(it) in given),
+                        (layout.handed[0], 0) if layout.handed else None)
+            with self._handing(layout.items, stops=True, base=base, owes=play,
                                intent="queue") as n, self._steps(att):
                 fresh = self._afresh(uris, "queue", number=n)
                 if fresh is None:
@@ -7136,7 +7240,27 @@ class HqpBackend(PlayerBackend):
                     self._link.refusals = []
                     self._took(layout.handed, taken, unsent, "of a new queue")
                     accepted = list(items)
-                    if play and not uris:
+                    took = {id(it) for it, t in zip(layout.handed, taken) if t}
+                    # From a start: the first slot from it HQPlayer took, or
+                    # one still on its way — at the start's second if it is
+                    # the start's own slot
+                    begin = (next((it for it in ahead if id(it) in took
+                                   or it.opener().get("kind") == "pending"), None)
+                             if start is not None else None)
+                    at = second if begin is head else 0
+                    if play and begin is not None and id(begin) in took:
+                        self._owe_start(att, self._link.item("start", n),
+                                        lambda it: self._start_item(begin, at, it),
+                                        spot=(begin, at))
+                    elif play and begin is not None:
+                        # its stream still to come: the start waits on it in
+                        # the node, and the attempt watched for the hand-over
+                        # sent no start — superseded, never a failure to explain
+                        if att is not None:
+                            att.request_end("superseded")
+                        self._owe_start(None, self._link.item("start", n),
+                                        lambda it: self._park(begin, at, _PENDING, start=it))
+                    elif play and not uris:
                         # Its first slot is still on its way: the play waits on it
                         # once the queue commits
                         first = items[0]

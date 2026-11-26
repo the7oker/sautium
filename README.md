@@ -540,8 +540,8 @@ isolation:
   Wi-Fi) but is **never exposed to the public internet** — no port is forwarded
   and the P2P UPnP layer never maps it.
 - All API requests are signed with **HMAC-SHA256** (`backend/auth_hmac.py`)
-  using a per-browser device token, earned once with the account password or a
-  pairing code the launcher shows as a QR code; `auth.js` signs every
+  using the node's device token, earned once with the account password or a
+  pairing code the launcher carries in a QR code; `auth.js` signs every
   `fetch`. The page carries no key.
 - The Web UI rides **plain HTTP**: no certificate a phone would trust can exist
   for a LAN address, so the exchange that earns the token (password or PIN in,

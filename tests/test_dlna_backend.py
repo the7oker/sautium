@@ -1080,6 +1080,47 @@ def _on_renderer(manager, r: FakeRenderer, items: list) -> None:
     assert added == len(items)
 
 
+def test_a_new_queue_played_from_a_slot_loads_that_slot_and_seeks_its_second(tmp_path, proxy,
+                                                                              renderers, manager,
+                                                                              quality):
+    """PLAYBACK-UI-1: "from here" — an album from the track chosen on its
+    page, a history session from its stop. The renderer is handed that
+    slot, not the queue's first, and sought to the start's second once it
+    plays; the whole queue stays, so Previous walks back through it."""
+    r = renderers()
+    items = [track(tmp_path, n, seconds=60.0) for n in (1, 2, 3)]
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": r.record})
+    manager.activate("dlna", renderer=r.record)
+    added, _gen = manager.replace_queue(items, play=True, start=(items[1], 12.0))
+    assert added == 3 and manager.queue.snapshot() == items
+    wait_for(lambda: r.called("SetAVTransportURI"), what="the start's slot loaded")
+    wait_for(lambda: r.called("Seek"), what="the start sought")
+    assert r.called("Seek")[-1]["Target"] == "0:00:12"
+    wait_for(lambda: manager.latest_status.get("state") == "playing", what="playing")
+    st = manager.latest_status
+    assert st["track_index"] == 2 and st["position"] >= 12
+
+
+def test_previous_past_three_seconds_seeks_the_renderer_to_the_tracks_start(tmp_path, proxy,
+                                                                           renderers, manager,
+                                                                           quality):
+    """B-157 on a renderer: Previous past the first 3 s is a Seek to 0:00 of
+    the track it plays — no load of the slot before."""
+    r = renderers()
+    items = [track(tmp_path, n, seconds=60.0) for n in (1, 2)]
+    manager.store.update({"output.type": "dlna", "output.dlna_renderer": r.record})
+    manager.activate("dlna", renderer=r.record)
+    manager.replace_queue(items, play=True, start=(items[1], 0.0))
+    wait_for(lambda: manager.latest_status.get("state") == "playing"
+             and manager.latest_status.get("position", 0) >= 3.5, timeout=15, what="4 s in")
+    loads = len(r.called("SetAVTransportURI"))
+    assert manager.previous(manager.ensure_active())
+    wait_for(lambda: r.called("Seek") and r.called("Seek")[-1]["Target"] == "0:00:00",
+             what="sought to the track's start")
+    assert len(r.called("SetAVTransportURI")) == loads
+    assert manager.latest_status["track_index"] == 2
+
+
 def _lost_mid_track(r: FakeRenderer, manager) -> float:
     """The renderer stops answering two seconds into slot 1 (20 s long, room
     for three missed polls on a loaded machine) and plays on — across into

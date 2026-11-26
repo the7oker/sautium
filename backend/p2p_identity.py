@@ -13,15 +13,11 @@ import json
 import logging
 from typing import Optional
 
-from desktop.node_identity import CERT_FILENAME, validate_username
+from desktop.node_identity import (ARGON2_HASH_LEN, ARGON2_MEMORY_COST, ARGON2_PARALLELISM,
+                                   ARGON2_TIME_COST, CERT_FILENAME, validate_username)
 
 logger = logging.getLogger(__name__)
 
-# Same parameters as desktop/node_identity.py
-ARGON2_TIME_COST = 4
-ARGON2_MEMORY_COST = 262144  # 256 MB
-ARGON2_PARALLELISM = 2
-ARGON2_HASH_LEN = 32
 
 def make_invite_code(username: str, public_key_raw: bytes) -> str:
     """Mirror of desktop/node_identity.make_invite_code — keep in step."""

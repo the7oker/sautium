@@ -145,13 +145,19 @@ const fs = require('node:fs'), vm = require('node:vm');
 const [naclPath, shaPath, authPath, origin, setup] = process.argv.slice(-5);
 const cfg = JSON.parse(setup);
 const store = Object.assign({}, cfg.store || {});
-const asked = [], sent = {}, how = {};
+const session = {};
+const asked = [], sent = {}, sealed = {}, how = {};
 const ctx = {
   window: { addEventListener() {}, dispatchEvent() {} },
   localStorage: {
     getItem: (k) => (k in store ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
     removeItem: (k) => { delete store[k]; },
+  },
+  sessionStorage: {
+    getItem: (k) => (k in session ? session[k] : null),
+    setItem: (k, v) => { session[k] = String(v); },
+    removeItem: (k) => { delete session[k]; },
   },
   location: { origin, hash: cfg.hash || '', pathname: '/', search: '' },
   document: { readyState: 'complete', addEventListener() {}, getElementById: () => null },
@@ -188,11 +194,16 @@ ctx.window.fetch = async (input, init) => {
   const client = Uint8Array.from(Buffer.from(env.client, 'base64'));
   const opened = nacl.box.open(Uint8Array.from(Buffer.from(env.box, 'base64')),
                                Uint8Array.from(Buffer.from(env.nonce, 'base64')), client, server.secretKey);
-  (sent[path] = sent[path] || []).push(JSON.parse(Buffer.from(opened).toString()));
-  const [status, headers] = queue.shift();
+  // The node reads a payload without its padding (device_auth BOX_BUCKET)
+  const payload = JSON.parse(Buffer.from(opened).toString());
+  (sealed[path] = sealed[path] || []).push(opened.length);
+  delete payload._pad;
+  (sent[path] = sent[path] || []).push(payload);
+  // An entry's third member, when given, is the sealed answer's body
+  const [status, headers, body] = queue.shift();
   if (status !== 200) return new Response('{"detail":"x"}', { status, headers: headers || {} });
   const nonce = nacl.randomBytes(24);
-  const reply = nacl.box(Buffer.from(JSON.stringify({ token: 'fresh token', public_key_hex: hex(identity.publicKey) })),
+  const reply = nacl.box(Buffer.from(JSON.stringify(body || { token: 'fresh token', public_key_hex: hex(identity.publicKey) })),
                          nonce, client, server.secretKey);
   return new Response(JSON.stringify({ nonce: Buffer.from(nonce).toString('base64'),
                                        box: Buffer.from(reply).toString('base64') }));
@@ -210,7 +221,7 @@ ctx.fetch = ctx.window.fetch;      // the page's global is its window
   } catch (e) {
     thrown = e.constructor.name + ': ' + e.message;
   }
-  process.stdout.write(JSON.stringify({ result, thrown, asked, sent, how, store, node: hex(identity.publicKey) }));
+  process.stdout.write(JSON.stringify({ result, thrown, asked, sent, sealed, how, store, session, node: hex(identity.publicKey) }));
 })();
 """
 
@@ -279,10 +290,9 @@ def rotations(doors, tmp_path, monkeypatch):
     monkeypatch.setattr(device_auth, "pin_door", lambda: True)
     monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
                                               for name in ("login", "signed")})
-    monkeypatch.setattr(device_auth, "_record_failure", lambda: None)
+    monkeypatch.setattr(device_auth, "_record_failure", lambda _key, n=1: n)
     monkeypatch.setattr(device_auth, "_pin", None)
     monkeypatch.setattr(device_auth, "_pin_prev", None)
-    monkeypatch.setattr(device_auth, "_pin_lock", asyncio.Lock())
 
     def rotate(_d, username, password, anonymous):
         time.sleep(0.05)
@@ -335,8 +345,8 @@ def test_two_changes_at_once_each_need_the_password_of_the_identity_they_change(
                 return (await client.post("/api/auth/change-identity", json=_seal(handshake, {
                     "username": username, "password": password,
                     "current_password": "the right one"}))).status_code
-            return await asyncio.gather(change("second", "the second one"),
-                                        change("third", "the third one"))
+            return await asyncio.gather(change("second", "the second one amber lanterns ford"),
+                                        change("third", "the third one amber lanterns ford"))
     assert sorted(asyncio.run(both())) == [200, 403]
     assert len(done) == 1
 
@@ -345,8 +355,9 @@ def test_a_docker_account_says_it_has_a_password(tmp_path, monkeypatch):
     pytest.importorskip("cryptography")
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
     monkeypatch.setattr(device_auth, "_another_identity", lambda _pubkey: False)   # no records here
+    monkeypatch.setattr(device_auth, "_holds_identity", lambda pubkey=None: False)
     monkeypatch.setattr(device_auth, "_record_signing_key", lambda _pubkey: None)
-    info = device_auth._write_identity(tmp_path, "anonymous-1a2b", "a chosen password")
+    info = device_auth._write_identity(tmp_path, "anonymous-1a2b", "a chosen password amber lanterns ford")
     assert info["anonymous"] is False
     assert json.loads((tmp_path / "node_info.json").read_text())["anonymous"] is False
     assert device_auth.account_anonymous() is False
@@ -356,12 +367,12 @@ def test_a_named_account_changes_only_with_its_current_password(rotations, monke
     change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
     for wrong in ({}, {"current_password": ""}, {"current_password": "a guess"}):
-        r = change(username="second", password="new password", **wrong)
+        r = change(username="second", password="new password amber lanterns ford", **wrong)
         assert r.status_code == 403, wrong
     assert done == []
-    assert change(username="second", password="new password",
+    assert change(username="second", password="new password amber lanterns ford",
                   current_password="the right one").status_code == 200
-    assert done == [("second", "new password")]
+    assert done == [("second", "new password amber lanterns ford")]
 
 
 def test_an_account_without_a_password_changes_on_the_code_its_host_shows(rotations, monkeypatch):
@@ -371,10 +382,10 @@ def test_an_account_without_a_password_changes_on_the_code_its_host_shows(rotati
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
     code = device_auth.issue_pin()
     for wrong in ({}, {"pin": ""}, {"pin": "AAAA-AAAA"}, {"current_password": "the right one"}):
-        assert change(username="named", password="a password now", **wrong).status_code == 403, wrong
+        assert change(username="named", password="a password now amber lanterns ford", **wrong).status_code == 403, wrong
     assert done == [] and change.asked == []
-    assert change(username="named", password="a password now", pin=code).status_code == 200
-    assert done == [("named", "a password now")]
+    assert change(username="named", password="a password now amber lanterns ford", pin=code).status_code == 200
+    assert done == [("named", "a password now amber lanterns ford")]
 
 
 def test_a_node_whose_host_shows_no_code_keeps_a_password(rotations, doors, monkeypatch):
@@ -386,7 +397,7 @@ def test_a_node_whose_host_shows_no_code_keeps_a_password(rotations, doors, monk
     monkeypatch.setattr(device_auth, "pin_door", lambda: False)
     r = change(username="second", password="", current_password="the right one")
     assert r.status_code == 422 and done == [] and change.asked == []
-    assert change(username="second", password="new password",
+    assert change(username="second", password="new password amber lanterns ford",
                   current_password="the right one").status_code == 200
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(),
                                                           {"username": "owner", "password": "",
@@ -408,7 +419,7 @@ def test_a_busy_node_says_so_at_the_change(rotations, monkeypatch):
 def test_the_change_asks_its_derivation_as_a_signed_caller(rotations, monkeypatch):
     change, _done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
-    assert change(username="second", password="new password",
+    assert change(username="second", password="new password amber lanterns ford",
                   current_password="the right one").status_code == 200
     assert change.asked == [True]
     assert change.recorded == ["cd" * 32]              # the new key, the node's on record
@@ -419,7 +430,7 @@ def test_an_identity_from_the_environment_is_changed_there_before_any_password_i
     change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
     (tmp_path / "node_info.json").unlink()
-    r = change(username="second", password="new password", current_password="a guess")
+    r = change(username="second", password="new password amber lanterns ford", current_password="a guess")
     assert r.status_code == 409 and "environment" in r.json()["detail"]
     assert change.asked == [] and done == []
 
@@ -454,23 +465,23 @@ def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_n
     assert code and code in caplog.text and path.stat().st_mode & 0o077 == 0
     for wrong in ("", "AAAA-AAAA-AAAA", code[:-1]):
         with pytest.raises(device_auth.WrongSetupCode):
-            asyncio.run(device_auth.create_account("owner", "a password", wrong))
+            asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", wrong))
     assert written == []
-    asyncio.run(device_auth.create_account("owner", "a password", code.lower()))
+    asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", code.lower()))
     assert written == ["owner"] and not path.exists()
     with pytest.raises(device_auth.AccountExists):
-        asyncio.run(device_auth.create_account("other", "a password", code))
+        asyncio.run(device_auth.create_account("other", "a password amber lanterns ford", code))
     for name in ("node_ed25519.key", "node_info.json"):   # the folder emptied while it runs
         (fresh_node / name).unlink()
     with pytest.raises(device_auth.WrongSetupCode):
-        asyncio.run(device_auth.create_account("other", "a password", code))
+        asyncio.run(device_auth.create_account("other", "a password amber lanterns ford", code))
     (fresh_node / "node_ed25519.key").write_text("k")     # a key with no name is an identity
     with caplog.at_level("WARNING", logger="device_auth"):
         device_auth.prepare_setup()
     assert not path.exists() and "no account can be created over it" in caplog.text
     assert device_auth.identity_key_on_disk()
     with pytest.raises(device_auth.AccountExists):
-        asyncio.run(device_auth.create_account("other", "a password", code))
+        asyncio.run(device_auth.create_account("other", "a password amber lanterns ford", code))
 
 
 def test_the_setup_code_is_read_out_of_what_was_pasted_around_it(fresh_node, monkeypatch):
@@ -481,9 +492,9 @@ def test_the_setup_code_is_read_out_of_what_was_pasted_around_it(fresh_node, mon
     code = device_auth._setup_code
     for given in ("\u0410\u0412\u0421\u0415-\u041d\u041a\u041c\u0420-\u0422\u0425\u0410\u0412", "", " - "):
         with pytest.raises(device_auth.WrongSetupCode):
-            asyncio.run(device_auth.create_account("owner", "a password", given))
+            asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", given))
     pasted = f"backend-1 | WARNING No account yet. The setup code to create it is {code} (also in …)"
-    assert asyncio.run(device_auth.create_account("owner", "a password", pasted)) == {"username": "owner"}
+    assert asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", pasted)) == {"username": "owner"}
 
 
 def test_the_setup_code_is_typed_by_hand_so_it_is_short_and_forgiving(fresh_node, monkeypatch):
@@ -498,7 +509,7 @@ def test_the_setup_code_is_typed_by_hand_so_it_is_short_and_forgiving(fresh_node
         device_auth.prepare_setup()
         code = device_auth._setup_code
         assert re.fullmatch("[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}", code)
-        assert asyncio.run(device_auth.create_account("owner", "a password", spell(code))) == {
+        assert asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", spell(code))) == {
             "username": "owner"}
     assert len(made) == 5
     # Only a word of the code's shape is a candidate, and of a long paste the last few
@@ -523,7 +534,7 @@ def test_wrong_setup_codes_shut_the_setups_door_and_never_burn_the_code(fresh_no
     wrong = "AAAA-AAAA" if code != "AAAA-AAAA" else "BBBB-BBBB"
 
     def attempt(given):
-        return asyncio.run(device_auth.create_account("owner", "a password", given))
+        return asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", given))
     for _ in range(device_auth.LOGIN_FREE_FAILURES):
         with pytest.raises(device_auth.WrongSetupCode):
             attempt(wrong)
@@ -547,7 +558,7 @@ def test_the_set_up_door_says_when_it_is_shut(fresh_node, doors, monkeypatch):
     monkeypatch.setitem(device_auth._doors, "setup", {
         "failures": 9, "shut_until": device_auth.time.time() + 120, "in_flight": 0})
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "a password", "setup_code": device_auth._setup_code}))
+        "username": "owner", "password": "a password amber lanterns ford", "setup_code": device_auth._setup_code}))
     assert r.status_code == 429 and r.headers["X-Sautium-Auth-Error"] == "shut"
     assert 100 < int(r.headers["Retry-After"]) <= 120 and "wrong setup codes" in r.json()["detail"]
 
@@ -556,7 +567,7 @@ def test_the_set_up_door_refuses_a_code_that_is_not_the_nodes(fresh_node, doors,
     monkeypatch.setattr(device_auth, "_write_identity", lambda *a: pytest.fail("created"))
     device_auth.prepare_setup()
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "a password", "setup_code": "AAAA-AAAA-AAAA"}))
+        "username": "owner", "password": "a password amber lanterns ford", "setup_code": "AAAA-AAAA-AAAA"}))
     assert r.status_code == 403
 
 
@@ -719,7 +730,7 @@ def test_a_pin_is_a_key_or_nothing():
 
 def test_a_refusal_at_the_credential_doors_names_the_field_never_its_value(doors):
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "pw4321", "setup_code": "x"}))
+        "username": "owner", "password": "", "setup_code": "pw4321"}))
     assert r.status_code == 422 and "pw4321" not in r.text
 
 
@@ -744,7 +755,6 @@ def test_the_pairing_code_is_the_hosts_to_read(tmp_path, monkeypatch):
     client = TestClient(app)
     secret = auth_hmac.ensure_secret(tmp_path / ".api_secret")
     assert client.get("/api/auth/pin", headers=signed("GET", "/api/auth/pin")).status_code == 403
-    assert client.get("/api/auth/pin/stream", headers=signed("GET", "/api/auth/pin/stream")).status_code == 403
     assert device_auth._pin is None                   # the refused read minted nothing
     r = client.get("/api/auth/pin", headers=signed("GET", "/api/auth/pin", key=secret))
     assert r.status_code == 200 and r.json()["code"] == device_auth._pin["code"]
@@ -807,12 +817,12 @@ def test_a_crowd_at_the_login_door_never_turns_a_signed_change_away(rotations, d
     shut = doors.post("/api/auth/login", json=_seal(doors.get("/api/auth/handshake").json(),
                                                     {"password": "the right one"}))
     assert shut.status_code == 429                    # the login's door is shut
-    assert change(username="second", password="new password",
+    assert change(username="second", password="new password amber lanterns ford",
                   current_password="the right one").status_code == 200
     for _ in range(device_auth.LOGIN_FREE_FAILURES + 1):
-        assert change(username="third", password="new password", current_password="a guess").status_code == 403
-    r = change(username="third", password="new password", current_password="new password")
-    assert r.status_code == 429 and r.headers["retry-after"] == "1" and done == [("second", "new password")]
+        assert change(username="third", password="new password amber lanterns ford", current_password="a guess").status_code == 403
+    r = change(username="third", password="new password amber lanterns ford", current_password="new password amber lanterns ford")
+    assert r.status_code == 429 and r.headers["retry-after"] == "1" and done == [("second", "new password amber lanterns ford")]
 
 
 def test_a_try_let_in_holds_the_door_until_its_answer_however_long_it_takes(login_door, monkeypatch):
@@ -852,12 +862,16 @@ def test_a_try_let_in_holds_the_door_until_its_answer_however_long_it_takes(logi
 def test_a_change_without_the_hosts_code_costs_its_code_nothing(rotations, monkeypatch):
     change, _done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
-    device_auth.issue_pin()
-    left = device_auth.pin_state()["attempts_left"]
-    assert change(username="named", password="a password now").status_code == 403
-    assert device_auth.pin_state()["attempts_left"] == left
-    assert change(username="named", password="a password now", pin="AAAA-AAAA").status_code == 403
-    assert device_auth.pin_state()["attempts_left"] == left - 1
+    code = device_auth.issue_pin()
+    told = []
+
+    async def refused():
+        told.append(1)
+    monkeypatch.setattr(device_auth, "pin_refused", refused)
+    assert change(username="named", password="a password now amber lanterns ford").status_code == 403
+    assert told == []                                   # no code at all is not a wrong code
+    assert change(username="named", password="a password now amber lanterns ford", pin="AAAA-AAAA").status_code == 403
+    assert told == [1] and device_auth.pin_state()["code"] == code      # told, never burned
 
 
 def test_the_owners_notice_of_wrong_passwords_is_dropped_once_seen(monkeypatch):
@@ -865,7 +879,7 @@ def test_the_owners_notice_of_wrong_passwords_is_dropped_once_seen(monkeypatch):
     store = {device_auth.LOGIN_FAILURES_KEY: {"count": 2, "since": "2026-11-05T10:00:00+00:00",
                                               "last": "2026-11-05T10:05:00+00:00"}}
     monkeypatch.setattr(settings_router, "_read", lambda key: store.get(key))
-    notice = settings_router._login_failures_notice()
+    notice = settings_router._failures_notice(device_auth.LOGIN_FAILURES_KEY)
     assert notice["since"] == "2026-11-05T10:05:00+00:00" and notice["data"]["count"] == 2
     monkeypatch.setattr(settings_router, "_notice_items", lambda: [{**notice, "seen": False}])
     assert [n["key"] for n in settings_router._notices_state()["items"]] == ["auth.login_failures"]
@@ -1086,14 +1100,14 @@ def test_the_setup_of_a_node_that_lost_its_key_takes_only_the_pair_that_signed_i
 
 def test_another_identity_over_its_records_is_made_on_the_owners_word(lost_key, fresh_node):
     lost_key.signed_by(_key_of("owner", "the right one"))
-    info = _bring_back(lost_key, "other", "a new password", new_identity=True)
-    assert info["username"] == "other" and info["public_key_hex"] == _key_of("other", "a new password")
+    info = _bring_back(lost_key, "other", "a new password amber lanterns ford", new_identity=True)
+    assert info["username"] == "other" and info["public_key_hex"] == _key_of("other", "a new password amber lanterns ford")
     assert lost_key.record() == info["public_key_hex"]
 
 
 def test_with_no_seal_of_its_own_any_pair_is_the_nodes_first(lost_key, fresh_node):
     lost_key.signed_by("cd" * 32, imported=True)       # another author's, imported
-    assert _bring_back(lost_key, "anyone", "a password")["username"] == "anyone"
+    assert _bring_back(lost_key, "anyone", "a password amber lanterns ford")["username"] == "anyone"
 
 
 def test_where_its_p2p_ran_only_the_key_that_run_held_is_the_nodes(lost_key, fresh_node):
@@ -1134,14 +1148,14 @@ def test_a_new_identity_on_record_is_the_only_one_a_second_loss_takes_back(lost_
     lost_key.recorded("ef" * 32)                       # the launcher's random key, lost too
     with pytest.raises(device_auth.AnotherIdentity):
         _bring_back(lost_key, "owner", "the right one")
-    made = _bring_back(lost_key, "second", "a new password", new_identity=True)["public_key_hex"]
+    made = _bring_back(lost_key, "second", "a new password amber lanterns ford", new_identity=True)["public_key_hex"]
     (fresh_node / "node_ed25519.key").unlink()          # lost again, before any start
     (fresh_node / "node_info.json").unlink()
     device_auth.prepare_setup()
     lost_key.code = device_auth._setup_code
     with pytest.raises(device_auth.AnotherIdentity):
         _bring_back(lost_key, "owner", "the right one")
-    assert _bring_back(lost_key, "second", "a new password")["public_key_hex"] == made
+    assert _bring_back(lost_key, "second", "a new password amber lanterns ford")["public_key_hex"] == made
 
 
 def test_the_same_pair_over_the_info_left_keeps_it(lost_key, fresh_node):
@@ -1171,7 +1185,7 @@ def test_another_identity_over_the_info_left_moves_it_aside(lost_key, fresh_node
     lost_key.recorded(_key_of("owner", "the right one"))
     left = {"node_id": "11" * 32, "public_key_hex": "11" * 32, "username": "owner"}
     (fresh_node / "node_info.json").write_text(json.dumps(left))
-    info = _bring_back(lost_key, "other", "a new password", new_identity=True)
+    info = _bring_back(lost_key, "other", "a new password amber lanterns ford", new_identity=True)
     assert json.loads((fresh_node / "node_info.json").read_text())["username"] == "other"
     [aside] = fresh_node.glob("replaced-*")
     assert json.loads((aside / "node_info.json").read_text()) == left
@@ -1221,12 +1235,12 @@ def test_a_fresh_nodes_setup_that_fails_at_its_placement_leaves_no_record(lost_k
     real = node_identity._link_exclusive
     monkeypatch.setattr(node_identity, "_link_exclusive", _disk_full)
     with pytest.raises(OSError):
-        _bring_back(lost_key, "first", "a first password")
+        _bring_back(lost_key, "first", "a first password amber lanterns ford")
     assert lost_key.record() is None and not (fresh_node / "node_ed25519.key").exists()
     monkeypatch.setattr(node_identity, "_link_exclusive", real)
     device_auth.record_identity_state()                 # the owner frees the disk and restarts
     assert device_auth.identity_missing() is False
-    assert _bring_back(lost_key, "chosen", "another password")["username"] == "chosen"
+    assert _bring_back(lost_key, "chosen", "another password amber lanterns ford")["username"] == "chosen"
 
 
 def test_another_identity_that_fails_at_its_placement_keeps_the_lost_keys_record(lost_key,
@@ -1241,7 +1255,7 @@ def test_another_identity_that_fails_at_its_placement_keeps_the_lost_keys_record
     real = node_identity._link_exclusive
     monkeypatch.setattr(node_identity, "_link_exclusive", _disk_full)
     with pytest.raises(OSError):
-        _bring_back(lost_key, "owner", "a typo", new_identity=True)
+        _bring_back(lost_key, "owner", "a typo amber lanterns ford", new_identity=True)
     assert lost_key.record() == lost
     monkeypatch.setattr(node_identity, "_link_exclusive", real)
     assert _bring_back(lost_key, "owner", "the right one")["public_key_hex"] == lost
@@ -1266,7 +1280,7 @@ def test_a_key_that_lands_meanwhile_is_the_one_on_record(lost_key, fresh_node, m
         real(tmp, key, pem)
     monkeypatch.setattr(node_identity, "_link_exclusive", another_process_first)
     with pytest.raises(device_auth.AccountExists):
-        _bring_back(lost_key, "first", "a first password")
+        _bring_back(lost_key, "first", "a first password amber lanterns ford")
     assert lost_key.record() == landed_pub
 
 
@@ -1281,7 +1295,7 @@ def test_a_temporary_name_that_cannot_be_removed_leaves_the_setup_made(lost_key,
             raise PermissionError(13, "being used by another process")
         return real_unlink(self, *a, **k)
     monkeypatch.setattr(Path, "unlink", sharing_violation)
-    info = _bring_back(lost_key, "first", "a first password")
+    info = _bring_back(lost_key, "first", "a first password amber lanterns ford")
     assert json.loads((fresh_node / "node_info.json").read_text())["username"] == "first"
     assert lost_key.record() == info["public_key_hex"]
 
@@ -1427,3 +1441,40 @@ def test_a_browser_that_knew_a_node_here_is_asked_in_the_words_of_bringing_it_ba
     assert out["sent"] == [] and out["confirms"] == []
     assert out["after_title"] == "This node's identity is missing" and out["accept"] == "Bring it back"
     assert "its identity is missing, as the form says" in out["after"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_what_the_page_seals_is_a_whole_bucket_whatever_the_password():
+    """F1 (SEC-S2): a box's length would say the password's; the page pads
+    every payload to the node's bucket, and the node reads it without."""
+    for password in ("x", "a much longer password, typed out in full " * 4):
+        out = _page(f"return await window.Sautium.auth.login({json.dumps(password)})",
+                    store=dict(_SIGNED_IN), replies={"/api/auth/login": [[200]]})
+        assert out["sent"]["/api/auth/login"] == [{"password": password}]
+        assert out["sealed"]["/api/auth/login"][0] % device_auth.BOX_BUCKET == 0
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_door_s_word_on_the_password_comes_back_as_such():
+    """The sealed answer that says `password` (routers/auth._weak) is no
+    account made and no identity changed: the page is handed the verdict,
+    and the person's word rides the next request; a sign-in's time is kept
+    for the next page to say once."""
+    weak = {"password": {"zone": "word", "seconds": 300000, "words": "about 3 days"}}
+    create = ("return await window.Sautium.auth.createAccount('owner', 'qmzvhwkt', 'AAAA-BBBB', "
+              "false, true, 'a@b.example')")
+    out = _page("window.Sautium.auth.acceptNode(''); " + create, unsigned=True, store=dict(_SIGNED_IN),
+                replies={"/api/auth/create-account": [[200, None, weak]]})
+    assert out["result"] == {"weak": weak["password"]}
+    assert out["store"]["sautium.device_token"] == "old token"          # no account made, no token
+    assert out["sent"]["/api/auth/create-account"][0]["keep"] is True
+    assert out["sent"]["/api/auth/create-account"][0]["email"] == "a@b.example"
+    out = _page("return await window.Sautium.auth.changeIdentity('owner', 'qmzvhwkt', 'now', true)",
+                store=dict(_SIGNED_IN), replies={"/api/auth/change-identity": [[200, None, weak]]})
+    assert out["result"] == {"ok": False, "weak": weak["password"]}
+    assert out["sent"]["/api/auth/change-identity"][0]["keep"] is True
+    told = {"token": "fresh token", "password": weak["password"]}
+    out = _page("const ok = await window.Sautium.auth.login('qmzvhwkt'); "
+                "return [ok, window.Sautium.auth.takePasswordTold(), window.Sautium.auth.takePasswordTold()]",
+                store=dict(_SIGNED_IN), replies={"/api/auth/login": [[200, None, told]]})
+    assert out["result"] == [True, weak["password"], None]

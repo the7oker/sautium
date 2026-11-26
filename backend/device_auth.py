@@ -12,10 +12,20 @@ once, by proving one of two things:
   * knowledge of the account password — re-deriving the Argon2id identity and
     checking that it yields this node's public key. Nothing about the password
     is stored anywhere, not even a hash: the account IS the derivation.
-  * possession of a pairing PIN the launcher hands over as a QR code or a
+  * possession of a pairing code the launcher hands over as a QR code or a
     link (it is never shown as text, and a Docker node has no surface for
     one), for the anonymous accounts the wizard creates with a random
     password its owner has never seen.
+
+THE PASSWORD ITSELF. The key is derived from the nickname and the password,
+and an invite code fixes it: whoever holds one tests guesses at home, unseen
+and without a limit, so no lock here bounds them. Every door that makes or
+changes an account therefore estimates the new password
+(desktop/password_strength: the time one GPU would take at the key's cost)
+and refuses one under an hour, takes one under a year only on the person's
+own word (`keep`), and an existing account is told its time once at a
+sign-in (told_once). Nothing of a password or of its estimate is kept but
+the public key whose password was estimated.
 
 The token is a pure function of a server-side EPOCH, so "log out everywhere"
 is `epoch += 1` — one integer, no device table. That is a deliberate trade:
@@ -36,12 +46,16 @@ per-exchange server key that the node's identity key signs. See "Credential
 channel" below. So does every other secret the Web UI sends (an AI key, a
 sign-in's code, the email's code — routers/auth.boxed), and the changes a
 device token alone does not make take the password through it (step_up).
+A box's length would say its payload's, a password's among it: both sides
+pad what they seal to a whole bucket (BOX_BUCKET).
 
 BRUTE FORCE. The two doors need different locks:
-  * PIN — 40 bits, short-lived: it expires in minutes, dies after
-    MAX_PIN_ATTEMPTS, and every check passes through a lock. Sleeping
-    between attempts would be useless: a thousand parallel requests sleep
-    concurrently. Serialising them is what makes attempts countable.
+  * pairing code — nobody types it (it rides in the QR and in "Open Web
+    UI"'s link), so it is long instead of guarded: 140 bits, out of reach of
+    any count of guesses. It is never burned — a burn was a lever a LAN
+    neighbour pulled to kill the code being scanned — and a wrong one is
+    told to the owner (pin_refused), a code this process minted and let
+    expire excepted.
   * password — Argon2id at 256 MB already makes guessing slow (a thousand
     parallel attempts would need 250 GB). The danger runs the other way: that
     same cost turns an unbounded login endpoint into a memory DoS, so
@@ -59,6 +73,8 @@ BRUTE FORCE. The two doors need different locks:
 
 import asyncio
 import base64
+import collections
+import hashlib
 import hmac
 import json
 import logging
@@ -73,18 +89,19 @@ logger = logging.getLogger(__name__)
 
 _EPOCH_KEY = "auth.token_epoch"
 
-# Unambiguous alphabet (no O/0, I/1) — the PIN is read off a screen and typed
-# on a phone. Its length is the defence, 40 bits: a code dies after
-# MAX_PIN_ATTEMPTS, but the launcher shows the next one at once, so the cap
-# bounds one code, not the guesses over time.
+# Unambiguous alphabet (no O/0, I/1): the setup code is typed by hand.
 _PIN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-PIN_GROUPS = 2
 PIN_GROUP_LEN = 4
+# The pairing code: 7 groups of 4 of 32 characters, 140 bits. Its length is
+# the whole defence (SEC-S2 A3): it is never typed, so nothing is lost by it.
+PIN_GROUPS = 7
 PIN_TTL_SECONDS = 5 * 60
-MAX_PIN_ATTEMPTS = 5
 # How long a just-rotated code stays acceptable. Covers the gap between a
 # camera reading the QR and the phone finishing the request.
 PIN_ROTATE_GRACE = 30
+# The codes this process minted, by digest: a wrong code among them is one
+# that expired (a QR in a photo, an old tab) — not a guess, not told.
+_MINTED_KEEP = 1024
 
 # One Argon2id derivation is ~256 MB; two concurrent is already half a gig.
 # Everything else waits rather than racing the container into an OOM kill —
@@ -92,7 +109,6 @@ PIN_ROTATE_GRACE = 30
 _derive_semaphore = asyncio.Semaphore(2)
 DERIVE_QUEUE = 4
 _derive_in_flight = 0
-_pin_lock = asyncio.Lock()
 # First-run setup is check-then-write around a ~1s Argon2id derivation — a
 # wide enough window for two concurrent requests to both pass the "no account
 # yet" test and for the second to overwrite the first's identity. Serialise
@@ -148,18 +164,22 @@ def setup_candidates(typed: str) -> list:
 LOGIN_FREE_FAILURES = 5
 LOGIN_DELAY_MAX = 15 * 60
 LOGIN_FAILURES_KEY = "auth.login_failures"
+PIN_FAILURES_KEY = "auth.pin_failures"
+# The public key whose password a sign-in estimated (told_once): a new
+# password is a new key, so a rotation asks again by itself
+PASSWORD_ESTIMATED_KEY = "auth.password_estimated_for"
 _doors = {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
           for name in ("login", "signed", "setup")}
 _failures_lock = threading.Lock()
 
-_pin: Optional[dict] = None          # {"code", "expires_at", "attempts"}
+_pin: Optional[dict] = None          # {"code", "expires_at"}
 _pin_prev: Optional[dict] = None     # {"code", "valid_until"} — rotation grace
-
-# Hosts watching the pairing code. Wake-event, not payload: the client pulls
-# the fresh code over the signed API, so the code itself never rides an SSE
-# frame that a proxy might buffer or log.
-_pin_sse_clients: list = []
-_pin_sse_lock = threading.Lock()
+_minted: "collections.OrderedDict[bytes, None]" = collections.OrderedDict()
+_pin_unrecorded = 0                  # wrong codes not yet in the record (pin_refused)
+_pin_recorded = 0                    # the record's count as this process last wrote it
+_pin_recording = False
+_pin_looks = 0                       # the owner's looks at the notices (pin_failures_seen)
+_pin_counts = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -188,9 +208,12 @@ def _epoch() -> int:
 def prime() -> None:
     """Load what every signed request derives its token from — the epoch (a
     DB read) and the node key (a file parse) — before the first request
-    lands on the event loop."""
+    lands on the event loop; and the password estimate, whose lists every
+    door and sign-in reads: lists that are not this release's fail the
+    start, not a sign-in."""
     _epoch()
     _expected_pubkey()
+    from desktop import password_strength  # noqa: F401
 
 
 def current_token(server_secret: bytes) -> str:
@@ -220,6 +243,87 @@ def bump_epoch() -> int:
     _epoch_cache = nxt
     logger.info("device tokens invalidated (epoch %d)", nxt)
     return nxt
+
+
+# ---------------------------------------------------------------------------
+# The password's estimate (desktop/password_strength)
+# ---------------------------------------------------------------------------
+
+class WeakPassword(Exception):
+    """A new password one GPU would find within an hour (`verdict["zone"]`
+    "refused"), or within a year with no `keep` ("word"). `verdict`: the
+    zone, the time in seconds and in words — said to the person through the
+    box, never in the clear."""
+
+    def __init__(self, verdict: dict):
+        super().__init__(verdict["zone"])
+        self.verdict = verdict
+
+
+def check_new_password(password: str, username: str, email: str, keep: bool) -> None:
+    """The edge every door that makes or changes an account holds: refused
+    under an hour, kept under a year only on the person's word."""
+    from desktop import password_strength
+    verdict = password_strength.verdict(password, (username, email))
+    if verdict["zone"] == "refused" or (verdict["zone"] == "word" and not keep):
+        raise WeakPassword(verdict)
+
+
+def account_email() -> str:
+    """The email the account names, one of the words an attacker tries first
+    against its password."""
+    from config import settings
+    d = _identity_dir()
+    if d:
+        try:
+            return json.loads((d / "node_info.json").read_text(encoding="utf-8")).get("email") or ""
+        except (OSError, ValueError):
+            pass
+    return settings.p2p_email or ""
+
+
+def told_once(password: str) -> Optional[dict]:
+    """At a sign-in that just checked `password`: the first time this key's
+    password is seen here, its estimate — returned to be said once when it is
+    under a year, None otherwise. What is written is the key estimated, the
+    same for a strong password as for a weak one."""
+    from routers.settings import _read, _write
+    pubkey = _expected_pubkey()
+    if pubkey is None or _read(PASSWORD_ESTIMATED_KEY) == pubkey:
+        return None
+    from desktop import password_strength
+    verdict = password_strength.verdict(password, (account_username() or "", account_email()))
+    _write(PASSWORD_ESTIMATED_KEY, pubkey)
+    if verdict["zone"] == "clear":
+        return None
+    # An account from the node's environment changes its password there
+    d = _identity_dir()
+    return {**verdict, "env": d is None or not (d / "node_info.json").exists()}
+
+
+def env_password_refusal() -> Optional[str]:
+    """At start, beside reserved_name_refusal and with its narrowing: the
+    words a node refuses to start with when it is about to MAKE its account
+    from P2P_USERNAME/P2P_PASSWORD with a password one GPU would find within
+    an hour — None otherwise. Only that start: the database names no
+    identity and the folder holds no key. A node made by its .env before
+    keeps starting, and is told at its next sign-in (told_once). No person
+    sees this door, so there is no word to keep a weaker one: the operator's
+    .env is that word."""
+    from config import settings
+    from desktop import password_strength
+    if not settings.p2p_username or not settings.p2p_password:
+        return None
+    d = _identity_dir()
+    if d is not None and (d / "node_ed25519.key").exists():
+        return None
+    if _holds_identity():
+        return None
+    verdict = password_strength.verdict(settings.p2p_password, (settings.p2p_username, settings.p2p_email))
+    if verdict["zone"] != "refused":
+        return None
+    return ("P2P_PASSWORD would be found within an hour of guessing on one GPU: choose another in .env "
+            "— the node does not start")
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +560,8 @@ class Busy(Exception):
 
 
 async def create_account(username: str, password: str, setup_code: str,
-                         new_identity: bool = False) -> dict:
+                         new_identity: bool = False, keep: bool = False,
+                         email: str = "") -> dict:
     """Create the node's identity from username+password and persist it.
 
     Mirrors desktop/node_identity._save_keypair so a Docker node and a
@@ -475,7 +580,14 @@ async def create_account(username: str, password: str, setup_code: str,
     the info the folder kept of it stays — and refuses a pair that makes
     another (AnotherIdentity) unless `new_identity`, the owner's word, given
     after he was told that a new identity makes his records another
-    author's."""
+    author's.
+
+    A new identity's password passes the estimate's edge
+    (check_new_password: WeakPassword; `keep` the person's word, `email`
+    typed beside it one of the words an attacker tries first) — before the
+    derivation where the database names no identity; after it, and only for
+    another identity, where it does: the identity of record comes back
+    whatever its password, which exists already and is told at sign-in."""
     global _setup_code
     d = _identity_dir()
     if d is None:
@@ -501,9 +613,10 @@ async def create_account(username: str, password: str, setup_code: str,
                 logger.warning("%d wrong setup codes in a row: the next is taken in %d s",
                                door["failures"], delay)
             raise WrongSetupCode()
-        info = await asyncio.to_thread(_write_identity, d, username, password,
-                                       new_identity=new_identity)
+        # The right code clears the door, whatever the password then meets
         door["failures"], door["shut_until"] = 0, 0.0
+        info = await asyncio.to_thread(_write_identity, d, username, password,
+                                       new_identity=new_identity, keep=keep, email=email)
         _setup_code = None
         (d / SETUP_CODE_FILE).unlink(missing_ok=True)
         return info
@@ -518,7 +631,7 @@ class WrongPin(Exception):
 
 
 async def rotate_identity(username: str, password: str, current_password: str = "",
-                          pin: str = "") -> dict:
+                          pin: str = "", keep: bool = False) -> dict:
     """A new name and/or password for the node's identity — in a
     deterministic KDF that is a new key (desktop/node_identity.rotate_identity
     keeps the old one in the archive). An empty password is minted, as the
@@ -534,8 +647,10 @@ async def rotate_identity(username: str, password: str, current_password: str = 
     login's rule — Shut; Busy past the derivation bound). An
     anonymous account has no password anyone has seen: its host vouches
     for the change instead, by the pairing code it shows now — `pin`, the
-    code a page opened from the host carries (WrongPin; a wrong one costs
-    one of MAX_PIN_ATTEMPTS, as at the pairing door).
+    code a page opened from the host carries (WrongPin; a wrong one is
+    told, as at the pairing door). A new password passes the estimate's
+    edge (check_new_password: WeakPassword, `keep` the person's word) after
+    the word and before the derivation; an empty one is minted.
 
     Everything in this process that cached the old key is told, and its
     chat client and identity worker start again on the new one; the P2P
@@ -552,6 +667,8 @@ async def rotate_identity(username: str, password: str, current_password: str = 
             raise RuntimeError("This identity comes from the node's environment "
                                "(P2P_USERNAME, P2P_PASSWORD): change it there")
         await step_up(current_password, pin)
+        if password:
+            await asyncio.to_thread(check_new_password, password, username, account_email(), keep)
         result = await _rotate_locked(d, username, password)
     _after_rotation(result["info"]["public_key_hex"])
     return result["info"]
@@ -566,8 +683,8 @@ async def step_up(password: str, pin: str) -> None:
     signed door (counted, shut past the free failures, the owner told —
     password_tried; Shut, Busy); an anonymous account has no password anyone
     has seen, so its host vouches instead, by the pairing code it shows now
-    (a wrong one costs one of MAX_PIN_ATTEMPTS). WrongPassword / WrongPin
-    otherwise — a node with no account has nobody to vouch."""
+    (a wrong one is told). WrongPassword / WrongPin otherwise — a node with
+    no account has nobody to vouch."""
     if account_configured() and account_anonymous():
         # No code at all is a page that was not opened from the host: it
         # costs the code the host shows nothing
@@ -648,7 +765,8 @@ def _after_rotation(pubkey: str) -> None:
     db_execute("NOTIFY sautium_identity_rotated")
 
 
-def _write_identity(d, username: str, password: str, new_identity: bool = False) -> dict:
+def _write_identity(d, username: str, password: str, new_identity: bool = False,
+                    keep: bool = False, email: str = "") -> dict:
     import json
 
     from cryptography.hazmat.primitives import serialization
@@ -659,12 +777,18 @@ def _write_identity(d, username: str, password: str, new_identity: bool = False)
 
     if not _may_take_name(username):
         raise ValueError(RESERVED_REFUSAL)
+    held = _holds_identity()
+    if not held:
+        check_new_password(password, username, email, keep)
     info = derive_identity(username, password)          # validates the name
     pubkey = info["public_key_hex"]
     if not _may_take_name(username, pubkey):
         raise ValueError(RESERVED_REFUSAL)
-    if not new_identity and _another_identity(pubkey):
+    another = held and _another_identity(pubkey)
+    if another and not new_identity:
         raise AnotherIdentity()
+    if another:
+        check_new_password(password, username, email, keep)
     # Said, not left to account_anonymous's reading of the name's shape: the
     # owner chose this password, whatever the nickname looks like
     info["anonymous"] = False
@@ -840,24 +964,29 @@ async def login_refused(name: str) -> None:
         door["shut_until"] = time.time() + delay
         logger.warning("%d wrong passwords in a row at the %s door: the next is taken in %d s",
                        door["failures"], name, delay)
-    await asyncio.to_thread(_record_failure)
+    await asyncio.to_thread(_record_failure, LOGIN_FAILURES_KEY)
 
 
-def _record_failure() -> None:
+def _record_failure(key: str, n: int = 1) -> int:
+    """`n` more wrong credentials in the owner's record `key` — its setting
+    is its notice's key too (routers/settings._REPORTS). Returns the count
+    the record holds now."""
     from datetime import datetime, timezone
 
     from db_pool import db_execute
     from routers.settings import _read, _write
     now = datetime.now(timezone.utc).isoformat()
     with _failures_lock:
-        record = _read(LOGIN_FAILURES_KEY) or {}
+        record = _read(key) or {}
         # The notice is marked seen by its latest failure: one recorded
         # after the owner looked is news, and starts a new count
-        seen = (_read("notice.seen") or {}).get("auth.login_failures")
+        seen = (_read("notice.seen") or {}).get(key)
         if not record or seen == record.get("last"):
             record = {"count": 0, "since": now}
-        _write(LOGIN_FAILURES_KEY, {**record, "count": record["count"] + 1, "last": now})
+        count = record["count"] + n
+        _write(key, {**record, "count": count, "last": now})
     db_execute("NOTIFY sautium_notices")
+    return count
 
 
 def _abandoned_derivation(task: asyncio.Task) -> None:
@@ -866,37 +995,15 @@ def _abandoned_derivation(task: asyncio.Task) -> None:
 
 
 # ---------------------------------------------------------------------------
-# PIN pairing (for accounts whose password the owner does not know)
+# Pairing code (for accounts whose password the owner does not know)
 # ---------------------------------------------------------------------------
 
-def notify_pin_subscribers() -> None:
-    """Wake every client watching the pairing code. Called when the code
-    changes under the host's feet — i.e. burned by failed attempts, which is
-    the one transition the host cannot predict from the deadline it was
-    given."""
-    with _pin_sse_lock:
-        for evt, loop in list(_pin_sse_clients):
-            try:
-                loop.call_soon_threadsafe(evt.set)
-            except RuntimeError:
-                continue          # loop closed; generator cleans itself up
-
-
-def pin_subscribe() -> tuple:
-    evt = asyncio.Event()
-    entry = (evt, asyncio.get_event_loop())
-    with _pin_sse_lock:
-        _pin_sse_clients.append(entry)
-    return entry
-
-
-def pin_unsubscribe(entry: tuple) -> None:
-    with _pin_sse_lock:
-        _pin_sse_clients[:] = [e for e in _pin_sse_clients if e[0] is not entry[0]]
+def _digest(code: str) -> bytes:
+    return hashlib.sha256(code.encode()).digest()
 
 
 def issue_pin() -> str:
-    """Mint a fresh pairing PIN, demoting the outstanding one to a short
+    """Mint a fresh pairing code, demoting the outstanding one to a short
     grace period rather than killing it outright.
 
     Rotation is otherwise a race the scanner cannot win: a camera reads the
@@ -908,9 +1015,11 @@ def issue_pin() -> str:
         _pin_prev = {"code": _pin["code"],
                      "valid_until": time.time() + PIN_ROTATE_GRACE}
     code = _code(PIN_GROUPS)
-    _pin = {"code": code, "expires_at": time.time() + PIN_TTL_SECONDS,
-            "attempts": 0}
-    logger.info("pairing PIN issued (valid %d min)", PIN_TTL_SECONDS // 60)
+    _pin = {"code": code, "expires_at": time.time() + PIN_TTL_SECONDS}
+    _minted[_digest(code)] = None
+    while len(_minted) > _MINTED_KEEP:
+        _minted.popitem(last=False)
+    logger.info("pairing code issued (valid %d min)", PIN_TTL_SECONDS // 60)
     return code
 
 
@@ -931,49 +1040,69 @@ def current_pin() -> dict:
 
 
 def pin_state() -> Optional[dict]:
-    """Outstanding PIN for display on the host, or None."""
+    """Outstanding code for display on the host, or None."""
     if not _pin or time.time() > _pin["expires_at"]:
         return None
     return {"code": _pin["code"],
-            "expires_in": int(_pin["expires_at"] - time.time()),
-            "attempts_left": MAX_PIN_ATTEMPTS - _pin["attempts"]}
+            "expires_in": int(_pin["expires_at"] - time.time())}
 
 
 async def redeem_pin(code: str) -> bool:
-    """Check the PIN. Valid until it expires or the attempt limit kills it —
-    a successful pairing does NOT consume it.
-
-    One-shot bought nothing here and cost real usability: the code lives for
-    minutes on the owner's own screen, so whoever can read it can pair either
-    way, while burning it on first use meant a second device (or the same
-    device on the node's other address, since a token is bound to one origin)
-    silently failed until the code rotated. Serialised, because parallel
-    guesses are the whole attack — a delay would just make a thousand
-    requests wait together."""
-    global _pin, _pin_prev
-    async with _pin_lock:
-        given = (code or "").strip().upper().encode()
-        if (_pin_prev and time.time() <= _pin_prev["valid_until"]
-                and hmac.compare_digest(_pin_prev["code"].encode(), given)):
-            return True
-        if not _pin or time.time() > _pin["expires_at"]:
-            return False
-        if not hmac.compare_digest(_pin["code"].encode(), given):
-            _pin["attempts"] += 1
-            if _pin["attempts"] >= MAX_PIN_ATTEMPTS:
-                logger.warning("pairing PIN burned after %d failed attempts",
-                               _pin["attempts"])
-                _pin = None
-                _pin_prev = None
-                notify_pin_subscribers()
-            return False
-        # Only wrong codes count toward the burn. Guessing is what the limit is
-        # for, and a correct code proves the caller is not guessing — while
-        # ordinary use redeems the same code repeatedly (a second device, the
-        # same one on another address, every load of a URL that carries it),
-        # which used to walk the counter to the edge of the limit for free.
-        _pin["attempts"] = 0
+    """Check the pairing code. Valid until it expires — a pairing does not
+    consume it, and a wrong code does not burn it: the code lives for minutes
+    on the owner's own screen, so whoever can read it can pair either way,
+    and at 140 bits no count of guesses reaches it. A wrong code is told
+    (pin_refused), unless it is one this process minted and let expire."""
+    given = (code or "").strip().upper()
+    if (_pin_prev and time.time() <= _pin_prev["valid_until"]
+            and hmac.compare_digest(_pin_prev["code"].encode(), given.encode())):
         return True
+    if _pin and time.time() <= _pin["expires_at"] and hmac.compare_digest(_pin["code"].encode(),
+                                                                          given.encode()):
+        return True
+    if given and _digest(given) not in _minted:
+        await pin_refused()
+    return False
+
+
+async def pin_refused() -> None:
+    """A wrong pairing code, into the owner's record of them since the
+    notice was last seen (_record_failure's rule). Nothing slows a wrong code
+    down — it is no threat at 140 bits — so a crowd of them must not be a
+    crowd of writes: the record is written when the codes not yet in it
+    reach the count it holds (1, 2, 4, 8 … — a flood of N is about log₂ N
+    writes, its notice saying "at least"), one write in flight at a time.
+    The owner's look at the notice starts it from one again
+    (pin_failures_seen, from a route's thread: the counters move under
+    `_pin_counts`, never across the write's await; a look that lands while a
+    write is in flight makes that write's count stale, `_pin_looks` says so)."""
+    global _pin_unrecorded, _pin_recorded, _pin_recording
+    with _pin_counts:
+        _pin_unrecorded += 1
+    if _pin_recording:
+        return
+    _pin_recording = True
+    try:
+        while True:
+            with _pin_counts:
+                if _pin_unrecorded < max(1, _pin_recorded):
+                    break
+                n, _pin_unrecorded = _pin_unrecorded, 0
+                looks = _pin_looks
+            count = await asyncio.to_thread(_record_failure, PIN_FAILURES_KEY, n)
+            with _pin_counts:
+                _pin_recorded = count if looks == _pin_looks else 0
+    finally:
+        _pin_recording = False
+
+
+def pin_failures_seen() -> None:
+    """The owner saw the notices: the next wrong code starts a new record,
+    written at once; the ones not yet written came before the look."""
+    global _pin_recorded, _pin_unrecorded, _pin_looks
+    with _pin_counts:
+        _pin_looks += 1
+        _pin_recorded = _pin_unrecorded = 0
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1120,11 @@ async def redeem_pin(code: str) -> bool:
 # node has no owner yet, and whoever sets it up becomes one.
 
 CHANNEL_TTL_SECONDS = 120
+# What either side seals is padded to a whole number of these bytes (the
+# `_pad` member, which every reader ignores): a box's length would otherwise
+# be its payload's, and a password's length with it, and a meter's answer
+# would say its zone. Auth.js pads its payloads to the same bucket.
+BOX_BUCKET = 1024
 # Outstanding handshakes. A LAN can fill this, never memory; the oldest goes.
 CHANNEL_CAP = 64
 _CHANNEL_CONTEXT = b"sautium-pair:v1"
@@ -1002,6 +1136,12 @@ _channels_lock = threading.Lock()
 class ChannelError(Exception):
     """The envelope does not open: unknown or expired handshake, a box that
     fails to authenticate, or a payload that is not a JSON object."""
+
+
+def padded(obj: dict) -> bytes:
+    """`obj` as JSON, its length a whole number of BOX_BUCKET bytes."""
+    plain = json.dumps({**obj, "_pad": ""}).encode("utf-8")
+    return json.dumps({**obj, "_pad": " " * (-len(plain) % BOX_BUCKET)}).encode("utf-8")
 
 
 def open_channel() -> dict:
@@ -1068,8 +1208,7 @@ def unbox(eph: str, client: str, nonce: str, box: str
 
     def reply(obj: dict) -> dict:
         reply_nonce = nacl_random(Box.NONCE_SIZE)
-        sealed_reply = channel.encrypt(
-            json.dumps(obj).encode("utf-8"), reply_nonce).ciphertext
+        sealed_reply = channel.encrypt(padded(obj), reply_nonce).ciphertext
         return {"nonce": base64.b64encode(reply_nonce).decode("ascii"),
                 "box": base64.b64encode(sealed_reply).decode("ascii")}
 

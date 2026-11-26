@@ -7887,6 +7887,107 @@ def test_an_output_switch_during_a_build_is_at_once_and_stops_hqplayer_once_it_i
     assert [c for ts, c in fake.arrivals if ts >= began and c != "Status"] == ["Stop"]
 
 
+def _long_facts(monkeypatch, usual_s=0.4, **kw):
+    """This host's build times as the Benchmark would give them (the SQL is
+    tests/test_hqp_load's): the usual build `usual_s`; what was asked kept."""
+    from playback import hqp_load
+    asked = []
+
+    def facts(endpoint_id, **setting):
+        asked.append(setting)
+        return {"usual_s": usual_s, "across": {"start_s": None, "built_s": 300.0, "slow": 2,
+                                               "ended": False}, "own": None, **kw}
+    monkeypatch.setattr(hqp_load, "build_facts", facts)
+    return asked
+
+
+def test_a_silent_build_past_the_hosts_usual_one_turns_long_once_and_ends_with_its_answer(
+        fake, output, monkeypatch):
+    """BENCH-GUARD-1 (B-153 (3)): a silent build past this host's usual one —
+    an event of the poller's wait on the build watch, at the moment it turns
+    long, never a page timer — is said with what this host's Benchmark
+    measured; the build's end — HQPlayer answering — ends it. A change's
+    build names no setting: its source and rate are not known yet."""
+    mgr, b = output
+    asked = _long_facts(monkeypatch)
+    seen = _seen(mgr, "building")
+    fake.build("SetFilter", 1.5)
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
+    assert _wait(lambda: any(x and x.get("long") for x in seen), 5)
+    first = next(i for i, x in enumerate(seen) if x and x.get("long"))
+    assert seen[first]["long"]["usual_s"] == 0.4 and seen[first]["long"]["cross"] is None
+    assert any(x and not x.get("long") for x in seen[:first])       # the short word came first
+    assert asked == [{}]                                             # read once a build
+    assert _wait(lambda: seen and seen[-1] is None, 10)
+
+
+def test_a_build_that_ends_within_the_usual_one_is_never_long(fake, output, monkeypatch):
+    mgr, b = output
+    _long_facts(monkeypatch, usual_s=5.0)
+    seen = _seen(mgr, "building")
+    fake.build("SetFilter", 1.0)
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
+    assert _wait(lambda: seen and seen[-1] is None, 10)
+    assert not any(x and x.get("long") for x in seen)
+
+
+def test_a_starts_long_build_names_its_setting_and_whether_it_crosses_families(fake, output, monkeypatch):
+    """A start's build: the held rate check names the setting and the
+    source — the filter that runs for it — and whether the output rate is
+    of another family than the source's."""
+    mgr, b = output
+    asked = _long_facts(monkeypatch)
+    b._rate_check = types.SimpleNamespace(rate=768000, first=44100,
+                                          key=("pcm", 768000, "one-x", "n-x", None, None))
+    b._rate_gen, b._rate_slot = b._queue.generation, 1
+    _, at, facts = b._long_build({"since": time.time() - 0.1, "command": "Play", "silent": True})
+    assert asked == [{"rate_out": 768000, "src_rate": 44100, "filter": "one-x", "shaper": None}]
+    assert (facts["cross"], facts["source"], facts["rate"]) == (True, 44100, 768000)
+    assert 0.2 <= at - time.monotonic() <= 0.4
+    b._rate_check = types.SimpleNamespace(rate=705600, first=96000,
+                                          key=("sdm", 705600, "one-x", "n-x", "ASDM7", None))
+    _, _, facts = b._long_build({"since": time.time(), "command": "Play", "silent": True})
+    assert asked[-1]["filter"] == "n-x" and asked[-1]["shaper"] == "ASDM7" and facts["cross"] is True
+    _, _, facts = b._long_build({"since": time.time(), "command": "SetFilter", "silent": True})
+    assert asked[-1] == {} and facts["cross"] is None
+    # Review round 1 M3: a check judged for another queue, or a start to a
+    # slot it was not judged for, names no setting
+    _, _, facts = b._long_build({"since": time.time(), "command": "SelectTrack", "silent": True})
+    assert asked[-1] == {} and facts["cross"] is None            # no start slot known: not the check's
+    b._rate_gen = b._queue.generation - 1
+    _, _, facts = b._long_build({"since": time.time(), "command": "Play", "silent": True})
+    assert asked[-1] == {} and facts["cross"] is None
+
+
+def test_a_long_builds_word_stays_with_it_past_the_build_limit(fake, output, monkeypatch):
+    """Review round 1 M4: once long, every word of that build says it — the
+    one a silence past the build limit says again included — never another
+    build's."""
+    mgr, b = output
+    seen = _seen(mgr, "building")
+    b._long_said = (100.0, {"usual_s": 20.0, "measured": False})
+    b._emit_building({"since": 100.0, "command": "Play", "silent": True, "unfinished": True})
+    b._emit_building({"since": 200.0, "command": "Play", "silent": True})
+    assert seen[-2]["long"] == {"usual_s": 20.0, "measured": False} and "long" not in seen[-1]
+
+
+def test_hqplayer_gone_in_a_long_build_is_said_once(fake, output, monkeypatch):
+    """BENCH-GUARD-1 Q9: HQPlayer went away in a build past the usual one —
+    the kernel ended it, or a person restarted it: said once, with the
+    next status; nothing is ledgered."""
+    mgr, b = output
+    _long_facts(monkeypatch)
+    lost = _seen(mgr, "build_lost")
+    building = _seen(mgr, "building")
+    fake.build("SetFilter", 30.0)
+    assert hb.change_dsp({"filter": "f57", "filter1x": "f57"})["building"] is not None
+    assert _wait(lambda: any(x and x.get("long") for x in building), 5)
+    fake.restart()
+    assert _wait(lambda: any(lost), 10)
+    said = [x for x in lost if x]
+    assert len(said) == 1 and said[0]["usual_s"] == 0.4 and said[0]["since"]
+
+
 def test_hqplayer_picked_again_before_its_build_ends_plays_on_unstopped(fake, output, monkeypatch):
     from routers import settings as settings_router
     mgr, b = output
@@ -7915,7 +8016,7 @@ def test_a_session_queued_while_hqplayer_builds_is_refused_as_busy(fake, output,
     mgr, b = output
     monkeypatch.setattr(player_router, "manager", mgr)
     monkeypatch.setattr(player_router, "_session_segments",
-                        lambda session_id: ([("owned", [{"id": 9}])], 0))
+                        lambda session_id: ([("owned", [{"id": 9}])], 0, [(0, "t-9")]))
     monkeypatch.setattr(queue_mod, "items_for_owned_rows",
                         lambda rows: [_item("E:/Music/B/09.flac", 9)])
     fake.build("SetFilter", 2.0)
@@ -8457,8 +8558,8 @@ def _build_after_the_commit(monkeypatch, b, seconds):
     a DSP change set off as the manager commits the replace."""
     changed = b.queue_changed
 
-    def commit(kind, *, play=False):
-        changed(kind, play=play)
+    def commit(kind, *, play=False, start=None):
+        changed(kind, play=play, start=start)
         if kind == "replace":
             fake_build_once.append(hb.change_dsp({"filter": "f57", "filter1x": "f57"}))
     fake_build_once: list = []
@@ -9089,8 +9190,8 @@ def test_a_start_left_to_a_backend_detached_before_it_goes_is_dropped_quietly(fa
     mgr, b, play, rotations = play_route
     changed = b.queue_changed
 
-    def detach_after(kind, *, play=False):
-        changed(kind, play=play)
+    def detach_after(kind, *, play=False, start=None):
+        changed(kind, play=play, start=start)
         if kind == "replace":
             b.shutdown()
     monkeypatch.setattr(b, "queue_changed", detach_after)
@@ -9622,7 +9723,7 @@ class _Away:
     def resume_at(self, index, position=0.0):
         pass
 
-    def queue_replace(self, items, *, play):
+    def queue_replace(self, items, *, play, start=None):
         return list(items)
 
     def queue_append(self, items):
@@ -9631,7 +9732,7 @@ class _Away:
     def queue_insert_next(self, items, anchor_index):
         return list(items), anchor_index
 
-    def queue_changed(self, kind, *, play=False):
+    def queue_changed(self, kind, *, play=False, start=None):
         pass
 
     def queue_start(self):
@@ -13388,6 +13489,34 @@ def test_a_seek_during_a_replace_starts_the_album_at_that_second(fake, output):
     assert ("Seek", {"position": "60"}) in _start_sent(fake, n)
 
 
+def test_a_new_queue_played_from_a_slot_starts_hqplayer_at_that_entry_and_second(fake, output):
+    """PLAYBACK-UI-1's "from here" — an album from the track chosen on its
+    page, a history session from its stop: HQPlayer is handed the whole
+    album and started at the chosen entry, at the start's second; its own
+    Previous then walks back through the album."""
+    mgr, b = output
+    n = len(fake.commands)
+    album = _b_album()
+    added, _gen = mgr.replace_queue(album, play=True, start=(album[1], 60.0))
+    assert added == 3
+    _settled()
+    assert fake.playlist == [f"file:///E:/Music/B/0{i}.flac" for i in range(1, 4)]
+    assert _wait(lambda: fake.state == int(PlaybackState.PLAYING) and fake.track == 2)
+    assert ("Seek", {"position": "60"}) in _start_sent(fake, n)
+    assert _wait(lambda: mgr._latest_status.get("track_index") == 2)
+
+
+def test_previous_past_three_seconds_seeks_hqplayer_to_the_tracks_start(fake, output):
+    """B-157 on HQPlayer: playing slot 1 at 0:42, Previous is a Seek to
+    0:00 of that track — not HQPlayer's own Previous."""
+    mgr, b = output
+    n = len(fake.commands)
+    assert mgr.previous(b)
+    assert _wait(lambda: ("Seek", {"position": "0"}) in fake.commands[n:])
+    assert not [c for c, _ in fake.commands[n:] if c in ("Previous", "SelectTrack")]
+    assert fake.track == 1
+
+
 def test_a_pause_during_a_replace_leaves_the_album_to_the_next_play(fake, output):
     """A Pause while HQPlayer takes an album drops the start the replace
     owes: HQPlayer stays stopped with the album, and the next Play starts its
@@ -15394,7 +15523,7 @@ def test_a_tap_on_a_renderer_while_a_removal_resyncs_names_its_track(monkeypatch
         def queue_remove(self, index):
             return True
 
-        def queue_changed(self, kind, *, play=False):     # its re-sync, on its loop
+        def queue_changed(self, kind, *, play=False, start=None):     # its re-sync, on its loop
             resyncing.set()
             done.wait(5)
 
