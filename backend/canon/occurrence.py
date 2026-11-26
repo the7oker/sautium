@@ -264,16 +264,29 @@ def settle_slots(conn, album_ids: Optional[Sequence[str]] = None) -> dict:
         return _settle_slots(cur, ids, st)
 
 
+# The (album, track) pairs of one track at two slots or more whose album
+# holds no copy with a file of it: an owned copy's positions are its files'
+# (settle_copies), and two copies that are one performance at two positions
+# (canon.content.fold_copy_twins) hold one track at two slots by design.
+_SHARED_SLOTS_SQL = """
+    SELECT at.album_id, at.track_id FROM album_tracks at
+     WHERE (CAST(%(a)s AS uuid[]) IS NULL OR at.album_id = ANY(CAST(%(a)s AS uuid[])))
+     GROUP BY at.album_id, at.track_id HAVING count(*) > 1
+       AND NOT EXISTS (SELECT 1 FROM owned_files f JOIN album_variants av ON av.id = f.album_variant_id
+                        WHERE av.album_id = at.album_id AND f.track_id = at.track_id)
+"""
+
+
 def _settle_slots(cur, ids, st: dict) -> dict:
-    cur.execute("""
-        WITH g AS (SELECT DISTINCT album_id FROM album_tracks
-                    WHERE (CAST(%(a)s AS uuid[]) IS NULL OR album_id = ANY(CAST(%(a)s AS uuid[])))
-                    GROUP BY album_id, track_id HAVING count(*) > 1)
+    cur.execute(f"""
+        WITH g AS ({_SHARED_SLOTS_SQL})
         SELECT at.id, at.album_id::text AS album_id, at.disc, at.position,
                at.track_id::text AS track_id, t.title,
+               gs.track_id IS NOT NULL AS shared,
                (SELECT a.name FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
                  WHERE ta.track_id = t.id AND ta.role = 'primary' ORDER BY a.id LIMIT 1) AS artist
-          FROM album_tracks at JOIN g ON g.album_id = at.album_id
+          FROM album_tracks at JOIN (SELECT DISTINCT album_id FROM g) ga ON ga.album_id = at.album_id
+          LEFT JOIN g gs ON gs.album_id = at.album_id AND gs.track_id = at.track_id
           JOIN tracks t ON t.id = at.track_id
          ORDER BY at.album_id, at.disc, at.position""", {"a": ids})
     by_album: Dict[str, list] = defaultdict(list)
@@ -286,12 +299,9 @@ def _settle_slots(cur, ids, st: dict) -> dict:
         named = [s for s in slots if s["artist"]]
         places = ordinals(((s["disc"], s["position"]), song_key(s["title"], s["artist"]))
                           for s in named)
-        counts = defaultdict(int)
-        for s in slots:
-            counts[s["track_id"]] += 1
         seen = set()
         for s in named:
-            if counts[s["track_id"]] < 2:
+            if not s["shared"]:
                 continue
             if s["track_id"] not in seen:
                 seen.add(s["track_id"])

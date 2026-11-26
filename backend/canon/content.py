@@ -1174,6 +1174,7 @@ def fold_credit_duplicates(dry_run: bool = True, artist_ids: list = None) -> dic
     groups: dict = {}
     for r in rows:
         groups.setdefault((r["album_id"], r["key"]), []).append(r)
+    names = _recording_names(sorted({r["track_id"] for r in rows})) if groups else {}
     db = SessionLocal()
     try:
         for (album_id, key), files in groups.items():
@@ -1187,8 +1188,7 @@ def fold_credit_duplicates(dry_run: bool = True, artist_ids: list = None) -> dic
             tracks: dict = {}
             for r in files:
                 tracks.setdefault(r["track_id"], []).append(r)
-            keeper = _keeper({t: fs[0]["title"] for t, fs in tracks.items()},
-                             _recording_names(list(tracks)))
+            keeper = _keeper({t: fs[0]["title"] for t, fs in tracks.items()}, names)
             for loser, lfiles in tracks.items():
                 if loser == keeper:
                     continue
@@ -1230,28 +1230,35 @@ def _folded(title: str) -> str:
     return normalize("".join(ch for ch in t if not unicodedata.combining(ch)))
 
 
-def _recording_names(track_ids) -> set:
-    """MusicBrainz's names of the recordings the tracks' files are bound to
-    (the dump's rows or a slice's): what the keeper rule reads."""
+def _recording_names(track_ids) -> dict:
+    """{track: MusicBrainz's names of the recordings its files are bound to}
+    (the dump's rows or a slice's): what the keeper rule reads. One read for
+    a whole pass — mb_recording has no index on its gid, so a dump node scans
+    it once per call."""
+    out: dict = {}
     if not track_ids:
-        return set()
-    return {r["name"] for r in db_query("""
-        WITH g AS (SELECT DISTINCT x.recording_mbid AS gid
+        return out
+    for r in db_query("""
+        WITH g AS (SELECT DISTINCT x.track_id::text AS track_id, x.recording_mbid AS gid
                      FROM (SELECT track_id, recording_mbid FROM media_files
                            UNION ALL SELECT track_id, recording_mbid FROM hqp_library_files) x
                     WHERE x.track_id = ANY(%(t)s::uuid[]) AND x.recording_mbid IS NOT NULL)
-        SELECT r.name FROM g JOIN mb_recording r ON r.gid = g.gid""", {"t": list(track_ids)})}
+        SELECT g.track_id, r.name FROM g JOIN mb_recording r ON r.gid = g.gid""",
+            {"t": list(track_ids)}):
+        out.setdefault(r["track_id"], set()).add(r["name"])
+    return out
 
 
-def _keeper(titles: dict, names: set) -> str:
+def _keeper(titles: dict, names: dict) -> str:
     """Which of tracks folded into one keeps its id ({track id: title},
-    MusicBrainz's names of their recordings) — the one rule of every fold
+    {track id: MusicBrainz's names of its recordings}, _recording_names) —
+    the one rule of every fold
     (CANON-TRACKS-1 §3.2, F2), the same on every node that holds them: the
     one track whose title is a name of its recording ("Music for 18
     Musicians: Section I" over the box's "Section I"), else, where none is
     or two are, the smallest uuid. Never which row came first: a node's
     created_at is its own."""
-    wanted = {_folded(n) for n in names}
+    wanted = {_folded(n) for t in titles for n in names.get(t, ())}
     named = [t for t, title in titles.items() if _folded(title) in wanted]
     return named[0] if len(named) == 1 else min(titles)
 
@@ -1353,18 +1360,18 @@ def fold_copy_twins(dry_run: bool = False, artist_ids: list = None, track_ids: l
     groups: dict = {}
     for t in involved:
         groups.setdefault(find(t), []).append(t)
+    folding = [m for m in groups.values() if len(m) > 1]
+    names = _recording_names([t for m in folding for t in m])
     db = SessionLocal()
     try:
-        for members in groups.values():
-            if len(members) < 2:
-                continue
+        for members in folding:
             st["groups"] += 1
             held = [v for t in members for v in copies.get(t, ())]
             if len(held) != len(set(held)):
                 st["vetoed"] += 1
                 logger.info("copy twins %s: two of them in one copy — left apart", members)
                 continue
-            keeper = _keeper({t: titles[t] for t in members}, _recording_names(members))
+            keeper = _keeper({t: titles[t] for t in members}, names)
             losers = [t for t in members if t != keeper]
             for loser in losers:
                 logger.info("%strack %s %r is one performance with %s %r — folded",
