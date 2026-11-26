@@ -246,10 +246,11 @@ See:
   track's id** (since 2026-11-26, CANON-TRACKS-1): the k-th position of a
   title in one copy or one release is `song:{artist}:{title}#k`
   (`track_uuid`'s `occurrence`, stored as `tracks.occurrence`; the first
-  keeps the plain key), so two movements titled alike are two tracks
-  (`canon.occurrence`: the scanner, the mint, the slots, a copy held in part
-  completed from its bound medium); every rule that recomputes an id from a
-  row takes it. And one performance in two copies is one track
+  keeps the plain key; a copy is a folder or its sibling disc folders, a
+  position (disc, track, cue start)), so two movements titled alike are two
+  tracks (`canon.occurrence`: the scanner's import and re-read, the mint,
+  the slots, a copy held in part completed from its bound release); every
+  rule that recomputes an id from a row takes it. And one performance in two copies is one track
   (`canon.content.fold_copy_twins`): their prints one material within 2 s,
   and MusicBrainz's word (one recording) or the album's (one position of two
   copies, titles alike once folded) — the print alone is no such word; the

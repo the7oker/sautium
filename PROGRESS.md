@@ -4770,13 +4770,27 @@ Musicians: …": 27 rows for 14 positions (B-134). CANON-TRACKS-1-PROPOSAL
   the plain key, so every id minted before stays. Always two, never by
   length: a length tolerance would have kept Köner's two untitled pieces
   0.4 s apart and every mono/stereo pair as one track. `canon.occurrence`
-  is the rule and its callers: the scanner's import and re-read (and an
-  HQPlayer library's sync), `settle_copies` for what a batch could not see,
-  the phantom mint, `settle_slots` for slots minted or imported before
-  (the seed's and a share's import run it), and `complete_copies` — a copy
-  held in part reads the positions it lacks off the MusicBrainz medium its
+  is the rule and its callers. A copy is a folder, or the sibling disc
+  folders the folder rule makes one album of (a release is all its media);
+  a position is (disc, track, cue start), so a CUE image's slices each take
+  their own. The scanner's import mints each file at its place among the
+  batch's files of its copy, and its re-read re-homes a retagged file
+  straight to its place — never through the first movement's track, where
+  a merge would leave the second's lyrics and analysis behind.
+  `settle_copies` puts right what a batch could not see, from the last
+  position down until nothing moves (a track a later position leaves is
+  free for the earlier one taking its place): a file on its own title's
+  track moves when its place grew, and to a smaller place only in a copy
+  held whole. With `complete` (the canon's pass, the release's step) a copy
+  held in part reads the positions it lacks off the MusicBrainz release its
   files are bound to, so a node without track 1 gives track 14 the id a
-  node with the whole copy gives it. Every rule that recomputes an id from
+  node with the whole copy gives it. A file leaving a track two positions
+  shared leaves no binding behind: that track's bindings and stamps go and
+  the canon binds each movement on its own evidence, as the re-read's split
+  does; a file whose place alone changed takes its binding along. The
+  phantom mint takes the rule, and `settle_slots` the slots minted or
+  imported before (the seed's and a share's import run it; an owned copy's
+  slots are its files'). Every rule that recomputes an id from
   a row takes the occurrence (the identity re-normalization, an artist's
   rename, the clean pass, the collaboration split) — without it an
   `IDENTITY_RULE` bump would fold every `#k` back. Not the recording's id:
@@ -4803,17 +4817,21 @@ Musicians: …": 27 rows for 14 positions (B-134). CANON-TRACKS-1-PROPOSAL
   folds it; a group that would put two positions of one copy on one track
   is left as it is. The keeper (`content._keeper`, shared with the credit
   fold): the title the recording's MusicBrainz name is, else the smallest
-  uuid. On the master: 20 folds within copies of one album and 91 across
-  albums at the release, the box's closing Pulses after its split is
-  analysed. The case that showed it was a binding error too: the album's
+  uuid. The release's step on a copy of the master (2026-11-26): 116
+  tracks folded (348 pairs, 231 kept apart), the box's closing Pulses after
+  its split is analysed and bound again. The whole start took 181.5 s
+  there — 197 files of 80 copies moved to their places, 46 481 slots of
+  8 567 albums onto 40 956 new tracks, 49 comma tracks derived again — and
+  a second start changed nothing. The case that showed it was a binding error too: the album's
   copy had five positions bound outside its own release (two concerts'
   recordings, an educational excerpt) — BACKLOG B-165.
 - **Nothing new travels.** The pull and carry match a record on its uuid
   and its recording; a split or folded track's records travel under its
   new uuid, which a node that has not updated does not hold, and the
   recording round refuses the closing Pulses' material under the first's
-  uuid. `MATCHER_VERSION` stays 2: the matcher's choices do not change,
-  and a binding follows its track by `ON UPDATE CASCADE`.
+  uuid. `MATCHER_VERSION` stays 2: the matcher's choices do not change; a
+  binding follows a renamed or folded track by `ON UPDATE CASCADE`, and a
+  moved file's as above.
 
 ## Known Gotchas
 
