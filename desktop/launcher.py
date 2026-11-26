@@ -1161,11 +1161,13 @@ class LauncherApp(ctk.CTk):
         old = self.config.get("music_path", "")
         if old:
             stored = old.replace("\\", "/").rstrip("/")
-            if not any(f.casefold() == stored.casefold() for f in folders):
-                if (self.api_client.add_folder(old) or {}).get("folder"):
-                    folders = self.api_client.library_folders() or folders
-            self.config = update_config({"music_path": ""})
-            self.service_manager.config = self.config
+            listed = lambda: any(f.casefold() == stored.casefold() for f in folders)
+            if not listed():
+                self.api_client.add_folder(old)
+                folders = self.api_client.library_folders() or folders
+            if listed():                  # forgotten only once the node holds it
+                self.config = update_config({"music_path": ""})
+                self.service_manager.config = self.config
         self._folders = folders
         self.ui_call(lambda: (self._btn_scan.configure(text=self._scan_button_label())
                               if not self._scan_active else None,
@@ -1197,8 +1199,10 @@ class LauncherApp(ctk.CTk):
         self._btn_scan.configure(state="disabled")
 
     def _scan_done(self):
-        """Restore UI after scan completes."""
+        """Restore UI after scan completes. The folders are read again: the
+        Web UI may have added or forgotten one meanwhile."""
         self._scan_active = False
+        threading.Thread(target=self._read_folders, daemon=True, name="library-folders").start()
         self._btn_scan.configure(
             text=self._scan_button_label(), command=self._scan_library,
             state="disabled" if self._node_down else "normal", fg_color="transparent",

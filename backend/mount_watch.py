@@ -71,6 +71,15 @@ def _changed() -> None:
     notify_library_subscribers()
 
 
+def _count_at_start() -> None:
+    """The disks plugged in before the start, counted once: the tabs
+    already open hear of one that holds music."""
+    import library_root
+    from db_pool import db_execute
+    if library_root.count_new_disks():
+        db_execute("NOTIFY sautium_notices")
+
+
 def _unread_changed() -> None:
     logger.info("mount watch: the volumes nothing mounted changed")
     from db_pool import db_execute
@@ -134,7 +143,7 @@ def start() -> bool:
         else:
             threading.Thread(target=_run_unread, args=(fd,), name="unread-watch", daemon=True).start()
             logger.info("watching %s for disks nothing mounted", ", ".join(folders))
-    threading.Thread(target=library_root.count_new_disks, name="new-disks", daemon=True).start()
+    threading.Thread(target=_count_at_start, name="new-disks", daemon=True).start()
     threading.Thread(target=_run, name="mount-watch", daemon=True).start()
     logger.info("watching the mount table for disks under %s", ", ".join(library_root.roots()))
     return True

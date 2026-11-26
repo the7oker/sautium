@@ -119,8 +119,9 @@ def roots() -> List[str]:
 
 def picks() -> bool:
     """This node's owner adds the library's folders in the Web UI, under
-    the roots its setup gave it."""
-    return bool(roots())
+    the roots its setup gave it. Read off the setting alone: no root is
+    resolved here (a reader on the play path never waits on a mount)."""
+    return any((settings.sautium_library_roots or "").split(":"))
 
 
 def kind() -> str:
@@ -142,11 +143,18 @@ def within(path: str) -> Optional[str]:
     return None
 
 
+def _norm(path: str) -> str:
+    """Forward slashes, no trailing separator — but a drive's root keeps
+    its own (`F:/`: `F:` alone is that drive's current folder)."""
+    p = path.replace("\\", "/").rstrip("/")
+    return p + "/" if re.fullmatch(r"[A-Za-z]:", p) else (p or "/")
+
+
 def stored(path: str) -> str:
     """A folder or a file as media_files.file_path spells it: forward
     slashes, no trailing separator (the launcher's E:\\Music is E:/Music; a
     Docker node of Windows or macOS stores its bind's host path)."""
-    return settings.translate_to_host_path(path).replace("\\", "/").rstrip("/") or "/"
+    return _norm(settings.translate_to_host_path(path))
 
 
 def local(path: str) -> str:
@@ -170,8 +178,7 @@ def env_folder() -> Optional[str]:
     MUSIC_LIBRARY_PATH. None on a node of another kind."""
     if kind() != "setup" or not settings.music_library_path:
         return None
-    named = (settings.music_host_path or settings.music_library_path).replace("\\", "/").rstrip("/")
-    return named or None
+    return _norm(settings.music_host_path or settings.music_library_path)
 
 
 # The table's rows as this process last read them. The backend is the one
@@ -210,11 +217,8 @@ def paths() -> List[str]:
 
 def folder_of(path: str, folders: Optional[List[str]] = None) -> Optional[str]:
     """The folder (its stored path) a stored path lies in, None outside
-    every folder of the library."""
-    for folder in (paths() if folders is None else folders):
-        if _under(path, folder):
-            return folder
-    return None
+    every folder of the library — the deepest, should two ever nest."""
+    return max((f for f in (paths() if folders is None else folders) if _under(path, f)), key=len, default=None)
 
 
 def folder_name(folder: Dict[str, Any]) -> str:
@@ -239,10 +243,18 @@ def apply() -> None:
     albums listed, forgotten only by the owner. What each folder holds is
     said."""
     env = env_folder()
-    if env is not None:
-        db_execute("INSERT INTO library_folders (path) VALUES (%s) ON CONFLICT (path) DO NOTHING", (env,))
+    with _write, transaction() as cur:
+        cur.execute("LOCK TABLE library_folders IN SHARE ROW EXCLUSIVE MODE")
+        if env is not None:
+            # the .env's word: its folder is a folder of the library; one of
+            # before that holds it is narrowed to it (the copies outside it
+            # are "Elsewhere"), those it holds are taken in
+            _place(cur, env, None, narrow=True)
     if picks():
         _follow_moved_disks()
+    with _write, transaction() as cur:
+        cur.execute("LOCK TABLE library_folders IN SHARE ROW EXCLUSIVE MODE")
+        _unnest(cur)
     invalidate()
     folders = given()
     logger.info("music folders: %s%s", ", ".join(f["path"] for f in folders) or "none",
@@ -399,21 +411,45 @@ def add(path: str) -> Dict[str, Any]:
     label = _label_of(real)
     with _write, transaction() as cur:
         cur.execute("LOCK TABLE library_folders IN SHARE ROW EXCLUSIVE MODE")
-        cur.execute("SELECT id, path, label FROM library_folders")
-        rows = [dict(zip(("id", "path", "label"), r)) for r in cur.fetchall()]
-        inside = next((r for r in rows if _under(folder, r["path"])), None)
-        if inside is not None:
-            raise Refused(f"It is already in your library, as part of {folder_name(inside)}.")
-        merged = [r for r in rows if _under(r["path"], folder)]
-        if merged:
-            cur.execute("DELETE FROM library_folders WHERE id = ANY(%s)", ([r["id"] for r in merged],))
-        cur.execute("INSERT INTO library_folders (path, label) VALUES (%s, %s) RETURNING id, path, label",
-                    (folder, label))
-        row = dict(zip(("id", "path", "label"), cur.fetchone()))
+        row, merged = _place(cur, folder, label)
     invalidate()
     logger.info("music folder added: %s%s", folder,
-                f" (it takes in {', '.join(r['path'] for r in merged)})" if merged else "")
-    return {"folder": row, "merged": [r["path"] for r in merged]}
+                f" (it takes in {', '.join(merged)})" if merged else "")
+    return {"folder": row, "merged": merged}
+
+
+def _place(cur, folder: str, label: Optional[str], narrow: bool = False) -> tuple:
+    """The one rule a folder enters the table by (the caller holds the
+    table's lock): one inside a folder of the library is refused — or, with
+    `narrow` (a setup node's .env, which names its folder), that outer row
+    becomes this folder —; folders inside it are taken in. Returns (its row,
+    the paths taken in)."""
+    cur.execute("SELECT id, path, label FROM library_folders")
+    rows = [dict(zip(("id", "path", "label"), r)) for r in cur.fetchall()]
+    same = next((r for r in rows if _key(r["path"]) == _key(folder)), None)
+    if same is not None:
+        if narrow:
+            return same, []
+        raise Refused(f"It is already in your library, as part of {folder_name(same)}.")
+    inside = next((r for r in rows if _under(folder, r["path"])), None)
+    if inside is not None and not narrow:
+        raise Refused(f"It is already in your library, as part of {folder_name(inside)}.")
+    gone = [r for r in rows if _under(r["path"], folder) or (narrow and r is inside)]
+    if gone:
+        cur.execute("DELETE FROM library_folders WHERE id = ANY(%s)", ([r["id"] for r in gone],))
+    cur.execute("INSERT INTO library_folders (path, label) VALUES (%s, %s) RETURNING id, path, label",
+                (folder, label))
+    return dict(zip(("id", "path", "label"), cur.fetchone())), [r["path"] for r in gone]
+
+
+def _unnest(cur) -> None:
+    """No folder inside another, whatever wrote the rows (the re-point of a
+    moved disk): the inner goes, the outer reads it."""
+    cur.execute("""DELETE FROM library_folders i USING library_folders o
+                    WHERE i.id <> o.id AND starts_with(i.path, rtrim(o.path, '/') || '/')
+                    RETURNING i.path, o.path""")
+    for inner, outer in cur.fetchall():
+        logger.info("music folder %s is part of %s: one folder from now on", inner, outer)
 
 
 def _label_of(real: str) -> Optional[str]:
@@ -762,6 +798,15 @@ def count_new_disks() -> bool:
     once a mount. Returns whether a count changed what new_disks says."""
     if not picks():
         return False
+    with _counting:
+        return _count_new_disks()
+
+
+# one count at a time: the start's and the mount watch's never cross
+_counting = threading.Lock()
+
+
+def _count_new_disks() -> bool:
     changed = False
     points = _new_points()
     keys = {(path, _device(path)) for path, _root, _point in points}

@@ -843,7 +843,8 @@ def _folders_state() -> Dict[str, Any]:
     """The library's folders as Settings › Library lists them, oldest first:
     {id, path, name (its disk's label and the folder under it, else its
     path), disk (it lies on a disk in the disks' folder), connected (it
-    answers by this process's recorded look, and its folder is there),
+    answers by this process's recorded look — the one definition: a folder
+    not there reads not answering there too),
     albums, tracks, away_copies, forgettable (not the folder a setup node's
     .env names), pullable (on a disk mounted read-only)} — the counts in one
     statement over the files by prefix — and `elsewhere`, the local copies
@@ -869,14 +870,14 @@ def _folders_state() -> Dict[str, Any]:
     listed = []
     for f, prefix in zip(folders, prefixes):
         c = counts.get(prefix) or {"albums": 0, "tracks": 0, "away_copies": 0}
-        here = os.path.isdir(library_root.local(f["path"]))
+        connected = prefix not in gone
         listed.append({"id": f["id"], "path": f["path"], "name": library_root.folder_name(f),
                        "label": f["label"], "disk": any(prefix.startswith(d.rstrip("/") + "/") for d in disks),
-                       "connected": here and prefix not in gone,
+                       "connected": connected,
                        "albums": int(c["albums"]), "tracks": int(c["tracks"]),
                        "away_copies": int(c["away_copies"]),
                        "forgettable": f["id"] is not None and f["path"] != env,
-                       "pullable": here and library_root.pullable(f["path"])})
+                       "pullable": connected and library_root.pullable(f["path"])})
     return {"folders": listed,
             "elsewhere": ({"albums": int(elsewhere["albums"]), "tracks": int(elsewhere["tracks"])}
                           if elsewhere["albums"] else None)}
@@ -919,7 +920,8 @@ async def _library_state() -> Dict[str, Any]:
     # hangs on a folder: an answer that differs from what the notices show
     # wakes them, and the folder list is drawn again with it.
     check_folder()
-    folders = _folders_state()
+    # off the event loop: a folder's mount (a dead share) may stall what reads it
+    folders = await asyncio.to_thread(_folders_state)
     # Copies a Rescan found none of the files of: kept, and removed only from
     # the row these numbers make (the partial index holds only them). Of
     # their albums, those that are away — no copy holding a file is not
@@ -949,7 +951,7 @@ async def _library_state() -> Dict[str, Any]:
         "music_folder":       library_root.kind(),
         # The disks plugged in that the library never had, for one tap
         # (library_root.new_disks; nothing of one passed over is stored)
-        "new_disks":          library_root.new_disks(),
+        "new_disks":          await asyncio.to_thread(library_root.new_disks),
         # What the owner's music with no file here plays as meanwhile: a
         # stream, or nothing until its files are back (the words of a
         # folder that is not connected)
@@ -2818,7 +2820,6 @@ async def post_restart():
     Only where such a policy holds the node (the image); a launcher's
     backend is the launcher's to restart. Any signed-in device may ask: it
     can already do everything a signed-in device can."""
-    import os
     import signal
     from claude_code_runner import IN_DOCKER
     if not IN_DOCKER:

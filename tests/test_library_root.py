@@ -303,6 +303,45 @@ def test_a_node_with_no_roots_has_the_folder_its_env_names(db, monkeypatch):
     assert library_root.env_folder() == "F:/Music"
 
 
+def test_an_env_folder_inside_one_of_before_narrows_it_and_no_folder_ever_nests(db, monkeypatch):
+    """Review round 1 (M2): a setup node whose .env moved into a folder of
+    before (E:/Music → E:/Music/Library) — the old row would hold the new,
+    every file read under the outer, unreachable one, and its Forget would
+    take the whole library. The .env's word narrows it; a folder the
+    re-point or any writer left inside another is taken in; folder_of
+    takes the deepest."""
+    monkeypatch.setattr(settings, "sautium_library_roots", "")
+    monkeypatch.setattr(settings, "music_library_path", "/music")
+    monkeypatch.setattr(settings, "music_host_path", "E:/Music")
+    library_root.apply()
+    monkeypatch.setattr(settings, "music_host_path", "E:/Music/Library")
+    library_root.apply()
+    assert _rows(db) == [("E:/Music/Library", None)]
+    monkeypatch.setattr(settings, "music_host_path", "E:/")               # a drive's root keeps its slash
+    library_root.apply()
+    assert _rows(db) == [("E:/", None)] and library_root.folder_of("E:/Album/01.flac") == "E:/"
+    db.execute("INSERT INTO library_folders (path) VALUES ('E:/Inner')")   # as a writer outside add() would
+    library_root.invalidate()
+    assert library_root.folder_of("E:/Inner/01.flac") == "E:/Inner"         # the deepest
+    library_root.apply()
+    assert _rows(db) == [("E:/", None)]                                     # taken in
+
+
+def test_the_env_folder_of_a_setup_node_is_not_forgotten_here(db, monkeypatch):
+    import asyncio
+    from fastapi import HTTPException
+    monkeypatch.chdir(BACKEND)
+    main = pytest.importorskip("main")
+    monkeypatch.setattr(settings, "sautium_library_roots", "")
+    monkeypatch.setattr(settings, "music_library_path", "/music")
+    monkeypatch.setattr(settings, "music_host_path", "E:/Music")
+    library_root.apply()
+    (row,) = [f for f in library_root.given() if f["path"] == "E:/Music"]
+    with pytest.raises(HTTPException) as no:
+        asyncio.run(main.scan_forget(row["id"]))
+    assert no.value.status_code == 409 and "MUSIC_LIBRARY_PATH" in no.value.detail
+
+
 def test_the_route_adds_arms_the_watch_and_scans_the_folder_alone(tree, db, monkeypatch):
     from fastapi import HTTPException
     settings_router = pytest.importorskip("routers.settings")

@@ -670,7 +670,7 @@ def test_the_plan_names_what_the_removal_would_delete_and_deletes_nothing(
                               "artists": 0, "away": 1}
     # the Library screen and /scan/status show it without the file ids
     lib = asyncio.run(settings_router._library_state())
-    assert lib["scan"]["prune_plan"] == {"id": plan["id"], "kind": "rescan", **plan["counts"]}
+    assert lib["scan"]["prune_plan"] == {"id": plan["id"], "kind": "rescan", **plan["counts"], "waits": False}
     assert asyncio.run(main_module.scan_status())["prune_plan"] == lib["scan"]["prune_plan"]
     assert lib["away"] == {"albums": 1, "copies": 1, "waiting": 0}
     cur.execute("SELECT count(*) FROM tracks")

@@ -161,6 +161,7 @@ class _Look:
         self.look_wakes = False       #   a producer's,
         self.given_up = False         #   a reader read "unreachable" rather than wait longer
         self.done = 0
+        self.dropped = False          # the folder left the library: its worker ends
         self.worker: Optional[threading.Thread] = None
 
 
@@ -181,7 +182,12 @@ def drop_look(path: str) -> None:
     folder that did not answer no longer narrows what opens."""
     with _looks_lock:
         look = _looks.pop(path, None)
-    if look is not None and look.unreachable:
+    if look is None:
+        return
+    with look.cond:
+        look.dropped = True
+        look.cond.notify_all()
+    if look.unreachable:
         _reach_moved()
 
 
@@ -362,7 +368,9 @@ def _ensure_worker(look: "_Look") -> None:
 def _look_worker(look: "_Look") -> None:
     while True:
         with look.cond:
-            look.cond.wait_for(lambda: look.wanted)
+            look.cond.wait_for(lambda: look.wanted or look.dropped)
+            if look.dropped:
+                return
             look.wanted = False
             look.look_wakes, look.wakes_wanted = look.wakes_wanted, False
             look.given_up = False
@@ -2265,7 +2273,7 @@ class LibraryScanner:
                         f"{stats['skipped']} skipped, {stats['errors']} errors")
         else:
             stats["processed"] = total_files
-            if scopes is None and not limit and not self.last_out:
+            if not limit and not self.last_out and set(self.folders) <= {s for s, r in self.last_scopes if r}:
                 # a whole walk read every file it met under this reader: the
                 # re-read a start queues where no events come is done
                 # (library_watch.start), whatever it could not read
@@ -2636,8 +2644,13 @@ def _files_of(folder: Optional[str]) -> List[int]:
     library had several)."""
     import library_root
     if folder is not None:
+        # its own files: never those of a folder that lies in it (no row does;
+        # the rule is the deepest folder's, as folder_of's)
+        inner = [p.rstrip("/") + "/" for p in library_root.paths()
+                 if p != folder and library_root._under(p, folder)]
         return list(db_query_one("""SELECT coalesce(array_agg(id ORDER BY id), '{}') AS ids FROM media_files
-                                     WHERE starts_with(file_path, %s)""", (folder.rstrip("/") + "/",))["ids"])
+                                     WHERE starts_with(file_path, %s) AND NOT file_path ^@ ANY(%s::text[])""",
+                                 (folder.rstrip("/") + "/", inner))["ids"])
     return list(db_query_one("""SELECT coalesce(array_agg(id ORDER BY id), '{}') AS ids FROM media_files
                                  WHERE NOT file_path ^@ ANY(%s::text[])""",
                              ([p.rstrip("/") + "/" for p in library_root.paths()],))["ids"])
@@ -2669,11 +2682,11 @@ def remove_folder(folder: Optional[Dict[str, Any]], counts: Dict[str, int],
     stats["checked"] = len(ids)
     def drop_row(db):
         db.execute(text("DELETE FROM library_folders WHERE id = :id"), {"id": folder["id"]})
+    import library_root
     out = _prune_files(ids, stats, dry_run=False, bound=counts,
                        then=drop_row if folder is not None and folder.get("id") is not None else None,
+                       committed=library_root.invalidate,
                        progress_cb=progress_cb, cancel_check=cancel_check)
-    import library_root
-    library_root.invalidate()
     if not out.get("grew"):
         logger.info("music folder %s forgotten: %s", folder["path"] if folder else "(elsewhere)",
                     {k: v for k, v in out.items() if k != "file_ids"})
@@ -2815,9 +2828,11 @@ def drop_tag_slots(db: Session, album_ids: Sequence[Any], track_ids: Sequence[An
 def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool,
                  progress_cb: Optional[callable], cancel_check: Optional[callable],
                  bound: Optional[Dict[str, int]] = None,
-                 then: Optional[callable] = None) -> Dict[str, Any]:
+                 then: Optional[callable] = None,
+                 committed: Optional[callable] = None) -> Dict[str, Any]:
     """`then(db)`: a last statement of the removal's own transaction (a
-    folder's row, which goes with its files or not at all)."""
+    folder's row, which goes with its files or not at all); `committed()`,
+    what follows its commit at once (the folders' rows read again)."""
     if dry_run:
         stats["file_ids"] = missing_ids
     if not missing_ids:
@@ -2826,6 +2841,8 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
             with get_db_context() as db:
                 then(db)
                 db.commit()
+            if committed is not None:
+                committed()
         return stats
 
     stats["pruned"] = len(missing_ids)
@@ -2942,6 +2959,8 @@ def _prune_files(missing_ids: List[int], stats: Dict[str, Any], *, dry_run: bool
         if then is not None:
             then(db)
         db.commit()
+    if committed is not None:
+        committed()
 
     # The elected file may be the analysed material at another path (a folder
     # the same Rescan found moved): its analysis follows it. The removal is
