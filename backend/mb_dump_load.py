@@ -705,7 +705,10 @@ def load_genre_list(progress_cb: ProgressCb = _noop) -> int:
 # ── stats (cheap, for the UI) ────────────────────────────────────────────────
 
 def stats() -> Dict:
-    """reltuples estimates + on-disk size + loaded version. No count(*) scans."""
+    """reltuples estimates + on-disk size + loaded version. No count(*) scans.
+    ``loaded`` needs the full load's in-DB marker too, as the ListenBrainz
+    loader's does: a slice node's mb_artist has rows (the slices it asked
+    for) and no dump."""
     from db_pool import db_query, db_query_one
     rows = db_query("""
         SELECT c.relname,
@@ -727,7 +730,7 @@ def stats() -> Dict:
     missing = ([t for t, _ in TABLES if int(by.get(t, {}).get("est_rows", 0)) <= 0]
                if full_load_here else [])
     return {
-        "loaded": bool(by) and int(by.get("mb_artist", {}).get("est_rows", 0)) > 0,
+        "loaded": full_load_here and int(by.get("mb_artist", {}).get("est_rows", 0)) > 0,
         "version": loaded_version(),
         "total_records": loaded,
         "size_bytes": size,
