@@ -168,7 +168,9 @@ def _key(path: str) -> str:
 
 
 def _under(path: str, folder: str) -> bool:
-    p, f = _key(path), _key(folder)
+    """`path` is `folder` or lies in it — each read by the one rule of
+    _norm, so a drive's root (`E:/`) is itself, never `E:`."""
+    p, f = _key(_norm(path)), _key(_norm(folder))
     return p == f or p.startswith(f.rstrip("/") + "/")
 
 

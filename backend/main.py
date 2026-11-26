@@ -1858,13 +1858,16 @@ SCOPE_BOUND = 1000
 
 def _merge_scopes(into: Dict[str, bool], scopes: Dict[str, bool]) -> None:
     """Merge folder scopes into a request: a folder walked whole absorbs
-    every scope under it; one already under such a folder adds nothing."""
+    every scope under it; one already under such a folder adds nothing.
+    `""` is every folder; any other key is a stored path, read by the
+    folders' one rule (a drive's root keeps its slash)."""
+    import library_root
     for rel, recursive in scopes.items():
-        rel = rel.replace("\\", "/").rstrip("/")
-        if any(rec and (r == "" or rel == r or rel.startswith(r + "/")) for r, rec in into.items()):
+        rel = library_root._norm(rel) if rel else ""
+        if any(rec and (r == "" or library_root._under(rel, r)) for r, rec in into.items()):
             continue
         if recursive:
-            for r in [r for r in into if rel == "" or r == rel or r.startswith(rel + "/")]:
+            for r in [r for r in into if rel == "" or library_root._under(r, rel)]:
                 del into[r]
             into[rel] = True
         else:
@@ -2166,8 +2169,9 @@ def _prune_worker(plan: Dict[str, Any]) -> None:
                                  f"{_plan_said(again)} wait for your answer")
         else:
             state["result"] = {"prune": stats, "plan_id": plan["id"]}
-            state["progress"] = (f"{plan['name'] or 'The albums elsewhere'} forgotten — "
-                                 f"{stats['pruned']} file(s) removed from the library"
+            # no folder's name: it is no longer listed, so nothing would cut it
+            # from a support bundle (diag_bundle._without_folder_names)
+            state["progress"] = (f"Forgotten — {stats['pruned']} file(s) removed from the library"
                                  if plan["kind"] == "folder" else
                                  f"Removal complete — {stats['pruned']} file(s) removed")
         logger.info(f"Prune results: {stats}")

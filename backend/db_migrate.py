@@ -363,7 +363,7 @@ def _library_folders(conn) -> dict:
                         WHERE av.location = 'local'
                           AND NOT EXISTS (SELECT 1 FROM library_folders lf
                                            WHERE av.directory_path = lf.path
-                                              OR starts_with(av.directory_path, lf.path || '/'))""")
+                                              OR starts_with(av.directory_path, rtrim(lf.path, '/') || '/'))""")
         elsewhere = cur.fetchone()[0]
     conn.commit()
     library_root.invalidate()

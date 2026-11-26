@@ -526,8 +526,9 @@ def _arm(path: str, local: str, w: Dict) -> None:
     from config import settings
 
     def on_dirty(changed: str, recursive: bool) -> None:
-        scope = settings.translate_to_host_path(changed).replace("\\", "/").rstrip("/")
-        if scope == path or scope.startswith(path.rstrip("/") + "/"):
+        import library_root
+        scope = library_root._norm(settings.translate_to_host_path(changed))
+        if library_root._under(scope, path):
             _request({scope: recursive}, explicit=False)
 
     holder = []

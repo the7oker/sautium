@@ -1172,3 +1172,26 @@ def test_the_scan_after_the_move_finds_every_file_where_it_was_left(scanning, db
                                       found.last_gone) == 0
     db.execute("SELECT count(*), count(*) FILTER (WHERE absent_since IS NOT NULL) FROM album_variants")
     assert db.fetchone() == (1, 0)
+
+
+def test_a_folder_at_a_drives_root_is_scoped_merged_and_watched_as_itself(monkeypatch):
+    """Review round 2 (H1): a launcher's library that is a whole drive is
+    stored `E:/` — `E:` alone is that drive's current folder — and every
+    reader of a scope reads it by the same rule: the whole scan's scope, the
+    queue's merge and the watcher's event, never refused as `E:`."""
+    scanner = pytest.importorskip("scanner")
+    monkeypatch.chdir(BACKEND)
+    main = pytest.importorskip("main")
+    monkeypatch.setattr(settings, "sautium_library_roots", "")
+    assert library_root.stored("E:\\\\") == "E:/" and library_root._norm("E:") == "E:/"
+    assert scanner.scope_admitted("E:/", ["E:/"]) == "E:/"
+    assert scanner.scope_admitted("E:/Album", ["E:/"]) == "E:/"
+    assert scanner.scope_admitted("E:/Album", ["F:/"]) is None
+    into = {}
+    main._merge_scopes(into, {"E:/": True})
+    main._merge_scopes(into, {"E:/Album": False})            # absorbed by the drive walked whole
+    assert into == {"E:/": True}
+    into = {"E:/Album": False}
+    main._merge_scopes(into, {"E:\\\\": True})                 # takes in what lies on it
+    assert into == {"E:/": True}
+    assert library_root._under("E:/Album/01.flac", "E:/") and not library_root._under("EX:/Album", "E:/")

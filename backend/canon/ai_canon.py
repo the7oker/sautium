@@ -133,10 +133,10 @@ def _context(artist_id, name):
           (SELECT string_agg(DISTINCT g.name, ', ') FROM albums al
              JOIN album_artists aa ON aa.album_id=al.id AND aa.artist_id=%(a)s::uuid
              JOIN album_genres ag ON ag.album_id=al.id JOIN genres g ON g.id=ag.genre_id) AS genres,
-          (SELECT min(substr(av.directory_path, length(f.p) + 2)) FROM albums al
+          (SELECT min(substr(av.directory_path, length(rtrim(f.p, '/')) + 2)) FROM albums al
              JOIN album_artists aa ON aa.album_id=al.id AND aa.artist_id=%(a)s::uuid
              JOIN album_variants av ON av.album_id=al.id
-             JOIN unnest(%(folders)s::text[]) AS f(p) ON starts_with(av.directory_path, f.p || '/')
+             JOIN unnest(%(folders)s::text[]) AS f(p) ON starts_with(av.directory_path, rtrim(f.p, '/') || '/')
             WHERE av.location = 'local') AS path
     """, {"a": artist_id, "folders": library_root.paths()})[0]
     cands = db_query("""

@@ -89,7 +89,7 @@ def scope_admitted(scope: str, folders: Optional[Sequence[str]] = None) -> Optio
     scope = scope.replace("\\", "/")
     if ".." in scope.split("/"):
         return None
-    folder = library_root.folder_of(scope.rstrip("/") or "/", folders)
+    folder = library_root.folder_of(library_root._norm(scope), folders)
     if folder is None:
         return None
     if library_root.picks() and library_root.within(settings.translate_to_local_path(scope)) is None:
@@ -359,6 +359,8 @@ def folders_unreachable_now() -> Dict[str, bool]:
 
 def _ensure_worker(look: "_Look") -> None:
     with look.cond:
+        if look.dropped:
+            return              # the folder left the library: nobody looks for it again
         if look.worker is None or not look.worker.is_alive():
             look.worker = threading.Thread(target=_look_worker, args=(look,), daemon=True,
                                            name="music-folder-look")

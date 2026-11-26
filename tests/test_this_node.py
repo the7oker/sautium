@@ -660,7 +660,7 @@ process.stdout.write(JSON.stringify(out));
     # The drawer's rows and the controls carry the marks
     assert 'data-go="more/profile" data-guide="verify_email this_node"' in SOURCE
     assert 'data-go="more/library" data-guide="analyse_library music_folder"' in SOURCE
-    assert 'data-action="choose-folder" data-guide="music_folder"' in SOURCE
+    assert 'data-action="add-folder" data-guide="music_folder"' in SOURCE
     assert '<div class="form-group" data-guide="this_node">' in SOURCE
     assert SOURCE.count('data-row="email" data-guide="verify_email"') == 2
 

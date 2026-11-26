@@ -450,7 +450,7 @@ const tile = (id, word = null) => {
   const cover = { querySelector: sel => { if (sel !== '.album-tile-out') throw new Error(sel); return t.mark; },
                   appendChild: put };
   if (word !== null) put({ className: 'album-tile-feat album-tile-out', textContent: word });
-  t.querySelector = sel => { if (sel !== '.album-cover') throw new Error(sel); return cover; };
+  t.querySelector = sel => { if (sel !== '.album-cover, .mosaic-cover') throw new Error(sel); return cover; };
   return t;
 };
 const shown = () => tiles.map(t => [t.dataset.albumId, t.marked, t.mark && t.mark.textContent]);

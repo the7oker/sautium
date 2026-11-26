@@ -76,8 +76,10 @@ def _count_at_start() -> None:
     already open hear of one that holds music."""
     import library_root
     from db_pool import db_execute
+    from routers.settings import notify_library_subscribers
     if library_root.count_new_disks():
         db_execute("NOTIFY sautium_notices")
+        notify_library_subscribers()
 
 
 def _unread_changed() -> None:

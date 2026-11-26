@@ -1160,7 +1160,9 @@ class LauncherApp(ctk.CTk):
             return
         old = self.config.get("music_path", "")
         if old:
+            # the node's spelling: forward slashes, a drive's root keeping its own
             stored = old.replace("\\", "/").rstrip("/")
+            stored = stored + "/" if len(stored) == 2 and stored[1] == ":" else stored
             listed = lambda: any(f.casefold() == stored.casefold() for f in folders)
             if not listed():
                 self.api_client.add_folder(old)
