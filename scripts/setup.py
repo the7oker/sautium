@@ -957,14 +957,7 @@ def env_plan(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optio
     plan.update(machine_tier.pg_settings(ram_gib))
     if not volume_exists and (preset or "SAUTIUM_BIRTH_PRESET" in held):
         plan["SAUTIUM_BIRTH_PRESET"] = preset or ""
-    if asked_preset is not None:
-        small = asked_preset == "nano"
-    elif "SAUTIUM_IMAGE_MODELS" in held:
-        small = held["SAUTIUM_IMAGE_MODELS"] == "0"
-    else:
-        small = preset == "nano"
-    plan["SAUTIUM_IMAGE_MODELS"] = plan["SAUTIUM_IMAGE_STREAMING"] = "0" if small else "1"
-    plan["SAUTIUM_IMAGE_ASSISTANT_CLI"] = "1" if assistant == "claude" else "0"
+    plan.update(image_choice(held, preset=preset, asked_preset=asked_preset, assistant=assistant))
     plan["CLAUDE_CODE_ENABLED"] = "true" if assistant == "claude" else "false"
     if "DEFAULT_PROVIDER" not in held:
         plan["DEFAULT_PROVIDER"] = "none"
@@ -976,6 +969,20 @@ def env_plan(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optio
     elif "COMPOSE_FILE" not in held:
         plan["COMPOSE_FILE"] = COMPOSE_FILE
     return plan
+
+
+def image_choice(held: Dict[str, str], *, preset: Optional[str], asked_preset: Optional[str],
+                 assistant: str) -> Dict[str, str]:
+    """What the image carries, as .env records it: the birth's at first,
+    what .env holds afterwards, `asked_preset` (--preset) whenever given."""
+    if asked_preset is not None:
+        small = asked_preset == "nano"
+    elif "SAUTIUM_IMAGE_MODELS" in held:
+        small = held["SAUTIUM_IMAGE_MODELS"] == "0"
+    else:
+        small = preset == "nano"
+    return {"SAUTIUM_IMAGE_MODELS": "0" if small else "1", "SAUTIUM_IMAGE_STREAMING": "0" if small else "1",
+            "SAUTIUM_IMAGE_ASSISTANT_CLI": "1" if assistant == "claude" else "0"}
 
 
 def write_env(plan: Dict[str, Optional[str]]) -> List[str]:
@@ -1044,16 +1051,29 @@ def born(pid: int) -> Optional[str]:
         return None
 
 
+def image_built(state: dict, env: Dict[str, str]) -> bool:
+    """Whether the image this commit and .env's choices make is built and
+    still there: a run again builds nothing."""
+    return state.get("built") == image_key(env) and bool(out(run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", agent.image_of(ROOT)])))
+
+
+def build_refusal(state: dict, env: Dict[str, str]) -> Optional[str]:
+    """Why this machine cannot build the image the run needs; None where it
+    can, or where nothing is to be built. Asked before the setup asks the
+    person anything of root's."""
+    refusal = machine_tier.image_build_refusal(machine_tier.machine_memory_kib())
+    if refusal is None or image_built(state, env):
+        return None
+    return refusal + ": Sautium cannot be set up on it yet"
+
+
 def build(state: dict, env: Dict[str, str]) -> None:
     """The image, built detached with its log in ./host/: a dropped terminal
     does not end it, and a second run attaches to the same build."""
     key = image_key(env)
-    if state.get("built") == key and out(run(["docker", "image", "inspect", "--format", "{{.Id}}",
-                                             agent.image_of(ROOT)])):
+    if image_built(state, env):
         return
-    refusal = machine_tier.image_build_refusal(machine_tier.machine_memory_kib())
-    if refusal:
-        raise Stop(refusal + ": Sautium cannot be set up on it yet")
     host = agent.host_dir(ROOT)
     log, code = host / "setup-build.log", host / "setup-build.exit"
     running = state.get("build") or {}
@@ -2042,6 +2062,11 @@ def cmd_setup(args) -> int:
         say("the Pi off. Use the official power supply.")
 
     state = load_state()
+    assistant = args.assistant or ("claude" if held.get("SAUTIUM_IMAGE_ASSISTANT_CLI") == "1" else "none")
+    refusal = build_refusal(state, {**held, **image_choice(held, preset=preset, asked_preset=args.preset,
+                                                            assistant=assistant)})
+    if refusal:
+        raise Stop(refusal)
     host = agent.host_dir(ROOT)
     host.mkdir(mode=0o700, exist_ok=True)
     root_steps(args, state, automount=not by_line, disk=disk)
@@ -2073,7 +2098,6 @@ def cmd_setup(args) -> int:
                 say(f"{music} is {said}: {SEEN_AT_START}")
                 say(NOT_SEEN_LATER)
         (ROOT / "data" / "no-library").mkdir(parents=True, exist_ok=True)
-    assistant = args.assistant or ("claude" if held.get("SAUTIUM_IMAGE_ASSISTANT_CLI") == "1" else "none")
     plan = env_plan(held, preset=preset, asked_preset=args.preset, ram_gib=m["ram_gib"],
                     assistant=assistant, volume_exists=volume, roots=not by_line)
     changed = write_env(plan)
@@ -2157,7 +2181,8 @@ def cmd_update(args) -> int:
         raise Stop(f"the request could not be left ({e.strerror}): run ./sautium")
     finally:
         os.close(fd)
-    say("Asked for the newest signed release; the host agent is working (an update takes minutes) …")
+    say("Asked for the newest signed release; the host agent is working (an update takes minutes; most of an hour "
+        "when it compiles Python on a small board) …")
     log = agent.host_dir(ROOT) / "agent.log"
     before = log.stat().st_size if log.exists() else 0
     # The agent's own unit, waited for: it takes the request just left

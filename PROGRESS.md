@@ -4451,8 +4451,9 @@ device on the network; none of them may hold for it more than a bound.
   source at Debian's optimisation matched it. The price is the compile —
   about 7 min on four desktop cores, 1.6 GB at the LTO link — paid once per
   pin, the stage's layer being kept across releases. A machine with under
-  3 GB of memory cannot build the image: the setup and the host agent's
-  update say so before any build (`machine_tier.image_build_refusal`),
+  2.5 GB of memory is refused the build: the setup (before it asks for any
+  root step) and the host agent's update say so before any build
+  (`machine_tier.image_build_refusal`),
   until a prebuilt image, named by digest in the signed release, takes the
   build off the boxes.
 - **Every process tests its fpcalc before it analyses.** It fingerprints a

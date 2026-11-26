@@ -465,7 +465,13 @@ def test_no_build_of_an_image_rests_on_a_package_archive_without_a_pin():
         code = _code(_dockerfile(name))
         for banned in ("ppa:", "add-apt-repository", "software-properties-common", "deadsnakes"):
             assert banned not in code, (name, banned)
-        assert code.count("> /etc/apt/sources.list.d/") == 1 and "jammy-pgdg main" in code
+        # The one source an image adds is PGDG's; the one it removes, the
+        # CUDA base's NVIDIA list
+        touched = [line.strip() for line in code.splitlines() if "sources.list" in line]
+        assert touched == ((["RUN rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list \\"]
+                            if name == "Dockerfile" else [])
+                           + ["> /etc/apt/sources.list.d/pgdg.list \\"]), (name, touched)
+        assert "jammy-pgdg main" in code
         stages = set()
         for line in code.splitlines():
             if line.startswith("FROM "):

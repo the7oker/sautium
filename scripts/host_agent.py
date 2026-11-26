@@ -867,6 +867,12 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     held = state.get("update_held_at")
     if held is not None and now - held < HELD_FLOOR:
         return "floor", "an update was refused for the checkout's own files minutes ago", None, None
+    # Before the survey: on a machine that cannot build, a request costs
+    # nothing, not a fetch
+    tier = machine_tier()
+    refusal = tier.image_build_refusal(tier.machine_memory_kib())
+    if refusal:
+        return "refused", f"{refusal}: an update builds it here, so this machine takes none", None, None
     found = survey(root)
     state["check_at"] = now
     if not found["offered"]:
@@ -891,10 +897,6 @@ def verb_update(state: dict, now: float, root: Path = None) -> Tuple[str, str, O
     except ValueError as e:
         state["update_held_at"] = now
         return "refused", f"{e}: an update builds what .env says the image carries", name, None
-    tier = machine_tier()
-    refusal = tier.image_build_refusal(tier.machine_memory_kib())
-    if refusal:
-        return "refused", f"{refusal}: an update builds it here, so this machine takes none", name, None
     postgres = pg_plan()
     tag = f"sautium-backend:{name}-{commit[:12]}"
     log(f"building {tag} from {name} ({commit})")

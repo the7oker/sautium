@@ -34,9 +34,10 @@ NANO_BELOW_RAM_GIB = 7.5
 NANO_BELOW_FREE_GB = 25
 # The node's image is built on the machine that runs it (the console setup,
 # the host agent's update), and the optimised link of its Python takes 1.6 GB
-# in one process (2026-11-26): a board with less memory than this cannot
-# build it
-IMAGE_BUILD_RAM_GIB = 3
+# in one process (2026-11-26): under this much memory (MemTotal, below a
+# board's nominal size: a 2 GB board reads ~1.8, a 3 GB machine ~2.8) the
+# build is refused before it starts
+IMAGE_BUILD_RAM_GIB = 2.5
 
 
 def image_build_refusal(ram_kib: Optional[int]) -> Optional[str]:
