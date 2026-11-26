@@ -180,17 +180,6 @@ def test_the_launcher_s_writers_keep_another_key_s_documents(launcher, tmp_path,
     assert _moved_said(caplog, CERT, theirs["pubkey"], other)
 
 
-def test_an_imported_bundle_keeps_the_documents_it_replaces(launcher, tmp_path):
-    mine = launcher
-    theirs = certificate(_key(), method="pow")
-    kept = {CERT: _write(tmp_path, CERT, theirs), PROOF: _write(tmp_path, PROOF, proof(theirs))}
-    cert = certificate(mine, method="pow")
-    bundle = tmp_path / "bundle.json"
-    bundle.write_text(json.dumps({"certificate": cert, "proof": proof(cert)}))
-    assert birth_cert.import_certificate(str(bundle))
-    assert _aside(tmp_path) == kept
-
-
 def test_the_mining_worker_keeps_another_key_s_proof(tmp_path):
     mine = _key()
     cert = dict(certificate(mine, method="pow"), difficulty=2)

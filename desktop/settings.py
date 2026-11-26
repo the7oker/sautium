@@ -4,12 +4,16 @@ Two tabs. "General" holds the launcher-only settings (ports) and their own
 Save. "Backup & Restore" holds actions, not settings: the node backup and
 its restore (docs/design/BACKUP.md — the file lands on this machine, keyed
 on the node's own key, and a restore replaces the database the backend
-serves) and the identity certificate transfer. AI provider,
+serves) and the identity file's export and import
+(desktop/identity_file: the key leaves and enters by the machine's own
+hands, never through the Web UI). AI provider,
 HQPlayer connection and Last.fm scrobbling live in the Web UI, so there is
 one source of truth for each of them, not two parallel configs.
 """
 
 import logging
+import threading
+from pathlib import Path
 from typing import Callable, Optional
 
 import customtkinter as ctk
@@ -35,7 +39,8 @@ class SettingsDialog(ctk.CTkToplevel):
                  on_export_plan: Optional[Callable] = None,
                  on_import: Optional[Callable] = None,
                  on_merge: Optional[Callable] = None,
-                 subscribe_job: Optional[Callable] = None):
+                 subscribe_job: Optional[Callable] = None,
+                 identity_ops: Optional[dict] = None):
         super().__init__(parent)
 
         self.title(DIALOG_TITLE)
@@ -63,6 +68,11 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_export_plan = on_export_plan
         self.on_import = on_import
         self.on_merge = on_merge
+        # LauncherApp's side of the identity file: "ui_call" (its thread
+        # marshal), "another_identity(pubkey)" (its database's word, asked
+        # off the Tk thread) and "place(contents)" (the services stopped, the
+        # identity placed, the services started again on it)
+        self.identity_ops = identity_ops
         self._rows: dict = {}
         # One voice per section: while a job runs its row speaks; otherwise
         # only the most recently started job keeps its result line — a
@@ -184,15 +194,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self._rows["export"].mount(tab)
         self._rows["import"].mount(tab)
 
-        # Identity certificate transfer: a public fact, re-fetchable from the
-        # Worker and carried by every node backup — the offline fallback.
-        self._section(tab, "Identity certificate")
+        # The identity file: the key with its certificate, its proof and the
+        # keys it retired — this node on another machine (SEC-S5 §16–§17)
+        self._section(tab, "Identity")
         self._cert_status = self._status(tab, self._cert_status_text())
         row = self._button_row(tab)
-        ctk.CTkButton(row, text="Export certificate…", width=150, command=self._export_birth_cert,
+        ctk.CTkButton(row, text="Export identity…", width=150, command=self._export_identity,
                       fg_color="transparent", border_width=1).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(row, text="Import certificate…", width=170, command=self._import_birth_cert,
+        ctk.CTkButton(row, text="Import identity…", width=170, command=self._import_identity,
                       fg_color="transparent", border_width=1).pack(side="left")
+        self._hint(tab, (
+            "This node's key, its certificate and the keys it retired, in one file: on another "
+            "machine it is this node — its friends, its chat, its name."))
 
         self._states = dict((self.backup_state() or {}) if self.backup_state else {})
         self._render_rows()
@@ -360,41 +373,13 @@ class SettingsDialog(ctk.CTkToplevel):
             return (f"Issued {cert['issued_at']} ({cert['method']}) — {work}")
         return "None yet (fetched automatically at P2P start)"
 
-    def _export_birth_cert(self):
-        from tkinter import filedialog
+    def _export_identity(self):
+        if self.identity_ops:
+            IdentityExportDialog(self, ui_call=self.identity_ops["ui_call"])
 
-        from desktop.p2p.birth_cert import export_certificate
-        path = filedialog.asksaveasfilename(
-            title="Export Birth Certificate",
-            defaultextension=".json",
-            initialfile="sautium_birth_certificate.json",
-            filetypes=[("JSON", "*.json")],
-        )
-        if not path:
-            return
-        ok = export_certificate(path)
-        self._cert_status.configure(
-            text="Certificate exported." if ok
-            else "Export failed — no certificate stored yet.",
-            text_color="#22c55e" if ok else "#ef4444",
-        )
-
-    def _import_birth_cert(self):
-        from tkinter import filedialog
-
-        from desktop.p2p.birth_cert import import_certificate
-        path = filedialog.askopenfilename(
-            title="Import Birth Certificate",
-            filetypes=[("JSON", "*.json")],
-        )
-        if not path:
-            return
-        ok = import_certificate(path)
-        self._cert_status.configure(
-            text=self._cert_status_text() if ok
-            else "Import failed — invalid certificate or wrong identity.",
-            text_color="#22c55e" if ok else "#ef4444",
-        )
+    def _import_identity(self):
+        if self.identity_ops:
+            IdentityImportDialog(self, ops=self.identity_ops, on_placed=self.destroy)
 
     def _save(self):
         """Persist port changes and notify the parent launcher (which restarts
@@ -577,3 +562,334 @@ class ExportDialog(ctk.CTkToplevel):
             return
         self.destroy()
         self._on_ok(scope, artists)
+
+
+_RED, _AMBER = "#ef4444", "#E8B06F"
+
+
+class IdentityExportDialog(ctk.CTkToplevel):
+    """The identity file's export (desktop/identity_file): a passphrase first
+    — the phrase drawn for the person, shown and never masked, or one of
+    their own held to the account password's edge — or none, with what that
+    means said. The export goes on only after the passphrase is typed back
+    once: it proves the phrase was kept, not only read. The lock's derivation
+    takes minutes, in a thread of its own; its estimate is said once."""
+
+    def __init__(self, parent, *, ui_call: Callable):
+        from desktop import identity_file as idf
+        from desktop import node_identity, password_strength
+        super().__init__(parent)
+        self.title("Export identity")
+        self.geometry("560x660")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self._ui_call = ui_call
+        self._dir = node_identity._identity_dir()
+        self._inputs = idf.estimate_inputs(self._dir)
+        self._offer = password_strength.phrase_offer()
+        self._busy = False
+
+        ctk.CTkLabel(self, text="Export identity", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(self, text_color="gray", justify="left", wraplength=510, text=(
+            "This node's key, its certificate and the keys it retired, in one file: imported on "
+            "another machine, that machine is this node.")).pack(padx=24, anchor="w")
+
+        self._mode = ctk.StringVar(value="phrase")
+        ctk.CTkRadioButton(self, text="Lock it with this phrase (recommended)", variable=self._mode,
+                           value="phrase", command=self._sync).pack(padx=24, anchor="w", pady=(12, 0))
+        offer = ctk.CTkFrame(self, fg_color="transparent")
+        offer.pack(fill="x", padx=48, pady=(4, 0))
+        self._phrase = ctk.CTkLabel(offer, text="", anchor="w",
+                                    font=ctk.CTkFont(family="Courier", size=16, weight="bold"))
+        self._phrase.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(offer, text="Another", width=80, command=self._another,
+                      fg_color="transparent", border_width=1).pack(side="right")
+        self._count = ctk.CTkLabel(self, text="", text_color="gray", anchor="w", font=ctk.CTkFont(size=12))
+        self._count.pack(padx=48, anchor="w")
+
+        ctk.CTkRadioButton(self, text="Lock it with a passphrase of my own", variable=self._mode,
+                           value="own", command=self._sync).pack(padx=24, anchor="w", pady=(10, 0))
+        self._own = ctk.CTkEntry(self, show="*", width=462, placeholder_text="passphrase")
+        self._own.pack(padx=48, pady=(4, 0), anchor="w")
+        self._own.bind("<KeyRelease>", lambda _e: self._measure())
+        self._meter = ctk.CTkLabel(self, text="", anchor="w", justify="left", wraplength=462,
+                                   font=ctk.CTkFont(size=12))
+        self._meter.pack(padx=48, anchor="w")
+        self._keep = ctk.BooleanVar(value=False)
+        self._keep_box = ctk.CTkCheckBox(self, text="I understand, keep it", variable=self._keep)
+
+        ctk.CTkRadioButton(self, text="No passphrase", variable=self._mode, value="none",
+                           command=self._sync).pack(padx=24, anchor="w", pady=(10, 0))
+
+        self._words = ctk.CTkLabel(self, text="", justify="left", wraplength=510)
+        self._words.pack(padx=24, anchor="w", pady=(10, 0))
+        self._back_label = ctk.CTkLabel(self, text="Type the passphrase back", anchor="w")
+        self._back_label.pack(padx=24, anchor="w", pady=(8, 0))
+        self._back = ctk.CTkEntry(self, show="*", width=510)
+        self._back.pack(padx=24, pady=(2, 0))
+        self._back.bind("<Return>", lambda _e: self._submit())
+        self._status = ctk.CTkLabel(self, text="", justify="left", wraplength=510)
+        self._status.pack(padx=24, anchor="w", pady=(6, 0))
+
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
+        self._go = ctk.CTkButton(btns, text="Export…", width=120, command=self._submit)
+        self._go.pack(side="right")
+        self._close = ctk.CTkButton(btns, text="Cancel", width=100, command=self.destroy,
+                                    fg_color="transparent", border_width=1)
+        self._close.pack(side="right", padx=(0, 8))
+        self._show_offer()
+        self._sync()
+
+    def _show_offer(self):
+        self._phrase.configure(text=self._offer["phrase"])
+        self._count.configure(text=self._offer["count"])
+
+    def _another(self):
+        from desktop import password_strength
+        self._offer = password_strength.phrase_offer()
+        self._show_offer()
+
+    def _measure(self):
+        from desktop import password_strength
+        text = self._own.get()
+        if not text:
+            self._meter.configure(text="")
+            self._keep_box.pack_forget()
+            return
+        v = password_strength.verdict(text, self._inputs)
+        self._meter.configure(text=v["meter"], text_color={"refused": _RED, "word": _AMBER}.get(v["zone"], "gray"))
+        if v["zone"] == "word":
+            self._keep_box.pack(padx=48, anchor="w", after=self._meter)
+        else:
+            self._keep.set(False)
+            self._keep_box.pack_forget()
+
+    def _sync(self):
+        from desktop import identity_file as idf
+        mode = self._mode.get()
+        self._own.configure(state="normal" if mode == "own" else "disabled")
+        locked = mode != "none"
+        self._words.configure(text=idf.PASSPHRASE_WORDS if locked else idf.PLAIN_WORDS)
+        for widget in (self._back_label, self._back):
+            widget.configure(state="normal" if locked else "disabled")
+
+    def _passphrase(self) -> Optional[str]:
+        """The passphrase chosen and typed back, or None for the plain file;
+        raises ValueError with what to do."""
+        from desktop import identity_file as idf
+        mode = self._mode.get()
+        if mode == "none":
+            return None
+        chosen = self._offer["phrase"] if mode == "phrase" else self._own.get()
+        if mode == "own":
+            try:
+                idf.check_passphrase(chosen, self._inputs, self._keep.get())
+            except idf.WeakPassphrase as e:
+                tail = (" Tick “I understand, keep it” to keep it, or choose another."
+                        if e.verdict["zone"] == "word" else " Use the phrase above, or another.")
+                raise ValueError(e.verdict["door"] + tail) from None
+        if self._back.get() != chosen:
+            raise ValueError("Type the passphrase back exactly as it is: it is asked when the file is "
+                             "imported, and nothing else opens it.")
+        return chosen
+
+    def _submit(self):
+        from tkinter import filedialog
+
+        from desktop import identity_file as idf
+        if self._busy:
+            return
+        try:
+            passphrase = self._passphrase()
+        except ValueError as e:
+            self._status.configure(text=str(e), text_color=_RED)
+            return
+        name = "sautium-identity-" + (self._inputs[0] or "node") + idf.FILE_SUFFIX
+        path = filedialog.asksaveasfilename(title="Save the identity file", parent=self,
+                                            initialfile=name, defaultextension=idf.FILE_SUFFIX,
+                                            filetypes=[("Sautium identity", "*" + idf.FILE_SUFFIX)])
+        if not path:
+            return
+        self._busy = True
+        self._go.configure(state="disabled")
+        self._close.configure(state="disabled")
+        self._status.configure(text="Making the file…", text_color="gray")
+        threading.Thread(target=self._work, args=(Path(path), passphrase, self._keep.get()),
+                         daemon=True, name="identity-export").start()
+
+    def _work(self, path: Path, passphrase: Optional[str], keep: bool):
+        from desktop import identity_file as idf
+        from desktop import password_strength
+        from desktop.identity_birth import expected_seconds
+        try:
+            if passphrase is not None:
+                took = password_strength.words(expected_seconds())
+                self._say(f"Locking the file: {took} on this machine. Sautium goes on meanwhile.", "gray")
+            data = idf.export(self._dir, passphrase, keep=keep)
+            path.unlink(missing_ok=True)            # the save dialog asked about a file there
+            idf.write_file(path, data)
+        except (idf.IdentityFileError, OSError) as e:
+            logger.error("The identity file was not written: %s", e)
+            self._say(str(e), _RED, done=True)
+            return
+        self._say(f"Written to {path}.\n\n" + (idf.PASSPHRASE_WORDS if passphrase else idf.PLAIN_WORDS),
+                  ("black", "white"), done=True)
+
+    def _say(self, text: str, color, done: bool = False):
+        def show():
+            if not self.winfo_exists():
+                return
+            self._status.configure(text=text, text_color=color)
+            if done:
+                self._busy = False
+                self._go.configure(state="disabled")
+                self._close.configure(state="normal", text="Close")
+        self._ui_call(show)
+
+
+class IdentityImportDialog(ctk.CTkToplevel):
+    """The identity file's import: the file chosen and what it says of
+    itself, the folder's refusal (another identity here) before anything
+    else, the database's word (another identity of record: the owner's
+    question, asked before the derivation), the passphrase for a locked
+    file, and the opening — minutes, in a thread, said once. Once open, the
+    launcher places it with its services stopped (`ops["place"]`)."""
+
+    def __init__(self, parent, *, ops: dict, on_placed: Callable[[], None]):
+        super().__init__(parent)
+        self.title("Import identity")
+        self.geometry("540x420")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self._ops, self._on_placed = ops, on_placed
+        self._data: Optional[bytes] = None
+        self._facts: Optional[dict] = None
+        self._busy = False
+
+        ctk.CTkLabel(self, text="Import identity", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(16, 4))
+        ctk.CTkLabel(self, text_color="gray", justify="left", wraplength=490, text=(
+            "An identity file made by Export identity… on another machine. This node becomes that "
+            "identity: its friends, its chat, its name. It is brought to a node that has none.")).pack(
+            padx=24, anchor="w")
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", padx=24, pady=(12, 4))
+        self._file = ctk.CTkLabel(row, text="No file chosen", anchor="w", text_color="gray")
+        self._file.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(row, text="Choose file…", width=120, command=self._choose,
+                      fg_color="transparent", border_width=1).pack(side="right")
+        self._pass_label = ctk.CTkLabel(self, text="The file's passphrase", anchor="w")
+        self._pass = ctk.CTkEntry(self, show="*", width=490)
+        self._pass.bind("<Return>", lambda _e: self._submit())
+        self._status = ctk.CTkLabel(self, text="", justify="left", wraplength=490)
+        self._status.pack(padx=24, anchor="w", pady=(6, 0))
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(4, 14), side="bottom")
+        self._go = ctk.CTkButton(btns, text="Import", width=170, command=self._submit, state="disabled")
+        self._go.pack(side="right")
+        ctk.CTkButton(btns, text="Cancel", width=100, command=self.destroy,
+                      fg_color="transparent", border_width=1).pack(side="right", padx=(0, 8))
+
+    def _choose(self):
+        from tkinter import filedialog
+
+        from desktop import identity_file as idf
+        from desktop import node_identity
+        if self._busy:
+            return
+        chosen = filedialog.askopenfilename(
+            title="Sautium identity file", parent=self,
+            filetypes=[("Sautium identity", "*" + idf.FILE_SUFFIX), ("All files", "*.*")])
+        if not chosen:
+            return
+        self._file.configure(text=Path(chosen).name, text_color=("black", "white"))
+        self._go.configure(state="disabled")
+        self._pass_label.pack_forget()
+        self._pass.pack_forget()
+        try:
+            with open(chosen, "rb") as f:
+                data = f.read(idf.FILE_MAX + 1)
+            facts = idf.summary(data)
+            idf.here(node_identity._identity_dir(), facts["public_key_hex"])
+        except (idf.IdentityFileError, OSError) as e:
+            self._status.configure(text=str(e), text_color=_RED)
+            return
+        self._data, self._facts = data, facts
+        self._busy = True
+        self._status.configure(text="Reading what this node's database names…", text_color="gray")
+        threading.Thread(target=self._ask_database, daemon=True, name="identity-import-check").start()
+
+    def _ask_database(self):
+        import psycopg2
+
+        from desktop import identity_file as idf
+        try:
+            another = self._ops["another_identity"](self._facts["public_key_hex"])
+        except psycopg2.Error as e:
+            logger.error("The database could not be read before an identity's import: %s", e)
+            words = f"This node's database could not be read: {e}"
+            self._call(lambda: self._refuse(words))
+            return
+        facts = self._facts
+        text = (f"The identity file of {facts['invite_code'] or facts['public_key_hex'][:16] + '…'}, "
+                f"made {facts['created_at'][:10]}"
+                + (", locked with a passphrase." if facts["locked"] else
+                   ", with no passphrase.\n\n" + idf.PLAIN_WORDS))
+        if another:
+            text += "\n\n" + idf.ANOTHER_IDENTITY
+
+        def show():
+            self._busy = False
+            self._status.configure(text=text, text_color=_AMBER if another else ("black", "white"))
+            if facts["locked"]:
+                self._pass_label.pack(padx=24, anchor="w", pady=(8, 0), before=self._status)
+                self._pass.pack(padx=24, pady=(2, 0), before=self._status)
+            self._go.configure(state="normal", text="Bring it here anyway" if another else "Import")
+        self._call(show)
+
+    def _submit(self):
+        if self._busy or self._data is None:
+            return
+        passphrase = self._pass.get() if self._facts["locked"] else None
+        if self._facts["locked"] and not passphrase:
+            self._status.configure(text="Type the file's passphrase", text_color=_RED)
+            return
+        self._busy = True
+        self._go.configure(state="disabled")
+        threading.Thread(target=self._open, args=(passphrase,), daemon=True,
+                         name="identity-import").start()
+
+    def _open(self, passphrase: Optional[str]):
+        from desktop import identity_file as idf
+        from desktop import password_strength
+        try:
+            seconds = idf.opening_seconds(self._data)
+            if seconds is not None:
+                took = password_strength.words(seconds)
+                self._call(lambda: self._status.configure(
+                    text=f"Opening the file: {took} on this machine.", text_color="gray"))
+            contents = idf.open_file(self._data, passphrase)
+        except idf.IdentityFileError as e:
+            words = str(e)
+            self._call(lambda: self._fail(words))
+            return
+
+        def placed():
+            self.destroy()
+            self._on_placed()
+            self._ops["place"](contents)
+        self._call(placed)
+
+    def _refuse(self, text: str):
+        self._data = None
+        self._fail(text)
+
+    def _fail(self, text: str):
+        self._busy = False
+        self._status.configure(text=text, text_color=_RED)
+        self._go.configure(state="normal" if self._data is not None else "disabled")
+
+    def _call(self, fn):
+        self._ops["ui_call"](lambda: self.winfo_exists() and fn())

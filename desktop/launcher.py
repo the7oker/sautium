@@ -52,6 +52,8 @@ IDENTITY_MISSING = (
     "a new one.\n\n"
     "To bring it back:\n"
     "•  put a copy of that folder back, then restart Sautium;\n"
+    "•  or import its identity file (Settings & Tools › Backup & Restore › Import identity…), "
+    "which Export identity… made on this node or another;\n"
     "•  or, if you chose this node's nickname and password, give the same pair in the web "
     "interface (Open Web UI): the same pair is the same identity. If you changed the nickname "
     "or password before, the record of the identities it replaced comes back only with a copy "
@@ -60,7 +62,8 @@ IDENTITY_MISSING = (
     "Once the identity is back, a backup of it (Settings & Tools › Backup & Restore) opens "
     "and restores its database, the current one kept beside it; a backup never brings an "
     "identity itself.\n"
-    "Without a password you chose, only the copy of the folder brings it back.\n\n"
+    "Without a password you chose, only the copy of the folder or the identity file brings it "
+    "back.\n\n"
     "A new identity made here has no nickname or password: a browser signs in to it only "
     "through Open Web UI or a QR code here, and chat, friends, the invite code, support "
     "requests and backups are off with it. {costs}")
@@ -772,8 +775,7 @@ class LauncherApp(ctk.CTk):
         ctk.CTkLabel(dialog, wraplength=430, justify="left", text=(
             f"The key of your identity ({account['username']}) was not finished: Sautium stopped "
             "before it was made. Type your password to make it now — it takes a few minutes, "
-            "and Sautium plays and scans meanwhile. (Signing in to the Web UI with it does the "
-            "same.)")).pack(padx=20, pady=(18, 8))
+            "and Sautium plays and scans meanwhile.")).pack(padx=20, pady=(18, 8))
         field = ctk.CTkEntry(dialog, show="*", placeholder_text="password", width=300)
         field.pack(pady=4)
         caption = ctk.CTkLabel(dialog, text="", text_color="gray", wraplength=430)
@@ -1339,7 +1341,9 @@ class LauncherApp(ctk.CTk):
             on_export_plan=self._export_plan,
             on_import=self._import_share,
             on_merge=self._merge_life,
-            subscribe_job=self._subscribe_job)
+            subscribe_job=self._subscribe_job,
+            identity_ops={"ui_call": self.ui_call, "another_identity": self._another_identity,
+                          "place": self._place_identity})
 
     def _subscribe_job(self, cb):
         """`cb(kind, event)` on the Tk thread for every event of a running
@@ -1546,6 +1550,59 @@ class LauncherApp(ctk.CTk):
             self.ui_call(lambda: self._btn_settings.configure(state="normal"))
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _another_identity(self, pubkey: str) -> bool:
+        """Whether this node's database names an identity other than
+        `pubkey` as its own — the owner's question before an identity file's
+        import (desktop/identity_file's caller's duty). Off the Tk thread."""
+        from desktop.node_identity import another_identity_at
+        return another_identity_at(self._get_local_db_dsn(), pubkey)
+
+    def _place_identity(self, contents):
+        """Settings & Tools › Import identity…, once the file is open and the
+        owner said yes: everything built on the identity stops — P2P, the
+        backend — the file's identity is placed, and the services start on
+        it; their start's identity check starts P2P on the new key."""
+        if any(run.running for run in self._jobs.values()):
+            self._progress_text.configure(text="Wait for the running backup, export or import to finish")
+            return
+        self._set_status("starting", "Bringing the identity here...")
+        for btn in (self._btn_open, self._btn_scan, self._btn_settings):
+            btn.configure(state="disabled")
+
+        def progress(msg):
+            self.ui_call(lambda: self._progress_text.configure(text=msg))
+
+        def _run():
+            from desktop import identity_file
+            from desktop.node_identity import _identity_dir
+            manager, self.p2p_manager = self.p2p_manager, None
+            if manager is not None:
+                try:
+                    manager.stop()
+                except Exception as e:          # the services must come back up whatever P2P did
+                    logger.warning(f"P2P did not stop cleanly before the identity's import: {e}",
+                                   exc_info=True)
+            self.service_manager.stop_tracker()
+            self.service_manager.stop_backend()
+            failure = None
+            try:
+                placed = identity_file.place(_identity_dir(), contents)
+            except (identity_file.IdentityFileError, OSError) as e:
+                logger.error(f"The identity file was not placed: {e}")
+                failure = str(e)[:300]
+            else:
+                note = f"This node is {placed['invite_code'] or placed['public_key_hex'][:16]} now"
+                logger.info(note)
+                self.ui_call(lambda: self._progress_text.configure(text=note))
+            self.service_manager.start_backend(progress_cb=progress)
+            self.service_manager.start_tracker()
+            if failure:
+                self.ui_call(lambda: self._set_status("error", "The identity was not brought here"))
+                self.ui_call(lambda: self._progress_text.configure(text=failure))
+            self.ui_call(lambda: self._btn_settings.configure(state="normal"))
+
+        threading.Thread(target=_run, daemon=True, name="identity-import").start()
 
     def _on_settings_saved(self, new_config):
         self.config = new_config

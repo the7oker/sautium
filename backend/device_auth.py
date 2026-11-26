@@ -494,26 +494,11 @@ def identity_missing() -> bool:
 
 def _another_identity(pubkey: str) -> bool:
     """Whether the identity `pubkey` (lower-case hex) is not the one this
-    node's database names as its own: its signing key of record, which every
-    start with a key, the account setup and a rotation write
-    (SIGNING_KEY_SETTING). A node that lost its folder before its first start
-    on this release recorded none: then the key its launcher's last P2P run
-    held (p2p.bound_identity), else any key that sealed records here as the
-    node's own; with no such seal, any identity is the node's first."""
+    node's database names as its own (node_identity.names_another_identity)."""
     from db_pool import get_conn
-    from desktop.node_identity import (BOUND_IDENTITY_SQL, OWN_SEALS_BY_SQL, OWN_SEALS_SQL,
-                                       SIGNING_KEY_SQL)
+    from desktop.node_identity import names_another_identity
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SELECT {SIGNING_KEY_SQL}, {BOUND_IDENTITY_SQL}")
-        recorded, bound = cur.fetchone()
-        named = recorded if recorded is not None else bound
-        if named is not None:
-            return named.lower() != pubkey
-        cur.execute(OWN_SEALS_SQL)
-        if not cur.fetchone()[0]:
-            return False
-        cur.execute(OWN_SEALS_BY_SQL, {"key": pubkey})
-        return not cur.fetchone()[0]
+        return names_another_identity(cur, pubkey)
 
 
 def _holds_identity(pubkey: Optional[str] = None) -> bool:

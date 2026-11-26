@@ -353,6 +353,40 @@ RECORD_SIGNING_KEY_SQL = """
      WHERE user_settings.value IS DISTINCT FROM EXCLUDED.value"""
 
 
+def names_another_identity(cur, pubkey: str) -> bool:
+    """Whether the identity `pubkey` (lower-case hex) is not the one the
+    database `cur` reads names as its own: its signing key of record, which
+    every start with a key, the account setup and a rotation write
+    (SIGNING_KEY_SETTING). A node that lost its folder before its first start
+    on this release recorded none: then the key its launcher's last P2P run
+    held (p2p.bound_identity), else any key that sealed records there as the
+    node's own; with no such seal, any identity is the node's first. Asked
+    before an identity is placed over records another one may have signed:
+    the account setup's key (backend/device_auth) and an identity file's
+    (desktop/identity_file)."""
+    cur.execute(f"SELECT {SIGNING_KEY_SQL}, {BOUND_IDENTITY_SQL}")
+    recorded, bound = cur.fetchone()
+    named = recorded if recorded is not None else bound
+    if named is not None:
+        return named.lower() != pubkey
+    cur.execute(OWN_SEALS_SQL)
+    if not cur.fetchone()[0]:
+        return False
+    cur.execute(OWN_SEALS_BY_SQL, {"key": pubkey})
+    return not cur.fetchone()[0]
+
+
+def another_identity_at(dsn: str, pubkey: str) -> bool:
+    """names_another_identity over a connection of its own to `dsn` (the
+    launcher; the identity file's command in a Docker node's container)."""
+    conn = psycopg2.connect(dsn, connect_timeout=10)
+    try:
+        with conn, conn.cursor() as cur:
+            return names_another_identity(cur, pubkey)
+    finally:
+        conn.close()
+
+
 def record_signing_key(dsn: str, pubkey: str) -> None:
     """`pubkey` as the node's signing key of record (SIGNING_KEY_SETTING)."""
     conn = psycopg2.connect(dsn, connect_timeout=10)
@@ -744,7 +778,8 @@ def new_account(username: str, password: str, *, source: str, email: str = "",
     """An account's file before its key: the id, the hash (none for an
     account with no password anyone knows), the key to come. `source`:
     "form" (the Web UI's setup), "wizard" (the launcher's), "console" (a
-    command's, the master's random key), "import" (an identity file's)."""
+    command's random identity, identity_file.new_identity — the master's),
+    "file" (an identity file's import, identity_file.place)."""
     validate_username(username)
     return {
         "v": 1,
