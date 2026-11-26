@@ -600,6 +600,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     # is minted at its title's place among the batch's files of its copy;
     # settle_copies, at the end, puts right what the batch could not see.
     places = batch_places(entries, dir_albums)
+    fresh: Set[tuple] = set()   # the file rows this import writes (settle_copies)
 
     with get_db_context() as db:
         lock_credits(db)
@@ -816,10 +817,11 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             row.arrived_at = metadata["arrived_at"]
                         db.add(row)
                         db.flush()
+                        fresh.add(("media_files", row.id))
                         elect_analysis_source(db, track.id)
                     else:
                         # No bytes here: nothing to elect as an analysis source.
-                        db.add(HqpLibraryFile(
+                        hf = HqpLibraryFile(
                             track_id=track.id,
                             album_variant_id=variant.id,
                             hqp_path=metadata["file_path"],
@@ -840,8 +842,10 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             raw_album=metadata.get("album"),
                             raw_year=metadata.get("date"),
                             raw_composers=metadata.get("composers"),
-                        ))
+                        )
+                        db.add(hf)
                         db.flush()
+                        fresh.add(("hqp_library_files", hf.id))
                     savepoint.commit()
                 except Exception:
                     savepoint.rollback()
@@ -865,7 +869,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                 logger.error(f"Error processing {file_path}: {e}")
                 stats["errors"] += 1
         derive_composers(db, derive_due)
-        settle_copies(db, [v.id for v in caches["variant"].values()])
+        settle_copies(db, [v.id for v in caches["variant"].values()], fresh=frozenset(fresh))
         db.commit()
 
 
@@ -1047,11 +1051,12 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
         # through the first's
         read = {}
         for _d, md, row in entries:
-            if md.get("title") and (md.get("artist") or md.get("album_artist")):
-                _t, _c, track_ov, disc_ov = assignments[md["file_path"]]
+            _t, _c, track_ov, disc_ov = assignments[md["file_path"]]
+            number = track_ov if track_ov is not None else md.get("track_number")
+            # a file whose number is gone keeps the place it was read at
+            if md.get("title") and (md.get("artist") or md.get("album_artist")) and number is not None:
                 read[row.id] = (disc_ov if disc_ov is not None else md.get("disc_number", 1),
-                                track_ov if track_ov is not None else md.get("track_number"),
-                                md["title"], md.get("artist") or md.get("album_artist"))
+                                number, md["title"], md.get("artist") or md.get("album_artist"))
         places = places_of(db, [row.album_variant_id for _d, _md, row in entries], read)
         splits = _split_tracks(db, entries, places)
         if splits:

@@ -208,9 +208,10 @@ def _completion(db: Session, partial: List[Tuple[tuple, list]]) -> Dict[int, int
     held in part, the medium every bound file of it sits on at its own
     position (the smallest such medium's id where several do); the earlier
     positions are that medium's before the file's, and — where the copy's
-    disc is that medium's position on its release — the release's earlier
-    media whole. A position counts when titled alike (titled_alike) and
-    credited as the file's own track is. Only files above a position the
+    disc is that medium's position on its release and the copy holds another
+    disc of that release — the release's earlier media whole. A position
+    counts when titled alike (titled_alike) and credited as the file's own
+    track is. Only files above a position the
     node lacks are read, and the recordings' rows once (mb_recording has no
     index on its gid)."""
     asked = []
@@ -257,7 +258,12 @@ def _completion(db: Session, partial: List[Tuple[tuple, list]]) -> Dict[int, int
             continue
         release, mpos = medium_of[medium]
         own = {c for m, p, c in on.get(f["rec"], ()) if m == medium and p == f["n"]}
-        whole = f["pos"][0] == mpos   # the copy's discs are the release's media
+        # the copy's discs are the release's media only where the copy holds
+        # another disc of that release: one disc of a box kept as an album of
+        # its own is that disc's tracklist alone
+        whole = f["pos"][0] == mpos and any(
+            d != f["pos"][0] and medium_of.get(m, (None,))[0] == release
+            for (fid, d), m in picked.items() if fid == id(files))
         held = {fl["pos"][:2] for fl in files}
         here = (mpos, f["n"])
         before = 0
@@ -282,10 +288,14 @@ def _move(db: Session, f: dict, new: str, k: int, title: str, artist: str,
     binding: one recording stood for both, wrong for all but one and
     arbitrary for that one, so the track's bindings and its files' stamps go
     and the canon binds each on its own evidence (as the re-read's split
-    does). A file whose place alone changed takes its recording's binding
-    along where no other file of the old track carries it."""
+    does). A file whose place alone changed takes this node's binding of its
+    recording along where no other file of the old track carries it (a
+    peer's is its author's: the node's own binding replaces it)."""
     from canon.identity import _ensure_artist, rehome_file_track
-    from credits import derive_composers
+    from credits import derive_composers, lock_credits
+    # the credits' lock before any row: the order every writer of credits
+    # takes (credits.CREDITS_LOCK_KEY)
+    lock_credits(db)
     old = str(f["track_id"])
     p = {"old": old, "new": new, "id": f["id"], "rec": f["rec"], "v": f["v"]}
     if collapsed:
@@ -313,7 +323,7 @@ def _move(db: Session, f: dict, new: str, k: int, title: str, artist: str,
     if not collapsed and f["rec"]:
         db.execute(text("""
             UPDATE track_mbids SET track_id = :new
-             WHERE recording_mbid = CAST(:rec AS uuid) AND track_id = :old
+             WHERE recording_mbid = CAST(:rec AS uuid) AND track_id = :old AND NOT imported
                AND NOT EXISTS (SELECT 1 FROM owned_files o
                                 WHERE o.track_id = :old AND o.recording_mbid = CAST(:rec AS uuid))"""), p)
     db.execute(text("""
@@ -329,7 +339,7 @@ def _move(db: Session, f: dict, new: str, k: int, title: str, artist: str,
 
 
 def settle_copies(db: Session, variant_ids: Optional[Sequence[int]] = None,
-                  complete: bool = False) -> dict:
+                  complete: bool = False, fresh: frozenset = frozenset()) -> dict:
     """Every file of each copy (all, or those holding `variant_ids`) on the
     track of its place. A file moves when two positions of its copy share its
     track and it is not the first of them, or when its track is its own
@@ -338,7 +348,14 @@ def settle_copies(db: Session, variant_ids: Optional[Sequence[int]] = None,
     the files alone may not see an earlier position). From the last position
     down, until nothing moves: a track a later position leaves is free for
     the one that takes its place. `complete` reads the positions a copy held
-    in part lacks off MusicBrainz (_completion). Idempotent."""
+    in part lacks off MusicBrainz (_completion). Idempotent.
+
+    `fresh` names the files ((table, id)) this transaction wrote — an
+    import's: two positions on one track are a collapse to undo, its bindings
+    and stamps gone, only where two of them are older than this
+    transaction; a fresh file at a position its copy held already on that
+    track is no collapse, and the file whose place it changed keeps its
+    binding."""
     st = {"copies": 0, "moved": 0, "unsplittable": 0}
     vs = None if variant_ids is None else sorted({int(v) for v in variant_ids})
     if vs == []:
@@ -352,8 +369,11 @@ def settle_copies(db: Session, variant_ids: Optional[Sequence[int]] = None,
         for c, files in copies.items():
             places = ordinals((f["pos"], f["key"]) for f in files)
             on: Dict[str, set] = defaultdict(set)
+            older: Dict[str, set] = defaultdict(set)
             for f in files:
                 on[str(f["track_id"])].add(f["pos"])
+                if (f["tbl"], f["id"]) not in fresh:
+                    older[str(f["track_id"])].add(f["pos"])
             touched = False
             for f in sorted(files, key=lambda f: f["pos"], reverse=True):
                 k = places[(f["pos"], f["key"])] + extra.get(id(f), 0)
@@ -372,7 +392,7 @@ def settle_copies(db: Session, variant_ids: Optional[Sequence[int]] = None,
                         logger.info("copy %s: position %s shares track %s under another title; "
                                     "left as it is", c, f["pos"], t)
                     continue
-                _move(db, f, new, k, title, artist, shared, st)
+                _move(db, f, new, k, title, artist, shared and len(older[t]) > 1, st)
                 on[t].discard(f["pos"])
                 on[new].add(f["pos"])
                 touched = True

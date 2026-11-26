@@ -240,6 +240,50 @@ def test_a_copy_held_in_part_takes_its_place_from_the_medium_it_is_bound_to(cur,
     assert _on(cur, 14)["track_id"] == str(track_uuid("Pulses", REICH, 2))
 
 
+def test_a_track_added_to_a_bound_copy_leaves_its_bindings_where_they_are(cur, library):
+    """Track 14 added later to a copy already bound: the batch mints it on
+    the first "Pulses" and the settle moves it to the second — a fresh file,
+    no collapse: the first's binding and stamp stay (review round 2, M5)."""
+    _import(_disc4(library, {1}))
+    rec = str(uuid.uuid4())
+    plain = str(track_uuid("Pulses", REICH))
+    cur.execute("UPDATE media_files SET recording_mbid = %s WHERE track_number = 1", (rec,))
+    cur.execute("""INSERT INTO track_mbids (recording_mbid, track_id, confidence, matcher_version)
+                   VALUES (%s, %s, 'overlap_verified', 2)""", (rec, plain))
+    _import(_disc4(library, {14}))
+    assert _on(cur, 14)["track_id"] == str(track_uuid("Pulses", REICH, 2))
+    cur.execute("SELECT track_id::text AS t FROM track_mbids")
+    assert [r["t"] for r in cur.fetchall()] == [plain]
+    cur.execute("SELECT recording_mbid::text AS r FROM media_files WHERE track_number = 1")
+    assert cur.fetchone()["r"] == rec
+
+
+def test_one_disc_of_a_box_kept_as_an_album_reads_its_own_medium_alone(cur, library):
+    """A copy of a box's disc 4 kept as an album of its own (DISCNUMBER 4):
+    the box's disc 1 is not this tracklist — its "I. Allegro" does not make
+    this one the second (review round 2, M4)."""
+    from database import get_db_context
+    for table in ("mb_track", "mb_recording", "mb_medium"):
+        cur.execute(f"DELETE FROM {table}")
+    cur.execute("INSERT INTO mb_medium (id, release, position) VALUES (40, 4, 1), (41, 4, 4)")
+    rec = str(uuid.uuid4())
+    for rid, gid, medium, pos, name in ((1, str(uuid.uuid4()), 40, 1, "I. Allegro"),
+                                        (2, str(uuid.uuid4()), 41, 1, "II. Largo"),
+                                        (3, rec, 41, 2, "I. Allegro")):
+        cur.execute("INSERT INTO mb_recording (id, gid, name, artist_credit) VALUES (%s, %s, %s, 7)",
+                    (rid, gid, name))
+        cur.execute("""INSERT INTO mb_track (id, gid, recording, medium, position, number, name, artist_credit)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, 7)""", (rid, str(uuid.uuid4()), rid, medium, pos,
+                                                                  str(pos), name))
+    _import([_md(library, "Mozart Box Vol 4", "Mozart Box Vol. 4", 2, "I. Allegro", 300.0, "Il Giardino",
+                 disc=4)])
+    cur.execute("UPDATE media_files SET recording_mbid = %s", (rec,))
+    with get_db_context() as db:
+        assert occurrence.settle_copies(db, complete=True)["moved"] == 0
+    cur.execute("SELECT track_id::text AS t FROM media_files")
+    assert cur.fetchone()["t"] == str(track_uuid("I. Allegro", "Il Giardino"))
+
+
 def test_a_rename_and_the_identity_rule_keep_the_place(cur, library, scratch_dsn, monkeypatch):
     """Every rule that recomputes a track's id from its row takes the
     occurrence: an artist's rename re-keys the closing Pulses to the second

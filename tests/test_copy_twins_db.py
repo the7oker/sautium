@@ -183,6 +183,38 @@ def test_a_group_that_would_put_two_positions_of_one_copy_on_one_track_is_left(c
     assert (st["merged"], st["vetoed"]) == (0, 1)
 
 
+def test_a_box_in_disc_folders_is_one_copy_to_the_fold_too(cur, library):
+    """A box ripped in disc folders, one recording at a position of each
+    disc: two positions of one copy as the occurrence reads one — the fold
+    leaves them, or the next settle would split them again (review round 2,
+    H2)."""
+    v, rec = "Владимир Высоцкий", str(uuid.uuid4())
+    _import([_md(library, "Box/CD1", "Box", 10, "Слухи", 190.4, v)])
+    _import([_md(library, "Box/CD2", "Box", 5, "Слухи", 190.4, v)])
+    cur.execute("UPDATE media_files SET disc_number = 2 WHERE file_path LIKE '%%/CD2/%%'")
+    cur.execute("UPDATE media_files SET recording_mbid = %s", (rec,))
+    cur.execute("""INSERT INTO analysis_sources (track_id, media_file_id, chromaprint, duration_seconds)
+                   SELECT DISTINCT ON (track_id) track_id, id, %s, 190 FROM media_files""", (PRINT,))
+    assert _tracks(cur) == 2
+    st = content.fold_copy_twins()
+    assert (st["merged"], st["vetoed"]) == (0, 1)
+
+
+def test_one_title_at_two_places_never_folds(cur, library):
+    """An album's second "Pulses" and a compilation's one, one recording, one
+    material: folded, the settle would move one of them off the keeper again
+    (review round 2, M3) — left apart."""
+    _import([_md(library, "D", "Music for 18 Musicians", 1, "Pulses", 326.5),
+             _md(library, "D", "Music for 18 Musicians", 14, "Pulses", 370.8)])
+    _import([_md(library, "C", "Collected", 3, "Pulses", 370.7, "Steve Reich and Musicians")])
+    rec = str(uuid.uuid4())
+    cur.execute("UPDATE media_files SET recording_mbid = %s WHERE duration_seconds > 370", (rec,))
+    cur.execute("""INSERT INTO analysis_sources (track_id, media_file_id, chromaprint, duration_seconds)
+                   SELECT track_id, id, %s, 371 FROM media_files WHERE duration_seconds > 370""", (PRINT,))
+    st = content.fold_copy_twins()
+    assert (st["merged"], st["vetoed"]) == (0, 1)
+
+
 def test_titles_alike_fold_their_accents(cur, library):
     from canon.occurrence import titled_alike
     assert titled_alike("Gymnopédie No. 1", "Gymnopedie No. 1")

@@ -59,3 +59,17 @@ def test_a_retag_moves_each_movement_to_its_own_place_with_what_is_its_own(cur, 
     assert cur.fetchall() == [(closing,)]
     cur.execute("SELECT occurrence FROM tracks WHERE id = %s", (closing,))
     assert cur.fetchone()[0] == 2
+
+
+def test_a_file_whose_track_number_is_gone_is_read_again_where_it_was(cur, library, templates):
+    """A tag editor cleared one file's TRACKNUMBER: the re-read keeps the
+    place the file was read at — it never fails the scan (review round 2,
+    H1: a None among the positions stopped every later scan)."""
+    _clean(cur)
+    disc = library / "Reich" / "Disc 4"
+    for n, title in ((1, "Pulses"), (2, "Section I"), (3, "Pulses")):
+        _flac(templates, disc / f"0{n}.flac", title, "Steve Reich", "Music for 18 Musicians", None, n)
+    _scan()
+    _retag(disc / "03.flac", tracknumber=None, comment="edited")
+    _scan()
+    assert _track_of(cur, "03.flac") == str(track_uuid("Pulses", "Steve Reich", 2))
