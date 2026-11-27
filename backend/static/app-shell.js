@@ -1072,6 +1072,9 @@
     has(id) { return id === '*' ? this.tasks.size > 0 : this.tasks.has(id); },
 
     paint() {
+      // A control a screen drew again in place (Sync & P2P's refresh) leaves
+      // its puck behind with the old element: gone with it
+      [..._guidePucks.keys()].forEach(target => { if (!target.isConnected) detachGuidePuck(target); });
       document.querySelectorAll('[data-guide]').forEach(el => {
         const on = el.dataset.guide.split(' ').some(id => this.has(id));
         el.classList.toggle('is-guided', on);
@@ -1142,7 +1145,9 @@
       <path d="M12 5v13M6 12l6 6 6-6"/>
     </svg>`;
 
-  const _guidePucks = new WeakMap();
+  // A Map, not a WeakMap: paint() walks it for the targets no longer in the
+  // document (each detached there, so nothing is held past its next paint)
+  const _guidePucks = new Map();
 
   /* The nearest ancestor that scrolls, or null for the document: the phone
      scrolls the document, the tablet's section window its own body. */
@@ -14612,7 +14617,10 @@
         const n = next.get(key);
         if (prev.domain === 'network' || (n && n.since === prev.since)) return;
         if (n && snapshot.initial && !n.report) {
-          [...this._shown, ...this._queue].forEach(t => { if (t.key === key && t.tag === prev.since) t.tag = n.since; });
+          // its words too: a re-arm made while the stream was down
+          const c = noticeCopy(n);
+          this.restate(key, prev.since, { kind: n.kind, title: c.title, text: c.text, why: c.why || null,
+                                          action: c.action || null, tag: n.since });
           return;
         }
         this.resolve(key, prev.since);
@@ -17188,7 +17196,7 @@
         <div class="form-row">
           <span class="form-label">Support</span>
           ${waiting
-            ? `<button class="btn-link" type="button" data-action="review-support" data-guide="support_request">${escapeProfileHtml(supportLabel(sync.support))}</button>`
+            ? `<button class="btn-link" type="button" data-action="review-support" data-guide="support_request" data-guide-scroll>${escapeProfileHtml(supportLabel(sync.support))}</button>`
             : `<span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>`}
         </div>
         ${sync.host_agent ? `<div class="form-row">
@@ -18746,7 +18754,7 @@
         sub = 'Updating… Sautium will stop and come back.';
       } else {
         control = offered
-          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-guide="update" data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
+          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-guide="update" data-guide-scroll data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
           : `<button class="profile-btn secondary" type="button" data-action="host-check"${waits(check) ? ' disabled' : ''}>${waits(check) ? 'Checking…' : 'Check for updates'}</button>`;
         const newest = [check, update].filter(r => r.answered_at)
           .sort((a, b) => (a.answered_at < b.answered_at ? 1 : -1))[0];

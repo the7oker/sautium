@@ -636,13 +636,17 @@ const els = %s.map(g => ({ dataset: { guide: g }, on: false, hasAttribute: () =>
                            classList: { toggle(_c, on) { this.el.on = on; } } }));
 els.forEach(el => { el.classList.el = el; });
 const document = { querySelectorAll: () => els };
-const attachGuidePuck = () => {}, detachGuidePuck = () => {};
+const detached = [];
+const attachGuidePuck = () => {}, detachGuidePuck = (t) => { detached.push(t.name); _guidePucks.delete(t); };
+// a control drawn again in place left its puck with the old element: the next paint takes it away
+const _guidePucks = new Map([[{ name: 'gone', isConnected: false }, {}], [{ name: 'here', isConnected: true }, {}]]);
 %s
 const out = {};
 for (const tasks of [[], ['verify_email'], ['this_node'], ['music_folder'], ['support_request']]) {
   guide._apply(tasks);
   out[tasks.join() || 'none'] = els.map(el => el.on);
 }
+out.detached = detached.filter(n => n !== undefined);
 process.stdout.write(JSON.stringify(out));
 """
     start = SOURCE.index("\n  const guide = {") + 1
@@ -656,7 +660,8 @@ process.stdout.write(JSON.stringify(out));
         "verify_email": [True, True, False, True],
         "this_node": [True, True, False, False],
         "music_folder": [True, False, True, False],
-        "support_request": [True, False, False, False]}
+        "support_request": [True, False, False, False],
+        "detached": ["gone"]}
     # The drawer's rows and the controls carry the marks
     assert 'data-go="more/profile" data-guide="verify_email this_node update"' in SOURCE
     assert 'data-go="more/library" data-guide="analyse_library music_folder"' in SOURCE
@@ -760,3 +765,7 @@ def test_an_offer_is_dated_by_its_first_answer_and_a_daily_check_is_no_news(agen
     assert again == first
     newer = answer("v0.3.2")
     assert newer["release"] == "v0.3.2" and newer["since"] != first["since"]
+    # an offer that stopped and is made again later is a new onset
+    asyncio.run(host.answer(host.Answer(verb="check", outcome="current"), req))
+    assert host.offered_release() is None
+    assert answer("v0.3.2")["since"] != newer["since"]

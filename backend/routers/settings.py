@@ -1980,6 +1980,14 @@ def post_notice_seen(key: str, body: NoticeSeen) -> Dict[str, Any]:
     report: a state ends with its source, never by being looked at."""
     if key not in _REPORTS:
         raise HTTPException(status_code=400, detail=f"not a report: {key}")
+    # Only the report's onset as it stands: a page that slept through a
+    # re-arm and closes the older toast leaves the newer one unseen — judged by
+    # equality, never by time order (a report's onset may move earlier: a
+    # clock set back at a Pi's boot, the newest sitting forgotten with its
+    # HQPlayer)
+    current = next((it["since"] for it in _notice_items() if it["key"] == key), None)
+    if current != body.since:
+        return {"key": key, "since": current, "seen": False}
     # One statement: two pages closing two reports at once keep both
     moved = db_execute("""
         INSERT INTO user_settings (key, value) VALUES ('notice.seen', jsonb_build_object(%(k)s, %(s)s))
@@ -1987,17 +1995,14 @@ def post_notice_seen(key: str, body: NoticeSeen) -> Dict[str, Any]:
             SET value = CASE jsonb_typeof(user_settings.value) WHEN 'object' THEN user_settings.value
                              ELSE '{}'::jsonb END || EXCLUDED.value,
                 updated_at = CURRENT_TIMESTAMP
-            -- never backwards: a page that slept through a re-arm and closes the
-            -- older toast leaves the newer onset seen
-            WHERE user_settings.value ->> %(k)s IS NULL
-               OR (user_settings.value ->> %(k)s)::timestamptz < %(s)s::timestamptz
+            WHERE user_settings.value -> %(k)s IS DISTINCT FROM to_jsonb(%(s)s::text)
         RETURNING 1 AS moved""", {"k": key, "s": body.since})
     if moved:
         if key == device_auth.PIN_FAILURES_KEY:
             # The wrong pairing codes' record starts again at the next one
             device_auth.pin_failures_seen()
         db_execute("NOTIFY sautium_notices")
-    return {"key": key, "since": body.since}
+    return {"key": key, "since": body.since, "seen": True}
 
 
 @router.post("/streaming/providers/{provider_id}/check")

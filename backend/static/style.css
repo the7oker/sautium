@@ -7931,6 +7931,13 @@ html { -webkit-tap-highlight-color: transparent; }
   background: var(--color-amber);
 }
 .profile-btn.primary.is-guided::after { background: currentColor; }
+/* Raised over the puck, which slides under them (an opaque ground for the link) */
+.btn-link.is-guided,
+.profile-btn.is-guided {
+  position: relative;
+  z-index: 21;
+}
+.btn-link.is-guided { background: var(--color-surface); }
 
 /* The rail is an out-of-flow strip from the top of the screen down to the
    target's centre (height measured in attachGuidePuck). Its only job is to

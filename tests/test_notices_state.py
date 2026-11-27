@@ -582,12 +582,22 @@ def test_a_condition_that_ends_at_its_time_wakes_the_channel_then(monkeypatch):
     assert settings_router._end_timer == {"at": None, "timer": None}
 
 
-def test_a_seen_never_goes_back_to_an_older_onset(cur):
-    """A page that slept through a re-arm closes the older toast after
-    another page saw the newer onset: the newer stays seen."""
+def test_a_seen_is_kept_only_for_the_reports_onset_as_it_stands(cur):
+    """A page that slept through a re-arm closes the older toast: nothing is
+    kept, the newer onset stays unseen. Judged by equality, never by time
+    order — an onset that moved earlier (a Pi's clock set back at its boot)
+    is seen at its close all the same."""
     newer, older = "2026-10-08T00:00:00+00:00", ONSET
     _setting(cur, "auth.login_failures", {"count": 1, "since": newer, "last": newer})
+    out = settings_router.post_notice_seen("auth.login_failures", settings_router.NoticeSeen(since=older))
+    assert out["seen"] is False
+    cur.execute("SELECT count(*) FROM user_settings WHERE key = 'notice.seen'")
+    assert cur.fetchone()[0] == 0
     settings_router.post_notice_seen("auth.login_failures", settings_router.NoticeSeen(since=newer))
-    settings_router.post_notice_seen("auth.login_failures", settings_router.NoticeSeen(since=older))
-    cur.execute("SELECT value FROM user_settings WHERE key = 'notice.seen'")
-    assert cur.fetchone()[0] == {"auth.login_failures": newer}
+    # the onset moves earlier: its close is its seen
+    cur.execute("UPDATE user_settings SET value = jsonb_set(value, '{last}', to_jsonb(%s::text)) "
+                "WHERE key = 'auth.login_failures'", (older,))
+    assert any(n["key"] == "auth.login_failures" for n in settings_router._notices_state()["items"])
+    assert settings_router.post_notice_seen("auth.login_failures",
+                                            settings_router.NoticeSeen(since=older))["seen"] is True
+    assert not any(n["key"] == "auth.login_failures" for n in settings_router._notices_state()["items"])
