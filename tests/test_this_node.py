@@ -765,6 +765,9 @@ def test_an_offer_is_dated_by_its_first_answer_and_a_daily_check_is_no_news(agen
     assert again == first
     newer = answer("v0.3.2")
     assert newer["release"] == "v0.3.2" and newer["since"] != first["since"]
+    # a check that did not run says nothing of the offer: made again, the same onset
+    asyncio.run(host.answer(host.Answer(verb="check", outcome="failed", detail="no network"), req))
+    assert answer("v0.3.2")["since"] == newer["since"]
     # an offer that stopped and is made again later is a new onset
     asyncio.run(host.answer(host.Answer(verb="check", outcome="current"), req))
     assert host.offered_release() is None

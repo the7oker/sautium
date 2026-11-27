@@ -157,10 +157,11 @@ async def answer(body: Answer, request: Request) -> dict:
         "report = CASE WHEN EXCLUDED.verb = 'diagnostics' AND EXCLUDED.outcome = 'done' "
         "AND EXCLUDED.report IS NOT NULL THEN EXCLUDED.report ELSE host_requests.report END",
         body.model_dump(exclude={"replayed"}))
-    if body.verb == "check" and body.outcome != "offered":
-        # An offer that stopped: one made again later is a new onset
+    if body.verb == "check" and body.outcome in ("current", "rewrite", "refused"):
+        # An offer that stopped (a check that did not run, or ran within the
+        # hour, says nothing of it): one made again later is a new onset
         db_execute("DELETE FROM user_settings WHERE key = 'update.offered_since'")
-    elif body.verb == "check" and body.release:
+    elif body.verb == "check" and body.outcome == "offered" and body.release:
         db_execute("""
             INSERT INTO user_settings (key, value)
             VALUES ('update.offered_since', jsonb_build_object('release', %(r)s::text,

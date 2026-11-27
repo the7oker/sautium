@@ -3287,8 +3287,10 @@ def test_a_restored_notice_once_seen_stays_gone_at_a_later_visit(run, monkeypatc
     settings_router.post_notice_seen("hqplayer.run_restored",
                                      settings_router.NoticeSeen(since=_run_restored()["since"]))
     assert _run_restored() is None
-    settings_router.post_notice_seen("power.undervoltage",
-                                     settings_router.NoticeSeen(since="2026-11-27T10:00:00+00:00"))
+    import power_watch
+    monkeypatch.setattr(power_watch, "_since", "2026-11-27T10:00:00+00:00")
+    assert settings_router.post_notice_seen("power.undervoltage", settings_router.NoticeSeen(
+        since="2026-11-27T10:00:00+00:00"))["seen"] is True
     assert _run_restored() is None
 
 
