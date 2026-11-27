@@ -501,7 +501,7 @@ If a design page or a prompt asks for a message on Now Playing, say so
 and stop for the design session.
 
 - **`notices.toast({ kind, title, text, why?, action?, key?, lasting?,
-  passive?, tag? })`** — the passive toast (no button) takes **no
+  passive?, tag?, heard? })`** — the passive toast (no button) takes **no
   pointer events**: a tap goes to whatever is beneath it, so it never
   blocks a control and the second tap of a double-tap cannot land on
   it. It is narrower than the screen header (272 design-px, centred) so

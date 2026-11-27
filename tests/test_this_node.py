@@ -737,3 +737,26 @@ const settle = () => new Promise(r => setTimeout(r, 0));
         ["restarted, its state not read yet", ["/api/host", "/api/settings/hardware"], 0, False, False],
         ["the node restarted", ["/api/host", "/api/settings/hardware"], 1, True, True],
         ["quiet again", host_only, 0, True, True]]
+
+
+def test_an_offer_is_dated_by_its_first_answer_and_a_daily_check_is_no_news(agent, monkeypatch):
+    """The daily check offering the same release again moves the check's row,
+    never the offer's onset: its lasting toast is not raised again every day.
+    A newer release is a new onset."""
+    import asyncio
+    import types
+    host = pytest.importorskip("routers.host")
+    c, _ = agent
+    settings_router = pytest.importorskip("routers.settings")
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
+    req = types.SimpleNamespace(state=types.SimpleNamespace(signer="host-agent"))
+
+    def answer(release):
+        asyncio.run(host.answer(host.Answer(verb="check", outcome="offered", release=release), req))
+        return host.offered_release()
+    first = answer("v0.3.1")
+    c.execute("UPDATE host_requests SET answered_at = answered_at + interval '1 day' WHERE verb = 'check'")
+    again = answer("v0.3.1")
+    assert again == first
+    newer = answer("v0.3.2")
+    assert newer["release"] == "v0.3.2" and newer["since"] != first["since"]

@@ -14124,9 +14124,9 @@
 
   /* ---------- Notices: toasts, the strip, the rows ----------
      A toast is a signal that a condition began (or that something the
-     user did finished off-screen), never where the fact lives: the rows
-     on Sync & P2P hold it and the guidance trail leads there, so a toast
-     nobody saw costs nothing. That is why the passive toast takes no
+     user did finished off-screen), never where the fact lives: a state
+     shows on its own domain's screen (the network's lines as Sync & P2P's
+     rows), and a toast of a condition lasts while it does. The passive toast takes no
      pointer events — a tap goes to whatever is beneath it, and the second
      tap of a double-tap cannot land on it — and only a toast with an
      action opts back in. Long-lived conditions never float: the strip
@@ -14604,10 +14604,18 @@
     apply(snapshot) {
       const next = new Map((snapshot.items || []).map(n => [n.key, n]));
       // A lasting toast goes with its condition: the key left the set, or it
-      // stands again at another onset (a toast of its own, below)
+      // stands again at another onset (a toast of its own, below). A
+      // connect-time snapshot that names another onset of a state still
+      // standing (the backend started again and dated it anew) keeps the
+      // toast up, under the new onset.
       this.items.forEach((prev, key) => {
         const n = next.get(key);
-        if (prev.domain !== 'network' && (!n || n.since !== prev.since)) this.resolve(key, prev.since);
+        if (prev.domain === 'network' || (n && n.since === prev.since)) return;
+        if (n && snapshot.initial && !n.report) {
+          [...this._shown, ...this._queue].forEach(t => { if (t.key === key && t.tag === prev.since) t.tag = n.since; });
+          return;
+        }
+        this.resolve(key, prev.since);
       });
       next.forEach((n, key) => {
         if (n.report) { this._report(n); return; }
@@ -14911,7 +14919,7 @@
         <div class="row-stack-sub">${c.sub}</div>
       </div>`;
       }).join('');
-      return rows ? `<div class="form-group">${rows}</div>` : '';
+      return rows ? `<div class="form-group" style="margin-top:calc(10*var(--px));">${rows}</div>` : '';
     },
     // Settings › Library, under Analyse library: why no analysis runs here
     tools: () => {
@@ -14929,18 +14937,13 @@
     // HQPlayer › Benchmark: a run's mark not judged yet, or a check that left
     // HQPlayer in the measured mode — the notices' own words — with "Leave
     // it as it is" where HQPlayer at rest refused the judgement
-    'benchmark-marks': () => {
-      const leave = new Set();
-      return ['hqplayer.run_stayed', 'hqplayer.run_unchecked'].map(key => notices.get(key)).filter(Boolean)
-        .map(n => {
-          const c = noticeCopy(n);
-          const d = n.data || {};
-          const button = c.action && !leave.has(d.run)
-            ? ` <button class="btn-link" type="button" data-action="bench-leave" data-run="${Number(d.run)}">${escapeHtml(c.action.label)}</button>` : '';
-          leave.add(d.run);
-          return `<p class="hqp-row-hint is-left">${c.text}${button}</p>`;
-        }).join('');
-    },
+    'benchmark-marks': () => ['hqplayer.run_stayed', 'hqplayer.run_unchecked'].map(key => notices.get(key))
+      .filter(Boolean).map(n => {
+        const c = noticeCopy(n);
+        const button = c.action
+          ? ` <button class="btn-link" type="button" data-action="bench-leave" data-run="${Number(n.data.run)}">${escapeHtml(c.action.label)}</button>` : '';
+        return `<p class="hqp-row-hint is-left">${c.text}${button}</p>`;
+      }).join(''),
     // Streaming library › Providers: each provider not answering, or that
     // stepped aside in its own words with its Check again; none, no block
     providers: () => {
@@ -14966,7 +14969,8 @@
     },
   };
   function noticeState(name) {
-    return `<div data-notice-state="${name}">${NOTICE_STATES[name]()}</div>`;
+    const html = NOTICE_STATES[name]();
+    return `<div data-notice-state="${name}" data-drawn="${escapeHtml(html)}">${html}</div>`;
   }
 
   /* The in-place note on a bare artist card — the consequence explained
@@ -17049,20 +17053,21 @@
   // The external services' pauses (the cooldown notices, routers/settings.py
   // _notice_items, domain `enrichment`) are the enrichment's own state, read
   // from the channel: the screen is drawn again at every notice. Last.fm's
-  // stands in place of "Idle"; Deezer's — artist photos and the 30-second
-  // excerpts, fetched as they are needed — whatever the switch says.
+  // stands in place of "Idle" — while the pass works on (lyrics, the
+  // embeddings: steps Last.fm does not gate), its own line under it; Deezer's
+  // — artist photos and the 30-second excerpts, fetched as they are needed —
+  // whatever the switch says.
   // Draft words for the words sitting (NOTICES-HOME-1 C1).
   function _cooldownLine(n, what) {
     return `${what} · ${escapeHtml(n.data.source === 'lastfm' ? 'Last.fm' : n.data.source === 'deezer' ? 'Deezer'
       : n.data.source)} asked to slow down${noticeStrikes(n)} — ${what.includes(' and ') ? 'resume' : 'resumes'} ${fmtUntil(n.until)}`;
   }
-  function _bgPauseLines(enabled) {
+  function _bgPauseLines(enabled, working) {
     return notices.list().filter(n => n.domain === 'enrichment'
-                                      && (enabled || n.key !== 'cooldown.lastfm'))
-      .map(n => n.key === 'cooldown.lastfm' ? null
-        : _cooldownLine(n, n.key === 'cooldown.deezer' ? 'Artist photos and 30-second excerpts paused'
+                                      && (n.key !== 'cooldown.lastfm' || (enabled && working)))
+      .map(n => _cooldownLine(n, n.key === 'cooldown.lastfm' ? 'Bios, tags and similar artists paused'
+        : n.key === 'cooldown.deezer' ? 'Artist photos and 30-second excerpts paused'
           : `${escapeHtml(n.data.source)} paused`))
-      .filter(Boolean)
       .map(line => `
         <div class="form-row stacked" data-bg-pause>
           <div class="row-stack-sub" style="color:var(--color-text-dim);font-size:calc(11.5*var(--px));">${line}</div>
@@ -17077,8 +17082,7 @@
     //   - on + busy → "Working on track stats · 17 stats, 4 lyrics so far"
     //   - on + draining a backlog → "Catching up · fetching lyrics"
     // and under it, whatever the switch, every other service's pause.
-    const pauses = _bgPauseLines(enabled);
-    if (!enabled || !s) return pauses;
+    if (!enabled || !s) return _bgPauseLines(enabled, false);
     const totals = s.totals || {};
     const partsArr = [];
     if (totals.lyrics)      partsArr.push(totals.lyrics      + ' lyrics');
@@ -17108,8 +17112,9 @@
     const isWorking = s.current_step && s.current_step !== 'idle' && s.current_step !== '';
 
     const lastfm = notices.get('cooldown.lastfm');
+    const pauses = _bgPauseLines(enabled, isWorking);
     let primary;
-    if (lastfm) {
+    if (lastfm && !isWorking) {
       primary = _cooldownLine(lastfm, 'Paused');
     } else if (isWorking) {
       primary = escapeHtml((s.draining ? 'Catching up · ' : 'Working · ') + step);
@@ -17183,7 +17188,7 @@
         <div class="form-row">
           <span class="form-label">Support</span>
           ${waiting
-            ? `<button class="btn-link" type="button" data-action="review-support" data-guide="support_request" data-guide-scroll>${escapeProfileHtml(supportLabel(sync.support))}</button>`
+            ? `<button class="btn-link" type="button" data-action="review-support" data-guide="support_request">${escapeProfileHtml(supportLabel(sync.support))}</button>`
             : `<span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>`}
         </div>
         ${sync.host_agent ? `<div class="form-row">
@@ -18741,7 +18746,7 @@
         sub = 'Updating… Sautium will stop and come back.';
       } else {
         control = offered
-          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-guide="update" data-guide-scroll data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
+          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-guide="update" data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
           : `<button class="profile-btn secondary" type="button" data-action="host-check"${waits(check) ? ' disabled' : ''}>${waits(check) ? 'Checking…' : 'Check for updates'}</button>`;
         const newest = [check, update].filter(r => r.answered_at)
           .sort((a, b) => (a.answered_at < b.answered_at ? 1 : -1))[0];
@@ -20766,8 +20771,11 @@
       // Targeted updates only — the open screen keeps its DOM.
       const note = document.querySelector('[data-discography-pending]');
       if (note) note.innerHTML = discographyPendingText();
+      // Drawn again only where it changed: a button the person is pressing
+      // (onceInFlight's mark on it) stays the same element
       document.querySelectorAll('[data-notice-state]').forEach(el => {
-        el.innerHTML = NOTICE_STATES[el.dataset.noticeState]();
+        const html = NOTICE_STATES[el.dataset.noticeState]();
+        if (el.dataset.drawn !== html) { el.innerHTML = html; el.dataset.drawn = html; }
       });
       if (parseHash().startsWith('more/sync')) {
         const content = screenRoot() && screenRoot().querySelector('[data-sync-content]');

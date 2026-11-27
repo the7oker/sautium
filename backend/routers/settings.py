@@ -1608,7 +1608,48 @@ def _notices_state() -> Dict[str, Any]:
         it["report"] = it["key"] in _REPORTS
         if not (it["report"] and it["seen"]):
             items.append(it)
+    _wake_at_the_end(items)
     return {"items": items}
+
+
+# A condition that ends at a time its source knows — a cooldown's
+# `cooldown_until`, a support request's expiry — ends with no word from
+# anyone: nothing writes at that moment. The channel is woken then, once, by
+# a timer on the earliest such end the last derivation served (an event at a
+# known time; NOTIFY reaches every process's streams and the trail). Another
+# key's `until` is a retry, not an end (the slices' fallback timer).
+_ENDS_AT_UNTIL = ("cooldown.", "support.request.")
+_end_timer: Dict[str, Any] = {"at": None, "timer": None}
+_end_lock = threading.Lock()
+
+
+def _wake_at_the_end(items: List[Dict[str, Any]]) -> None:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    ends = [datetime.fromisoformat(it["until"]) for it in items
+            if it.get("until") and it["key"].startswith(_ENDS_AT_UNTIL)]
+    ends = [t for t in ends if t > now]
+    at = min(ends) if ends else None
+    with _end_lock:
+        if at == _end_timer["at"]:
+            return
+        if _end_timer["timer"] is not None:
+            _end_timer["timer"].cancel()
+        _end_timer.update(at=at, timer=None)
+        if at is None:
+            return
+        # a second past the end: the database's now() is past it too
+        timer = threading.Timer((at - now).total_seconds() + 1.0, _end_reached, args=(at,))
+        timer.daemon = True
+        _end_timer["timer"] = timer
+        timer.start()
+
+
+def _end_reached(at) -> None:
+    with _end_lock:
+        if _end_timer["at"] == at:
+            _end_timer.update(at=None, timer=None)
+    db_execute("NOTIFY sautium_notices")
 
 
 _REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures",
@@ -1946,7 +1987,10 @@ def post_notice_seen(key: str, body: NoticeSeen) -> Dict[str, Any]:
             SET value = CASE jsonb_typeof(user_settings.value) WHEN 'object' THEN user_settings.value
                              ELSE '{}'::jsonb END || EXCLUDED.value,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE user_settings.value -> %(k)s IS DISTINCT FROM to_jsonb(%(s)s::text)
+            -- never backwards: a page that slept through a re-arm and closes the
+            -- older toast leaves the newer onset seen
+            WHERE user_settings.value ->> %(k)s IS NULL
+               OR (user_settings.value ->> %(k)s)::timestamptz < %(s)s::timestamptz
         RETURNING 1 AS moved""", {"k": key, "s": body.since})
     if moved:
         if key == device_auth.PIN_FAILURES_KEY:

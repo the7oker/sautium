@@ -181,7 +181,8 @@ A **bottom-up sheet** with a vertical list of entries:
   also Claude Code's sign-in whenever gear research waits for it, since
   research runs on Claude Code whichever agent answers the chat
 - Sync & P2P (`#more/sync`) — the network's state, the P2P settings, the
-  notices
+  network's own background lines (since 2026-11-27 every other notice is a
+  toast and its state on its own domain's screen)
 
 The drawer's header carries the title and, on its baseline at the right
 edge, a link to the website (sautium.net). The About screen that held the
@@ -251,7 +252,7 @@ into `history.state`. The routes:
 #more/phantoms               → Streaming library (phantom counts, enrichment)
 #more/databases              → Offline databases (MusicBrainz, ListenBrainz)
 #more/ai                     → AI assistant (agent, sign-in)
-#more/sync                   → Sync & P2P (network state, settings, notices)
+#more/sync                   → Sync & P2P (network state, settings, the network's lines)
 #profile/<pubkey-prefix>     → Profile (viewing other, read-only)
 ```
 

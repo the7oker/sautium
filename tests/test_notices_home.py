@@ -123,6 +123,7 @@ const out = {
   on: _bgEnrichStatusLine({ current_step: 'idle', last_run_at: 'x', totals: {} }, true),
   off: _bgEnrichStatusLine({ current_step: 'idle', last_run_at: 'x', totals: {} }, false),
 };
+out.working = _bgEnrichStatusLine({ current_step: 'lyrics', draining: true, totals: { lyrics: 17 } }, true);
 ITEMS = [];
 out.none = _bgEnrichStatusLine({ current_step: 'idle', last_run_at: 'x', totals: {} }, true);
 process.stdout.write(JSON.stringify(out));
@@ -131,7 +132,8 @@ process.stdout.write(JSON.stringify(out));
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_enrichment_line_says_its_services_pauses():
-    """Last.fm's cooldown stands in place of "Idle" while the switch is on;
+    """Last.fm's cooldown stands in place of "Idle" while the switch is on —
+    under a working step, its own line;
     Deezer's — the photos and the 30-second excerpts — is said whatever the
     switch; with neither, "Idle" as before."""
     js = _functions("escapeHtml", "noticeStrikes", "_cooldownLine", "_bgPauseLines", "_bgEnrichStatusLine")
@@ -143,6 +145,9 @@ def test_the_enrichment_line_says_its_services_pauses():
     deezer = "Artist photos and 30-second excerpts paused · Deezer asked to slow down (2× in a row) — resume at 14:20"
     assert deezer in text["on"] and deezer in text["off"]
     assert "Last.fm" not in text["off"]
+    # the pass works on through Last.fm's pause (lyrics, the embeddings): it says so, the pause under it
+    assert "Catching up · fetching lyrics" in text["working"] and "Paused ·" not in text["working"]
+    assert "Bios, tags and similar artists paused · Last.fm asked to slow down" in text["working"]
     assert "Idle · last batch 3 min ago" in text["none"] and "paused" not in text["none"]
 
 
@@ -274,3 +279,58 @@ def test_the_other_surfaces_use_the_channel_the_design_gives():
     assert "setTimeout" not in hint
     assert "Phase 2" not in src and "Your audio chain is not shared." in src
     assert "notices.toast({ key: 'hqp-forget', text" not in src
+
+
+_CLOSE = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const src = fs.readFileSync(process.argv[process.argv.length - 1], 'utf8');
+const literal = src.slice(src.indexOf('  const notices = {'), src.indexOf('  window.notices = notices;'));
+const posted = [];
+const marks = { '.toast-close': 'toast-close', '[data-toast="why"]': 'data-toast="why"',
+                '[data-toast="action"]': 'data-toast="action"' };
+function element() {
+  const e = { innerHTML: '', className: '', on: {}, kids: {},
+    classList: { s: new Set(), add(c) { this.s.add(c); }, remove(c) { this.s.delete(c); }, contains(c) { return this.s.has(c); } },
+    setAttribute() {}, getBoundingClientRect() {}, remove() {},
+    addEventListener(t, f) { (this.on[t] = this.on[t] || []).push(f); },
+    querySelector(sel) {
+      if (!this.innerHTML.includes(marks[sel])) return null;
+      if (!this.kids[sel]) this.kids[sel] = element();
+      return this.kids[sel];
+    } };
+  return e;
+}
+const stack = element(); stack.appendChild = () => {};
+const context = {
+  sessionStorage: { getItem: () => null, setItem() {} }, console,
+  window: { dispatchEvent() {} }, CustomEvent: class {},
+  document: { getElementById: () => stack, createElement: element },
+  modalIsOpen: () => false, layoutMode: () => 'compact', escapeHtml: s => s,
+  setTimeout: (f) => { f(); return 0; }, clearTimeout() {},
+  noticeCopy: n => ({ title: n.key, text: '' }),
+  fetch: async (url, opts) => { posted.push(url); return { ok: true }; },
+};
+vm.runInNewContext(`'use strict';\n${literal}\nthis.notices = notices;`, context);
+const n = context.notices;
+const a = { key: 'auth.login_failures', domain: 'account', since: 'r1', report: true, seen: false };
+const b = { key: 'power.undervoltage', domain: 'node', since: 'p1', report: true, seen: false };
+n.apply({ items: [a, b], initial: true });
+// the person closes the toast on screen: its seen, once
+const shown = n._shown[0];
+const key = shown.key;
+shown.el.kids['.toast-close'].on.click.forEach(f => f());
+// another page saw the other one: the snapshot without it ends its toast here, and posts nothing
+n.apply({ items: [a, b].filter(x => x.key !== key) });
+n.apply({ items: [] });
+setTimeout(() => process.stdout.write(JSON.stringify({ key, posted, left: n._shown.length + n._queue.length })), 0);
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_reports_close_is_its_seen_and_its_end_elsewhere_is_not():
+    """The real toast: the close of a report's toast posts that report's seen
+    once; a report whose toast the snapshot ends — another page saw it —
+    posts nothing from here."""
+    proc = subprocess.run([NODE, "-e", _CLOSE, "--", str(SHELL)], capture_output=True, text=True, check=True)
+    out = json.loads(proc.stdout)
+    assert out["posted"] == [f"/api/settings/notices/{out['key']}/seen"] and out["left"] == 0

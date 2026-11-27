@@ -552,3 +552,42 @@ def test_the_trail_lights_for_an_offered_release_and_a_waiting_request_alone(cur
     assert tasks() == ["update"]
     with pytest.raises(Exception):
         settings_router.post_guidance_seen("notices")
+
+
+def test_a_condition_that_ends_at_its_time_wakes_the_channel_then(monkeypatch):
+    """A cooldown or a support request ends at a time its source knows, and
+    nothing writes then: the channel is woken once at the earliest such end
+    the derivation served — a retry's `until` (the slices') wakes nothing."""
+    import threading
+    from datetime import datetime, timedelta, timezone
+    woke = threading.Event()
+    sent = []
+    monkeypatch.setattr(settings_router, "db_execute", lambda sql, *a: sent.append(sql) or woke.set())
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=0.2)).isoformat()
+    later = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(settings_router, "_notice_items", lambda: [
+        {"key": "mb_slice.deferred", "until": soon, "seen": False},
+        {"key": "cooldown.deezer", "until": later, "seen": False},
+        {"key": "support.request.9", "until": later, "seen": False}])
+    settings_router._notices_state()
+    assert settings_router._end_timer["at"] == datetime.fromisoformat(later)
+    assert not woke.wait(1.5)                       # the retry woke nothing
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=0.2)).isoformat()
+    monkeypatch.setattr(settings_router, "_notice_items", lambda: [
+        {"key": "cooldown.deezer", "until": soon, "seen": False}])
+    settings_router._notices_state()
+    assert woke.wait(5) and sent == ["NOTIFY sautium_notices"]
+    monkeypatch.setattr(settings_router, "_notice_items", lambda: [])
+    settings_router._notices_state()
+    assert settings_router._end_timer == {"at": None, "timer": None}
+
+
+def test_a_seen_never_goes_back_to_an_older_onset(cur):
+    """A page that slept through a re-arm closes the older toast after
+    another page saw the newer onset: the newer stays seen."""
+    newer, older = "2026-10-08T00:00:00+00:00", ONSET
+    _setting(cur, "auth.login_failures", {"count": 1, "since": newer, "last": newer})
+    settings_router.post_notice_seen("auth.login_failures", settings_router.NoticeSeen(since=newer))
+    settings_router.post_notice_seen("auth.login_failures", settings_router.NoticeSeen(since=older))
+    cur.execute("SELECT value FROM user_settings WHERE key = 'notice.seen'")
+    assert cur.fetchone()[0] == {"auth.login_failures": newer}

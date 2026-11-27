@@ -75,7 +75,12 @@ def offered_release() -> Optional[dict]:
     offered = release_verify.parse_version(row[0]["release"])
     if offered is None or offered <= updater.installer_version():
         return None
-    return {"release": row[0]["release"], "since": row[0]["answered_at"].isoformat()}
+    # The offer's onset is the first answer that offered this release: the
+    # daily check that offers it again is no news (its toast lasts)
+    first = db_query("SELECT value FROM user_settings WHERE key = 'update.offered_since'")
+    since = (first[0]["value"]["since"] if first and first[0]["value"].get("release") == row[0]["release"]
+             else row[0]["answered_at"].isoformat())
+    return {"release": row[0]["release"], "since": since}
 
 
 def update_report() -> Optional[dict]:
@@ -152,6 +157,14 @@ async def answer(body: Answer, request: Request) -> dict:
         "report = CASE WHEN EXCLUDED.verb = 'diagnostics' AND EXCLUDED.outcome = 'done' "
         "AND EXCLUDED.report IS NOT NULL THEN EXCLUDED.report ELSE host_requests.report END",
         body.model_dump(exclude={"replayed"}))
+    if body.verb == "check" and body.outcome == "offered" and body.release:
+        db_execute("""
+            INSERT INTO user_settings (key, value)
+            VALUES ('update.offered_since', jsonb_build_object('release', %(r)s::text,
+                                                               'since', to_jsonb(now())))
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+                WHERE user_settings.value ->> 'release' IS DISTINCT FROM %(r)s::text""",
+                   {"r": body.release})
     logger.info("the host agent answered %s: %s", body.verb, body.outcome)
     if body.verb == "update" and body.outcome in ("failed", "undone"):
         from db_pool import get_conn
