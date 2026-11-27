@@ -300,7 +300,7 @@ def _mcp_config_overrides() -> List[str]:
         # startup_timeout_sec instead; the key exists since codex 0.151
         # (0.149 ignores it and keeps its fixed 1 s). Not `required`: that
         # fails the turn when a server does not start, where the runner
-        # has always gone on without it.
+        # has always gone on without it — now once its timeout has passed.
         args += ["-c", "mcp_optional_startup_grace_ms=0"]
     return args
 
