@@ -977,6 +977,22 @@ def test_a_release_that_did_not_start_is_not_tried_again_for_a_day(checkout, mon
     assert ha.verb_update(state, 1000.0 + ha.UPDATE_NOOP_FLOOR, checkout)[0] == "updated"
 
 
+def test_a_board_too_small_to_build_the_image_takes_no_update_and_says_why(checkout, monkeypatch):
+    """Compiling the image's Python takes 1.6 GB at once: on a 2 GB board an
+    update would spend an hour beside the running node and fail, every day.
+    It is refused before the survey, so a forged loop costs no fetch."""
+    up = _Update(checkout, monkeypatch, ram_gib=1.8)
+    surveyed = []
+    monkeypatch.setattr(ha, "survey", lambda root=None: surveyed.append(root) or pytest.fail("surveyed"))
+    state = {}
+    outcome, detail, release, _ = ha.verb_update(state, 1000.0, checkout)
+    assert (outcome, release) == ("refused", None)
+    assert "1.8 GB of memory" in detail and "needs 2.5 GB" in detail
+    assert up.calls == [] and surveyed == [] and state == {}
+    up = _Update(checkout, monkeypatch, ram_gib=2.8)          # a 3 GB machine's MemTotal builds
+    assert ha.verb_update({}, 1000.0, checkout)[0] == "updated" and "build" in up.calls
+
+
 def test_an_update_a_run_did_not_finish_is_undone_at_the_next_start(checkout, node, monkeypatch):
     handler, api = node
     up = _Update(checkout, monkeypatch)

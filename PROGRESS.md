@@ -4491,9 +4491,26 @@ device on the network; none of them may hold for it more than a bound.
   another address), bookworm's fpcalc exits 3 on every file shorter than
   its 120 s window, and the CPU architecture moved none. So
   `Dockerfile.mac`, the one image for Docker on an Apple Silicon Mac and on
-  a Linux arm64 host (a Pi 5, `docker-compose.pi.yml`), is `ubuntu:22.04`
-  with deadsnakes 3.11, as the release image is. Moving the release's base
-  off FFmpeg 4.4 is a design question first, never a routine bump.
+  a Linux arm64 host (a Pi 5, `docker-compose.pi.yml`), is `ubuntu:22.04`,
+  as the release image is. Moving the release's base off FFmpeg 4.4 is a
+  design question first, never a routine bump.
+- **The interpreter is built from python.org's source** (since 2026-11-26,
+  IMAGE-BUILD-1). Both images had taken Python 3.11 from the deadsnakes PPA,
+  which nothing pinned and nothing backed up: two of five builds on a Pi
+  failed on its 503. Now a stage both Dockerfiles share word for word builds
+  CPython at a pinned version and digest with PGO + LTO, both bases are
+  named by digest, and the CUDA base's own NVIDIA list is removed (apt's
+  three retries were already jammy's default). python-build-standalone,
+  which needs no compile, was measured and refused: its interpreter ran
+  bytecode 30–45 % slower than deadsnakes' on amd64, where python.org's
+  source at Debian's optimisation matched it. The price is the compile —
+  about 7 min on four desktop cores, 1.6 GB at the LTO link — paid once per
+  pin, the stage's layer being kept across releases. A machine with under
+  2.5 GB of memory is refused the build: the setup (before it asks for any
+  root step) and the host agent's update say so before any build
+  (`machine_tier.image_build_refusal`),
+  until a prebuilt image, named by digest in the signed release, takes the
+  build off the boxes.
 - **Every process tests its fpcalc before it analyses.** It fingerprints a
   12 s synthetic signal shipped in the tree (`backend/fingerprint_probe/`,
   made by `scripts/make_fingerprint_probe.py`) and compares the print with

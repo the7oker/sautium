@@ -21,20 +21,75 @@
 # question first: the self-test (provenance.fingerprinter) refuses analysis
 # on an fpcalc that fingerprints its probe signal wrong or not at all, but
 # FFmpeg 7.1 moves a file's print one time in five, and its probe's not.
-FROM ubuntu:22.04 AS base
+#
+# The base is named by its digest (Docker Hub's index for ubuntu:22.04): a
+# base that moves reaches nodes in a release, as every other pin does.
+# Python is CPython built from python.org's source in a stage of its own
+# (jammy's own python3.11 is 3.11.0rc1): no build of this image rests on a
+# package archive with no pin and no second source, as the deadsnakes PPA
+# was (IMAGE-BUILD-1: two of five builds on a Raspberry Pi failed on its
+# 503). The stage's layer is reused until the pin below moves.
+FROM ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac30f3e18cdb AS os
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
+
+# -- CPython, built once per pin ---------------------------------------------
+FROM os AS python
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config curl ca-certificates xz-utils \
+    libssl-dev zlib1g-dev libbz2-dev liblzma-dev libsqlite3-dev libffi-dev uuid-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Debian's level of optimisation (PGO + LTO): an interpreter as fast as the
+# distributions' (python-build-standalone's ran bytecode 30-45 % slower,
+# measured). No readline and no gdbm headers: the interpreter links no GPL
+# library. The tests are left out of the install, and so is tkinter with
+# what needs it (no Tk headers, so no _tkinter: a package that cannot import
+# would read as present), as Debian's python3.11 is without python3.11-tk.
+ARG CPYTHON_VERSION=3.11.18
+ARG CPYTHON_SHA256=9120e0a653868f6e3698d36cdd99e5a58903ec9469e448f21d98f7b16d8fa290
+RUN curl -fsSLo /tmp/python.tar.xz \
+        https://www.python.org/ftp/python/${CPYTHON_VERSION}/Python-${CPYTHON_VERSION}.tar.xz \
+    && echo "${CPYTHON_SHA256}  /tmp/python.tar.xz" | sha256sum -c - \
+    && mkdir /tmp/python && tar -xJf /tmp/python.tar.xz -C /tmp/python --strip-components=1 \
+    && cd /tmp/python \
+    && ./configure --prefix=/usr/local --enable-shared --enable-optimizations --with-lto \
+        --enable-loadable-sqlite-extensions --without-ensurepip --enable-option-checking=fatal \
+        LDFLAGS=-Wl,-rpath,/usr/local/lib \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd / && rm -rf /tmp/python /tmp/python.tar.xz \
+    && find /usr/local/lib/python3.11 -depth -type d -name test -prune -exec rm -rf '{}' + \
+    && find /usr/local -name 'libpython*.a' -delete \
+    && find /usr/local/lib/python3.11 -name '*.opt-[12].pyc' -delete \
+    && rm -rf /usr/local/lib/python3.11/tkinter /usr/local/lib/python3.11/idlelib \
+        /usr/local/lib/python3.11/turtledemo /usr/local/bin/idle3* \
+    && find /usr/local/lib -name '*.so*' -type f -exec strip --strip-unneeded '{}' + \
+    && ln -s python3 /usr/local/bin/python \
+    && /usr/local/bin/python3 -c "import ssl, sqlite3, ctypes, lzma, bz2, zlib, uuid, decimal, hashlib"
+
+
+# -- what the node runs on ----------------------------------------------------
+FROM os AS base
+
 ENV PYTHON_VERSION=3.11
 
-# What the node runs on. deadsnakes for a 3.11 final, as the release image (jammy's own is 3.11.0rc1)
-RUN apt-get update && apt-get install -y software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python${PYTHON_VERSION} \
-    python${PYTHON_VERSION}-venv \
-    python${PYTHON_VERSION}-distutils \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # The interpreter's own libraries (the python stage built against them),
+    # and the MIME table its mimetypes reads (the Web UI's fonts are served
+    # by type)
+    media-types \
+    libssl3 \
+    zlib1g \
+    libbz2-1.0 \
+    liblzma5 \
+    libsqlite3-0 \
+    libffi8 \
+    libuuid1 \
     # Audio processing libraries
     ffmpeg \
     libsndfile1 \
@@ -51,23 +106,22 @@ RUN apt-get update && apt-get install -y software-properties-common \
     ca-certificates \
     # Node's archive is .tar.xz
     xz-utils \
-    && apt-get purge -y software-properties-common && apt-get autoremove -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
+# After the packages: a pin's move rebuilds nothing above it
+COPY --from=python /usr/local/ /usr/local/
 
 
 # -- the build stage: compilers and headers, left behind -----------------------
 FROM base AS build
 
-# Every file fetched with curl in the two stages below names its version and is checked against
-# its SHA-256 before it is unpacked or run; a version moves with its digest, in
-# a release. (The pip installs of this stage resolve from PyPI at build time.)
+# Every file fetched with curl in this file names its version and is checked
+# against its SHA-256 before it is unpacked or run; a version moves with its
+# digest, in a release. (The pip installs of this stage resolve from PyPI at
+# build time.)
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python${PYTHON_VERSION}-dev \
     libsndfile1-dev \
     build-essential \
     && apt-get clean \
@@ -109,8 +163,10 @@ RUN if [ "${MODELS}" = 1 ]; then \
 # cutlet's Japanese dictionary (transliterate.py degrades without it), as the release image has it
 RUN pip install --no-cache-dir unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc
 
-# Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
-RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+# libtorrent for the DHT's peer discovery. Its wheels exist for both
+# architectures, so a failure here is a download's, and an image without it
+# would be a node that silently finds no peers: the build fails instead.
+RUN pip install --no-cache-dir "libtorrent>=2.0.15"
 
 
 # -- the image -----------------------------------------------------------------
@@ -163,7 +219,7 @@ ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]
 
 # The packages the build stage installed (pip, the libraries, their scripts,
 # the dictionary's mecabrc): everything pip wrote lives under /usr/local
-COPY --from=build /usr/local/lib/python3.11/dist-packages /usr/local/lib/python3.11/dist-packages
+COPY --from=build /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=build /usr/local/bin/ /usr/local/bin/
 COPY --from=build /usr/local/etc/mecabrc /usr/local/etc/mecabrc
 
@@ -214,8 +270,8 @@ ENV PG_BIN=/usr/lib/postgresql/18/bin
 # library file that does not compile on 3.11 (torch ships 3.12 syntax among
 # its tests) is one nothing imports.
 ENV PYTHONPYCACHEPREFIX=/usr/local/lib/sautium/pycache
-RUN python -c "import compileall, sys; [compileall.compile_dir(p, quiet=1, workers=0) for p in sys.path if p.startswith('/usr/') and p.endswith(('python3.11', 'dist-packages'))]" \
-    && test -d /usr/local/lib/sautium/pycache/usr/lib/python3.11
+RUN python -c "import compileall, sys; [compileall.compile_dir(p, quiet=1, workers=0) for p in sys.path if p.startswith('/usr/') and p.endswith(('python3.11', 'site-packages'))]" \
+    && test -d /usr/local/lib/sautium/pycache/usr/local/lib/python3.11/site-packages
 
 # Copy application code
 COPY . .

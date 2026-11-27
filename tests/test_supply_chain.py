@@ -432,15 +432,92 @@ def test_the_arm64_image_fingerprints_with_the_release_images_ffmpeg():
     release, arm64 = _dockerfile("Dockerfile"), _dockerfile("Dockerfile.mac")
     def bases(text):
         return [line for line in text.splitlines() if line.startswith("FROM ")]
-    assert bases(release) == ["FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04"]
-    # One base under both of its stages: the packages are built on the FFmpeg
-    # and Python the image runs them on
-    assert bases(arm64) == ["FROM ubuntu:22.04 AS base", "FROM base AS build", "FROM base"]
+    assert bases(release) == [f"FROM {UBUNTU} AS os", "FROM os AS python", f"FROM {CUDA}"]
+    # One base under every stage: the interpreter and the packages are built
+    # on the FFmpeg and libraries the image runs them on
+    assert bases(arm64) == [f"FROM {UBUNTU} AS os", "FROM os AS python", "FROM os AS base",
+                            "FROM base AS build", "FROM base"]
     for text in (release, arm64):
-        for wanted in ("ppa:deadsnakes/ppa", "libchromaprint-tools", "lbzip2",
+        for wanted in ("libchromaprint-tools", "lbzip2",
                        "unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc", "jammy-pgdg main",
                        "pip install --no-index /tmp/${PIP_WHEEL}"):
             assert wanted in text, wanted
+
+
+UBUNTU = "ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac30f3e18cdb"
+CUDA = ("nvidia/cuda:12.2.0-runtime-ubuntu22.04"
+        "@sha256:739e0bde7bafdb2ed9057865f53085539f51cbf8bd6bf719f2e114bab321e70e")
+
+
+def _code(text: str) -> str:
+    """A Dockerfile without its comment lines"""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_no_build_of_an_image_rests_on_a_package_archive_without_a_pin():
+    """The deadsnakes PPA had no pin and no second source, and two of five
+    builds on a Pi failed on its 503 (IMAGE-BUILD-1): no image reads an apt
+    source but Ubuntu's and PGDG's (its key checked by digest) — the CUDA
+    base's own NVIDIA list is removed before its first apt layer — and every
+    base an image starts from outside the file is named by its digest, so a
+    base that moves reaches nodes in a release."""
+    for name in ("Dockerfile", "Dockerfile.mac"):
+        code = _code(_dockerfile(name))
+        for banned in ("ppa:", "add-apt-repository", "software-properties-common", "deadsnakes"):
+            assert banned not in code, (name, banned)
+        # The one source an image adds is PGDG's; the one it removes, the
+        # CUDA base's NVIDIA list
+        touched = [line.strip() for line in code.splitlines() if "sources.list" in line]
+        assert touched == ((["RUN rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list \\"]
+                            if name == "Dockerfile" else [])
+                           + ["> /etc/apt/sources.list.d/pgdg.list \\"]), (name, touched)
+        assert "jammy-pgdg main" in code
+        stages = set()
+        for line in code.splitlines():
+            if line.startswith("FROM "):
+                words = line.split()
+                if words[1] not in stages:
+                    assert "@sha256:" in words[1], (name, line)
+                if len(words) == 4:
+                    stages.add(words[3])
+        # Python's mimetypes reads the system's table: without it the Web
+        # UI's fonts are served as text/plain
+        assert code.count("    media-types \\\n") == 1, name
+    cuda = _stages(_code(_dockerfile("Dockerfile")))[""]
+    first_update = cuda.index("apt-get update")
+    assert cuda.index("rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list") < first_update
+
+
+def test_both_images_build_the_same_interpreter_from_pythons_own_source():
+    """CPython from python.org, pinned by digest, at Debian's optimisation
+    (PGO + LTO), in a stage of its own both files share word for word; no
+    readline or gdbm headers, so the interpreter links no GPL library."""
+    import re
+    def stage(text):
+        start = text.index(f"FROM {UBUNTU} AS os")
+        return text[start:text.index("\n# -- ", text.index("FROM os AS python"))]
+    shared = stage(_dockerfile("Dockerfile"))
+    assert shared == stage(_dockerfile("Dockerfile.mac"))
+    assert "https://www.python.org/ftp/python/${CPYTHON_VERSION}/Python-${CPYTHON_VERSION}.tar.xz" in shared
+    assert '"${CPYTHON_SHA256}  /tmp/python.tar.xz" | sha256sum -c -' in shared
+    assert re.search(r"ARG CPYTHON_VERSION=3\.11\.\d+\nARG CPYTHON_SHA256=[0-9a-f]{64}\n", shared)
+    assert "--enable-optimizations --with-lto" in shared and "--prefix=/usr/local" in shared
+    assert "readline" not in _code(shared) and "gdbm" not in _code(shared)
+    # No Tk, so no tkinter package that would be found and fail to import
+    assert "tk-dev" not in shared and "rm -rf /usr/local/lib/python3.11/tkinter " in shared
+    for name in ("Dockerfile", "Dockerfile.mac"):
+        code = _code(_dockerfile(name))
+        assert code.count("COPY --from=python /usr/local/ /usr/local/") == 1
+        assert "update-alternatives" not in code and "python3.11-" not in code
+
+
+def test_libtorrent_is_never_left_out_of_an_image_in_silence():
+    """Its wheels exist for both architectures: a failed install is a
+    download's, and an image without it is a node that finds no peers."""
+    for name in ("Dockerfile", "Dockerfile.mac"):
+        code = _code(_dockerfile(name))
+        assert 'RUN pip install --no-cache-dir "libtorrent>=2.0.15"\n' in code + "\n"
+        assert "|| echo" not in code and "|| true" not in code
 
 
 def _stages(text: str) -> dict:
@@ -455,15 +532,16 @@ def _stages(text: str) -> dict:
 
 
 def test_the_cpu_image_leaves_its_compilers_in_the_build_stage():
-    """No variant of the image carries compilers or headers (PI-NODE-1 A4:
-    372 MB of 5.5 GB): pip runs in a stage that has them, and the image takes
-    what pip wrote."""
-    stages = _stages("\n".join(line for line in _dockerfile("Dockerfile.mac").splitlines()
-                                if not line.lstrip().startswith("#")))
+    """No variant of the image carries compilers or the libraries' headers
+    (PI-NODE-1 A4: 372 MB of 5.5 GB): the interpreter and pip run in stages
+    that have them, and the image takes what they wrote — Python's own
+    headers (a few MB) ride along in /usr/local with the interpreter."""
+    stages = _stages(_code(_dockerfile("Dockerfile.mac")))
     for package in ("build-essential", "-dev"):
-        assert package in stages["build"] and package not in stages["base"] + stages[""], package
+        assert package in stages["build"] and package in stages["python"], package
+        assert package not in stages["os"] + stages["base"] + stages[""], package
     assert "pip install" not in stages["base"] + stages[""]
-    assert "COPY --from=build /usr/local/lib/python3.11/dist-packages" in stages[""]
+    assert "COPY --from=build /usr/local/lib/python3.11/site-packages" in stages[""]
 
 
 def test_an_image_without_the_models_installs_the_nodes_packages_alone():

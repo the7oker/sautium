@@ -32,6 +32,22 @@ NANO_BELOW_RAM_GIB = 7.5
 # Docker's data root must hold the full image (5.5 GB), the models (4 GB) and
 # a database that grows: less free than this, and the node is born small
 NANO_BELOW_FREE_GB = 25
+# The node's image is built on the machine that runs it (the console setup,
+# the host agent's update), and the optimised link of its Python takes 1.6 GB
+# in one process (2026-11-26): under this much memory (MemTotal, below a
+# board's nominal size: a 2 GB board reads ~1.8, a 3 GB machine ~2.8) the
+# build is refused before it starts
+IMAGE_BUILD_RAM_GIB = 2.5
+
+
+def image_build_refusal(ram_kib: Optional[int]) -> Optional[str]:
+    """Why a machine of `ram_kib` cannot build the node's image; None where
+    it can, or where its memory could not be read (the build then answers
+    for itself)."""
+    if ram_kib is None or ram_kib >= IMAGE_BUILD_RAM_GIB * 1024 ** 2:
+        return None
+    return (f"this machine has {ram_kib / 1024 ** 2:.1f} GB of memory, and building Sautium's image needs "
+            f"{IMAGE_BUILD_RAM_GIB} GB (compiling its Python takes 1.6 GB at once)")
 
 
 def auto_tier(device: str, accel_gb: float, ram_gb: float) -> str:

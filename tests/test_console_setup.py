@@ -2181,6 +2181,37 @@ def test_a_second_run_attaches_to_its_own_build_and_to_no_other_process(checkout
     assert len(started) == 2
 
 
+def test_a_board_too_small_to_build_the_image_is_told_before_anything_is_asked_of_it(checkout, monkeypatch):
+    """The image's Python takes 1.6 GB to link: a 2 GB board would spend an
+    hour on a build that fails, twice. The run says so before it asks the
+    person for any root step, and an image already built for this commit and
+    these choices is no build at all."""
+    monkeypatch.setattr(setup.agent, "head", lambda root: "c" * 40)
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:local")
+    monkeypatch.setattr(setup.machine_tier, "machine_memory_kib", lambda: int(1.8 * 1024 ** 2))
+    monkeypatch.setattr(setup, "run", lambda args, **kw: subprocess.CompletedProcess(args, 0, b"sha256:abc\n", b""))
+    env = setup.image_choice({}, preset="nano", asked_preset=None, assistant="none")
+    assert env == {"SAUTIUM_IMAGE_MODELS": "0", "SAUTIUM_IMAGE_STREAMING": "0", "SAUTIUM_IMAGE_ASSISTANT_CLI": "0"}
+    refusal = setup.build_refusal({}, env)
+    assert "1.8 GB of memory" in refusal and "needs 2.5 GB" in refusal and "cannot be set up on it yet" in refusal
+    assert setup.build_refusal({"built": setup.image_key(env)}, env) is None
+    other = {**env, "SAUTIUM_IMAGE_ASSISTANT_CLI": "1"}                 # another image is another build
+    assert setup.build_refusal({"built": setup.image_key(env)}, other) is not None
+    # An image the host agent's update built for this commit, from these choices, is built too
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:v0.4.0-cccccccccccc")
+    (checkout / ".env").write_text("".join(f"{k}={v}\n" for k, v in env.items()))
+    assert setup.build_refusal({}, env) is None
+    assert setup.build_refusal({}, other) is not None
+    monkeypatch.setattr(setup.agent, "image_of", lambda root: "sautium-backend:v0.3.0-bbbbbbbbbbbb")
+    assert setup.build_refusal({}, env) is not None
+    monkeypatch.setattr(setup.machine_tier, "machine_memory_kib", lambda: int(2.8 * 1024 ** 2))
+    assert setup.build_refusal({}, env) is None
+    assert setup.machine_tier.image_build_refusal(None) is None
+    # The run asks it before the root steps
+    source = Path(setup.__file__).read_text(encoding="utf-8")
+    assert source.index("refusal = build_refusal(state, ") < source.index("    root_steps(args, state, ")
+
+
 @pytest.fixture
 def installed(checkout, monkeypatch):
     """A node as a setup left it, with Docker and systemd replaced by a

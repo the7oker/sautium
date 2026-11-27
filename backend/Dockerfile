@@ -1,5 +1,59 @@
-# Use NVIDIA CUDA base image with Ubuntu 22.04
-FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+# The release image: NVIDIA's CUDA runtime on Ubuntu 22.04.
+#
+# Both bases are named by their digests (Docker Hub's indexes): a base that
+# moves reaches nodes in a release, as every other pin does. Python is
+# CPython built from python.org's source in a stage of its own — the same
+# stage as Dockerfile.mac's (a test holds them equal). Ubuntu 22.04's own
+# python3.11 is 3.11.0rc1, whose stdlib lacks sys.get_int_max_str_digits:
+# torch._dynamo's polyfills reference that symbol at import time, so on rc1
+# every transformers model load (CLAP, BGE-M3) crashes. The deadsnakes PPA
+# that served a final before had no pin and no second source (IMAGE-BUILD-1).
+FROM ubuntu:22.04@sha256:b000e69a50ff940390233025e7a337fb8469b509e2334fa4d018ac30f3e18cdb AS os
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+
+# -- CPython, built once per pin ---------------------------------------------
+FROM os AS python
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential pkg-config curl ca-certificates xz-utils \
+    libssl-dev zlib1g-dev libbz2-dev liblzma-dev libsqlite3-dev libffi-dev uuid-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Debian's level of optimisation (PGO + LTO): an interpreter as fast as the
+# distributions' (python-build-standalone's ran bytecode 30-45 % slower,
+# measured). No readline and no gdbm headers: the interpreter links no GPL
+# library. The tests are left out of the install, and so is tkinter with
+# what needs it (no Tk headers, so no _tkinter: a package that cannot import
+# would read as present), as Debian's python3.11 is without python3.11-tk.
+ARG CPYTHON_VERSION=3.11.18
+ARG CPYTHON_SHA256=9120e0a653868f6e3698d36cdd99e5a58903ec9469e448f21d98f7b16d8fa290
+RUN curl -fsSLo /tmp/python.tar.xz \
+        https://www.python.org/ftp/python/${CPYTHON_VERSION}/Python-${CPYTHON_VERSION}.tar.xz \
+    && echo "${CPYTHON_SHA256}  /tmp/python.tar.xz" | sha256sum -c - \
+    && mkdir /tmp/python && tar -xJf /tmp/python.tar.xz -C /tmp/python --strip-components=1 \
+    && cd /tmp/python \
+    && ./configure --prefix=/usr/local --enable-shared --enable-optimizations --with-lto \
+        --enable-loadable-sqlite-extensions --without-ensurepip --enable-option-checking=fatal \
+        LDFLAGS=-Wl,-rpath,/usr/local/lib \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd / && rm -rf /tmp/python /tmp/python.tar.xz \
+    && find /usr/local/lib/python3.11 -depth -type d -name test -prune -exec rm -rf '{}' + \
+    && find /usr/local -name 'libpython*.a' -delete \
+    && find /usr/local/lib/python3.11 -name '*.opt-[12].pyc' -delete \
+    && rm -rf /usr/local/lib/python3.11/tkinter /usr/local/lib/python3.11/idlelib \
+        /usr/local/lib/python3.11/turtledemo /usr/local/bin/idle3* \
+    && find /usr/local/lib -name '*.so*' -type f -exec strip --strip-unneeded '{}' + \
+    && ln -s python3 /usr/local/bin/python \
+    && /usr/local/bin/python3 -c "import ssl, sqlite3, ctypes, lzma, bz2, zlib, uuid, decimal, hashlib"
+
+
+# -- the image -----------------------------------------------------------------
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04@sha256:739e0bde7bafdb2ed9057865f53085539f51cbf8bd6bf719f2e114bab321e70e
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -7,20 +61,22 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Set Python version
 ENV PYTHON_VERSION=3.11
 
-# Install system dependencies.
-# deadsnakes PPA is mandatory: Ubuntu 22.04's stock python3.11 package is frozen
-# at 3.11.0rc1, whose stdlib lacks sys.get_int_max_str_digits. torch._dynamo's
-# polyfills reference that symbol at import time, so on rc1 every transformers
-# model load (CLAP, BGE-M3) crashes — silently killing all embedding generation.
-# deadsnakes ships a proper 3.11.x final.
-RUN apt-get update && apt-get install -y software-properties-common \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
+# Install system dependencies. The CUDA base lists NVIDIA's own apt
+# repository; this image installs nothing from it, and left in place every
+# apt layer would read one more archive nothing here pins.
+RUN rm /etc/apt/sources.list.d/cuda-ubuntu2204-x86_64.list \
     && apt-get update && apt-get install -y \
-    # Python (final, from deadsnakes — not jammy's rc1)
-    python${PYTHON_VERSION} \
-    python${PYTHON_VERSION}-dev \
-    python${PYTHON_VERSION}-venv \
-    python${PYTHON_VERSION}-distutils \
+    # The interpreter's own libraries (the python stage built against them),
+    # and the MIME table its mimetypes reads (the Web UI's fonts are served
+    # by type)
+    media-types \
+    libssl3 \
+    zlib1g \
+    libbz2-1.0 \
+    liblzma5 \
+    libsqlite3-0 \
+    libffi8 \
+    libuuid1 \
     # Audio processing libraries
     ffmpeg \
     libsndfile1 \
@@ -37,6 +93,9 @@ RUN apt-get update && apt-get install -y software-properties-common \
     # Cleanup
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# After the packages: a pin's move rebuilds nothing above it
+COPY --from=python /usr/local/ /usr/local/
 
 # Every file fetched with curl below names its version and is checked against
 # its SHA-256 before it is unpacked or run; a version moves with its digest, in
@@ -76,11 +135,7 @@ RUN useradd -m -s /bin/bash agent \
 COPY node_user.py /usr/local/lib/sautium/node_user.py
 ENTRYPOINT ["python3", "-I", "-S", "/usr/local/lib/sautium/node_user.py"]
 
-# Set Python 3.11 as default
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
-
-# Bootstrap pip for the deadsnakes interpreter (it ships without pip; the jammy
+# Bootstrap pip for the interpreter (built without ensurepip; the jammy
 # python3-pip package would target the system python3.10 instead): pip's own
 # wheel, which installs itself.
 ARG PIP_WHEEL=pip-26.2.2-py3-none-any.whl
@@ -120,8 +175,10 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-ml.txt
 # is absent (launcher), transliterate._japanese degrades to anyascii, not a crash.
 RUN pip install --no-cache-dir unidic-lite==1.0.8 && touch /usr/local/etc/mecabrc
 
-# Optional: libtorrent for P2P DHT peer discovery (graceful degradation if unavailable)
-RUN pip install --no-cache-dir "libtorrent>=2.0.15" || echo "WARNING: libtorrent not available — DHT peer discovery disabled"
+# libtorrent for the DHT's peer discovery. Its wheels exist, so a failure
+# here is a download's, and an image without it would be a node that
+# silently finds no peers: the build fails instead.
+RUN pip install --no-cache-dir "libtorrent>=2.0.15"
 
 # PyNaCl for the peer-chat surface (E2E Box, mirrors the launcher's chat
 # stack). Standalone late layer so it never busts the pip-install cache.
@@ -174,8 +231,8 @@ ENV PG_BIN=/usr/lib/postgresql/18/bin
 # library file that does not compile on 3.11 (torch ships 3.12 syntax among
 # its tests) is one nothing imports.
 ENV PYTHONPYCACHEPREFIX=/usr/local/lib/sautium/pycache
-RUN python -c "import compileall, sys; [compileall.compile_dir(p, quiet=1, workers=0) for p in sys.path if p.startswith('/usr/') and p.endswith(('python3.11', 'dist-packages'))]" \
-    && test -d /usr/local/lib/sautium/pycache/usr/lib/python3.11
+RUN python -c "import compileall, sys; [compileall.compile_dir(p, quiet=1, workers=0) for p in sys.path if p.startswith('/usr/') and p.endswith(('python3.11', 'site-packages'))]" \
+    && test -d /usr/local/lib/sautium/pycache/usr/local/lib/python3.11/site-packages
 
 # Copy application code
 COPY . .
