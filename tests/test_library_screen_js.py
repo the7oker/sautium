@@ -343,7 +343,7 @@ def test_a_folder_out_is_a_warning_with_its_albums_and_a_new_disk_offers_its_one
     assert out.returncode == 0, out.stderr
     streams, waits, empty, disk, added = json.loads(out.stdout)
     assert streams == {"title": "STICK &lt;B> · Music is not connected",
-                       "text": 'Its <span class="num">9</span> albums stream until it is back.', "action": None}
+                       "text": 'Its <span class="num">9</span> albums stream until it is back.', "action": "Library"}
     assert waits["text"] == 'Its <span class="num">1</span> album cannot play until it is back.'
     assert empty["text"] == "Its music cannot play until it is back."
     assert disk == {"title": "A disk with music was plugged in",

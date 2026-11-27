@@ -8686,11 +8686,12 @@
 
   function friendRowInner(friend) {
     const name = friend.display_name || friend.username || friend.invite_code || '?';
-    // A friend's invite whose handshake has not completed has no thread yet
-    // (onRowClick opens nothing): the row says so as its state
+    // A friend's invite whose handshake has not completed has no thread yet —
+    // the server's empty `chat_key` (routers/p2p.py), and onRowClick opens
+    // nothing: the row says so as its state
     const status = friend.source === 'master'
       ? `<div class="friend-status">${escapeHtml(supportLine(friend))}</div>`
-      : !friendUrlKey(friend)
+      : friend.chat_key === ''
         ? '<div class="friend-status">waiting for the handshake — chat once both sides accept</div>'
       : friend.is_online
         ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
