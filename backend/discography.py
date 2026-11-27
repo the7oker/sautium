@@ -43,7 +43,7 @@ synced from the other side only gains an `album_artists` link).
 """
 
 import logging
-from collections import Counter
+from collections import Counter, defaultdict
 import re
 import unicodedata
 from typing import Any, Dict, List, Optional
@@ -54,7 +54,7 @@ from psycopg2.extras import execute_values
 
 from db_pool import db_execute, db_query, db_query_one, get_conn
 from mb_dump_load import MB_LOAD_LOCK_KEY
-from uuid_utils import album_uuid, artist_uuid, normalize, track_uuid
+from uuid_utils import album_uuid, artist_uuid, normalize, song_key, track_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -518,14 +518,15 @@ def _fully_timed(release: dict) -> bool:
     return all(t["length_ms"] for t in release["tracks"])
 
 
-def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> int:
+def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict,
+                         occurrences: dict) -> int:
     """Slots whose current track is not the one about to claim them: move the
     old track's data onto the new uuid BEFORE the upsert — a rename, or a
     merge when the new uuid already exists (the rip the user made since) —
     so the slot's DO UPDATE is a no-op and nothing analysed, listened to or
     owned is stranded on a row no tracklist points at. The moved track takes
-    the MB title its new uuid was derived from and exactly the slot's artist
-    as primary (the rename carried the old link along)."""
+    the MB title and the occurrence its new uuid was derived from and exactly
+    the slot's artist as primary (the rename carried the old link along)."""
     current = {(r["disc"], r["position"]): r["track_id"] for r in db_query("""
         SELECT disc, position, track_id::text AS track_id
         FROM album_tracks WHERE album_id = %(al)s::uuid""", {"al": album_id})}
@@ -569,6 +570,8 @@ def _carry_rekeyed_slots(album_id: str, slot_rows: list, slot_artists: dict) -> 
             db.execute(_sql("UPDATE tracks SET title = :t, title_latin = :tl "
                             "WHERE id = :id AND title <> :t"),
                        {"t": title, "tl": latinize(title), "id": new})
+            db.execute(_sql("UPDATE tracks SET occurrence = :k WHERE id = :id AND occurrence <> :k"),
+                       {"k": occurrences[new], "id": new})
             db.execute(_sql("DELETE FROM track_artists WHERE track_id = :id "
                             "AND role = 'primary' AND artist_id <> :ar"),
                        {"id": new, "ar": slot_artists[new]})
@@ -665,7 +668,10 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
 
     track_rows, artist_rows, credit_rows, slot_rows = [], [], [], []
     slot_artists: dict = {}
-    for tr in best["tracks"]:
+    # Two slots of the release titled alike are two tracks: the k-th is
+    # minted at its place (canon.occurrence), as a copy's files are.
+    places: dict = defaultdict(int)
+    for tr in sorted(best["tracks"], key=lambda t: (t["disc"] or 1, t["position"])):
         # MB has pathological titles past the column's 500 chars; clamp
         # BEFORE the UUID so identity keys on the stored value.
         title = (tr["title"] or "").strip()[:500]
@@ -689,8 +695,10 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
         else:
             slot_artist_id, slot_artist_name = str(artist_uuid(head)), head
             credit_rows.append((slot_artist_id, head, latinize(head)))
-        tid = str(track_uuid(title, slot_artist_name))
-        track_rows.append((tid, title, latinize(title)))
+        places[song_key(title, slot_artist_name)] += 1
+        occurrence = places[song_key(title, slot_artist_name)]
+        tid = str(track_uuid(title, slot_artist_name, occurrence))
+        track_rows.append((tid, title, latinize(title), occurrence))
         artist_rows.append((tid, "primary", slot_artist_id))
         for name in featured:
             fid = str(artist_uuid(name))
@@ -701,7 +709,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                            tr["recording_mbid"], tr["length_ms"]), title))
     if not slot_rows:
         return 0
-    _carry_rekeyed_slots(album_id, slot_rows, slot_artists)
+    _carry_rekeyed_slots(album_id, slot_rows, slot_artists, {r[0]: r[3] for r in track_rows})
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -711,9 +719,9 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                     ON CONFLICT (id) DO NOTHING
                 """, credit_rows, template="(%s::uuid, %s, %s)")
             execute_values(cur, """
-                INSERT INTO tracks (id, title, title_latin) VALUES %s
+                INSERT INTO tracks (id, title, title_latin, occurrence) VALUES %s
                 ON CONFLICT (id) DO NOTHING
-            """, track_rows, template="(%s::uuid, %s, %s)")
+            """, track_rows, template="(%s::uuid, %s, %s, %s)")
             execute_values(cur, """
                 INSERT INTO track_artists (track_id, role, artist_id) VALUES %s
                 ON CONFLICT DO NOTHING
@@ -729,7 +737,7 @@ def _persist_phantom_tracklist(album_id: str, artist_id: str,
                   AND NOT EXISTS (
                       SELECT 1 FROM unnest(%(ftids)s::uuid[], %(fids)s::uuid[]) AS f(track_id, artist_id)
                       WHERE f.track_id = ta.track_id AND f.artist_id = ta.artist_id)
-            """, {"tids": [t for t, _, _ in track_rows],
+            """, {"tids": [r[0] for r in track_rows],
                   "ftids": [t for t, _ in featured_rows],
                   "fids": [a for _, a in featured_rows]})
             # A slot MusicBrainz confirms is MusicBrainz's from then on: one

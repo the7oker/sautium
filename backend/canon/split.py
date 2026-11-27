@@ -116,14 +116,14 @@ def normalize_compound_artist(
 
     # ── Process tracks ────────────────────────────────────────────────────
     tracks = db.execute(text("""
-        SELECT t.id::text, t.title
+        SELECT t.id::text, t.title, t.occurrence
         FROM tracks t
         JOIN track_artists ta ON ta.track_id = t.id
         WHERE ta.artist_id = :aid AND ta.role = 'primary'
     """), {"aid": compound_str}).fetchall()
 
-    for old_track_str, title in tracks:
-        new_track_id = track_uuid(title, primary_name)
+    for old_track_str, title, occurrence in tracks:
+        new_track_id = track_uuid(title, primary_name, occurrence)
         new_track_str = str(new_track_id)
 
         will_merge = (

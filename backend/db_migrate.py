@@ -127,6 +127,21 @@ rule. Two layers, one tracking table (`_schema_migrations`):
      that delta — a leftover's slots have no file, so the delta's backfill
      leaves every one 'mb', and the step takes them whatever they say — and
      runs after the schema deltas like every data step, before the seed.
+     The occurrence step (`track_occurrences_v1`, 2026-11-26, CANON-TRACKS-1)
+     splits once the tracks two positions of one tracklist shared — a box's
+     two "Pulses", eleven "[untitled]", a release's three "I. Allegro" —
+     before a title's place among them was an input of the id
+     (tracks.occurrence, delta 080): the copies' later positions move to
+     their own tracks with their analysis and listens, a copy held in part
+     is completed from the medium its files are bound to, the slots follow
+     (canon.occurrence). The twins step (`copy_twins_v1`, the same day)
+     folds once the owned tracks that are one performance by MusicBrainz's
+     word or the album's, their prints alike (canon.content.fold_copy_twins);
+     from then on the canon's pass and the sonic pass fold them as they
+     come. The composer step (`composer_commas_v2`, the same day) derives
+     once the comma tracks whose last `&` / `and` is now the list's
+     (credits._parts, B-136); the composers left holding nothing go by the
+     derive's own sweep.
 
 Right after the schema deltas, once per database, the birth preset
 (`birth_preset_v1`, _apply_birth_preset): the switches a node's setup chose
@@ -1017,6 +1032,27 @@ def apply_pending() -> dict:
                 db.commit()
             _mark(conn, "composer_commas_v1")
 
+        if not _marked(conn, "track_occurrences_v1"):
+            out["track_occurrences"] = _split_occurrences(conn)
+            logger.info("tracks two positions of one tracklist shared, split once: %s",
+                        out["track_occurrences"])
+            _mark(conn, "track_occurrences_v1")
+
+        # After the split: a fold never joins two positions of one copy, and
+        # the split's new tracks wait for their prints like any other.
+        if not _marked(conn, "copy_twins_v1"):
+            from canon.content import fold_copy_twins
+            out["copy_twins"] = fold_copy_twins()
+            _mark(conn, "copy_twins_v1")
+
+        if not _marked(conn, "composer_commas_v2"):
+            from credits import rederive_commas
+            from database import get_db_context
+            with get_db_context() as db:
+                out["composer_commas_v2"] = rederive_commas(db)
+                db.commit()
+            _mark(conn, "composer_commas_v2")
+
         # Before the seed, whose album of the same id would otherwise land
         # on a leftover's row and slots.
         if not _marked(conn, "tracklist_leftovers_v1"):
@@ -1059,6 +1095,26 @@ def apply_pending() -> dict:
     finally:
         conn.close()
     logger.info("db_migrate: %s", out)
+    return out
+
+
+def _split_occurrences(conn) -> dict:
+    """track_occurrences_v1: the tracks two positions of one tracklist
+    shared before a title's place there was part of its id (canon.
+    occurrence) — the copies' files moved to their own tracks (each later
+    position, with the analysis made from it and its own listens; a copy
+    held in part completed from the medium its files are bound to), then the
+    tracklist slots of every album. A moved file wakes its artists' canon,
+    which binds it on its own evidence; the slots' seals are the notary's to
+    make again."""
+    from canon.occurrence import settle_copies, settle_slots
+    from database import get_db_context
+    out = {}
+    with get_db_context() as db:
+        out["copies"] = settle_copies(db, complete=True)
+        db.commit()
+    out["slots"] = settle_slots(conn)
+    conn.commit()
     return out
 
 

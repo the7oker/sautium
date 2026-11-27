@@ -509,6 +509,7 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
     client = SyncClient(api_client=None, db_dsn=db_dsn)
     try:
         done = 0
+        slotted: set = set()
         for obj in read_export(path):
             if cancel.is_set():
                 raise ShareError("import cancelled")
@@ -519,6 +520,8 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
                 if existing_only and section in _ROW_REFS:
                     rows = keep_existing(_ROW_REFS[section], rows, have)
                 seed_import.insert_structural(conn, {section: rows})
+                if section == "album_tracks":
+                    slotted.update(r["album_id"] for r in rows)
             elif "envelope" in obj:
                 category, data = obj["envelope"], obj["data"]
                 if existing_only:
@@ -528,6 +531,12 @@ def apply_import(path: Path, db_dsn: str, *, confirmed: bool = False,
                 if category == "segments":
                     done = min(done + sq.SEGMENTS_MAX_UUIDS, total_tracks)
                     progress("importing", tracks_done=done, tracks=total_tracks)
+        # the mint's rule over the tracklists it landed, once their tracks'
+        # credits are in (a section is a chunk; insert_structural's own pass
+        # saw the slots before the credits): canon.occurrence
+        from canon.occurrence import settle_slots
+        settle_slots(conn, slotted)
+        conn.commit()
     finally:
         client._close_conn()
         conn.close()

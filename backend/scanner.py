@@ -39,6 +39,7 @@ from uuid_utils import artist_uuid, track_uuid, album_uuid, genre_uuid, normaliz
 import file_stat
 from album_identity import assign_dir_albums, dir_disc, group_key
 from canon.identity import ORPHAN_TRACK_SQL, elect_analysis_source
+from canon.occurrence import batch_places, places_of, settle_copies
 from credits import derive_composers, lock_credits, split_names
 from provenance import ANALYSIS_KINDS, relink_returned_files
 import cue_sheet
@@ -663,6 +664,11 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
     for dir_path, md in entries:
         ov = dir_albums.get(md.get("file_path"), (None, None, None, None))[3]
         batch_discs[dir_path].add(ov if ov is not None else (md.get("disc_number") or 1))
+    # Two positions of one copy are two tracks (canon.occurrence): each file
+    # is minted at its title's place among the batch's files of its copy;
+    # settle_copies, at the end, puts right what the batch could not see.
+    places = batch_places(entries, dir_albums)
+    fresh: Set[tuple] = set()   # the file rows this import writes (settle_copies)
 
     with get_db_context() as db:
         lock_credits(db)
@@ -715,13 +721,16 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             db.flush()
                         pending_cache.append(("artist", a_uid, artist))
                     # ── Track ──
-                    t_uid = track_uuid(metadata["title"], track_artist_name)
+                    cue_start = metadata.get("cue_start_seconds")
+                    occurrence = places.get(
+                        (file_path, float(cue_start) if cue_start is not None else -1.0), 1)
+                    t_uid = track_uuid(metadata["title"], track_artist_name, occurrence)
                     if t_uid in caches["track"]:
                         track = caches["track"][t_uid]
                     else:
                         track = db.query(Track).filter(Track.id == t_uid).first()
                         if not track:
-                            track = Track(id=t_uid, title=metadata["title"])
+                            track = Track(id=t_uid, title=metadata["title"], occurrence=occurrence)
                             db.add(track)
                             db.flush()
                         pending_cache.append(("track", t_uid, track))
@@ -876,10 +885,11 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             row.arrived_at = metadata["arrived_at"]
                         db.add(row)
                         db.flush()
+                        fresh.add(("media_files", row.id))
                         elect_analysis_source(db, track.id)
                     else:
                         # No bytes here: nothing to elect as an analysis source.
-                        db.add(HqpLibraryFile(
+                        hf = HqpLibraryFile(
                             track_id=track.id,
                             album_variant_id=variant.id,
                             hqp_path=metadata["file_path"],
@@ -900,8 +910,10 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                             raw_album=metadata.get("album"),
                             raw_year=metadata.get("date"),
                             raw_composers=metadata.get("composers"),
-                        ))
+                        )
+                        db.add(hf)
                         db.flush()
+                        fresh.add(("hqp_library_files", hf.id))
                     savepoint.commit()
                 except Exception:
                     savepoint.rollback()
@@ -925,6 +937,7 @@ def import_metadata(entries: List[Tuple[str, Dict[str, Any]]], *, sink: FileSink
                 logger.error(f"Error processing {file_path}: {e}")
                 stats["errors"] += 1
         derive_composers(db, derive_due)
+        settle_copies(db, [v.id for v in caches["variant"].values()], fresh=frozenset(fresh))
         db.commit()
 
 
@@ -1053,23 +1066,25 @@ _REREAD_SQL = text(f"""
 _MATERIAL_LENGTH_TOLERANCE = 0.5
 
 
-def _split_tracks(db, entries) -> Set[str]:
+def _split_tracks(db, entries, places: Dict[int, int]) -> Set[str]:
     """The tracks this re-read splits: every file of the track (here and at
     an HQPlayer) is in the batch and moves, and they move to two or more
     track identities — a merged work's movements, once TITLE's values are
     joined (CANON-CLASSICAL-DESIGN §1.4). Decided before any file moves, so
     no walk order changes it. All of a track's files moving to one identity
-    is a rename, which the track follows."""
+    is a rename, which the track follows. A file's identity is at its place
+    in its copy (`places`, canon.occurrence.places_of)."""
     moving: Dict[str, Set[str]] = defaultdict(set)
     files: Dict[str, int] = defaultdict(int)
     for _dir, md, row in entries:
         if not md.get("title") or not (md.get("artist") or md.get("album_artist")):
             continue
-        new = str(track_uuid(md["title"], md.get("artist") or md.get("album_artist")))
+        artist = md.get("artist") or md.get("album_artist")
+        new = str(track_uuid(md["title"], artist))
         old = (str(track_uuid(row.raw_track_name, row.raw_artist or row.raw_album_artist))
                if row.raw_track_name else None)
         if old != new:
-            moving[row.track_id].add(new)
+            moving[row.track_id].add(str(track_uuid(md["title"], artist, places.get(row.id, 1))))
             files[row.track_id] += 1
     candidates = [t for t, keys in moving.items() if len(keys) >= 2]
     if not candidates:
@@ -1099,7 +1114,19 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
     derive_due: Set[str] = set()
     with get_db_context() as db:
         lock_credits(db)
-        splits = _split_tracks(db, entries)
+        # each file's place in its copy as it now reads (canon.occurrence): a
+        # second movement whose tags changed goes to its own track, never
+        # through the first's
+        read = {}
+        for _d, md, row in entries:
+            _t, _c, track_ov, disc_ov = assignments[md["file_path"]]
+            number = track_ov if track_ov is not None else md.get("track_number")
+            # a file whose number is gone keeps the place it was read at
+            if md.get("title") and (md.get("artist") or md.get("album_artist")) and number is not None:
+                read[row.id] = (disc_ov if disc_ov is not None else md.get("disc_number", 1),
+                                number, md["title"], md.get("artist") or md.get("album_artist"))
+        places = places_of(db, [row.album_variant_id for _d, _md, row in entries], read)
+        splits = _split_tracks(db, entries, places)
         if splits:
             # one recording for every movement of a work, signed: wrong for
             # all of them but one, and arbitrary for that one — each new track
@@ -1167,7 +1194,8 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                     if old_key != track_uuid(md["title"], track_artist):
                         # first: the analysis of the file's material moves with it
                         track = rehome_file_track(db, row.id, row.track_id, md["title"],
-                                                  track_artist, split=row.track_id in splits)
+                                                  track_artist, split=row.track_id in splits,
+                                                  occurrence=places.get(row.id, 1))
                         db.execute(text("UPDATE media_files SET content_at = now() WHERE id = :id"),
                                    {"id": row.id})
                         stats["moved"] = stats.get("moved", 0) + (track != row.track_id)
@@ -1238,6 +1266,9 @@ def reread_metadata(entries: List[Tuple[str, Dict[str, Any], Any]], assignments:
                 logger.error(f"Error reading {md['file_path']} again: {e}", exc_info=True)
                 stats["errors"] += 1
         derive_composers(db, derive_due)
+        # a title or a track number changed may leave two positions of one
+        # copy on one track (canon.occurrence)
+        settle_copies(db, [row.album_variant_id for _d, _md, row in entries])
         db.commit()
 
 

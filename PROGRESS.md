@@ -70,7 +70,16 @@ implementation details live in the code, DB and git history.
   "Mozart" is. On a dump node MB's silence is evidence, and such a value is a
   list. Of the owner's 483 spaced comma values 12 have that shape: 3
   inverted names, 1 band, 8 lists. A generational suffix belongs to the
-  name before it ("Ray Parker, Jr."). The file's COMPOSERSORT is not read:
+  name before it ("Ray Parker, Jr."). Inside a comma list the last part's
+  `&` / `and` is the list's own joiner (2026-11-26, CANON-TRACKS-1, B-136):
+  "Hans Zimmer, Klaus Badelt & Lisa Gerrard" is three writers, an Oxford
+  comma's "…, and C" too, and the `&` says a list before the shape rule does
+  ("Björk, Guy Sigsworth & Mark Bell" is three on any node); a value without
+  a comma keeps it ("Lennon & McCartney" is how a team is credited), and so
+  does a last part the node knows whole ("Simon & Garfunkel" performing
+  here). The master held 35 composer rows of that shape that only such a
+  list's last part named (46 credits); the 41 comma-less `X & Y` rows that
+  perform nothing stay teams. The file's COMPOSERSORT is not read:
   17 of 42 840 files carried it, each a copy of its COMPOSER value, lists
   included. The decision is the derive's, beside the turning: whenever MB
   rows arrive or go (a dump's load or deletion, the canon pass slices wake)
@@ -1023,7 +1032,10 @@ implementation details live in the code, DB and git history.
   sits at the same slot or length (19 merged, 13 vetoed as real duets and
   remixes, 3 left unproven on the master). Identity itself stays the
   tagged title: folding the credit into `normalize` is a network-wide
-  identity migration, not a canon pass.
+  identity migration, not a canon pass. Its keeper is the one rule of every
+  fold since 2026-11-26 (`content._keeper`): the title MusicBrainz's
+  recording carries, else the smallest uuid — it had been the older row,
+  which differs from node to node.
   Same night: rows of one tag holding different discs fold on their
   folder names (CD1/CD2/CD3, Disc 2) — the local scanner leaves
   `disc_number` at 1 for such rips — and the fingerprint titles run
@@ -4837,6 +4849,90 @@ every folder the person has given it, several at once
   window (the OS's dialog; the route takes the host's own signed call
   alone); the Web UI lists, counts and forgets.
 
+### Two positions of one tracklist are two tracks; one performance in two copies is one track (2026-11-26)
+
+The box *Works 1965–1995*'s Disc 4 titles its first and its last movement
+"Pulses" (326 s and 371 s): one track, 14 files and 13 tracks, the page a
+row short and the closing Pulses played as the opening one (B-135). Beside
+it the album's own copy titles the same fourteen sections "Music for 18
+Musicians: …": 27 rows for 14 positions (B-134). CANON-TRACKS-1-PROPOSAL
+(private) holds the counts and the design session's answers.
+
+- **A title's place among a tracklist's positions is part of a track's
+  id.** `song:{artist}:{title}` is album-free, so two positions of one copy
+  or of one MusicBrainz release titled alike were one track — on the
+  master 150 owned tracks in 82 copies (eleven "[untitled]" on one Thomas
+  Köner album) and 25 195 groups of the phantom layer's tracklists (a disc
+  of three concertos, each with an "I. Allegro"). The k-th position of a
+  title is now `song:{artist}:{title}#k` (`uuid_utils.track_uuid`'s
+  `occurrence`, stored as `tracks.occurrence`, delta 080); the first keeps
+  the plain key, so every id minted before stays. Always two, never by
+  length: a length tolerance would have kept Köner's two untitled pieces
+  0.4 s apart and every mono/stereo pair as one track. `canon.occurrence`
+  is the rule and its callers. A copy is a folder, or the sibling disc
+  folders the folder rule makes one album of (a release is all its media);
+  a position is (disc, track, cue start), so a CUE image's slices each take
+  their own. The scanner's import mints each file at its place among the
+  batch's files of its copy, and its re-read re-homes a retagged file
+  straight to its place — never through the first movement's track, where
+  a merge would leave the second's lyrics and analysis behind.
+  `settle_copies` puts right what a batch could not see, from the last
+  position down until nothing moves (a track a later position leaves is
+  free for the earlier one taking its place): a file on its own title's
+  track moves when its place grew, and to a smaller place only in a copy
+  held whole. With `complete` (the canon's pass, the release's step) a copy
+  held in part reads the positions it lacks off the MusicBrainz release its
+  files are bound to, so a node without track 1 gives track 14 the id a
+  node with the whole copy gives it. A file leaving a track two positions
+  shared leaves no binding behind: that track's bindings and stamps go and
+  the canon binds each movement on its own evidence, as the re-read's split
+  does; a file whose place alone changed takes this node's binding of its
+  recording along (a peer's is replaced by the canon's next binding). The
+  phantom mint takes the rule, and `settle_slots` the slots minted or
+  imported before (the seed's and a share's import run it; an owned copy's
+  slots are its files'). Every rule that recomputes an id from
+  a row takes the occurrence (the identity re-normalization, an artist's
+  rename, the clean pass, the collaboration split) — without it an
+  `IDENTITY_RULE` bump would fold every `#k` back. Not the recording's id:
+  a recording is the canon's choice, which can be wrong (below), and an id
+  made from it would differ between a node that binds and one that does
+  not. Residue: an unbound copy held in part gives a later "Pulses" the
+  first place; `#k` ids are album-free as the first occurrence's are.
+- **One performance in two copies is one track — by a word, never by the
+  print alone.** The chromaprint is the material's address, not a
+  performance test: Morcheeba's *Charango* and its instrumental edition
+  are one material at two of their positions, and an instrumental, a clean
+  mix or a mono mix of one recording are near-alike prints at one length.
+  `content.fold_copy_twins` folds two owned tracks when a file of each is
+  within 2 s of the other's length, their own prints are one material
+  (`material.same_material`), and a word says they are the same thing:
+  MusicBrainz's — a file of each bound to one recording, on any albums
+  (`track_mbids` keys the recording: two tracks of one recording could
+  never both hold it) — or the album's — one position of two copies of one
+  album, their titles alike once folded (accents, and a classical work
+  prefix on one side: "Section I" / "Music for 18 Musicians: Section I").
+  A remaster whose print differs stays apart though MusicBrainz keeps one
+  recording (14 such pairs in copies of one album on the master); a track
+  with no print of its own waits, and the sonic pass that gives it one
+  folds it; a group that would put two positions of one copy on one track,
+  or one title at two places (an album's second "Pulses" and a
+  compilation's first), is left as it is — the occurrence would undo it. The keeper (`content._keeper`, shared with the credit
+  fold): the title the recording's MusicBrainz name is, else the smallest
+  uuid. The release's step on a copy of the master (2026-11-26): 116
+  tracks folded (348 pairs, 231 kept apart), the box's closing Pulses after
+  its split is analysed and bound again. The whole start took 181.5 s
+  there — 197 files of 80 copies moved to their places, 46 481 slots of
+  8 567 albums onto 40 956 new tracks, 49 comma tracks derived again — and
+  a second start changed nothing. The case that showed it was a binding error too: the album's
+  copy had five positions bound outside its own release (two concerts'
+  recordings, an educational excerpt) — BACKLOG B-165.
+- **Nothing new travels.** The pull and carry match a record on its uuid
+  and its recording; a split or folded track's records travel under its
+  new uuid, which a node that has not updated does not hold, and the
+  recording round refuses the closing Pulses' material under the first's
+  uuid. `MATCHER_VERSION` stays 2: the matcher's choices do not change; a
+  binding follows a renamed or folded track by `ON UPDATE CASCADE`, and a
+  moved file's as above.
 
 ## Known Gotchas
 

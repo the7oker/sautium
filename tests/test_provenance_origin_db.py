@@ -69,6 +69,14 @@ def conn(scratch_dsn, monkeypatch):
     engine = database.make_engine(scratch_dsn)
     monkeypatch.setattr(database, "SessionLocal",
                         sessionmaker(autocommit=False, autoflush=False, bind=engine))
+    # the sonic pass's end folds copy twins (canon.content) through the pool
+    # and the canon's own name of the session factory
+    import psycopg2.pool
+    import db_pool
+    from canon import content
+    pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
+    monkeypatch.setattr(db_pool, "_pool", pool)
+    monkeypatch.setattr(content, "SessionLocal", database.SessionLocal)
     monkeypatch.setattr(sync_client, "TRUSTED_AUTHORITIES", [ISSUER])
     c = psycopg2.connect(scratch_dsn)
     c.autocommit = True
@@ -82,6 +90,7 @@ def conn(scratch_dsn, monkeypatch):
                     "('lossy-test', 'A lossy provider', false)")
     yield c
     c.close()
+    pool.closeall()
     engine.dispose()
 
 

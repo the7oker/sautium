@@ -420,7 +420,7 @@ def _move_file_analysis(db: Session, media_file_id: int, old: str, new: str) -> 
 
 
 def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: str,
-                      artist_name: str, split: bool = False) -> str:
+                      artist_name: str, split: bool = False, occurrence: int = 1) -> str:
     """A file read again whose tags now name another track (a title or an
     artist fixed in a tag editor): the track a fresh import would place it
     on. When it was its track's last file the track follows it —
@@ -435,9 +435,11 @@ def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: st
     two or more identities — TITLE's values joined, CANON-CLASSICAL-DESIGN
     §1.4): every file goes as one that keeps others goes, the last one too,
     so no walk order decides which movement inherits the whole work; and its
-    own listens go with it. Returns the track the file is on."""
+    own listens go with it. `occurrence` is the file's place among its
+    copy's positions of that title (canon.occurrence): a second movement
+    titled as the first moves so too. Returns the track the file is on."""
     from transliterate import latinize
-    new = str(track_uuid(title, artist_name))
+    new = str(track_uuid(title, artist_name, occurrence))
     if new == old_track:
         return new
     artist = str(_ensure_artist(db, artist_name))
@@ -448,12 +450,14 @@ def rehome_file_track(db: Session, media_file_id: int, old_track: str, title: st
     existed = db.execute(text("SELECT 1 FROM tracks WHERE id = :id"), {"id": new}).first()
     if not existed:
         if keeps_others:
-            db.execute(text("INSERT INTO tracks (id, title, title_latin) VALUES (:id, :t, :tl)"),
-                       {"id": new, "t": title, "tl": latinize(title)})
+            db.execute(text("INSERT INTO tracks (id, title, title_latin, occurrence) "
+                            "VALUES (:id, :t, :tl, :k)"),
+                       {"id": new, "t": title, "tl": latinize(title), "k": occurrence})
         else:
             _update_track_uuid(db, old_track, new)
-            db.execute(text("UPDATE tracks SET title = :t, title_latin = :tl WHERE id = :id"),
-                       {"id": new, "t": title, "tl": latinize(title)})
+            db.execute(text("UPDATE tracks SET title = :t, title_latin = :tl, occurrence = :k "
+                            "WHERE id = :id"),
+                       {"id": new, "t": title, "tl": latinize(title), "k": occurrence})
     elif not keeps_others:
         _update_track_uuid(db, old_track, new)
     if keeps_others:
@@ -676,12 +680,12 @@ def recanonicalize_artist(db: Session, source_id, canonical_name: str) -> str:
     # Recompute primary tracks/albums under the canonical name (merges if
     # the canonical-named UUID already exists).
     tracks = db.execute(text("""
-        SELECT t.id::text, t.title FROM tracks t
+        SELECT t.id::text, t.title, t.occurrence FROM tracks t
         JOIN track_artists ta ON ta.track_id = t.id
         WHERE ta.artist_id = :aid AND ta.role = 'primary'
     """), {"aid": source_str}).fetchall()
-    for tid, title in tracks:
-        _update_track_uuid(db, tid, str(track_uuid(title, canonical_name)))
+    for tid, title, occurrence in tracks:
+        _update_track_uuid(db, tid, str(track_uuid(title, canonical_name, occurrence)))
 
     albums = db.execute(text("""
         SELECT a.id::text, a.title FROM albums a

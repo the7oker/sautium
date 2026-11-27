@@ -242,7 +242,20 @@ See:
   `uuid_utils.IDENTITY_RULE` with it: every node's backend re-normalizes at
   its next start (`db_migrate`, marker `identity_rule_v{N}`,
   `canon.migrations.renormalize_identities`); the seals bind the uuids and
-  get re-signed.
+  get re-signed. **A title's place in its tracklist is an input of a
+  track's id** (since 2026-11-26, CANON-TRACKS-1): the k-th position of a
+  title in one copy or one release is `song:{artist}:{title}#k`
+  (`track_uuid`'s `occurrence`, stored as `tracks.occurrence`; the first
+  keeps the plain key; a copy is a folder or its sibling disc folders, a
+  position (disc, track, cue start)), so two movements titled alike are two
+  tracks (`canon.occurrence`: the scanner's import and re-read, the mint,
+  the slots, a copy held in part completed from its bound release); every
+  rule that recomputes an id from a row takes it. And one performance in two copies is one track
+  (`canon.content.fold_copy_twins`): their prints one material within 2 s,
+  and MusicBrainz's word (one recording) or the album's (one position of two
+  copies, titles alike once folded) — the print alone is no such word; the
+  keeper of every fold is `content._keeper` (the recording's name, else the
+  smallest uuid).
 - **A composer is a credit, never an artist role** (since 2026-11-18,
   CREDITS-1): `track_credits` (`track_credit_role`, `composer` alone so far;
   `source` `tag` | `mb` — what the file says is the floor, MusicBrainz's work
@@ -268,8 +281,11 @@ See:
   (`Debussy, Claude`) is one name as written — not in an unspaced script
   or beside `Traditional`/`Anonymous` —, and a generational suffix
   (`Ray Parker, Jr.`) is part of the name before it (since 2026-11-23,
-  LIBRARY-FIXES-1); the comma tracks that would now read otherwise are
-  derived again whenever MB rows arrive or go. Owned through a credit is owned
+  LIBRARY-FIXES-1); inside a comma list the last part's ` & ` / ` and ` is
+  the list's (`Hans Zimmer, Klaus Badelt & Lisa Gerrard` is three) unless
+  that part is known whole, a value without a comma a team (`Lennon &
+  McCartney`; since 2026-11-26, B-136); the comma tracks that would now
+  read otherwise are derived again whenever MB rows arrive or go. Owned through a credit is owned
   (`sql_queries.ARTIST_OWNED`), never engaged. Nothing of it travels.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.

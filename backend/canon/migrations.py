@@ -60,12 +60,12 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
 
                 # Recalculate track UUIDs (primary artist name changed)
                 tracks = db.execute(text("""
-                    SELECT t.id::text, t.title FROM tracks t
+                    SELECT t.id::text, t.title, t.occurrence FROM tracks t
                     JOIN track_artists ta ON ta.track_id = t.id
                     WHERE ta.artist_id = :aid AND ta.role = 'primary'
                 """), {"aid": artist_id}).fetchall()
-                for old_track_id, title in tracks:
-                    new_track_id = str(track_uuid(title, cleaned))
+                for old_track_id, title, occurrence in tracks:
+                    new_track_id = str(track_uuid(title, cleaned, occurrence))
                     _update_track_uuid(db, old_track_id, new_track_id)
                     tracks_updated += 1
 
@@ -121,12 +121,12 @@ def _clean_all_artist_names(db: Session, dry_run: bool = False) -> Dict:
             if new_artist_id != artist_id:
                 # Recalculate track UUIDs
                 tracks = db.execute(text("""
-                    SELECT t.id::text, t.title FROM tracks t
+                    SELECT t.id::text, t.title, t.occurrence FROM tracks t
                     JOIN track_artists ta ON ta.track_id = t.id
                     WHERE ta.artist_id = :aid AND ta.role = 'primary'
                 """), {"aid": artist_id}).fetchall()
-                for old_track_id, title in tracks:
-                    new_track_id = str(track_uuid(title, cleaned))
+                for old_track_id, title, occurrence in tracks:
+                    new_track_id = str(track_uuid(title, cleaned, occurrence))
                     _update_track_uuid(db, old_track_id, new_track_id)
                     tracks_updated += 1
 
@@ -300,11 +300,11 @@ def unsplit_pass2_compounds(db: Session, dry_run: bool = False) -> Dict:
         """), {"e": entity_id, "a": artist_id})
 
     for cur_track, name in track_targets.items():
-        row = db.execute(text("SELECT title FROM tracks WHERE id = :id"),
+        row = db.execute(text("SELECT title, occurrence FROM tracks WHERE id = :id"),
                          {"id": cur_track}).fetchone()
         if not row:
             continue  # already merged away by an earlier move
-        target = str(track_uuid(row[0], name))
+        target = str(track_uuid(row[0], name, row[1]))
         merged = target != cur_track and db.execute(
             text("SELECT 1 FROM tracks WHERE id = :id"), {"id": target}).fetchone() is not None
         final = _update_track_uuid(db, cur_track, target)
@@ -381,7 +381,7 @@ def reidentify_per_track_artists(db: Session, dry_run: bool = False) -> Dict:
     skipped and counted instead (expected ~0).
     """
     rows = db.execute(text("""
-        SELECT t.id::text AS tid, t.title, a.id::text AS cur_id,
+        SELECT t.id::text AS tid, t.title, t.occurrence, a.id::text AS cur_id,
                count(*) AS nfiles,
                count(*) FILTER (WHERE q.new_name IS NOT NULL) AS nqual,
                array_agg(DISTINCT q.new_name) FILTER (WHERE q.new_name IS NOT NULL) AS new_names
@@ -395,12 +395,12 @@ def reidentify_per_track_artists(db: Session, dry_run: bool = False) -> Dict:
                          AND lower(btrim(mf.raw_artist)) <> lower(btrim(mf.raw_album_artist))
                         THEN btrim(mf.raw_artist) END AS new_name
         ) q
-        GROUP BY t.id, t.title, a.id
+        GROUP BY t.id, t.title, t.occurrence, a.id
         HAVING count(*) FILTER (WHERE q.new_name IS NOT NULL) > 0
     """)).fetchall()
 
     stats = {"affected": len(rows), "moved": 0, "merged": 0, "noop": 0, "skipped_mixed": 0}
-    for tid, title, cur_id, nfiles, nqual, new_names in rows:
+    for tid, title, occurrence, cur_id, nfiles, nqual, new_names in rows:
         if nqual < nfiles or len(new_names) > 1:
             stats["skipped_mixed"] += 1
             logger.warning(f"  mixed identity, skipping track {title!r}: {new_names}")
@@ -414,7 +414,7 @@ def reidentify_per_track_artists(db: Session, dry_run: bool = False) -> Dict:
             stats["moved"] += 1
             continue
         _ensure_artist(db, new_name)
-        new_tid = str(track_uuid(title, new_name))
+        new_tid = str(track_uuid(title, new_name, occurrence))
         merged = new_tid != tid and db.execute(
             text("SELECT 1 FROM tracks WHERE id = :id"), {"id": new_tid}).fetchone() is not None
         final = _update_track_uuid(db, tid, new_tid)
@@ -759,13 +759,13 @@ def _renormalize_tracks(db: Session, dry_run: bool) -> Dict:
         src = raw.cursor(name="renorm_tracks")
         src.itersize = 50_000
         src.execute("""
-            SELECT t.id::text, t.title, a.name
+            SELECT t.id::text, t.title, a.name, t.occurrence
             FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id""")
         buf, n = io.StringIO(), 0
-        for tid, title, name in src:
-            buf.write(f"{tid}\t{track_uuid(title, name)}\n")
+        for tid, title, name, occurrence in src:
+            buf.write(f"{tid}\t{track_uuid(title, name, occurrence)}\n")
             n += 1
             if n % 250_000 == 0:
                 buf.seek(0)
@@ -871,11 +871,11 @@ def _verify_identities(db: Session) -> Dict:
             JOIN artists a ON a.id = aa.artist_id"""))
         if np == 1 and str(album_uuid(t, n)) != i)
     drift = 0
-    for i, t, n in db.execute(text("""
-            SELECT t.id::text, t.title, a.name FROM tracks t
+    for i, t, n, k in db.execute(text("""
+            SELECT t.id::text, t.title, a.name, t.occurrence FROM tracks t
             JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
             JOIN artists a ON a.id = ta.artist_id""").execution_options(yield_per=50_000)):
-        if str(track_uuid(t, n)) != i:
+        if str(track_uuid(t, n, k)) != i:
             drift += 1
     out["tracks"] = drift
     return out

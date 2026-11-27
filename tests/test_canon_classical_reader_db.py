@@ -125,6 +125,19 @@ def test_a_publishing_credit_falls_to_the_album_artist(cur, library, tone):
     assert cur.fetchall() == [("Trio Mediæval",)]
 
 
+def _merged_as_minted_before(cur):
+    """The old reader's work titled one way at three positions: since
+    CANON-TRACKS-1 the import makes them three tracks (#1, #2, #3 of the
+    work's title); a database minted before held them as one, which is what
+    the re-read's split is for — that state, put back."""
+    cur.execute("""SELECT DISTINCT mf.track_id::text FROM media_files mf
+                     JOIN tracks t ON t.id = mf.track_id WHERE t.occurrence = 1""")
+    (first,), = cur.fetchall()
+    cur.execute("UPDATE media_files SET is_analysis_source = FALSE WHERE track_id <> %s", (first,))
+    cur.execute("UPDATE media_files SET track_id = %s", (first,))
+    cur.execute("DELETE FROM tracks WHERE occurrence > 1")
+
+
 def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
     """Read under the old reader (the first TITLE value, revision 0), the
     three movements are one track with three listens, one signed binding and
@@ -142,6 +155,7 @@ def test_a_merged_work_splits_file_by_file_on_the_next_read(cur, library, tone):
         old_reader.setattr(scanner, "joined_title", lambda values: values[0] if values else None)
         old_reader.setattr(scanner, "TAGS_READ_REV", 0)
         _scan()
+    _merged_as_minted_before(cur)
     cur.execute("SELECT DISTINCT track_id::text FROM media_files")
     (merged,), = cur.fetchall()
     cur.execute("INSERT INTO listening_history (track_id, media_file_id, started_at, completed) "
@@ -201,6 +215,7 @@ def test_a_split_takes_the_files_own_slots_and_leaves_musicbrainzs_and_a_peers(c
         old_reader.setattr(scanner, "joined_title", lambda values: values[0] if values else None)
         old_reader.setattr(scanner, "TAGS_READ_REV", 0)
         _scan()
+    _merged_as_minted_before(cur)
     # the first slot MusicBrainz's, the second a peer's record, the third the files' own
     cur.execute("""INSERT INTO album_tracks (album_id, track_id, disc, position, imported)
                    SELECT av.album_id, mf.track_id, 1, mf.track_number, mf.track_number = 2

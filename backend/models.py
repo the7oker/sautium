@@ -234,6 +234,7 @@ class Track(Base):
     id = Column(UUID(as_uuid=True), primary_key=True)
     title = Column(String(500), nullable=False)
     title_latin = Column(String(500))                         # Latin transliteration of title for cross-script fuzzy search (Phase 0a)
+    occurrence = Column(SmallInteger, nullable=False, server_default="1")  # uuid_utils.track_uuid's place of the title in its tracklist
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
