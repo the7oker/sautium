@@ -143,7 +143,10 @@ def test_a_key_the_web_ui_saved_never_runs_a_codex_sign_in(tmp_path, monkeypatch
     import codex_cli
     import codex_runner
     from config import settings
-    monkeypatch.setattr(settings, "_env_openai_api_key", None)
+    # A private attribute is patched in pydantic's own dict: pytest 9.2's
+    # setattr takes the old value from the instance __dict__, finds none
+    # there, and its undo deletes the attribute for every later test
+    monkeypatch.setitem(settings.__pydantic_private__, "_env_openai_api_key", None)
     monkeypatch.setattr(settings, "codex_api_key", None)
     monkeypatch.setattr(settings, "openai_api_key", "key-the-web-ui-saved")
     monkeypatch.setattr(codex_cli, "codex_home", lambda: tmp_path / "codex-home")
@@ -165,7 +168,7 @@ def test_codex_signs_in_with_the_settings_key_on_its_stdin_alone(tmp_path, monke
     from config import settings
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_API_KEY", raising=False)
-    monkeypatch.setattr(settings, "_env_openai_api_key", None)
+    monkeypatch.setitem(settings.__pydantic_private__, "_env_openai_api_key", None)
     monkeypatch.setattr(settings, "codex_api_key", "key-from-the-settings")
     monkeypatch.setattr(codex_cli, "codex_home", lambda: tmp_path / "codex-home")
     monkeypatch.setattr(codex_runner, "_codex_home", lambda: tmp_path / "codex-home")

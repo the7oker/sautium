@@ -350,8 +350,12 @@ def test_a_codex_one_shot_runs_on_its_own_instructions_and_cannot_write_a_file(c
 
 
 def test_a_codex_turn_runs_the_assistants_tools_inside_its_sandbox(codex, shared, monkeypatch):
+    """The server answers its first list seconds late, as the assistant's
+    own does (its imports): the first request still offers its tools."""
+    servers = _probes(shared, "postgres")
+    servers["mcpServers"]["postgres"]["env"]["PROBE_START_DELAY"] = "3"
     library = shared / "mcp.json"
-    library.write_text(json.dumps(_probes(shared, "postgres")))
+    library.write_text(json.dumps(servers))
     monkeypatch.setattr(runner, "MCP_CONFIG_PATH", str(library))
     target = shared / "written.txt"
     api = codex([{"tool": "ping", "namespace": "mcp__postgres", "input": {"note": "postgres"}},

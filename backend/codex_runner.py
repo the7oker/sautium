@@ -292,6 +292,16 @@ def _mcp_config_overrides() -> List[str]:
         # them in the roster as ordinary function tools.
         args += ["-c", "features.code_mode.direct_only_tool_namespaces="
                  + json.dumps([f"mcp__{n}" for n in names])]
+        # The first request waits for a server that is not `required` 1 s,
+        # then goes out without its tools: the assistant's server answers
+        # its first call after ~1.2 s (measured), so the model chose its
+        # first step with no library tool, and a call to one came back
+        # "unsupported call". 0 waits for each server's own
+        # startup_timeout_sec instead; the key exists since codex 0.151
+        # (0.149 ignores it and keeps its fixed 1 s). Not `required`: that
+        # fails the turn when a server does not start, where the runner
+        # has always gone on without it — now once its timeout has passed.
+        args += ["-c", "mcp_optional_startup_grace_ms=0"]
     return args
 
 
