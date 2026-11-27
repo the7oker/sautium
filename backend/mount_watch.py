@@ -5,8 +5,10 @@ mounts beneath one reaches the container's own mount table. The kernel says
 when that table changes — a `poll()` on /proc/self/mountinfo wakes with
 POLLERR|POLLPRI — so one thread blocks there, with no timer and no door of
 the host channel. On each change it runs what depends on the table: the
-folder sheet's list (the Library stream), the music folder's look (a card
-pulled or put back: the notice, and through it the folder watcher's re-arm).
+folder sheet's list (the Library stream), each folder's look (a card pulled
+or put back: the notice, and through it the folder watcher's re-arm), and a
+disk the library never had, counted once to be offered for one tap
+(library_root.count_new_disks, LIBRARY-FOLDERS-1 §3.2).
 
 A disk that arrives and that nothing mounts changes no mount table. Root's
 automount says so in a file beside the disks (library_root.unread, PI-NODE-2C
@@ -50,16 +52,34 @@ def watch(wait: Callable[[], bool], changed: Callable[[], None], of: str = "the 
 
 def _changed() -> None:
     logger.info("mount watch: the mount table changed")
+    from db_pool import db_execute
     from routers.settings import notify_library_subscribers
-    from scanner import library_unreachable
+    from scanner import look_all
+    import library_root
     import library_watch
-    # The folder's state, recorded and said where it changed (the notice; a
+    # Each folder's state, recorded and said where it changed (the notice; a
     # folder that is back re-arms its watch through the look's own rule)
-    library_unreachable(wake=True)
-    # A card put back at another moment than a look: the watch that waits for
-    # the folder is asked directly as well
+    look_all(wake=True)
+    # A card put back at another moment than a look: the watches that wait
+    # for their folder are asked directly as well
     library_watch.folder_back()
+    # A disk plugged in: its folders take the label it carries now, and a
+    # disk the library never had is counted, to be offered for one tap
+    library_root.refresh_labels()
+    if library_root.count_new_disks(plugged=True):
+        db_execute("NOTIFY sautium_notices")
     notify_library_subscribers()
+
+
+def _count_at_start() -> None:
+    """The disks plugged in before the start, counted once: the tabs
+    already open hear of one that holds music."""
+    import library_root
+    from db_pool import db_execute
+    from routers.settings import notify_library_subscribers
+    if library_root.count_new_disks():
+        db_execute("NOTIFY sautium_notices")
+        notify_library_subscribers()
 
 
 def _unread_changed() -> None:
@@ -125,6 +145,7 @@ def start() -> bool:
         else:
             threading.Thread(target=_run_unread, args=(fd,), name="unread-watch", daemon=True).start()
             logger.info("watching %s for disks nothing mounted", ", ".join(folders))
+    threading.Thread(target=_count_at_start, name="new-disks", daemon=True).start()
     threading.Thread(target=_run, name="mount-watch", daemon=True).start()
     logger.info("watching the mount table for disks under %s", ", ".join(library_root.roots()))
     return True

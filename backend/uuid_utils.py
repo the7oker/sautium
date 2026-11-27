@@ -77,13 +77,30 @@ def artist_uuid(name: str) -> uuid.UUID:
     return uuid.uuid5(NAMESPACE, f"artist:{normalize(name)}")
 
 
-def track_uuid(title: str, artist_name: str) -> uuid.UUID:
+def track_uuid(title: str, artist_name: str, occurrence: int = 1) -> uuid.UUID:
     """Generate deterministic UUID for a track (title + primary artist).
+
+    `occurrence` is the place of this title among the positions of one
+    tracklist that carry it (canon.occurrence, CANON-TRACKS-1 §2): two
+    movements titled alike in one copy or one release are two tracks. The
+    first keeps the plain key — every id minted before 2026-11-26 is a first
+    — and the k-th is suffixed `#k`, which no normalized title holds (a
+    digit is a word character, `#` never one). It is an input of the
+    identity as the title is, stored on the row (`tracks.occurrence`): a
+    rule that recomputes a track's id from its row takes it.
 
     Note: internal seed uses 'song:' prefix for backward compatibility
     with UUIDs generated during initial migration.
     """
-    return uuid.uuid5(NAMESPACE, f"song:{normalize(artist_name)}:{normalize(title)}")
+    key = f"song:{normalize(artist_name)}:{normalize(title)}"
+    return uuid.uuid5(NAMESPACE, key if occurrence == 1 else f"{key}#{occurrence}")
+
+
+def song_key(title: str, artist_name: str) -> tuple:
+    """What track_uuid mints a track's id from, folded as it folds them —
+    two titles of one key at two positions of a tracklist are its first and
+    second occurrence."""
+    return normalize(artist_name or ""), normalize(title or "")
 
 
 def album_uuid(title: str, artist_name: str) -> uuid.UUID:

@@ -1,7 +1,7 @@
 """The nickname Sautium is kept for Support (SUPPORT-FIRST, BACKLOG B-132): no
 new account takes it or a name that reads as it, at the boundaries where an
-account is made — the Web UI's setup, a rotation into it, a start that makes
-its account from P2P_USERNAME, the launcher's account step — and a node that
+account is made — the Web UI's setup, a rotation into it, the launcher's
+account step — and a node that
 holds it keeps it. On a real database, with a throwaway key pinned in place of
 the shipped master's; the Worker's own boundary is in tests/p2p/
 test_worker_limits.py."""
@@ -9,7 +9,6 @@ test_worker_limits.py."""
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import psycopg2
 import psycopg2.pool
@@ -47,9 +46,22 @@ class _Key:
                 "invite_code": self.code, "email": ""}
 
 
+class _Pair(_Key):
+    """The key a nickname and a password make (at the suite's cost)."""
+
+    def __init__(self, username: str, password: str):
+        self.key = node_identity.key_from_seed(node_identity.derive_seed(username, password))
+        raw = self.key.public_key().public_bytes_raw()
+        self.pub, self.username, self.password = raw.hex(), username, password
+        self.code = node_identity.make_invite_code(username, raw)
+
+
+MASTER_PASSWORD = "the master's password amber lanterns ford"
+
+
 @pytest.fixture
 def pin(monkeypatch):
-    node = _Key("Sautium")
+    node = _Pair("Sautium", MASTER_PASSWORD)
     for mod in (backend_master, master_node):
         monkeypatch.setattr(mod, "MASTER_PUBKEY_HEX", node.pub)
         monkeypatch.setattr(mod, "MASTER_INVITE_CODE", node.code)
@@ -78,24 +90,32 @@ def _record(conn, pubkey: str) -> None:
 
 
 @pytest.fixture
-def derive(monkeypatch):
-    """The Web UI's setup derivation, answered by `derive.key` — and every
-    call counted, so a refusal can be shown to cost none."""
-    calls = []
-    state = SimpleNamespace(key=None, calls=calls)
-
-    def identity(username, password, email=""):
-        calls.append(username)
-        return {**state.key.info(), "username": username}
-
-    monkeypatch.setattr(p2p_identity, "derive_identity", identity)
-    monkeypatch.setattr(p2p_identity, "derive_private_key", lambda u, p: state.key.key)
+def setup(births, tmp_path, monkeypatch):
+    """The Web UI's setup in a folder of `tmp_path`: `create(folder, name,
+    password, **kw)` makes the account and ends its key's derivation; what
+    it placed, or None."""
+    from routers import p2p as p2p_router
+    monkeypatch.setattr(device_auth, "_create_lock", __import__("asyncio").Lock())
+    monkeypatch.setattr(device_auth, "_held", None)
+    monkeypatch.setattr(device_auth, "_key_arrived", lambda pubkey: None)
     monkeypatch.setattr(device_auth, "_record_signing_key", lambda _pubkey: None)
-    return state
+    monkeypatch.setattr(p2p_router, "_publish_identity_state", lambda state: None)
+    monkeypatch.setitem(device_auth._doors, "setup", {"failures": 0, "shut_until": 0.0, "in_flight": 0})
+
+    def create(folder, username, password, **kw):
+        import asyncio
+        monkeypatch.setattr(config.settings, "p2p_identity_dir", str(folder))
+        device_auth.prepare_setup()
+        asyncio.run(device_auth.create_account(username, password, device_auth._setup_code, **kw))
+        births.finish()
+        info = folder / "node_info.json"
+        return json.loads(info.read_text()) if (folder / "node_ed25519.key").exists() else None
+    create.births = births
+    return create
 
 
 def _settings(monkeypatch, **kw):
-    for k, v in {"sautium_master": False, "p2p_username": "", "p2p_password": "",
+    for k, v in {"sautium_master": False,
                  "p2p_identity_dir": "", **kw}.items():
         monkeypatch.setattr(config.settings, k, v)
 
@@ -120,56 +140,50 @@ def test_the_shape_rule_still_answers_first_and_the_backend_reads_the_same_rule(
         node_identity.validate_new_username("Ѕаutium")          # Cyrillic letters: the shape refuses
     with pytest.raises(ValueError, match="3-32 Latin letters"):
         node_identity.validate_new_username("Sautium\n")       # `$` alone would take it
-    assert p2p_identity.validate_username is node_identity.validate_username
 
 
 def test_the_reserved_skeleton_is_supports_own_name():
     assert node_identity.username_skeleton(master_node.MASTER_USERNAME) in node_identity.RESERVED_SKELETONS
 
 
-# --- the Web UI's setup (device_auth._write_identity) --------------------------
+# --- the Web UI's setup (device_auth.create_account, its key's end) -------------
 
-def test_a_new_account_under_the_name_is_refused_before_any_derivation(db, pin, derive, tmp_path,
+def test_a_new_account_under_the_name_is_refused_before_any_derivation(db, pin, setup, tmp_path,
                                                                        monkeypatch):
     _settings(monkeypatch)
-    derive.key = _Key("Sautium")
+    monkeypatch.setattr(config.settings, "p2p_identity_dir", str(tmp_path))
+    device_auth.prepare_setup()
     with pytest.raises(ValueError, match="kept for Sautium's own Support"):
-        device_auth._write_identity(tmp_path, "Sautium", "a password amber lanterns ford")
-    assert derive.calls == []
-    assert not (tmp_path / "node_ed25519.key").exists()
+        import asyncio
+        asyncio.run(device_auth.create_account("Sautium", "a password amber lanterns ford",
+                                               device_auth._setup_code))
+    assert setup.births == []
+    assert not (tmp_path / "account.json").exists() and not (tmp_path / "node_ed25519.key").exists()
 
 
 def test_the_master_on_a_new_database_makes_its_account_and_another_key_there_does_not(
-        db, pin, derive, tmp_path, monkeypatch):
+        db, pin, setup, tmp_path, monkeypatch):
     _settings(monkeypatch, sautium_master=True)
-    derive.key = _Key("Sautium")                           # the pair derives another key
-    with pytest.raises(ValueError, match="kept for Sautium's own Support"):
-        device_auth._write_identity(tmp_path / "other", "Sautium", "a password amber lanterns ford")
-    assert derive.calls == ["Sautium"]                     # the key decides: derived first
-    assert not (tmp_path / "other" / "node_ed25519.key").exists()
-    derive.key = pin
-    info = device_auth._write_identity(tmp_path / "master", "Sautium", "the master's password amber lanterns ford")
+    assert setup(tmp_path / "other", "Sautium", "a password amber lanterns ford") is None
+    assert not (tmp_path / "other" / "account.json").exists()          # the key decided: taken back
+    info = setup(tmp_path / "master", "Sautium", MASTER_PASSWORD)
     assert info["public_key_hex"] == pin.pub
 
 
-def test_a_holder_brings_its_identity_back_and_its_records_name_no_other(db, pin, derive, tmp_path,
+def test_a_holder_brings_its_identity_back_and_its_records_name_no_other(db, pin, setup, tmp_path,
                                                                         monkeypatch):
     _settings(monkeypatch)
-    holder = _Key("sautium")
+    holder = _Pair("sautium", "its password amber lanterns ford")
     _record(db, holder.pub)
-    derive.key = holder
-    info = device_auth._write_identity(tmp_path / "back", "sautium", "its password amber lanterns ford")
+    info = setup(tmp_path / "back", "sautium", holder.password)
     assert info["public_key_hex"] == holder.pub
     # a new identity over a holder's records takes the name no more than a stranger does
-    derive.key = _Key("sautium")
-    with pytest.raises(ValueError, match="kept for Sautium's own Support"):
-        device_auth._write_identity(tmp_path / "new", "sautium", "another amber lanterns ford", new_identity=True)
+    assert setup(tmp_path / "new", "sautium", "another amber lanterns ford", new_identity=True) is None
 
 
-def test_any_other_name_is_made_as_before(db, pin, derive, tmp_path, monkeypatch):
+def test_any_other_name_is_made_as_before(db, pin, setup, tmp_path, monkeypatch):
     _settings(monkeypatch)
-    derive.key = _Key("alice")
-    assert device_auth._write_identity(tmp_path, "alice", "a password amber lanterns ford")["username"] == "alice"
+    assert setup(tmp_path, "alice", "a password amber lanterns ford")["username"] == "alice"
 
 
 # --- a rotation (desktop/node_identity.rotate_identity) ------------------------
@@ -184,66 +198,19 @@ def _identity_folder(d: Path, node: _Key) -> Path:
     return d
 
 
-def test_a_rotation_into_the_name_is_refused_before_its_derivation(tmp_path, monkeypatch):
-    seeds = []
-    monkeypatch.setattr(node_identity, "derive_seed",
-                        lambda u, p: seeds.append(u) or Ed25519PrivateKey.generate().private_bytes_raw())
+def test_a_rotation_into_the_name_is_refused_before_its_key_is_made(tmp_path, monkeypatch):
     d = _identity_folder(tmp_path / "id", _Key("alice"))
     with pytest.raises(ValueError, match="kept for Sautium's own Support"):
-        node_identity.rotate_identity(d, "SAUTIUM", "a new password", anonymous=False)
-    assert seeds == []
+        node_identity.check_rotation_name(d, "SAUTIUM")
+    with pytest.raises(ValueError, match="kept for Sautium's own Support"):
+        node_identity.rotate_identity(d, "SAUTIUM", Ed25519PrivateKey.generate(), False, None)
     assert json.loads((d / "node_info.json").read_text())["username"] == "alice"
 
 
 def test_a_holder_changes_its_password_and_keeps_its_name(tmp_path, monkeypatch):
-    monkeypatch.setattr(node_identity, "derive_seed",
-                        lambda u, p: Ed25519PrivateKey.generate().private_bytes_raw())
     d = _identity_folder(tmp_path / "id", _Key("Sautium"))
-    result = node_identity.rotate_identity(d, "sautium", "a new password", anonymous=False)
+    node_identity.write_account(d, node_identity.new_account("Sautium", "an old one", source="form"))
+    result = node_identity.rotate_identity(d, "sautium", Ed25519PrivateKey.generate(), False,
+                                           node_identity.signin_hash("a new password"))
     assert result["info"]["username"] == "sautium"
-
-
-# --- a start that makes its account from P2P_USERNAME --------------------------
-
-def _env_node(monkeypatch, node: _Key, tmp_path: Path):
-    _settings(monkeypatch, p2p_username=node.username, p2p_password="from .env",
-              p2p_identity_dir=str(tmp_path / "empty"))
-    monkeypatch.setattr(device_auth, "_expected_pubkey", lambda: node.pub)
-
-
-def test_a_start_making_its_account_under_the_name_with_another_key_refuses(db, pin, tmp_path,
-                                                                            monkeypatch):
-    node = _Key("Sautium")
-    _env_node(monkeypatch, node, tmp_path)
-    assert device_auth.reserved_name_refusal() == (
-        "P2P_USERNAME names the reserved nickname Sautium, and this node's key is not Support's "
-        "— the node does not start; choose another nickname in .env")
-
-
-def test_a_node_made_by_its_env_before_this_release_keeps_starting(db, pin, tmp_path, monkeypatch):
-    node = _Key("sautium")
-    _record(db, node.pub)
-    _env_node(monkeypatch, node, tmp_path)
-    assert device_auth.reserved_name_refusal() is None
-
-
-def test_a_node_made_by_its_env_keeps_starting_after_a_new_password(db, pin, tmp_path, monkeypatch):
-    """Review round 2: the env's new P2P_PASSWORD derives another key — the
-    holder's rotation, which keeps the name; the database names the old one."""
-    _record(db, _Key("sautium").pub)
-    _env_node(monkeypatch, _Key("sautium"), tmp_path)
-    assert device_auth.reserved_name_refusal() is None
-
-
-def test_the_master_and_any_other_name_start(db, pin, tmp_path, monkeypatch):
-    _env_node(monkeypatch, pin, tmp_path)
-    assert device_auth.reserved_name_refusal() is None
-    _env_node(monkeypatch, _Key("alice"), tmp_path)
-    assert device_auth.reserved_name_refusal() is None
-
-
-def test_a_key_in_the_identity_folder_is_not_the_env_s_account(db, pin, tmp_path, monkeypatch):
-    node = _Key("Sautium")
-    _env_node(monkeypatch, node, tmp_path)
-    _identity_folder(tmp_path / "empty", _Key("alice"))
-    assert device_auth.reserved_name_refusal() is None
+    assert node_identity.read_account(d)["username"] == "sautium"

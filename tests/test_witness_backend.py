@@ -702,31 +702,31 @@ def test_an_identity_rule_migration_leaves_witness_rows_whole(worker, conn, stag
     assert sign_audio.verify_all()                       # by its own copy of the stamp
 
 
-def test_a_rotation_signs_the_waiting_rows_with_the_old_key(conn, tmp_path, monkeypatch):
+def test_a_rotation_signs_the_waiting_rows_with_the_old_key(conn, births, tmp_path, monkeypatch):
     import device_auth
     monkeypatch.setattr(settings, "p2p_identity_dir", str(tmp_path))
-    monkeypatch.setattr(settings, "p2p_username", "")
-    monkeypatch.setattr(settings, "p2p_password", "")
     monkeypatch.setattr(p2p_identity, "_signing_key_cache", None)
     monkeypatch.setattr(p2p_identity, "resolve_identity", lambda s: None)
+    monkeypatch.setattr(device_auth, "_key_arrived", lambda pubkey: None)
+    # The new key's end, on a loop of its own as the backend's would be
+    monkeypatch.setattr(device_auth, "_on_loop", lambda follow: asyncio.run(follow()))
     device_auth.prepare_setup()
     # The module's witness rows are NODE's, never deleted: over them this
     # account is another identity, made on the owner's word
     asyncio.run(device_auth.create_account("first", "correct-horse-amber-lanterns", device_auth._setup_code,
                                            new_identity=True))
+    births.finish()
     old = json.loads((tmp_path / "node_info.json").read_text())["public_key_hex"]
     subjects = [_sighting("handshake") for _ in range(2)]
     assert all(_row(conn, s, "handshake")["signature"] is None for s in subjects)
     asyncio.run(device_auth.rotate_identity("second", "battery-staple-amber-lanterns", "correct-horse-amber-lanterns"))
+    births.finish()
     new = json.loads((tmp_path / "node_info.json").read_text())["public_key_hex"]
     assert new != old
     for s in subjects:
         row = _row(conn, s, "handshake")
         assert row["author_pubkey"] == old
         assert record_sig.verify(witness.statement(row, old), row["signature"], old)
-
-
-KDF = nb.KdfParams(time_cost=1, memory_cost=8 * 1024, parallelism=1)
 
 
 def _target(dsn: str, dbname=None) -> nb.PgTarget:
@@ -743,11 +743,10 @@ def test_a_backup_round_trip_keeps_the_rows_and_their_guard(worker, scratch_dsn,
     _sighting("introduced")                                       # one unsigned too
     source = _target(scratch_dsn)
     restored = _target(scratch_dsn, "sautium_witness_restore")
-    created = nb.create_backup(tmp_path, target=source, kek=nb.derive_kek("pw", "node", KDF),
-                               username="node", pubkey=NODE_PUB, kdf=KDF)
+    created = nb.create_backup(tmp_path, target=source, seed=nb.seed_of(NODE), username="node")
     with open(created["path"], "rb") as fp:
         reader = nb.BackupReader(fp)
-        reader.unlock("pw", KDF)
+        reader.unlock_with_seeds([nb.seed_of(NODE)])
         nb.restore_database(reader, restored, manifest=reader.read_manifest(), replace=True)
     try:
         copy = restored.connect()

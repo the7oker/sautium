@@ -1,8 +1,10 @@
 """The doors a browser signs in through (device_auth, routers/auth.py,
 auth.js): a password login on an anonymous account is refused before any
-derivation; the derivations in flight are bounded, a request past the bound
-is told the node is busy; a box the node could not open says so, and the page
-seals it again once, to a fresh handshake."""
+check; the checks in flight are bounded, a request past the bound is told the
+node is busy; a box the node could not open says so, and the page seals it
+again once, to a fresh handshake. The account exists before its key (SEC-S5):
+its key is made in the background (`births` stands in for the worker), and a
+password is checked by the account's sign-in hash."""
 
 import asyncio
 import base64
@@ -11,7 +13,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -27,32 +28,60 @@ if str(ROOT / "backend") not in sys.path:
 import device_auth  # noqa: E402
 import p2p_identity  # noqa: E402
 
+_HOLDS_IDENTITY = device_auth._holds_identity
+
 
 @pytest.fixture(autouse=True)
 def _no_identity(monkeypatch):
     monkeypatch.setattr(p2p_identity, "load_signing_key", lambda settings: None)
     monkeypatch.setattr(device_auth, "_derive_in_flight", 0)
+    monkeypatch.setattr(device_auth, "_epoch_cache", 0)       # the handshake's tag reads it
     device_auth._channels.clear()
 
 
-def _account(monkeypatch, *, anonymous: bool):
+def _account(monkeypatch, *, anonymous: bool, password: str = "the right one"):
+    from desktop import node_identity
+    account = node_identity.new_account("anonymous-1a2b" if anonymous else "owner", password,
+                                        source="form", anonymous=anonymous)
+    monkeypatch.setattr(device_auth, "_account", lambda: {**account, "pubkey": "ab" * 32})
     monkeypatch.setattr(device_auth, "_expected_pubkey", lambda: "ab" * 32)
-    monkeypatch.setattr(device_auth, "account_username",
-                        lambda: "anonymous-1a2b" if anonymous else "owner")
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: anonymous)
+    return account
 
 
-def test_a_password_login_on_an_anonymous_account_derives_nothing(monkeypatch):
+def test_a_password_login_on_an_anonymous_account_checks_nothing(monkeypatch):
+    from desktop import node_identity
     _account(monkeypatch, anonymous=True)
-    derived = []
-    monkeypatch.setattr(p2p_identity, "derive_identity",
-                        lambda *a: derived.append(a) or {"public_key_hex": "ab" * 32})
+    checked = []
+    monkeypatch.setattr(node_identity, "signin_matches", lambda *a: checked.append(a) or True)
     assert asyncio.run(device_auth.verify_password("any password at all")) is False
-    assert derived == []
+    assert checked == []
 
 
-def test_the_derivations_in_flight_are_bounded_and_the_last_place_is_a_signed_callers(monkeypatch):
-    monkeypatch.setattr(device_auth, "_derive_semaphore", asyncio.Semaphore(2))
+def test_a_password_is_checked_by_the_accounts_hash_never_by_a_derivation(monkeypatch):
+    from desktop import node_identity
+    _account(monkeypatch, anonymous=False)
+    monkeypatch.setattr(node_identity, "derive_seed", lambda *a: pytest.fail("derived"))
+    assert asyncio.run(device_auth.verify_password("the right one")) is True
+    assert asyncio.run(device_auth.verify_password("a guess")) is False
+
+
+def test_an_identity_made_before_sec_s5_is_refused_with_its_words(tmp_path, monkeypatch, caplog):
+    """A key with an account's name beside it and no account file: nothing
+    checks its password (the owner's word, SEC-S5 §15) — the door says so,
+    and the log has the one error line; nothing is offered over the key."""
+    monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    (tmp_path / "node_ed25519.key").write_text("k")
+    (tmp_path / "node_info.json").write_text(json.dumps({"username": "owner"}))
+    assert device_auth.older_identity() and device_auth.account_configured()
+    with caplog.at_level("ERROR", logger="device_auth"), pytest.raises(device_auth.OlderIdentity):
+        asyncio.run(device_auth.verify_password("the right one"))
+    assert "made by a Sautium before this one" in caplog.text
+    (tmp_path / "account.json").write_text(json.dumps({"username": "owner", "signin": None}))
+    assert not device_auth.older_identity()
+
+
+def test_the_checks_in_flight_are_bounded_and_the_last_place_is_a_signed_callers(monkeypatch):
+    monkeypatch.setattr(device_auth, "_memory_slots", threading.BoundedSemaphore(2))
     gate = threading.Event()
 
     def derive():
@@ -83,7 +112,7 @@ def test_the_derivations_in_flight_are_bounded_and_the_last_place_is_a_signed_ca
 
 
 def test_a_derivation_whose_caller_went_has_its_failure_said(caplog, monkeypatch):
-    monkeypatch.setattr(device_auth, "_derive_semaphore", asyncio.Semaphore(2))
+    monkeypatch.setattr(device_auth, "_memory_slots", threading.BoundedSemaphore(2))
     gate = threading.Event()
 
     def derive():
@@ -114,11 +143,16 @@ def _seal(handshake: dict, payload: dict) -> dict:
 
 
 @pytest.fixture
-def doors():
+def doors(monkeypatch):
+    """The auth routes on one loop for the whole test, as uvicorn's: a key
+    made in the background is followed on it. The node's secret is the
+    test's (the handshake's tag and the tokens are made under it)."""
     from routers import auth
+    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     app = FastAPI()
     app.include_router(auth.router)
-    return TestClient(app)
+    with TestClient(app) as client:
+        yield client
 
 
 def test_a_busy_node_says_so_at_the_password_door(doors, monkeypatch):
@@ -180,11 +214,16 @@ ctx.window.fetch = async (input, init) => {
     const expires = 4102444800;
     const eb = Buffer.alloc(8); eb.writeBigUInt64BE(BigInt(expires));
     const signed = Buffer.concat([Buffer.from('sautium-pair:v1'), Buffer.from(server.publicKey), eb]);
+    const nodePubkey = cfg.unsigned ? '' : hex(identity.publicKey);
+    // The node's word under the device token it issued (device_auth.open_channel's tag)
+    const issued = cfg.issued === undefined ? store['sautium.device_token'] : cfg.issued;
+    const tag = issued ? require('node:crypto').createHmac('sha256', issued)
+      .update(Buffer.concat([signed, Buffer.from(nodePubkey)])).digest('hex') : '';
     return new Response(JSON.stringify({
-      eph: Buffer.from(server.publicKey).toString('base64'), expires,
-      node_pubkey: cfg.unsigned ? '' : hex(identity.publicKey),
-      sig: cfg.unsigned ? '' : hex(nacl.sign.detached(signed, identity.secretKey)) }));
+      eph: Buffer.from(server.publicKey).toString('base64'), expires, node_pubkey: nodePubkey,
+      sig: cfg.unsigned ? '' : hex(nacl.sign.detached(signed, identity.secretKey)), tag }));
   }
+  if (path === '/api/auth/status') return new Response(JSON.stringify(cfg.status || {}));
   const queue = (cfg.replies || {})[path];
   if (!queue) return new Response('{}');
   const sentHeaders = new Headers((init && init.headers) || {});
@@ -270,11 +309,12 @@ def test_only_a_refused_password_is_said_to_be_wrong():
 
 
 @pytest.fixture
-def rotations(doors, tmp_path, monkeypatch):
-    """The change-identity door over a node with an identity file; the
+def rotations(doors, births, tmp_path, monkeypatch):
+    """The change-identity door over a node with an account and its key; the
     rotation's own work — the key's, the witness drain's, what the node is
     told after — recorded or stubbed, not run; the current password is "the
-    right one" until a rotation sets another."""
+    right one" until a rotation sets another. `done`: the keys started,
+    (username, password); `births.finish()` ends the last."""
     import db_pool
     import notary
     import p2p_chat
@@ -282,10 +322,13 @@ def rotations(doors, tmp_path, monkeypatch):
     from desktop import node_identity
     from routers import auth
     from routers import p2p as p2p_router
-    done, state = [], {"password": "the right one"}
+    state = {"password": "the right one"}
+    account = {**node_identity.new_account("owner", "the right one", source="form"),
+               "pubkey": "ab" * 32}
     (tmp_path / "node_info.json").write_text("{}")
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
-    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
+    monkeypatch.setattr(device_auth, "_account", lambda: account)
+    monkeypatch.setattr(device_auth, "key_state", lambda: "ready")
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
     monkeypatch.setattr(device_auth, "pin_door", lambda: True)
     monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
@@ -293,11 +336,12 @@ def rotations(doors, tmp_path, monkeypatch):
     monkeypatch.setattr(device_auth, "_record_failure", lambda _key, n=1: n)
     monkeypatch.setattr(device_auth, "_pin", None)
     monkeypatch.setattr(device_auth, "_pin_prev", None)
+    rotated = []
 
-    def rotate(_d, username, password, anonymous):
-        time.sleep(0.05)
-        done.append((username, password))
-        state["password"] = password
+    def rotate(_d, username, key, anonymous, signin):
+        rotated.append((username, anonymous, signin))
+        state["password"] = None if signin is None else next(
+            b["password"] for b in reversed(births) if b["username"] == username)
         return {"info": {"username": username, "invite_code": "x", "public_key_hex": "cd" * 32,
                          "anonymous": anonymous}, "rotation": {}}
     monkeypatch.setattr(node_identity, "rotate_identity", rotate)
@@ -311,6 +355,7 @@ def rotations(doors, tmp_path, monkeypatch):
     for module, name in ((p2p_identity, "forget_cached"), (p2p_router, "forget_identity"),
                          (p2p_chat, "forget_service"), (device_auth, "bump_epoch")):
         monkeypatch.setattr(module, name, lambda: None)
+    monkeypatch.setattr(p2p_identity, "changed", nothing)
     monkeypatch.setattr(db_pool, "db_execute", lambda *a, **k: None)
     monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
@@ -327,12 +372,18 @@ def rotations(doors, tmp_path, monkeypatch):
     def change(**payload):
         return doors.post("/api/auth/change-identity",
                           json=_seal(doors.get("/api/auth/handshake").json(), payload))
-    change.asked, change.recorded = asked, recorded
-    return change, done
+    change.asked, change.recorded, change.rotated = asked, recorded, rotated
+
+    class Done(list):
+        def __eq__(self, other):
+            return [(b["username"], b["password"]) for b in births] == other
+    return change, Done()
 
 
-def test_two_changes_at_once_each_need_the_password_of_the_identity_they_change(rotations, doors,
-                                                                                 monkeypatch):
+def test_a_change_while_a_key_is_made_waits_for_it(rotations, doors, births, monkeypatch):
+    """Two changes at once: the first's key is made in the background, the
+    second is told a key is being made — and so is any change until it lands,
+    the old identity whole meanwhile."""
     import httpx
     _change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
@@ -347,17 +398,64 @@ def test_two_changes_at_once_each_need_the_password_of_the_identity_they_change(
                     "current_password": "the right one"}))).status_code
             return await asyncio.gather(change("second", "the second one amber lanterns ford"),
                                         change("third", "the third one amber lanterns ford"))
-    assert sorted(asyncio.run(both())) == [200, 403]
-    assert len(done) == 1
+    assert sorted(asyncio.run(both())) == [200, 409]
+    assert len(births) == 1
+
+
+def test_a_change_is_made_when_its_key_lands_and_the_old_identity_stands_till_then(
+        rotations, births, monkeypatch):
+    change, done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    r = change(username="second", password="new password amber lanterns ford",
+               current_password="the right one")
+    assert r.status_code == 200 and "token" not in r.json()
+    assert change.rotated == [] and change.recorded == []
+    births.finish()
+    (username, anonymous, signin), = change.rotated
+    from desktop import node_identity
+    assert username == "second" and anonymous is False
+    assert node_identity.signin_matches(signin, "new password amber lanterns ford")
+    assert change.recorded == ["cd" * 32]
+
+
+def test_the_same_name_and_password_are_this_identity_already(rotations, births, monkeypatch):
+    change, _done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    r = change(username="owner", password="the right one", current_password="the right one")
+    assert r.status_code == 400 and "this identity already" in r.json()["detail"]
+    assert births == []
+
+
+def test_no_change_is_made_while_a_new_key_is_being_made(rotations, births, monkeypatch):
+    """A change to no password after a change to a new one, its key still
+    being made: refused — never a random key now and the first key's
+    rotation over it minutes later."""
+    change, _done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth._birth, "state", lambda: {"status": "deriving", "purpose": "rotate"})
+    r = change(username="second", password="", current_password="the right one")
+    assert r.status_code == 409 and "being made" in r.json()["detail"]
+    assert change.rotated == []
+
+
+def test_a_change_to_no_password_is_a_random_key_at_once(rotations, births, monkeypatch):
+    change, _done = rotations
+    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    r = change(username="second", password="", current_password="the right one")
+    assert r.status_code == 200
+    assert births == [] and change.rotated == [("second", True, None)]
 
 
 def test_a_docker_account_says_it_has_a_password(tmp_path, monkeypatch):
     pytest.importorskip("cryptography")
+    from desktop import node_identity
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
-    monkeypatch.setattr(device_auth, "_another_identity", lambda _pubkey: False)   # no records here
-    monkeypatch.setattr(device_auth, "_holds_identity", lambda pubkey=None: False)
-    monkeypatch.setattr(device_auth, "_record_signing_key", lambda _pubkey: None)
-    info = device_auth._write_identity(tmp_path, "anonymous-1a2b", "a chosen password amber lanterns ford")
+    account = node_identity.new_account("anonymous-1a2b", "a chosen password amber lanterns ford",
+                                        source="form")
+    node_identity.write_account(tmp_path, account)
+    info = node_identity.place_account_key(
+        tmp_path, node_identity.key_from_seed(node_identity.derive_seed(
+            "anonymous-1a2b", "a chosen password amber lanterns ford")), account)
     assert info["anonymous"] is False
     assert json.loads((tmp_path / "node_info.json").read_text())["anonymous"] is False
     assert device_auth.account_anonymous() is False
@@ -388,23 +486,6 @@ def test_an_account_without_a_password_changes_on_the_code_its_host_shows(rotati
     assert done == [("named", "a password now amber lanterns ford")]
 
 
-def test_a_node_whose_host_shows_no_code_keeps_a_password(rotations, doors, monkeypatch):
-    """A node without a pairing code (Docker) is signed into by its password:
-    a change to none is refused before anything is derived, and an account
-    is never created without one."""
-    change, done = rotations
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
-    monkeypatch.setattr(device_auth, "pin_door", lambda: False)
-    r = change(username="second", password="", current_password="the right one")
-    assert r.status_code == 422 and done == [] and change.asked == []
-    assert change(username="second", password="new password amber lanterns ford",
-                  current_password="the right one").status_code == 200
-    r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(),
-                                                          {"username": "owner", "password": "",
-                                                           "setup_code": "x"}))
-    assert r.status_code == 422
-
-
 def test_a_busy_node_says_so_at_the_change(rotations, monkeypatch):
     change, done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
@@ -416,23 +497,14 @@ def test_a_busy_node_says_so_at_the_change(rotations, monkeypatch):
     assert done == []
 
 
-def test_the_change_asks_its_derivation_as_a_signed_caller(rotations, monkeypatch):
+def test_the_change_asks_its_check_as_a_signed_caller(rotations, births, monkeypatch):
     change, _done = rotations
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
     assert change(username="second", password="new password amber lanterns ford",
                   current_password="the right one").status_code == 200
     assert change.asked == [True]
+    births.finish()
     assert change.recorded == ["cd" * 32]              # the new key, the node's on record
-
-
-def test_an_identity_from_the_environment_is_changed_there_before_any_password_is_derived(
-        rotations, tmp_path, monkeypatch):
-    change, done = rotations
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
-    (tmp_path / "node_info.json").unlink()
-    r = change(username="second", password="new password amber lanterns ford", current_password="a guess")
-    assert r.status_code == 409 and "environment" in r.json()["detail"]
-    assert change.asked == [] and done == []
 
 
 @pytest.fixture
@@ -440,24 +512,23 @@ def fresh_node(tmp_path, monkeypatch):
     """A node with no account: its identity folder `tmp_path`, empty."""
     from config import settings
     monkeypatch.setattr(settings, "p2p_identity_dir", str(tmp_path))
-    monkeypatch.setattr(settings, "p2p_username", "")
     monkeypatch.setattr(device_auth, "_setup_code", None)
     monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
     monkeypatch.setitem(device_auth._doors, "setup", {"failures": 0, "shut_until": 0.0, "in_flight": 0})
     monkeypatch.setattr(device_auth, "_expected_pubkey",
                         lambda: "ab" * 32 if (tmp_path / "node_ed25519.key").exists() else None)
     monkeypatch.setattr(device_auth, "_identity_dir", lambda: tmp_path)
+    # No database: no identity of record (lost_key gives it one)
+    monkeypatch.setattr(device_auth, "_holds_identity", lambda pubkey=None: False)
     return tmp_path
 
 
-def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_node, monkeypatch, caplog):
+def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_node, births, monkeypatch,
+                                                                       caplog):
     """Its log and its identity folder hold the code — the folder's file for
     the node's user alone — and nothing is created without it; the code
-    dies with the account."""
-    written = []
-    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: (
-        written.append(u), (d / "node_ed25519.key").write_text("k"),
-        (d / "node_info.json").write_text(json.dumps({"username": u})), {"username": u})[3])
+    dies with the account, which exists at once, its key to come."""
+    written = births
     with caplog.at_level("INFO", logger="device_auth"):
         device_auth.prepare_setup()
     path = fresh_node / device_auth.SETUP_CODE_FILE
@@ -467,12 +538,16 @@ def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_n
         with pytest.raises(device_auth.WrongSetupCode):
             asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", wrong))
     assert written == []
-    asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", code.lower()))
-    assert written == ["owner"] and not path.exists()
+    assert asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford",
+                                                  code.lower())) == {"username": "owner", "key": "deriving"}
+    assert [b["username"] for b in written] == ["owner"] and not path.exists()
+    account = json.loads((fresh_node / "account.json").read_text())
+    assert account["username"] == "owner" and account["pubkey"] is None
+    assert (fresh_node / "account.json").stat().st_mode & 0o077 == 0
+    assert device_auth.account_configured() and device_auth.key_state() == "interrupted"
     with pytest.raises(device_auth.AccountExists):
         asyncio.run(device_auth.create_account("other", "a password amber lanterns ford", code))
-    for name in ("node_ed25519.key", "node_info.json"):   # the folder emptied while it runs
-        (fresh_node / name).unlink()
+    (fresh_node / "account.json").unlink()                 # the folder emptied while it runs
     with pytest.raises(device_auth.WrongSetupCode):
         asyncio.run(device_auth.create_account("other", "a password amber lanterns ford", code))
     (fresh_node / "node_ed25519.key").write_text("k")     # a key with no name is an identity
@@ -487,14 +562,15 @@ def test_a_fresh_node_is_set_up_only_with_the_code_it_wrote_at_its_start(fresh_n
 def test_the_setup_code_is_read_out_of_what_was_pasted_around_it(fresh_node, monkeypatch):
     """A line of the log, spaces, another layout's letters: the code inside
     is taken, nothing else is, and nothing is a server error."""
-    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: {"username": u})
+    monkeypatch.setattr(device_auth, "_start_birth", lambda *a: True)
     device_auth.prepare_setup()
     code = device_auth._setup_code
     for given in ("\u0410\u0412\u0421\u0415-\u041d\u041a\u041c\u0420-\u0422\u0425\u0410\u0412", "", " - "):
         with pytest.raises(device_auth.WrongSetupCode):
             asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", given))
     pasted = f"backend-1 | WARNING No account yet. The setup code to create it is {code} (also in …)"
-    assert asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", pasted)) == {"username": "owner"}
+    assert asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", pasted)) == {
+        "username": "owner", "key": "deriving"}
 
 
 def test_the_setup_code_is_typed_by_hand_so_it_is_short_and_forgiving(fresh_node, monkeypatch):
@@ -503,14 +579,15 @@ def test_the_setup_code_is_typed_by_hand_so_it_is_short_and_forgiving(fresh_node
     this node's setup code")."""
     import re
     made = []
-    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: made.append(u) or {"username": u})
+    monkeypatch.setattr(device_auth, "_start_birth", lambda u, *a: made.append(u) or True)
     for spell in (lambda c: c.replace("-", ""), lambda c: c.replace("-", " "), str.lower,
                   lambda c: f"  {c.lower().replace('-', ' - ')}\n", lambda c: c.replace("-", "\u2013")):
         device_auth.prepare_setup()
         code = device_auth._setup_code
         assert re.fullmatch("[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}", code)
         assert asyncio.run(device_auth.create_account("owner", "a password amber lanterns ford", spell(code))) == {
-            "username": "owner"}
+            "username": "owner", "key": "deriving"}
+        (fresh_node / "account.json").unlink()
     assert len(made) == 5
     # Only a word of the code's shape is a candidate, and of a long paste the last few
     assert device_auth.setup_candidates("ABCDEFGHJKLMNPQR") == []
@@ -525,7 +602,7 @@ def test_wrong_setup_codes_shut_the_setups_door_and_never_burn_the_code(fresh_no
     """Past five wrong tries a delay that doubles; the code stays the one the
     node wrote, and opens the door once the delay is over."""
     made = []
-    monkeypatch.setattr(device_auth, "_write_identity", lambda d, u, p, **_kw: made.append(u) or {"username": u})
+    monkeypatch.setattr(device_auth, "_start_birth", lambda u, *a: made.append(u) or True)
     clock = [1000.0]
     monkeypatch.setattr(device_auth.time, "time", lambda: clock[0])
     device_auth.prepare_setup()
@@ -548,12 +625,12 @@ def test_wrong_setup_codes_shut_the_setups_door_and_never_burn_the_code(fresh_no
         clock[0] += shut.value.seconds
     assert waits == [1, 2, 4, 8]
     assert device_auth._setup_code == code and path.read_text().strip() == code and made == []
-    assert attempt(code) == {"username": "owner"}
+    assert attempt(code) == {"username": "owner", "key": "deriving"}
     assert device_auth._doors["setup"]["failures"] == 0
 
 
 def test_the_set_up_door_says_when_it_is_shut(fresh_node, doors, monkeypatch):
-    monkeypatch.setattr(device_auth, "_write_identity", lambda *a, **k: pytest.fail("created"))
+    monkeypatch.setattr(device_auth, "_start_birth", lambda *a: pytest.fail("created"))
     device_auth.prepare_setup()
     monkeypatch.setitem(device_auth._doors, "setup", {
         "failures": 9, "shut_until": device_auth.time.time() + 120, "in_flight": 0})
@@ -564,7 +641,7 @@ def test_the_set_up_door_says_when_it_is_shut(fresh_node, doors, monkeypatch):
 
 
 def test_the_set_up_door_refuses_a_code_that_is_not_the_nodes(fresh_node, doors, monkeypatch):
-    monkeypatch.setattr(device_auth, "_write_identity", lambda *a: pytest.fail("created"))
+    monkeypatch.setattr(device_auth, "_start_birth", lambda *a: pytest.fail("created"))
     device_auth.prepare_setup()
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
         "username": "owner", "password": "a password amber lanterns ford", "setup_code": "AAAA-AAAA-AAAA"}))
@@ -583,6 +660,7 @@ def login_door(doors, monkeypatch):
     monkeypatch.setattr(device_auth, "current_token", lambda _s: "fresh token")
     monkeypatch.setattr(device_auth, "account_configured", lambda: True)
     monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth, "password_door", lambda: True)
     monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
                                               for name in ("login", "signed")})
     monkeypatch.setattr(device_auth.time, "time", lambda: clock[0])
@@ -696,23 +774,36 @@ def test_a_node_with_no_identity_signs_no_browser_in_and_pins_nothing():
     """An answer without an identity is refused at the password and pairing
     doors before anything is sent; creating an account takes it — asking
     first where this browser knew another node, and pinning the new
-    account's key once it is made."""
+    account's key at its first signed answer, once the key is made."""
     for scenario, door in (("return await window.Sautium.auth.login('x')", "/api/auth/login"),
                            ("return await window.Sautium.auth.pair('ABCD-EFGH')", "/api/auth/pair")):
-        out = _page(scenario, unsigned=True, store=dict(_SIGNED_IN), replies={door: [[200]]})
+        # A node with no account makes no tag (device_auth.open_channel)
+        out = _page(scenario, unsigned=True, issued="", store=dict(_SIGNED_IN), replies={door: [[200]]})
         assert out["thrown"] == "NodeUnset: This node presents no identity — it is not set up yet.", out
         assert door not in out["asked"] and "sautium.node_pubkey" not in out["store"]
     create = "return await window.Sautium.auth.createAccount('owner', 'a password', 'AAAA-BBBB-CCCC')"
     out = _page(create, unsigned=True, store=dict(_SIGNED_IN), replies={"/api/auth/create-account": [[200]]})
-    assert out["result"] is True and out["store"]["sautium.node_pubkey"] == out["node"]
+    assert out["result"] is True and "sautium.node_pubkey" not in out["store"]
+    assert out["store"]["sautium.pin_pending"] == "1"
     assert out["sent"]["/api/auth/create-account"][0]["setup_code"] == "AAAA-BBBB-CCCC"
+    # The key made: the first signed answer is pinned — on the token's word
+    out = _page("return await window.Sautium.auth.login('x')", store={**_SIGNED_IN, "sautium.pin_pending": "1"},
+                replies={"/api/auth/login": [[200]]})
+    assert out["result"] is True and out["store"]["sautium.node_pubkey"] == out["node"]
+    assert "sautium.pin_pending" not in out["store"]
+    # Something answering in the node's place, which never saw the token: not pinned
+    out = _page("return await window.Sautium.auth.login('x')", store={**_SIGNED_IN, "sautium.pin_pending": "1"},
+                issued="", replies={"/api/auth/login": [[200]]})
+    assert out["thrown"].startswith("NodeChanged") and "sautium.node_pubkey" not in out["store"]
+    assert "/api/auth/login" not in out["asked"]
     known = {**_SIGNED_IN, "sautium.node_pubkey": "cd" * 32}
     out = _page(create, unsigned=True, store=known, replies={"/api/auth/create-account": [[200]]})
     assert out["thrown"] == "NodeChanged: node identity changed"
     assert "/api/auth/create-account" not in out["asked"]
     out = _page("window.Sautium.auth.acceptNode(''); " + create, unsigned=True, store=known,
                 replies={"/api/auth/create-account": [[200]]})
-    assert out["result"] is True and out["store"]["sautium.node_pubkey"] == out["node"]
+    assert out["result"] is True and "sautium.node_pubkey" not in out["store"]
+    assert out["store"]["sautium.pin_pending"] == "1"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -730,7 +821,7 @@ def test_a_pin_is_a_key_or_nothing():
 
 def test_a_refusal_at_the_credential_doors_names_the_field_never_its_value(doors):
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "", "setup_code": "pw4321"}))
+        "username": "owner" * 10, "password": "pw4321", "setup_code": "x"}))
     assert r.status_code == 422 and "pw4321" not in r.text
 
 
@@ -782,9 +873,9 @@ def test_only_a_derivation_that_did_not_match_is_a_wrong_password(login_door, mo
     nothing; a derivation that failed is a busy node — none is counted."""
     login, _clock, derived, store, _woken = login_door
     assert login("").status_code == 401 and derived == []
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: True)
+    monkeypatch.setattr(device_auth, "password_door", lambda: False)
     assert login("a guess").status_code == 401 and derived == []
-    monkeypatch.setattr(device_auth, "account_anonymous", lambda: False)
+    monkeypatch.setattr(device_auth, "password_door", lambda: True)
 
     async def failing(password, **_kw):
         raise device_auth.Busy()
@@ -794,12 +885,13 @@ def test_only_a_derivation_that_did_not_match_is_a_wrong_password(login_door, mo
     assert device_auth.LOGIN_FAILURES_KEY not in store
 
 
-def test_a_derivation_that_fails_says_the_node_is_busy(monkeypatch):
+def test_a_check_that_fails_says_the_node_is_busy(monkeypatch):
+    from desktop import node_identity
     _account(monkeypatch, anonymous=False)
 
     def failing(*_a):
-        raise MemoryError("no room for the derivation")
-    monkeypatch.setattr(p2p_identity, "derive_identity", failing)
+        raise MemoryError("no room for the check")
+    monkeypatch.setattr(node_identity, "signin_matches", failing)
     with pytest.raises(device_auth.Busy):
         asyncio.run(device_auth.verify_password("the right one"))
 
@@ -990,12 +1082,12 @@ setTimeout(async () => {
 @pytest.mark.parametrize("status, says", [
     ({"onboarding": False, "password_login": False, "pin_door": False, "unnamed_key": True,
       "username": None}, "holds a key without its account"),
-    ({"onboarding": False, "password_login": False, "pin_door": False, "unnamed_key": False,
-      "username": "anonymous-1a2b"}, "loses this identity"),
+    ({"onboarding": False, "password_login": False, "pin_door": True, "unnamed_key": False,
+      "older_identity": True, "username": "owner"}, "made by an older Sautium"),
 ])
 def test_a_node_no_browser_can_sign_in_to_says_why_and_offers_no_form(status, says):
-    """A key with no account, or an account with no password where no host
-    shows a code: the gate says which, what starting over costs, and offers
+    """A key with no account, or an identity made before SEC-S5 whose
+    password nothing checks: the gate says which and what to do, and offers
     nothing to submit — a press changes nothing."""
     static = ROOT / "backend" / "static"
     proc = subprocess.run(["node", "-e", _GATE_PAGE, "--", str(static / "vendor" / "nacl-fast.min.js"),
@@ -1018,21 +1110,26 @@ def test_the_change_sheet_says_how_long_a_shut_door_waits():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def lost_key(fresh_node, scratch_dsn, monkeypatch):
+def lost_key(fresh_node, births, scratch_dsn, monkeypatch):
     """`fresh_node` on a database of its own, its setup code written, the
-    derivation at a test's cost (the same pair → key map). Its `signed_by(key,
-    imported=False)` adds a features record sealed by `key`; `bound(key)` and
-    `recorded(key)` set the key the launcher's last P2P run held and the
-    node's signing key of record; `record()` reads the latter back."""
+    derivation at a test's cost (the same pair → key map), the key's worker
+    held (`births`). Its `signed_by(key, imported=False)` adds a features
+    record sealed by `key`; `bound(key)` and `recorded(key)` set the key the
+    launcher's last P2P run held and the node's signing key of record;
+    `record()` reads the latter back; `arrived` the keys followed."""
     import types
 
     import db_pool
     import psycopg2
     import psycopg2.pool
     from desktop import node_identity
-    monkeypatch.setattr(p2p_identity, "ARGON2_TIME_COST", 1)
-    monkeypatch.setattr(p2p_identity, "ARGON2_MEMORY_COST", 8 * 1024)
+    from routers import p2p as p2p_router
     monkeypatch.setattr(device_auth, "_identity_missing", False)
+    monkeypatch.setattr(device_auth, "_holds_identity", _HOLDS_IDENTITY)
+    monkeypatch.setattr(device_auth, "_held", None)
+    arrived = []
+    monkeypatch.setattr(device_auth, "_key_arrived", arrived.append)
+    monkeypatch.setattr(p2p_router, "_publish_identity_state", lambda state: None)
     pool = psycopg2.pool.ThreadedConnectionPool(1, 2, dsn=scratch_dsn)
     monkeypatch.setattr(db_pool, "_pool", pool)
     conn = psycopg2.connect(scratch_dsn)
@@ -1066,17 +1163,38 @@ def lost_key(fresh_node, scratch_dsn, monkeypatch):
     device_auth.prepare_setup()
     yield types.SimpleNamespace(signed_by=signed_by, bound=lambda key: setting("p2p.bound_identity", key),
                                 recorded=lambda key: setting("identity.signing_key", key),
-                                record=record, code=device_auth._setup_code, conn=conn)
+                                record=record, code=device_auth._setup_code, conn=conn,
+                                births=births, arrived=arrived)
     conn.close()
     pool.closeall()
 
 
 def _key_of(username, password):
-    return p2p_identity.derive_identity(username, password)["public_key_hex"]
+    from desktop import node_identity
+    return node_identity.public_hex(node_identity.key_from_seed(
+        node_identity.derive_seed(username, password)))
+
+
+class Another(Exception):
+    """The key made is another identity than the one the records name: the
+    owner is asked (key_state "another_identity"), nothing is placed."""
 
 
 def _bring_back(node, username, password, **kw):
-    return asyncio.run(device_auth.create_account(username, password, node.code, **kw))
+    """The setup, and its key's end: the info placed, or Another."""
+    asyncio.run(device_auth.create_account(username, password, node.code, **kw))
+    node.births.finish()
+    if device_auth.key_state() == "another_identity":
+        raise Another()
+    d = Path(device_auth._identity_dir())
+    return json.loads((d / "node_info.json").read_text())
+
+
+def _no(node):
+    """The owner's no to another identity: the account taken back, the setup
+    offered again under a new code."""
+    assert asyncio.run(device_auth.decide_new_identity(False)) == {"key": None}
+    node.code = device_auth._setup_code
 
 
 def test_the_setup_of_a_node_that_lost_its_key_takes_only_the_pair_that_signed_its_records(
@@ -1089,9 +1207,11 @@ def test_the_setup_of_a_node_that_lost_its_key_takes_only_the_pair_that_signed_i
     lost_key.signed_by(own)
     lost_key.signed_by("cd" * 32, imported=True)
     for username, password in (("owner", "the wrong one"), ("other", "the right one")):
-        with pytest.raises(device_auth.AnotherIdentity):
+        with pytest.raises(Another):
             _bring_back(lost_key, username, password)
         assert not (fresh_node / "node_ed25519.key").exists()
+        _no(lost_key)
+        assert not (fresh_node / "account.json").exists()
         assert (fresh_node / device_auth.SETUP_CODE_FILE).exists()
     info = _bring_back(lost_key, "owner", "the right one")
     assert info["public_key_hex"] == own and (fresh_node / "node_ed25519.key").exists()
@@ -1118,8 +1238,9 @@ def test_where_its_p2p_ran_only_the_key_that_run_held_is_the_nodes(lost_key, fre
     lost_key.signed_by(old)
     lost_key.signed_by(new)
     lost_key.bound(new)
-    with pytest.raises(device_auth.AnotherIdentity):
+    with pytest.raises(Another):
         _bring_back(lost_key, "owner", "the old one")
+    _no(lost_key)
     assert _bring_back(lost_key, "owner", "the new one")["public_key_hex"] == new
 
 
@@ -1134,8 +1255,9 @@ def test_the_signing_key_of_record_is_the_one_the_setup_takes_back(lost_key, fre
     if bound:
         lost_key.bound(old)
     lost_key.recorded(new)
-    with pytest.raises(device_auth.AnotherIdentity):
+    with pytest.raises(Another):
         _bring_back(lost_key, "owner", "the old one")
+    _no(lost_key)
     assert _bring_back(lost_key, "owner", "the new one")["public_key_hex"] == new
 
 
@@ -1146,15 +1268,17 @@ def test_a_new_identity_on_record_is_the_only_one_a_second_loss_takes_back(lost_
     lost_key.signed_by(replaced)
     lost_key.bound(replaced)
     lost_key.recorded("ef" * 32)                       # the launcher's random key, lost too
-    with pytest.raises(device_auth.AnotherIdentity):
+    with pytest.raises(Another):
         _bring_back(lost_key, "owner", "the right one")
+    _no(lost_key)
     made = _bring_back(lost_key, "second", "a new password amber lanterns ford", new_identity=True)["public_key_hex"]
-    (fresh_node / "node_ed25519.key").unlink()          # lost again, before any start
-    (fresh_node / "node_info.json").unlink()
+    for name in ("node_ed25519.key", "node_info.json", "account.json"):   # lost again, before any start
+        (fresh_node / name).unlink()
     device_auth.prepare_setup()
     lost_key.code = device_auth._setup_code
-    with pytest.raises(device_auth.AnotherIdentity):
+    with pytest.raises(Another):
         _bring_back(lost_key, "owner", "the right one")
+    _no(lost_key)
     assert _bring_back(lost_key, "second", "a new password amber lanterns ford")["public_key_hex"] == made
 
 
@@ -1214,12 +1338,36 @@ def test_a_start_puts_its_key_on_record_or_says_once_that_the_identity_is_missin
     assert lost_key.record() == "ab" * 32
 
 
-def test_the_door_names_another_identity(lost_key, fresh_node, doors):
+def test_the_door_asks_about_another_identity_when_its_key_is_made(lost_key, fresh_node, doors,
+                                                                    monkeypatch):
+    """The setup's browser is signed in at once; the question comes with the
+    key, and nothing is placed until the owner answers."""
+    from routers import auth
+    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     lost_key.signed_by(_key_of("owner", "the right one"))
     r = doors.post("/api/auth/create-account", json=_seal(doors.get("/api/auth/handshake").json(), {
-        "username": "owner", "password": "the wrong one", "setup_code": lost_key.code}))
-    assert r.status_code == 409 and r.headers["x-sautium-auth-error"] == "another-identity"
+        "username": "owner", "password": "a different one amber lanterns ford", "setup_code": lost_key.code}))
+    assert r.status_code == 200
+    lost_key.births.finish()
+    status = doors.get("/api/auth/status").json()
+    assert status["key"] == "another_identity" and status["onboarding"] is False
     assert not (fresh_node / "node_ed25519.key").exists()
+    monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
+                                              for name in ("login", "signed")})
+    monkeypatch.setattr(device_auth, "_record_failure", lambda _key, n=1: n)
+
+    def answer(make, password):
+        return doors.post("/api/auth/new-identity", json=_seal(doors.get("/api/auth/handshake").json(),
+                                                               {"make": make, "password": password}))
+    # Only on the account's own password: who the node is changes on the person's word
+    assert answer(True, "a guess").status_code == 403
+    assert answer(True, None).status_code in (403, 422)
+    assert not (fresh_node / "node_ed25519.key").exists()
+    r = answer(True, "a different one amber lanterns ford")
+    assert r.status_code == 200 and set(r.json()) == {"nonce", "box"}      # the answer sealed
+    assert (fresh_node / "node_ed25519.key").exists() and lost_key.arrived
+    with pytest.raises(device_auth.NothingHeld):                         # nothing waits any more
+        asyncio.run(device_auth.decide_new_identity(True))
 
 
 def _disk_full(*_a):
@@ -1237,6 +1385,8 @@ def test_a_fresh_nodes_setup_that_fails_at_its_placement_leaves_no_record(lost_k
     with pytest.raises(OSError):
         _bring_back(lost_key, "first", "a first password amber lanterns ford")
     assert lost_key.record() is None and not (fresh_node / "node_ed25519.key").exists()
+    assert not (fresh_node / "account.json").exists()  # no account is left without its key
+    lost_key.code = device_auth._setup_code
     monkeypatch.setattr(node_identity, "_link_exclusive", real)
     device_auth.record_identity_state()                 # the owner frees the disk and restarts
     assert device_auth.identity_missing() is False
@@ -1257,14 +1407,15 @@ def test_another_identity_that_fails_at_its_placement_keeps_the_lost_keys_record
     with pytest.raises(OSError):
         _bring_back(lost_key, "owner", "a typo amber lanterns ford", new_identity=True)
     assert lost_key.record() == lost
+    lost_key.code = device_auth._setup_code
     monkeypatch.setattr(node_identity, "_link_exclusive", real)
     assert _bring_back(lost_key, "owner", "the right one")["public_key_hex"] == lost
 
 
 def test_a_key_that_lands_meanwhile_is_the_one_on_record(lost_key, fresh_node, monkeypatch):
     """A key placed by another process between the setup's check and its
-    link: the setup refuses (an account exists) and the key that landed is
-    the one on record, not the typed pair's."""
+    link: the one made is dropped and the key that landed is the one on
+    record, not the typed pair's."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     from desktop import node_identity
@@ -1279,9 +1430,9 @@ def test_a_key_that_lands_meanwhile_is_the_one_on_record(lost_key, fresh_node, m
                                              serialization.NoEncryption()))
         real(tmp, key, pem)
     monkeypatch.setattr(node_identity, "_link_exclusive", another_process_first)
-    with pytest.raises(device_auth.AccountExists):
-        _bring_back(lost_key, "first", "a first password amber lanterns ford")
-    assert lost_key.record() == landed_pub
+    asyncio.run(device_auth.create_account("first", "a first password amber lanterns ford", lost_key.code))
+    lost_key.births.finish()
+    assert lost_key.record() == landed_pub and lost_key.arrived == []
 
 
 def test_a_temporary_name_that_cannot_be_removed_leaves_the_setup_made(lost_key, fresh_node,
@@ -1308,19 +1459,14 @@ def test_the_signing_key_of_record_stays_out_of_the_life_merge():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_the_page_asks_for_another_identity_only_with_the_persons_word():
-    create = "return await window.Sautium.auth.createAccount('owner', 'a password', 'AAAA-BBBB-CCCC'"
-    another = [[409, {"X-Sautium-Auth-Error": "another-identity"}]]
-    out = _page(create + ")", unsigned=True, store=dict(_SIGNED_IN),
-                replies={"/api/auth/create-account": another})
-    assert out["result"] == {"anotherIdentity": True}
-    assert out["sent"]["/api/auth/create-account"][0]["new_identity"] is False
-    out = _page(create + ", true)", unsigned=True, store=dict(_SIGNED_IN),
-                replies={"/api/auth/create-account": [[200]]})
-    assert out["result"] is True and out["sent"]["/api/auth/create-account"][0]["new_identity"] is True
-    out = _page(create + ")", unsigned=True, store=dict(_SIGNED_IN),
+def test_the_page_never_asks_for_another_identity_at_the_setup():
+    """The question comes with the key (askAnotherIdentity), so the setup
+    sends no word for it; a node with an account already says so."""
+    create = "return await window.Sautium.auth.createAccount('owner', 'a password', 'AAAA-BBBB-CCCC')"
+    out = _page(create, unsigned=True, store=dict(_SIGNED_IN),
                 replies={"/api/auth/create-account": [[409]]})
     assert out["result"] == "This node already has an account — reload."
+    assert "new_identity" not in out["sent"]["/api/auth/create-account"][0]
 
 
 _RESTORE_GATE = r"""
@@ -1370,12 +1516,8 @@ ctx.window.fetch = async (input, init) => {
                                Uint8Array.from(Buffer.from(env.nonce, 'base64')), client, server.secretKey);
   const body = JSON.parse(Buffer.from(opened).toString());
   sent.push(body);
-  if (!body.new_identity) {
-    return new Response('{"detail":"x"}', { status: 409,
-                                            headers: { 'X-Sautium-Auth-Error': 'another-identity' } });
-  }
   const nonce = nacl.randomBytes(24);
-  const reply = nacl.box(Buffer.from(JSON.stringify({ token: 't', public_key_hex: 'ab'.repeat(32) })),
+  const reply = nacl.box(Buffer.from(JSON.stringify({ token: 't', username: body.username, key: 'deriving' })),
                          nonce, client, server.secretKey);
   return new Response(JSON.stringify({ nonce: Buffer.from(nonce).toString('base64'),
                                        box: Buffer.from(reply).toString('base64') }));
@@ -1415,20 +1557,20 @@ _MISSING = {"onboarding": True, "identity_missing": True, "password_login": Fals
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_the_gate_brings_an_identity_back_and_makes_another_only_after_saying_what_it_costs():
-    out = _restore_gate({**_MISSING, "pin_door": True}, confirm=False)
+def test_the_gate_brings_an_identity_back_and_asks_nothing_before_its_key():
+    """The setup's account exists at once and the browser is in; whether the
+    pair is the identity the records name is asked when its key is made
+    (askAnotherIdentity), never at the form."""
+    out = _restore_gate({**_MISSING, "pin_door": True, "launcher": True}, confirm=False)
     assert out["title"] == "Bring this node's identity back" and out["button"] == "Bring it back"
     assert "the same pair makes the same identity" in out["msg"]
     assert "Sautium's window names" in out["msg"] and "docker logs" not in out["msg"]
-    [asked] = out["confirms"]
-    assert asked["focusCancel"] is True and asked["confirmText"] == "Make a new identity"
-    assert "deletes the features and instruments it signed" in asked["message"]
-    assert [body["new_identity"] for body in out["sent"]] == [False]
-    assert out["after"].startswith("Nothing was made") and out["reloaded"] is False
-    out = _restore_gate({**_MISSING, "pin_door": False}, confirm=True)
+    assert out["confirms"] == [] and out["reloaded"] is True
+    assert [{k: v for k, v in body.items() if k != "_pad"} for body in out["sent"]] == [
+        {"username": "owner", "password": "a password", "setup_code": "AAAA-BBBB-CCCC",
+         "keep": False, "email": ""}]
+    out = _restore_gate({**_MISSING, "pin_door": True, "launcher": False}, confirm=True)
     assert "docker logs" in out["msg"]
-    assert [body["new_identity"] for body in out["sent"]] == [False, True]
-    assert {body["username"] for body in out["sent"]} == {"owner"} and out["reloaded"] is True
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -1436,7 +1578,7 @@ def test_a_browser_that_knew_a_node_here_is_asked_in_the_words_of_bringing_it_ba
     """In the restore form the node answering with no identity is the one
     whose identity is missing: the question says so, and its way on is
     bringing it back; nothing is sent before the answer."""
-    out = _restore_gate({**_MISSING, "pin_door": True}, confirm=False,
+    out = _restore_gate({**_MISSING, "pin_door": True, "launcher": True}, confirm=False,
                         store={"sautium.node_pubkey": "cd" * 32})
     assert out["sent"] == [] and out["confirms"] == []
     assert out["after_title"] == "This node's identity is missing" and out["accept"] == "Bring it back"
@@ -1462,7 +1604,7 @@ def test_a_door_s_word_on_the_password_comes_back_as_such():
     for the next page to say once."""
     weak = {"password": {"zone": "word", "seconds": 300000, "words": "about 3 days"}}
     create = ("return await window.Sautium.auth.createAccount('owner', 'qmzvhwkt', 'AAAA-BBBB', "
-              "false, true, 'a@b.example')")
+              "true, 'a@b.example')")
     out = _page("window.Sautium.auth.acceptNode(''); " + create, unsigned=True, store=dict(_SIGNED_IN),
                 replies={"/api/auth/create-account": [[200, None, weak]]})
     assert out["result"] == {"weak": weak["password"]}
@@ -1478,3 +1620,81 @@ def test_a_door_s_word_on_the_password_comes_back_as_such():
                 "return [ok, window.Sautium.auth.takePasswordTold(), window.Sautium.auth.takePasswordTold()]",
                 store=dict(_SIGNED_IN), replies={"/api/auth/login": [[200, None, told]]})
     assert out["result"] == [True, weak["password"], None]
+
+
+# --- an empty password: the random identity (SEC-S5 §20) -----------------------
+
+def test_the_setup_takes_an_empty_password_as_a_random_key_at_once(fresh_node, births, monkeypatch):
+    """No password: a random key, placed at once — nothing derives it, ever;
+    no sign-in hash; its door the host's code."""
+    from routers import p2p as p2p_router
+    arrived = []
+    monkeypatch.setattr(device_auth, "_key_arrived", arrived.append)
+    monkeypatch.setattr(device_auth, "_record_signing_key", lambda pubkey: None)
+    monkeypatch.setattr(p2p_router, "_publish_identity_state", lambda state: None)
+    device_auth.prepare_setup()
+    made = asyncio.run(device_auth.create_account("owner", "", device_auth._setup_code))
+    assert made["key"] == "ready" and made["invite_code"].startswith("owner#")
+    assert births == [] and arrived == [made["public_key_hex"]]
+    account = json.loads((fresh_node / "account.json").read_text())
+    assert account["anonymous"] is True and account["signin"] is None
+    assert device_auth.password_door() is False and device_auth.account_anonymous() is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_new_password_field_says_which_identity_it_makes():
+    """Empty: the random identity and where it lives, in its host's words;
+    typed: what a password makes, and its price."""
+    js = (ROOT / "backend" / "static" / "auth.js").read_text(encoding="utf-8")
+    assert 'what.textContent = field.value ? PASSWORD_MAKES : randomIdentityWords();' in js
+    assert "make your identity again on any machine" in js
+    assert "./sautium pair, or python -m pairing in its container" in js
+    assert "in the identity file you export" in js
+    wizard = (ROOT / "desktop" / "wizard.py").read_text(encoding="utf-8")
+    assert "what.configure(text=PASSWORD_MAKES if text else RANDOM_IDENTITY)" in wizard
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_signed_in_page_answers_about_the_key_on_the_tokens_word():
+    """Review round 2: a page that booted with its token never asked the
+    status; the node, its key being made or stopped, answers unsigned — the
+    token vouches for that answer, and only for the node's."""
+    out = _page("return await window.Sautium.auth.resumeKey('pw')", unsigned=True, store=dict(_SIGNED_IN),
+                replies={"/api/auth/resume-key": [[200, None, {"key": "deriving"}]]})
+    assert out["result"] == {"ok": True, "data": {"key": "deriving"}}
+    assert out["store"]["sautium.pin_pending"] == "1"
+    out = _page("return await window.Sautium.auth.resumeKey('pw')", unsigned=True, store=dict(_SIGNED_IN),
+                issued="", replies={"/api/auth/resume-key": [[200]]})
+    assert "/api/auth/resume-key" not in out["asked"]
+
+
+def test_a_node_with_no_password_door_counts_no_wrong_password(monkeypatch):
+    """An account a plain identity file brought (no sign-in hash): a password
+    at its login is refused for nothing — no count, no notice, no shut door."""
+    from desktop import node_identity
+    account = {**node_identity.new_account("owner", "x", source="file"), "signin": None, "anonymous": False}
+    monkeypatch.setattr(device_auth, "_account", lambda: account)
+    monkeypatch.setattr(device_auth, "older_identity", lambda: False)
+    monkeypatch.setattr(device_auth, "_doors", {name: {"failures": 0, "shut_until": 0.0, "in_flight": 0}
+                                              for name in ("login", "signed")})
+    monkeypatch.setattr(device_auth, "_record_failure", lambda *a: pytest.fail("counted"))
+    assert asyncio.run(device_auth.password_tried("a guess")) is False
+    assert device_auth._doors["login"]["failures"] == 0
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_a_browser_that_knew_the_node_before_it_was_made_anew_is_asked_not_refused():
+    """Review round 3: pinned to an earlier identity, the node's unsigned
+    answer while its new key is made is the question of a node that changed —
+    and once the person says set it up, it signs in."""
+    known = {**_SIGNED_IN, "sautium.node_pubkey": "cd" * 32}
+    status = "await window.Sautium.auth.status(); "
+    out = _page(status + "return await window.Sautium.auth.login('x')", unsigned=True, store=dict(known),
+                status={"key": "deriving"}, replies={"/api/auth/login": [[200]]})
+    assert out["thrown"] == "NodeChanged: node identity changed"
+    assert "/api/auth/login" not in out["asked"]
+    out = _page(status + "window.Sautium.auth.acceptNode(''); return await window.Sautium.auth.login('x')",
+                unsigned=True, store=dict(known), status={"key": "deriving"},
+                replies={"/api/auth/login": [[200]]})
+    assert out["result"] is True and "sautium.node_pubkey" not in out["store"]
+    assert out["store"]["sautium.pin_pending"] == "1"

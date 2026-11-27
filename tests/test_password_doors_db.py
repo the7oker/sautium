@@ -2,7 +2,7 @@
 edge (SEC-S2): refused under an hour of one GPU, kept under a year only on
 the person's word, nothing asked above — the Web UI's setup (and its restore,
 which brings the identity of record back whatever its password), an identity
-change, a start that makes its account from .env. An existing account is told
+change. An existing account is told
 its time once at a sign-in, and only the key estimated is kept. The pairing
 code is 140 bits, never burned, a wrong one told. Every box is padded, and no
 log holds a password. On a real database; made-up passwords only."""
@@ -33,9 +33,9 @@ import device_auth  # noqa: E402
 import p2p_identity  # noqa: E402
 from desktop import node_identity, password_strength  # noqa: E402
 
-REFUSED = "sunshine"                     # 47 guesses
-WORD = "qmzvhwkt"                        # 10⁸: about 4 days of one GPU today
-CLEAR = "tangerine volcano quiet"        # about 2 centuries
+REFUSED = "sunshine"                     # 47 guesses: about 2 minutes of one GPU at the key's cost
+WORD = "Sunshine1!"                      # about a day
+CLEAR = "tangerine volcano quiet"        # beyond ten thousand years
 SENTINEL = "Qz7vXk2Lp9WmTr4"             # the password a log must never hold
 
 
@@ -83,91 +83,96 @@ def _setting(conn, key: str):
     return row[0] if row else None
 
 
-@pytest.fixture
-def derive(monkeypatch):
-    calls = []
-    state = SimpleNamespace(key=None, calls=calls)
-
-    def identity(username, password, email=""):
-        calls.append(username)
-        return {**state.key.info(), "username": username}
-
-    monkeypatch.setattr(p2p_identity, "derive_identity", identity)
-    monkeypatch.setattr(p2p_identity, "derive_private_key", lambda u, p: state.key.key)
-    monkeypatch.setattr(device_auth, "_record_signing_key", lambda _pubkey: None)
-    return state
-
-
 def _settings(monkeypatch, **kw):
-    for k, v in {"sautium_master": False, "p2p_username": "", "p2p_password": "", "p2p_email": "",
+    for k, v in {"sautium_master": False,
                  "p2p_identity_dir": "", **kw}.items():
         monkeypatch.setattr(config.settings, k, v)
 
 
+def _pubkey(username, password):
+    return node_identity.public_hex(node_identity.key_from_seed(
+        node_identity.derive_seed(username, password)))
+
+
+@pytest.fixture
+def setup(db, births, tmp_path, monkeypatch):
+    """The Web UI's setup on a node with no account in `tmp_path`: `create`
+    makes the account (its key started, `births`), `info()` reads what its
+    key's end placed."""
+    _settings(monkeypatch, p2p_identity_dir=str(tmp_path))
+    monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
+    monkeypatch.setattr(device_auth, "_held", None)
+    monkeypatch.setattr(device_auth, "_key_arrived", lambda pubkey: None)
+    monkeypatch.setitem(device_auth._doors, "setup", {"failures": 0, "shut_until": 0.0, "in_flight": 0})
+    from routers import p2p as p2p_router
+    monkeypatch.setattr(p2p_router, "_publish_identity_state", lambda state: None)
+
+    def create(username, password, **kw):
+        device_auth.prepare_setup()
+        return asyncio.run(device_auth.create_account(username, password, device_auth._setup_code, **kw))
+
+    def info():
+        return json.loads((tmp_path / "node_info.json").read_text())
+    return SimpleNamespace(create=create, info=info, births=births, folder=tmp_path)
+
+
 # --- the Web UI's setup: a new identity -----------------------------------------
 
-def test_a_password_under_an_hour_is_refused_before_any_derivation(db, derive, tmp_path, monkeypatch):
-    _settings(monkeypatch)
-    derive.key = _Key("alice")
+def test_a_password_under_an_hour_is_refused_before_anything_is_made(setup):
     with pytest.raises(device_auth.WeakPassword) as e:
-        device_auth._write_identity(tmp_path, "alice", REFUSED)
+        setup.create("alice", REFUSED)
     assert e.value.verdict["zone"] == "refused"
-    assert derive.calls == [] and not (tmp_path / "node_ed25519.key").exists()
+    assert setup.births == [] and not (setup.folder / "account.json").exists()
 
 
-def test_a_password_under_a_year_is_made_only_on_the_person_s_word(db, derive, tmp_path, monkeypatch):
-    _settings(monkeypatch)
-    derive.key = _Key("alice")
+def test_a_password_under_a_year_is_made_only_on_the_person_s_word(setup):
     with pytest.raises(device_auth.WeakPassword) as e:
-        device_auth._write_identity(tmp_path, "alice", WORD)
-    assert e.value.verdict["zone"] == "word" and e.value.verdict["words"] == "about 3 days"
-    assert derive.calls == []
-    info = device_auth._write_identity(tmp_path, "alice", WORD, keep=True)
-    assert info["public_key_hex"] == derive.key.pub
+        setup.create("alice", WORD)
+    assert e.value.verdict["zone"] == "word" and e.value.verdict["words"] == "about 1 day"
+    assert setup.births == []
+    assert setup.create("alice", WORD, keep=True) == {"username": "alice", "key": "deriving"}
+    setup.births.finish()
+    assert setup.info()["public_key_hex"] == _pubkey("alice", WORD)
 
 
-def test_a_password_above_a_year_asks_nothing(db, derive, tmp_path, monkeypatch):
-    _settings(monkeypatch)
-    derive.key = _Key("alice")
-    assert device_auth._write_identity(tmp_path, "alice", CLEAR)["username"] == "alice"
+def test_a_password_above_a_year_asks_nothing(setup):
+    assert setup.create("alice", CLEAR)["username"] == "alice"
 
 
-def test_the_nickname_and_the_email_typed_are_tried_first(db, derive, tmp_path, monkeypatch):
-    _settings(monkeypatch)
-    derive.key = _Key("zorbulon")
+def test_the_nickname_and_the_email_typed_are_tried_first(setup):
     assert password_strength.verdict("zorbulon1999")["zone"] == "clear"
     with pytest.raises(device_auth.WeakPassword) as e:
-        device_auth._write_identity(tmp_path, "zorbulon", "zorbulon1999")
-    assert e.value.verdict["zone"] == "refused"
-    assert password_strength.verdict("quixotic1999")["zone"] == "word"
+        setup.create("zorbulon", "zorbulon1999")
+    assert e.value.verdict["zone"] == "word"
+    assert password_strength.verdict("quixotic")["zone"] == "word"
     with pytest.raises(device_auth.WeakPassword) as e:
-        device_auth._write_identity(tmp_path, "someone", "quixotic1999", keep=True,
-                                    email="quixotic@example.org")
+        setup.create("someone", "quixotic", keep=True, email="quixotic@example.org")
     assert e.value.verdict["zone"] == "refused"
 
 
 # --- the Web UI's setup: bringing the identity of record back -------------------
 
-def test_the_identity_of_record_comes_back_whatever_its_password(db, derive, tmp_path, monkeypatch):
-    _settings(monkeypatch)
-    mine = _Key("alice")
-    _record(db, mine.pub)
-    derive.key = mine
-    info = device_auth._write_identity(tmp_path, "alice", REFUSED)
-    assert info["public_key_hex"] == mine.pub
+def test_the_identity_of_record_comes_back_whatever_its_password(db, setup):
+    _record(db, _pubkey("alice", REFUSED))
+    setup.create("alice", REFUSED)
+    setup.births.finish()
+    assert setup.info()["public_key_hex"] == _pubkey("alice", REFUSED)
 
 
-def test_another_identity_over_the_records_is_gated_after_its_derivation(db, derive, tmp_path,
-                                                                         monkeypatch):
-    _settings(monkeypatch)
-    _record(db, _Key("alice").pub)
-    derive.key = _Key("alice")                    # the pair makes another key
-    with pytest.raises(device_auth.AnotherIdentity):
-        device_auth._write_identity(tmp_path, "alice", REFUSED)
+def test_another_identity_over_the_records_is_gated_at_the_owner_s_word(db, setup):
+    _record(db, _Key("alice").pub)                      # the pair makes another key
+    setup.create("alice", REFUSED)
+    setup.births.finish()
+    assert device_auth.key_state() == "another_identity"
     with pytest.raises(device_auth.WeakPassword):
-        device_auth._write_identity(tmp_path, "alice", REFUSED, new_identity=True)
-    assert derive.calls == ["alice", "alice"] and not (tmp_path / "node_ed25519.key").exists()
-    assert device_auth._write_identity(tmp_path, "alice", CLEAR, new_identity=True)
+        asyncio.run(device_auth.decide_new_identity(True))
+    asyncio.run(device_auth.decide_new_identity(False))
+    with pytest.raises(device_auth.WeakPassword):
+        setup.create("alice", REFUSED, new_identity=True)
+    assert not (setup.folder / "node_ed25519.key").exists()
+    setup.create("alice", CLEAR, new_identity=True)
+    setup.births.finish()
+    assert setup.info()["public_key_hex"] == _pubkey("alice", CLEAR)
 
 
 # --- the route: the refusal sealed, a phrase beside it, the setup code kept ----
@@ -201,8 +206,8 @@ def doors(monkeypatch):
     return TestClient(app)
 
 
-def test_the_setup_door_seals_its_refusal_with_a_phrase_and_keeps_the_code(db, derive, doors,
-                                                                           tmp_path, monkeypatch):
+def test_the_setup_door_seals_its_refusal_with_a_phrase_and_keeps_the_code(db, doors, tmp_path,
+                                                                           monkeypatch):
     _settings(monkeypatch, p2p_identity_dir=str(tmp_path))
     device_auth.prepare_setup()
     code = device_auth._setup_code
@@ -224,7 +229,7 @@ def test_the_setup_door_seals_its_refusal_with_a_phrase_and_keeps_the_code(db, d
 def test_the_setup_meter_answers_only_while_the_node_has_no_account(db, doors, tmp_path, monkeypatch):
     _settings(monkeypatch, p2p_identity_dir=str(tmp_path))
     status, said, _ = _call(doors, "/api/auth/setup-estimate",
-                            {"password": "zorbulon1999", "username": "zorbulon", "email": ""})
+                            {"password": "zorbulon", "username": "zorbulon", "email": ""})
     assert status == 200 and said["zone"] == "refused"
     status, said, _ = _call(doors, "/api/auth/setup-phrase", {})
     assert status == 200 and len(said["phrase"].split("-")) == 4
@@ -242,10 +247,10 @@ def test_one_setup_estimate_at_a_time(db, doors, tmp_path, monkeypatch):
 
 def test_the_signed_meter_tries_the_account_s_email(db, doors, monkeypatch):
     monkeypatch.setattr(device_auth, "account_email", lambda: "quixotic@example.org")
-    _, said, _ = _call(doors, "/api/auth/estimate", {"password": "quixotic1999", "username": "x"})
+    _, said, _ = _call(doors, "/api/auth/estimate", {"password": "quixotic", "username": "x"})
     assert said["zone"] == "refused"
     monkeypatch.setattr(device_auth, "account_email", lambda: "")
-    _, said, _ = _call(doors, "/api/auth/estimate", {"password": "quixotic1999", "username": "x"})
+    _, said, _ = _call(doors, "/api/auth/estimate", {"password": "quixotic", "username": "x"})
     assert said["zone"] == "word"
 
 
@@ -267,30 +272,42 @@ def test_the_page_pads_what_it_seals_to_the_same_bucket():
 
 # --- an identity change ----------------------------------------------------------
 
-def test_a_new_password_at_an_identity_change_passes_the_same_edge(db, tmp_path, monkeypatch):
+def _changing(tmp_path, monkeypatch):
+    """A node whose account and key are made, its step-up said yes to."""
     d = tmp_path / "id"
     d.mkdir()
     (d / "node_info.json").write_text(json.dumps({"username": "alice", "email": "quixotic@example.org"}))
+    node_identity.write_account(d, {**node_identity.new_account(
+        "alice", "the current one amber lanterns", source="form", email="quixotic@example.org"),
+        "pubkey": "ab" * 32})
     _settings(monkeypatch, p2p_identity_dir=str(d))
-    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
-    rotated = []
+    monkeypatch.setattr(device_auth, "key_state", lambda: "ready")
+    monkeypatch.setattr(device_auth, "_create_lock", asyncio.Lock())
 
     async def stepped(password, pin):
         return None
-
-    async def rotate(d_, username, password):
-        rotated.append(password)
-        return {"info": {"public_key_hex": "ab" * 32}}
     monkeypatch.setattr(device_auth, "step_up", stepped)
-    monkeypatch.setattr(device_auth, "_rotate_locked", rotate)
     monkeypatch.setattr(device_auth, "_after_rotation", lambda pubkey: None)
-    for password, keep in ((REFUSED, True), (WORD, False), ("alice1999", True), ("quixotic1999", True)):
+    # The new key's end, on a loop of its own as the backend's would be
+    monkeypatch.setattr(device_auth, "_on_loop", lambda follow: asyncio.run(follow()))
+    return d
+
+
+def test_a_new_password_at_an_identity_change_passes_the_same_edge(db, births, tmp_path, monkeypatch):
+    _changing(tmp_path, monkeypatch)
+    random = []
+    monkeypatch.setattr(device_auth, "_rotate_to",
+                        lambda d_, username, key, anonymous, signin: random.append(anonymous) or {
+                            "public_key_hex": "cd" * 32})
+    for password, keep in ((REFUSED, True), (WORD, False), ("alice", True), ("quixotic", True)):
         with pytest.raises(device_auth.WeakPassword):
             asyncio.run(device_auth.rotate_identity("alice", password, "current", keep=keep))
-    assert rotated == []
+    assert births == []
     asyncio.run(device_auth.rotate_identity("alice", WORD, "current", keep=True))
-    asyncio.run(device_auth.rotate_identity("alice", "", "current"))          # minted: no edge
-    assert rotated == [WORD, ""]
+    assert [b["password"] for b in births] == [WORD]
+    births.finish()
+    asyncio.run(device_auth.rotate_identity("alice", "", "current"))          # a random key: no edge
+    assert random == [False, True]
 
 
 # --- an existing account, told once ----------------------------------------------
@@ -301,7 +318,7 @@ def test_a_sign_in_tells_a_weak_password_s_time_once_and_keeps_only_the_key(db, 
     monkeypatch.setattr(device_auth, "account_username", lambda: "alice")
     monkeypatch.setattr(device_auth, "account_email", lambda: "")
     said = device_auth.told_once(WORD)
-    assert said["zone"] == "word" and said["words"] == "about 3 days"
+    assert said["zone"] == "word" and said["words"] == "about 1 day"
     assert _setting(db, device_auth.PASSWORD_ESTIMATED_KEY) == key["pub"]
     assert device_auth.told_once(WORD) is None
     key["pub"] = "cd" * 32                                   # a new password is a new key
@@ -309,26 +326,6 @@ def test_a_sign_in_tells_a_weak_password_s_time_once_and_keeps_only_the_key(db, 
     key["pub"] = "ef" * 32
     assert device_auth.told_once(CLEAR) is None
     assert _setting(db, device_auth.PASSWORD_ESTIMATED_KEY) == key["pub"]   # strong: the same record
-
-
-# --- a start that makes its account from .env -----------------------------------
-
-def test_a_start_making_its_account_from_a_weak_env_password_refuses(db, tmp_path, monkeypatch):
-    _settings(monkeypatch, p2p_username="alice", p2p_password=REFUSED, p2p_identity_dir=str(tmp_path))
-    refusal = device_auth.env_password_refusal()
-    assert refusal.startswith("P2P_PASSWORD would be found within an hour") and REFUSED not in refusal
-    _settings(monkeypatch, p2p_username="alice", p2p_password=WORD, p2p_identity_dir=str(tmp_path))
-    assert device_auth.env_password_refusal() is None          # the operator's .env is its word
-
-
-def test_a_node_its_env_made_before_keeps_starting(db, tmp_path, monkeypatch):
-    _settings(monkeypatch, p2p_username="alice", p2p_password=REFUSED, p2p_identity_dir=str(tmp_path))
-    _record(db, _Key("alice").pub)
-    assert device_auth.env_password_refusal() is None
-    with db.cursor() as cur:
-        cur.execute("DELETE FROM user_settings WHERE key = %s", (node_identity.SIGNING_KEY_SETTING,))
-    (tmp_path / "node_ed25519.key").write_text("a key")
-    assert device_auth.env_password_refusal() is None
 
 
 # --- the pairing code (A3) -------------------------------------------------------
@@ -399,7 +396,7 @@ def test_random_characters_between_symbols_keep_their_price():
         assert password_strength.estimate(password).zone == "clear", password
     for title in ("harry potter and the philosopher's stone", "the-lord-of-the-rings",
                   "make-america-great-again!", "ocean's eleven", "Schindler's List"):
-        assert password_strength.estimate(title).zone == "refused", title
+        assert password_strength.estimate(title).zone != "clear", title
 
 
 def test_a_code_this_node_minted_and_let_expire_is_not_told(db, monkeypatch):
@@ -421,22 +418,24 @@ def test_the_wrong_codes_are_a_notice_of_their_own(db):
 
 # --- nothing of a password in a log ----------------------------------------------
 
-def test_no_door_logs_a_password_or_its_time(db, derive, doors, tmp_path, monkeypatch, caplog):
+def test_no_door_logs_a_password_or_its_time(db, births, doors, tmp_path, monkeypatch, caplog):
     from routers import auth
-    _settings(monkeypatch, p2p_identity_dir=str(tmp_path), p2p_username="alice", p2p_password=SENTINEL[:6])
-    derive.key = _Key("alice")
+    from routers import p2p as p2p_router
+    _settings(monkeypatch, p2p_identity_dir=str(tmp_path))
+    monkeypatch.setattr(device_auth, "_key_arrived", lambda pubkey: None)
+    monkeypatch.setattr(p2p_router, "_publish_identity_state", lambda state: None)
+    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
     caplog.set_level("DEBUG")
-    assert device_auth.env_password_refusal()                         # the env's door, weak
     device_auth.prepare_setup()
     code = device_auth._setup_code
-    for password in (SENTINEL[:6], SENTINEL):
+    for password in (SENTINEL[:6], SENTINEL, REFUSED):
         _call(doors, "/api/auth/setup-estimate", {"password": password, "username": "alice"})
-    # refused at the door (made, it would start the node's workers: not here)
+    # refused at the door: under a year, and no word given
     _call(doors, "/api/auth/create-account", {"username": "alice", "password": SENTINEL[:6],
                                               "setup_code": code})
-    device_auth._write_identity(tmp_path, "alice", SENTINEL)          # made
-    monkeypatch.setattr(device_auth, "_expected_pubkey", lambda: "ab" * 32)
-    monkeypatch.setattr(auth, "_secret", lambda: b"node secret")
+    _call(doors, "/api/auth/create-account", {"username": "alice", "password": SENTINEL,
+                                              "setup_code": code})       # made
+    births.finish()
 
     async def right(password, **_kw):
         return True
@@ -444,7 +443,8 @@ def test_no_door_logs_a_password_or_its_time(db, derive, doors, tmp_path, monkey
     _call(doors, "/api/auth/login", {"password": SENTINEL[:6]})      # told once, at the sign-in
     text = caplog.text
     assert not any(SENTINEL[i:i + 3] in text for i in range(len(SENTINEL) - 2))
-    for weak in (SENTINEL[:6],):
+    assert REFUSED not in text
+    for weak in (SENTINEL[:6], REFUSED):
         said = password_strength.verdict(weak, ("alice",))
         assert said["words"] not in text and said["meter"] not in text
 
@@ -461,7 +461,7 @@ def test_a_sign_in_carries_the_time_once_in_its_sealed_answer(db, doors, monkeyp
         return True
     monkeypatch.setattr(device_auth, "password_tried", right)
     _, said, _ = _call(doors, "/api/auth/login", {"password": WORD})
-    assert said["token"] and said["password"]["zone"] == "word" and said["password"]["env"] is True
+    assert said["token"] and said["password"]["zone"] == "word"
     _, said, _ = _call(doors, "/api/auth/login", {"password": WORD})
     assert "password" not in said
 
@@ -471,16 +471,16 @@ def test_a_change_s_refusal_is_sealed_and_changes_nothing(db, doors, tmp_path, m
     d.mkdir()
     (d / "node_info.json").write_text(json.dumps({"username": "alice"}))
     _settings(monkeypatch, p2p_identity_dir=str(d))
-    monkeypatch.setattr(device_auth, "account_configured", lambda: True)
+    node_identity.write_account(d, {**node_identity.new_account(
+        "alice", "the current one amber lanterns", source="form"), "pubkey": "ab" * 32})
+    monkeypatch.setattr(device_auth, "key_state", lambda: "ready")
     monkeypatch.setattr(device_auth, "pin_door", lambda: True)
 
     async def stepped(password, pin):
         return None
-
-    async def rotate(*a):
-        raise AssertionError("rotated")
     monkeypatch.setattr(device_auth, "step_up", stepped)
-    monkeypatch.setattr(device_auth, "_rotate_locked", rotate)
+    monkeypatch.setattr(device_auth, "_start_birth", lambda *a: pytest.fail("a key started"))
+    monkeypatch.setattr(device_auth, "_rotate_to", lambda *a: pytest.fail("rotated"))
     status, said, r = _call(doors, "/api/auth/change-identity",
                             {"username": "alice", "password": REFUSED, "current_password": "x"})
     assert status == 200 and said["password"]["zone"] == "refused" and said["password"]["offer"]["phrase"]
@@ -488,7 +488,7 @@ def test_a_change_s_refusal_is_sealed_and_changes_nothing(db, doors, tmp_path, m
 
 
 @pytest.mark.parametrize("password", [REFUSED, WORD, CLEAR, "Sunshine1!", "Kyiv2025", "ocean's eleven"])
-def test_the_meter_and_the_door_read_one_number(db, derive, doors, tmp_path, monkeypatch, password):
+def test_the_meter_and_the_door_read_one_number(db, doors, tmp_path, monkeypatch, password):
     _settings(monkeypatch, p2p_identity_dir=str(tmp_path))
     _, meter, _ = _call(doors, "/api/auth/setup-estimate", {"password": password, "username": "alice"})
     try:

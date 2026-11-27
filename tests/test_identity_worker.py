@@ -172,10 +172,8 @@ def node(scratch_dsn, tmp_path, monkeypatch):
     folder = tmp_path / "node_identity"
     folder.mkdir()
     for key, value in dict(p2p_identity_dir=str(folder), p2p_enabled=True, p2p_sync_port=8801,
-                           p2p_listen_port=0, p2p_username="", p2p_password="", p2p_email="").items():
+                           p2p_listen_port=0).items():
         monkeypatch.setattr(settings, key, value)
-    monkeypatch.setattr(p2p_identity, "ARGON2_TIME_COST", 1)
-    monkeypatch.setattr(p2p_identity, "ARGON2_MEMORY_COST", 8 * 1024)
     monkeypatch.setitem(identity_pow.POW_PARAMS, 1, TEST_PARAMS)
     monkeypatch.setitem(identity_proof.ensure_identity_proof.__kwdefaults__, "mem_guard_kib", 0)
     monkeypatch.setitem(identity_proof.ensure_identity_proof.__kwdefaults__, "pause_seconds", 0.05)
@@ -250,8 +248,15 @@ def _ready(state: dict) -> bool:
 
 
 def _account(node, username="owner", password="a password amber lanterns ford") -> dict:
-    """An account on disk, as the Web UI's setup leaves it."""
-    return device_auth._write_identity(node.folder, username, password)
+    """An account on disk, as the Web UI's setup leaves it once its key is
+    made (device_auth._born's placement), on record."""
+    from desktop import node_identity
+    account = node_identity.new_account(username, password, source="form")
+    node_identity.write_account(node.folder, account)
+    info = node_identity.place_account_key(
+        node.folder, node_identity.key_from_seed(node_identity.derive_seed(username, password)), account)
+    device_auth._record_signing_key(info["public_key_hex"])
+    return info
 
 
 def _proof_binds_its_certificate(node) -> dict:
@@ -279,8 +284,9 @@ def test_an_account_made_in_the_web_ui_earns_its_proof_with_no_restart(node, scr
         r = web.post("/api/auth/create-account", json=_seal(web.get("/api/auth/handshake").json(), {
             "username": "owner", "password": "a password amber lanterns ford", "setup_code": code}))
         assert r.status_code == 200, r.text
-        assert (node.folder / "node_info.json").exists()
+        # The account at once, its key in the background: the worker starts on the key
         state = _await_identity(scratch_dsn, _ready)
+        assert (node.folder / "node_info.json").exists()
     assert state["detail"] == "proof" and state["difficulty"] == EASY
     cert = _proof_binds_its_certificate(node)
     assert cert["method"] == "pow" and node.worker.issuances() == 1
@@ -327,7 +333,8 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
     real = p2p_router._publish_identity_state
 
     def publish(state):
-        if rotating.is_set() and state["difficulty"] != EASY:
+        if (rotating.is_set() and state.get("status") != "deriving"
+                and state.get("difficulty") != EASY):
             release.wait(30)                            # the old thread, held in its attempt
         published.append(dict(state))
         real(state)
@@ -342,7 +349,15 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
             workers.append(first)
             await asyncio.to_thread(_await_identity, scratch_dsn, lambda s: s.get("attempts", 0) > 2)
             rotating.set()
-            info = await device_auth.rotate_identity("second", "second password amber lanterns ford", "first password amber lanterns ford")
+            assert (await device_auth.rotate_identity(
+                "second", "second password amber lanterns ford",
+                "first password amber lanterns ford"))["key"] == "deriving"
+            # The new key is made in the background, the old identity whole till then
+            for _ in range(600):
+                info = json.loads((node.folder / "node_info.json").read_text())
+                if info["public_key_hex"] != old:
+                    break
+                await asyncio.sleep(0.05)
             await asyncio.sleep(1)
             held = (node.worker.asked_for(info["public_key_hex"].lower()),
                     any(s["difficulty"] == EASY for s in published), first.mining.done())
@@ -362,6 +377,7 @@ def test_an_identity_change_stops_the_old_worker_and_starts_one_for_the_new_key(
     assert info["public_key_hex"] != old
     cert = _proof_binds_its_certificate(node)
     assert cert["pubkey"] == info["public_key_hex"].lower()
+    published = [s for s in published if s.get("status") != "deriving"]
     olds = [i for i, s in enumerate(published) if s["difficulty"] != EASY]
     news = [i for i, s in enumerate(published) if s["difficulty"] == EASY]
     assert published[olds[-1]]["status"] == "stopped" and olds[-1] < news[0]

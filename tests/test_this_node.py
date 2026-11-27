@@ -604,9 +604,18 @@ def test_a_node_that_picks_its_folder_is_led_to_choose_one(trail, monkeypatch, t
     trail.db.execute("UPDATE user_profile SET email_verified = TRUE WHERE id = 1")
     monkeypatch.setattr(trail.settings, "sautium_library_roots", str(tmp_path))
     monkeypatch.setattr(trail.settings, "music_library_path", "")
+    trail.db.execute("TRUNCATE library_folders")
+    library_root_mod = pytest.importorskip("library_root")
+    library_root_mod.invalidate()
     assert trail.tasks() == ["music_folder"]
-    monkeypatch.setattr(trail.settings, "music_library_path", str(tmp_path))
-    assert trail.tasks() == []                         # cleared by the choice
+    (tmp_path / "Music").mkdir()
+    import library_root
+    library_root.add(str(tmp_path / "Music"))
+    try:
+        assert trail.tasks() == []                     # cleared by the first folder
+    finally:
+        trail.db.execute("TRUNCATE library_folders")
+        library_root.invalidate()
     assert "music_folder" not in trail.router._GUIDANCE_DISMISSIBLE
 
 
@@ -651,7 +660,7 @@ process.stdout.write(JSON.stringify(out));
     # The drawer's rows and the controls carry the marks
     assert 'data-go="more/profile" data-guide="verify_email this_node"' in SOURCE
     assert 'data-go="more/library" data-guide="analyse_library music_folder"' in SOURCE
-    assert 'data-action="choose-folder" data-guide="music_folder"' in SOURCE
+    assert 'data-action="add-folder" data-guide="music_folder"' in SOURCE
     assert '<div class="form-group" data-guide="this_node">' in SOURCE
     assert SOURCE.count('data-row="email" data-guide="verify_email"') == 2
 

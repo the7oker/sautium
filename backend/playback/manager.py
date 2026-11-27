@@ -833,14 +833,14 @@ class PlaybackManager:
         (db_migrate's hqp_choice_v1): nothing here reads "configured" as
         "chosen" any more.
 
-        What opens here is this process's own observation, so the music
-        folder is looked at first — before the persisted queue is restored
-        and its slots' ways in read (scanner.gone_prefixes). The look is the
-        notices' shared one, waited for no longer than its patience: what a
-        slower folder answers is recorded when it does, and that record is
-        the queue's event (reach_changed)."""
-        from scanner import folder_unreachable_now
-        folder_unreachable_now()
+        What opens here is this process's own observation, so each folder
+        of the library is looked at first — before the persisted queue is
+        restored and its slots' ways in read (scanner.gone_prefixes). The
+        looks are the notices' shared ones, waited for no longer than their
+        patience: what a slower folder answers is recorded when it does, and
+        that record is the queue's event (reach_changed)."""
+        from scanner import folders_unreachable_now
+        folders_unreachable_now()
         from routers.settings import _read
         from routers.player import _hqp_configured
         otype = _read("output.type") or "browser"
@@ -1345,7 +1345,6 @@ class PlaybackManager:
         it = items[0]
         missed: set = set()
         endpoint = getattr(backend, "endpoint_id", None)
-        root = settings.library_db_root() + "/"
         # read against the copies only where that says more than the slot does:
         # a file slot nothing was observed of is its own file
         fresh = bool(substitute.unopened()) or (not held and it.source.get("kind") != "file")
@@ -1361,14 +1360,18 @@ class PlaybackManager:
                     src = substitute.native_plays([it], backend.id, endpoint)[0] or it.source
                 src = src.get("file", src)      # a file HQPlayer is handed prepared is that file
                 path = src.get("path") if src.get("kind") == "file" else None
-                if (path is None or path in missed or not path.startswith(root)
+                if (path is None or path in missed
                         or any(path.startswith(g) for g in gone_prefixes())):
-                    break       # no file of the music folder the node takes for reachable
+                    break       # no file the node takes for reachable
                 if _opens(settings.translate_to_local_path(path)):
                     break
+                import library_root
+                folder = library_root.folder_of(path)
+                if folder is None:
+                    break       # a file of no folder of the library: taken as it is, nothing to look at
                 if not missed:
                     from scanner import check_folder
-                    check_folder(wait=True)
+                    check_folder(folder, wait=True)
                     if any(path.startswith(g) for g in gone_prefixes()):
                         break   # its folder does not answer: the recorded fact says the rest
                 missed.add(path)

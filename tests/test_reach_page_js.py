@@ -2,9 +2,9 @@
 music with no file that opens here now (PI-NODE-2D §3.4, §9.1) — the album
 screen's states (everything here; none here and this node streams; none
 here and nothing streams; the mix), the Library screen's scan buttons and
-path row while the music folder does not answer (F13), and the open
-screen's payload asked again when the notice library.mount_missing begins
-or ends, repainted only when it says otherwise. app-shell.js's own
+folder list while a folder does not answer (F13, LIBRARY-FOLDERS-1), and
+the open screen's payload asked again when what is reachable changes,
+repainted only when it says otherwise. app-shell.js's own
 functions, run as written against stand-ins for the DOM; skipped where Node
 is not. No browser renders the page here."""
 
@@ -291,66 +291,60 @@ def test_a_refused_tap_says_the_albums_words_as_a_toast():
     ]
 
 
-PATH_ROW = "\n".join([
+FOLDERS = "\n".join([
     "const SAFE_TO_PULL = 'safe';",
-    "const MUSIC_FOLDER_LINES = { pick: '', launcher: 'launcher', setup: 'setup' };",
-    _block("function paintMusicPathRow(row, missing) {"),
-    "let _nodeStreams = null;",
-    "let _nodeStreamsAsked = false;",
-    "let _prunePlanHeld = null;",
-    _block("function paintMusicFolder(missing) {"),
+    "const fmtNum = n => String(n);",
+    "const _count = (n, one, many) => `${fmtNum(n)} ${n === 1 ? one : many}`;",
+    "const escapeProfileHtml = s => String(s).replace(/</g, '&lt;');",
+    "const fmtPathForDisplay = s => s;",
+    _block("function _folderRow(f, streams) {"),
+    _block("function paintLibraryFolders(lib) {"),
 ])
 
-PATH_ROW_DRIVER = PATH_ROW + r"""
-const classes = new Set();
-const sub = { textContent: '', hidden: true };
-const row = { classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)) },
-              dataset: { musicFolder: 'setup' }, querySelector: () => sub };
-const buttons = [{ disabled: false }, { disabled: false }, { disabled: false }];
-let notice = null, asked = 0, answer;
-const notices = { get: () => notice };
+FOLDERS_DRIVER = FOLDERS + r"""
+const buttons = [{ disabled: false }, { disabled: false }];
+const remove = { disabled: false };
+const why = { textContent: '', hidden: true };
 const document = { querySelectorAll: sel => {
-    if (sel !== '[data-action="scan"], [data-action="scan-prune"], [data-action="remove-away"]') throw new Error(sel);
+    if (sel !== '[data-action="scan"], [data-action="scan-prune"]') throw new Error(sel);
     return buttons; },
-  querySelector: sel => {
-    if (sel === '[data-away-why]') return null;          // the Away row is not on this screen's stub
-    if (sel !== '[data-music-path-row]') throw new Error(sel); return row; } };
-const fetch = url => { asked += 1; if (url !== '/api/player/reach') throw new Error(url);
-  return Promise.resolve({ ok: true, json: () => Promise.resolve(answer) }); };
-const seen = () => ({ line: sub.textContent, disabled: buttons.map(b => b.disabled),
-                      error: classes.has('kind-error'), asked });
-(async () => {
-  const steps = [];
-  paintMusicFolder(false); steps.push(seen());
-  notice = { key: 'library.mount_missing' }; answer = { streams: %(streams)s };
-  paintMusicFolder(true); steps.push(seen());
-  await new Promise(r => setTimeout(r, 0)); await new Promise(r => setTimeout(r, 0));
-  steps.push(seen());
-  paintMusicFolder(true); steps.push(seen());             // another snapshot: not asked again
-  notice = null;
-  paintMusicFolder(false); steps.push(seen());
-  console.log(JSON.stringify(steps));
-})();
+  querySelector: sel => ({ '[data-action="remove-away"]': remove, '[data-away-why]': why })[sel] };
+const disk = (id, connected) => ({ id, name: `STICK <${id}> · Music`, disk: true, connected, albums: 9,
+                                   tracks: 94, forgettable: true, pullable: connected });
+const cases = %(cases)s;
+console.log(JSON.stringify(cases.map(([folders, away, streams]) => {
+  paintLibraryFolders({ folders, away });
+  return { scan: buttons.map(b => b.disabled), remove: remove.disabled, why: why.hidden ? null : why.textContent,
+           rows: folders.map(f => _folderRow(f, streams)) };
+})));
 """
 
-WAITS = "Not connected — your own tracks cannot play or be scanned until it is back."
-STREAMS = ("Not connected — your own tracks stream or wait, and nothing can be scanned, "
-           "until it is back.")
 
-
-@pytest.mark.parametrize("streams, said", [(True, STREAMS), (False, WAITS)])
-def test_the_scan_buttons_wait_for_the_folder_under_the_rows_sentence(streams, said):
-    """F13: "Scan for new", "Rescan" and the Away row's Remove (2E F23) are
-    disabled while the notice stands, and back with its end; the row says
-    whether the albums stream meanwhile, asked once."""
-    steps = _node(PATH_ROW_DRIVER % {"streams": json.dumps(streams)})
-    assert steps[0] == {"line": "setup", "disabled": [False] * 3, "error": False, "asked": 0}
-    assert steps[1] == {"line": WAITS, "disabled": [True] * 3, "error": True, "asked": 1}
-    assert steps[2] == {"line": said, "disabled": [True] * 3, "error": True, "asked": 1}
-    assert steps[3] == steps[2]
-    assert steps[4] == {"line": "setup", "disabled": [False] * 3, "error": False, "asked": 1}
-    # the three places that paint the row paint the buttons with it
-    assert SOURCE.count("paintMusicFolder(!!notices.get('library.mount_missing'));") == 3
+def test_the_folder_list_says_each_folders_state_and_the_scans_wait_only_for_none():
+    """LIBRARY-FOLDERS-1: a folder not connected is a dimmed row saying what
+    its albums do meanwhile — stream where this node streams, else wait —
+    never a red row; "Scan for new" and "Rescan" wait only while no folder
+    answers; the Away row's Remove while every copy away waits for a disk
+    that is out, the line saying how many wait."""
+    out = _node(FOLDERS_DRIVER % {"cases": json.dumps([
+        [[{"id": 1, "connected": True}, {"id": 2, "connected": False}], {"copies": 2, "waiting": 1}, True],
+        [[{"id": 1, "connected": False}, {"id": 2, "connected": False}], {"copies": 2, "waiting": 2}, False],
+        [[], {}, False],
+    ]).replace('{"id": 1, "connected": true}', 'disk(1, true)')
+      .replace('{"id": 2, "connected": false}', 'disk(2, false)')
+      .replace('{"id": 1, "connected": false}', 'disk(1, false)')})
+    one_out, all_out, none = out
+    assert (one_out["scan"], one_out["remove"], one_out["why"]) == (
+        [False, False], False, "1 copy waits for a disk that is not connected.")
+    connected, out_row = one_out["rows"]
+    assert "status-dot green" in connected and "safe" in connected and "is-out" not in connected
+    assert "STICK &lt;1>" in connected and "9 albums · 94 tracks" in connected
+    assert "Forget this disk and its albums" in connected               # one removal, in or out (Q2)
+    assert "is-out" in out_row and "status-dot dim" in out_row and "Not connected · " in out_row
+    assert "Its albums stream until the disk is back" in out_row and "kind-error" not in out_row
+    assert (all_out["scan"], all_out["remove"]) == ([True, True], True)
+    assert "Its albums cannot play until the disk is back." in all_out["rows"][0]
+    assert (none["scan"], none["remove"], none["why"]) == ([False, False], False, None)
 
 
 REACH = "\n".join([
@@ -456,7 +450,7 @@ const tile = (id, word = null) => {
   const cover = { querySelector: sel => { if (sel !== '.album-tile-out') throw new Error(sel); return t.mark; },
                   appendChild: put };
   if (word !== null) put({ className: 'album-tile-feat album-tile-out', textContent: word });
-  t.querySelector = sel => { if (sel !== '.album-cover') throw new Error(sel); return cover; };
+  t.querySelector = sel => { if (sel !== '.album-cover, .mosaic-cover') throw new Error(sel); return cover; };
   return t;
 };
 const shown = () => tiles.map(t => [t.dataset.albumId, t.marked, t.mark && t.mark.textContent]);

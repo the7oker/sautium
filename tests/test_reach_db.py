@@ -125,9 +125,8 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "music_host_path", None)
     # The folder's state is process state: each test starts with it answering,
     # once the look worker is idle (a look still running would land here)
-    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
-    for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0)):
-        monkeypatch.setattr(scanner, name, value)
+    assert _wait(lambda: all(not look.looking and not look.wanted for look in list(scanner._looks.values())))
+    monkeypatch.setattr(scanner, "_looks", {})
     pool = psycopg2.pool.ThreadedConnectionPool(1, 6, dsn=scratch_dsn, options="-c timezone=UTC")
     monkeypatch.setattr(db_pool, "_pool", pool)
     conn = psycopg2.connect(scratch_dsn)
@@ -140,7 +139,7 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     owned, streamed = str(uuid.uuid4()), str(uuid.uuid4())
     cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'Night Walks'), (%s, 'Dawn Chorus')",
                 (owned, streamed))
-    db_root = settings.library_db_root()
+    db_root = root.as_posix()
     cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
                 (owned, f"{db_root}/NW"))
     variant = cur.fetchone()[0]
@@ -168,7 +167,7 @@ def node(scratch_dsn, monkeypatch, tmp_path):
         phantoms.append(t)
 
     def gone(flag: bool) -> None:
-        monkeypatch.setattr(scanner, "_folder_unreachable", flag)
+        scanner._look_of(db_root).unreachable = flag
 
     elsewhere = (tmp_path / "elsewhere").as_posix()
 
@@ -210,7 +209,7 @@ def node(scratch_dsn, monkeypatch, tmp_path):
            "gone": gone, "copy": copy, "elsewhere": elsewhere, "streaming": streaming_service,
            "monkeypatch": monkeypatch}
     prov.land(*phantoms, *tracks)
-    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
+    assert _wait(lambda: all(not look.looking and not look.wanted for look in list(scanner._looks.values())))
     _wait(lambda: not [t for t in threading.enumerate() if t.name == "queue-reach"])
     conn.close()
     pool.closeall()
@@ -593,7 +592,7 @@ def test_a_recorded_change_rereads_the_queue_once_and_the_folders_return_is_the_
     out.changed.clear()
     v = mgr.queue.version
 
-    scanner.folder_seen(True)                       # a producer's observation: the folder is gone
+    scanner.folder_seen(node["db_root"], True)                       # a producer's observation: the folder is gone
     assert _wait(lambda: out.changed == ["rebind"])
     assert all(_streams(it) for it in items) and mgr.queue.version == v + 1
     assert _wait(lambda: mgr.latest_status.get("playlist_version") == v + 1)
@@ -601,10 +600,10 @@ def test_a_recorded_change_rereads_the_queue_once_and_the_folders_return_is_the_
     # each row says what its stream does, and the lane looked at its window
     assert _wait(lambda: [s["index"] for s in mgr.slots_message()["slots"]] == [1, 2])
     assert _wait(lambda: set(node["tracks"]) <= set(node["prov"].asked))
-    scanner.folder_seen(True)                       # said again: nothing changed, nothing is read
+    scanner.folder_seen(node["db_root"], True)                       # said again: nothing changed, nothing is read
     assert not _wait(lambda: len(out.changed) > 1, timeout=0.5)
 
-    scanner.folder_seen(False)                      # a library file served: it answers again
+    scanner.folder_seen(node["db_root"], False)                      # a library file served: it answers again
     assert _wait(lambda: out.changed == ["rebind", "rebind"])
     assert all(it.play is None for it in items) and mgr.queue.version == v + 2
     assert [it.source for it in items] == origins
@@ -621,7 +620,7 @@ def test_the_slot_the_output_sounds_keeps_its_way_in_until_the_output_leaves_it(
     first, second = _queue(node)
     mgr._on_backend_status(out, PlaybackStatus(state="playing", position=3.0, length=200.0,
                                                queue_index=1))
-    scanner.folder_seen(True)
+    scanner.folder_seen(node["db_root"], True)
     assert _wait(lambda: _streams(second))
     assert first.play is None and mgr._reach_owed is first
     mgr._on_backend_status(out, PlaybackStatus(state="playing", position=4.0, length=200.0,
@@ -688,7 +687,7 @@ def test_his_queue_whose_folder_went_where_nothing_streams_is_said_once_too(node
     mgr = node["mgr"]
     items = _queue(node, play=True)
     node["monkeypatch"].setattr(node["streaming"], "is_enabled", lambda: False)
-    scanner.folder_seen(True)
+    scanner.folder_seen(node["db_root"], True)
     assert _wait(lambda: all(it.opener().get("kind") == "unplayable" for it in items))
     assert _wait(lambda: [(s["state"], s["reason"], s.get("why")) for s in mgr.slots_message()["slots"]]
                  == [("failed", "not_here", "disk")] * 2)
@@ -1137,7 +1136,7 @@ def test_the_look_waits_for_a_stat_no_longer_than_its_patience(node, monkeypatch
 
 def test_a_first_file_that_is_there_asks_the_folder_nothing(node, monkeypatch):
     import scanner
-    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: pytest.fail("the folder was looked at"))
+    monkeypatch.setattr(scanner, "check_folder", lambda path=None, wait=False: pytest.fail("the folder was looked at"))
     items = _queue(node, play=True)
     assert node["out"].replaced == [["file", "file"]] and all(it.play is None for it in items)
 
@@ -1208,13 +1207,15 @@ def test_the_folder_watchers_loss_is_a_look_at_the_folder(node, monkeypatch):
     import library_watch
     import scanner
     looked = []
-    monkeypatch.setattr(scanner, "check_folder", lambda wait=False: looked.append(wait))
-    monkeypatch.setattr(library_watch, "_source", None)
-    monkeypatch.setattr(library_watch, "_state", dict(library_watch._state))
-    library_watch._lost("unmounted")
-    assert looked == [False]
-    library_watch._lost("the watch limit", library_watch.NO_EVENTS)      # no word about the folder
-    assert looked == [False]
+    monkeypatch.setattr(scanner, "check_folder", lambda path=None, wait=False: looked.append((path, wait)))
+    monkeypatch.setattr(library_watch, "_watches", {node["db_root"]: {"state": library_watch.WATCHING,
+                                                                      "why": None, "source": None}})
+    library_watch._lost(node["db_root"], "unmounted")
+    assert looked == [(node["db_root"], False)]
+    library_watch._lost(node["db_root"], "the watch limit", library_watch.NO_EVENTS)   # no word about it
+    assert looked == [(node["db_root"], False)]
+    library_watch._lost("/a/folder/forgotten", "unmounted")                 # a folder no longer watched
+    assert looked == [(node["db_root"], False)]
 
 
 def test_the_pages_hear_the_recorded_answer_change_whatever_the_notice_said(node, monkeypatch):
@@ -1242,12 +1243,13 @@ def test_the_pages_hear_the_recorded_answer_change_whatever_the_notice_said(node
                     return msg["d"]
         assert await said("reach") == {"key": ""}
         await said("identity")
-        scanner._shown = True                       # a reader gave up: the notice shows
+        folder = scanner._look_of(node["db_root"])
+        folder.shown = True                         # a reader gave up: the notice shows
         assert manager_mod.reach_key() == ""
-        scanner._record(True, scanner._next_ticket(), wake=False)      # the look lands: gone
+        scanner._record(folder, True, scanner._next_ticket(folder), wake=False)   # the look lands: gone
         gone = await said("reach")
         assert gone["key"] and node["db_root"] not in gone["key"]
-        scanner.folder_seen(False)
+        scanner.folder_seen(node["db_root"], False)
         assert await said("reach") == {"key": ""}
         reading = asyncio.ensure_future(stream.__anext__())
         await asyncio.sleep(0.05)
@@ -1658,5 +1660,5 @@ def test_a_refused_scan_says_what_brings_the_folder_back_on_this_node(monkeypatc
         "The music folder is empty or not mounted, so nothing was scanned. "
         "Reconnect it and restart Sautium: this node sees a disk only as it was at its start.")
     with pytest.raises(scanner.LibraryUnreachable, match="restart Sautium"):
-        monkeypatch.setattr(scanner, "library_unreachable", lambda wake=True: True)
-        scanner.refuse_if_unreachable()
+        monkeypatch.setattr(scanner, "folder_unreachable", lambda path, wake=True: True)
+        scanner.refuse_if_unreachable(["/a/folder"])

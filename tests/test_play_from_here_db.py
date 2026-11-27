@@ -93,9 +93,8 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     (root / "NW").mkdir(parents=True)
     monkeypatch.setattr(settings, "music_library_path", str(root))
     monkeypatch.setattr(settings, "music_host_path", None)
-    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
-    for name, value in (("_folder_unreachable", False), ("_shown", False), ("_recorded", 0)):
-        monkeypatch.setattr(scanner, name, value)
+    assert _wait(lambda: all(not look.looking and not look.wanted for look in list(scanner._looks.values())))
+    monkeypatch.setattr(scanner, "_looks", {})
     monkeypatch.setattr(tracker, "_play_session", None)
     monkeypatch.setattr(tracker, "_last_heard", None, raising=False)
     monkeypatch.setattr(tracker, "_scrobble_async", lambda *a, **k: True)
@@ -111,7 +110,7 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     owned, streamed = str(uuid.uuid4()), str(uuid.uuid4())
     cur.execute("INSERT INTO albums (id, title) VALUES (%s, 'Night Walks'), (%s, 'Dawn Chorus')",
                 (owned, streamed))
-    db_root = settings.library_db_root()
+    db_root = root.as_posix()
     cur.execute("INSERT INTO album_variants (album_id, directory_path) VALUES (%s, %s) RETURNING id",
                 (owned, f"{db_root}/NW"))
     variant = cur.fetchone()[0]
@@ -159,7 +158,7 @@ def node(scratch_dsn, monkeypatch, tmp_path):
     yield {"mgr": mgr, "out": out, "player": player, "cur": cur, "owned": owned,
            "streamed": streamed, "files": files, "tracks": tracks, "phantoms": phantoms,
            "tracker": tracker}
-    assert _wait(lambda: not scanner._looking and not scanner._look_wanted)
+    assert _wait(lambda: all(not look.looking and not look.wanted for look in list(scanner._looks.values())))
     _wait(lambda: not [t for t in threading.enumerate() if t.name == "queue-reach"])
     conn.close()
     pool.closeall()

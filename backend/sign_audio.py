@@ -386,7 +386,7 @@ def _signer():
     sealing is skipped there, never fatal to the caller."""
     key = load_signing_key(settings)
     if key is None:
-        logger.info("no signing identity (P2P_USERNAME/P2P_PASSWORD) — "
+        logger.info("no signing identity (no account yet, or its key not made) — "
                     "sealing skipped")
         return None
     return key, _pubkey_hex(key)

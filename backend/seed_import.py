@@ -41,6 +41,7 @@ from pathlib import Path
 import psycopg2
 import psycopg2.extras
 
+from canon.occurrence import settle_slots
 from config import settings
 from uuid_utils import IDENTITY_RULE
 
@@ -68,10 +69,11 @@ _STRUCTURAL_INSERTS = [
      ("id", "title", "title_latin", "release_year", "label", "catalog_number",
       "total_tracks", "musicbrainz_id", "mb_match_confidence", "cover_url",
       "author_pubkey", "signature", "batch_root", "merkle_proof")),
+    # a bundle made before tracks.occurrence carries none: every track a first
     ("tracks",
-     "INSERT INTO tracks (id, title, title_latin) VALUES %s ON CONFLICT DO NOTHING",
-     "(%s::uuid, %s, %s)",
-     ("id", "title", "title_latin")),
+     "INSERT INTO tracks (id, title, title_latin, occurrence) VALUES %s ON CONFLICT DO NOTHING",
+     "(%s::uuid, %s, %s, coalesce(%s::smallint, 1))",
+     ("id", "title", "title_latin", "occurrence")),
     ("album_tracks",
      """INSERT INTO album_tracks (album_id, track_id, disc, position, recording_mbid,
                                   length_ms, author_pubkey, signature, batch_root,
@@ -190,7 +192,12 @@ def insert_structural(conn, structural: dict) -> None:
     chunk at a time — from a CLI's process, so the rows are said to the
     pages with their commit (NOTIFY sautium_library: the streaming
     library's footprint is theirs), as the records are
-    (SyncClient._import_items)."""
+    (SyncClient._import_items).
+
+    The tracklists it lands take the mint's rule (canon.occurrence): a
+    bundle made before it carries the slots of one release titled alike on
+    one track, and those are split as the node's own were — the slot's seal
+    shed, for it no longer says what its author signed."""
     from desktop.sync_client import SyncClient
     with conn.cursor() as cur:
         batches = structural.get("batches") or {}
@@ -208,6 +215,7 @@ def insert_structural(conn, structural: dict) -> None:
             if rows:
                 psycopg2.extras.execute_values(cur, sql, rows, template=template,
                                                page_size=500)
+        settle_slots(conn, {s["album_id"] for s in structural.get("album_tracks") or []})
         cur.execute("NOTIFY sautium_library")
     conn.commit()
 

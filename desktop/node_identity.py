@@ -21,6 +21,7 @@ import re
 import secrets
 import ssl
 import stat
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -51,11 +52,25 @@ try:
 except ImportError:
     HAS_ARGON2 = False
 
-# Argon2id parameters for key derivation
-ARGON2_TIME_COST = 4
-ARGON2_MEMORY_COST = 262144  # 256 MB
+# Argon2id parameters for key derivation: a thousand times the cost of the
+# first release's t=4 over 256 MiB, at half the memory and twice the passes
+# (SECURITY-PRE-RELEASE §9.13: the same memory traffic a guess, 290-315 MiB
+# left beside Nano on a 1 GB board). 5–11 min on a desktop (11 measured on
+# Legion under load, 2026-11-26), 12 on a 16 GB Pi 5, 26 on a 1 GB one — paid
+# once, in the background (identity_birth).
+# Part of every key: a change here is a new key for every account.
+ARGON2_TIME_COST = 8000
+ARGON2_MEMORY_COST = 131072  # 128 MiB
 ARGON2_PARALLELISM = 2
 ARGON2_HASH_LEN = 32
+
+# The sign-in hash (account.json's `signin`): what a sign-in checks instead
+# of deriving the key again. The same time as the first release's key at the
+# key's memory (t=8 over 128 MiB): a stolen disk yields the password no
+# cheaper than it did, and it holds the key or the password already.
+SIGNIN_TIME_COST = 8
+SIGNIN_MEMORY_COST = 131072
+SIGNIN_PARALLELISM = 2
 
 # One GPU's guesses a second against this derivation, at the cost it was
 # counted for (SECURITY-PRE-RELEASE §9.2, §9.10): 86 measured on an RTX 4090
@@ -339,6 +354,40 @@ RECORD_SIGNING_KEY_SQL = """
      WHERE user_settings.value IS DISTINCT FROM EXCLUDED.value"""
 
 
+def names_another_identity(cur, pubkey: str) -> bool:
+    """Whether the identity `pubkey` (lower-case hex) is not the one the
+    database `cur` reads names as its own: its signing key of record, which
+    every start with a key, the account setup and a rotation write
+    (SIGNING_KEY_SETTING). A node that lost its folder before its first start
+    on this release recorded none: then the key its launcher's last P2P run
+    held (p2p.bound_identity), else any key that sealed records there as the
+    node's own; with no such seal, any identity is the node's first. Asked
+    before an identity is placed over records another one may have signed:
+    the account setup's key (backend/device_auth) and an identity file's
+    (desktop/identity_file)."""
+    cur.execute(f"SELECT {SIGNING_KEY_SQL}, {BOUND_IDENTITY_SQL}")
+    recorded, bound = cur.fetchone()
+    named = recorded if recorded is not None else bound
+    if named is not None:
+        return named.lower() != pubkey
+    cur.execute(OWN_SEALS_SQL)
+    if not cur.fetchone()[0]:
+        return False
+    cur.execute(OWN_SEALS_BY_SQL, {"key": pubkey})
+    return not cur.fetchone()[0]
+
+
+def another_identity_at(dsn: str, pubkey: str) -> bool:
+    """names_another_identity over a connection of its own to `dsn` (the
+    launcher; the identity file's command in a Docker node's container)."""
+    conn = psycopg2.connect(dsn, connect_timeout=10)
+    try:
+        with conn, conn.cursor() as cur:
+            return names_another_identity(cur, pubkey)
+    finally:
+        conn.close()
+
+
 def record_signing_key(dsn: str, pubkey: str) -> None:
     """`pubkey` as the node's signing key of record (SIGNING_KEY_SETTING)."""
     conn = psycopg2.connect(dsn, connect_timeout=10)
@@ -384,13 +433,17 @@ def ensure_identity(dsn: str) -> str:
     author's. A database that cannot be read or written raises
     (psycopg2.Error) and nothing is generated. A key that lands meanwhile (a
     restore, the web interface's account setup) is the identity: generating
-    never writes over one."""
+    never writes over one. "account" — it holds no key but an account file:
+    the account's key is being made, or its making was stopped
+    (identity_birth); nothing is generated over an account."""
+    d = _identity_dir()
     if has_identity():
-        d = _identity_dir()
         if not (d / "node_info.json").exists():
             _rebuild_info(d)
         record_signing_key(dsn, pubkey_on_disk(d))
         return "present"
+    if read_account(d) is not None:
+        return "account"
     conn = psycopg2.connect(dsn, connect_timeout=10)
     try:
         with conn.cursor() as cur:
@@ -419,6 +472,10 @@ def generate_identity(dsn: Optional[str] = None) -> str:
     (replaced-<when>/), not written over."""
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required for identity generation")
+    if read_account(_identity_dir()) is not None:
+        # An account waiting for its key: a random key beside it would be one
+        # its password does not make (SEC-S5)
+        raise FileExistsError(str(_identity_dir() / ACCOUNT_FILENAME))
 
     private_key = Ed25519PrivateKey.generate()
     pub_raw = private_key.public_key().public_bytes(
@@ -456,15 +513,17 @@ class IdentitySettling:
     (the launcher's ui_call); `closing()` says the caller quits, and a
     completion then calls nothing — no notice, no P2P start. The state is
     the caller's thread's alone. Its callbacks, there: `ready()` — an
-    identity is on disk, P2P may start on it; `missing()` — none is, while
+    identity is on disk, P2P may start on it; `unborn()` — the account is
+    there and its key is not yet (being made, or its making stopped);
+    `missing()` — none is, while
     the database says the node had one; `unsettled(error)` — the check
     decided nothing (the database could not be read, or the check failed:
     re-raised for the thread's hook after the callback is handed back);
     `failed(error)` — the owner's new identity could not be made."""
 
-    def __init__(self, dsn, run, ui, closing, *, ready, missing, unsettled, failed):
+    def __init__(self, dsn, run, ui, closing, *, ready, unborn, missing, unsettled, failed):
         self._dsn, self._run, self._ui, self._closing = dsn, run, ui, closing
-        self._ready, self._missing = ready, missing
+        self._ready, self._unborn, self._missing = ready, unborn, missing
         self._unsettled, self._failed = unsettled, failed
         self.busy = False
 
@@ -501,6 +560,9 @@ class IdentitySettling:
         except Exception as e:
             self._end(self._unsettled, e)
             raise
+        if state == "account":
+            self._end(self._unborn)
+            return
         if state == "missing":
             logger.warning("No node identity, and the database says this node had one (its "
                            "signing key of record, its own seals, or the key its last P2P run "
@@ -579,13 +641,24 @@ def validate_new_username(username: str) -> None:
         raise ValueError(RESERVED_REFUSAL)
 
 
+def account_password(password: str) -> str:
+    """The password as every derivation and check reads it: NFKC (NIST SP
+    800-63B-4 §3.1.1.2). One rule, so a launcher and a Docker node never
+    derive two keys from one password typed in two Unicode forms (a "й"
+    composed or not, a ligature, full-width digits)."""
+    return unicodedata.normalize("NFKC", password)
+
+
 def derive_seed(username: str, password: str) -> bytes:
-    """Derive 32-byte Ed25519 seed from username+password using Argon2id."""
+    """The account's 32-byte Ed25519 seed: Argon2id over the nickname and the
+    password — the one derivation every road calls (both runtimes, the
+    restore of an identity by its pair, the master's command). Minutes, by
+    design: called only from identity_birth's worker and that command."""
     if not HAS_ARGON2:
         raise RuntimeError("argon2-cffi package required for account creation")
     salt = f"{username}:sautium".encode("utf-8")
     return hash_secret_raw(
-        secret=password.encode("utf-8"),
+        secret=account_password(password).encode("utf-8"),
         salt=salt,
         time_cost=ARGON2_TIME_COST,
         memory_cost=ARGON2_MEMORY_COST,
@@ -602,21 +675,13 @@ def make_invite_code(username: str, public_key_raw: bytes) -> str:
     return f"{username}#{h[:4]}-{h[4:8]}-{h[8:]}"
 
 
-def derive_account_identity(username: str, password: str):
-    """Derive (private_key, public_key_hex, invite_code) WITHOUT saving.
+def key_from_seed(seed: bytes) -> "Ed25519PrivateKey":
+    return Ed25519PrivateKey.from_private_bytes(seed)
 
-    For wizard flows that must sign Worker requests (email verification,
-    birth-certificate issuance) before the account is persisted — the
-    derivation is deterministic, so the eventual create_account() yields
-    the same identity."""
-    validate_username(username)
-    seed = derive_seed(username, password)
-    private_key = Ed25519PrivateKey.from_private_bytes(seed)
-    pub_raw = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    return private_key, pub_raw.hex(), make_invite_code(username, pub_raw)
+
+def public_hex(private_key) -> str:
+    return private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw).hex()
 
 
 def parse_invite_code(invite_code: str) -> tuple[str, str]:
@@ -641,63 +706,165 @@ def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
     return digest.hex().upper() == hash_part
 
 
-def create_account(
-    username: str,
-    password: str,
-    email: str = "",
-    email_verified: bool = False,
-    anonymous: bool = False,
-) -> dict:
-    """
-    Create or recover account from username + password.
+# ---------------------------------------------------------------------------
+# The account file: the account before its key (SEC-S5)
+# ---------------------------------------------------------------------------
+# A key costs minutes to derive (ARGON2_TIME_COST), and the node must not wait
+# for it: the account exists from its first second as ACCOUNT_FILENAME — its
+# nickname, the hash every sign-in checks, and the random id the device token
+# is derived from (backend/device_auth.current_token) — and the key follows,
+# derived in the background (desktop/identity_birth). `pubkey` is null until
+# the key is placed; then it binds the hash to the key it was made with.
+#
+# Never a member of a backup, a support bundle, a share or an export: inside
+# any of them the hash would be a cheap test of the password beside a key a
+# thousand times dearer. The identity file (desktop/identity_file) carries it,
+# beside the key it would only be weaker than.
+#
+# A key in the folder with no account file was made by a Sautium before this
+# one: nothing here reproduces such a key (the owner's word, SEC-S5 §15), so
+# its password signs nothing in, and the node is made anew.
 
-    Uses Argon2id to derive deterministic Ed25519 keypair.
-    Same username + password on any device = same keys = same identity.
+ACCOUNT_FILENAME = "account.json"
 
-    `anonymous` records that the password was minted rather than chosen, so
-    nobody can ever type it. It is what tells the login gate to offer the
-    pairing PIN instead of a password prompt nothing could satisfy.
 
-    Returns: {node_id, public_key_hex, algorithm, username, invite_code, email, email_verified, anonymous}
-    """
-    if not HAS_CRYPTO:
-        raise RuntimeError("cryptography package required")
+def _hasher():
+    from argon2 import PasswordHasher
+    return PasswordHasher(time_cost=SIGNIN_TIME_COST, memory_cost=SIGNIN_MEMORY_COST,
+                          parallelism=SIGNIN_PARALLELISM, hash_len=32, salt_len=16, type=Type.ID)
 
+
+def signin_hash(password: str) -> str:
+    """The sign-in hash of `password` (a PHC string: its salt, random, and
+    its parameters inside)."""
+    return _hasher().hash(account_password(password))
+
+
+def signin_matches(phc: str, password: str) -> bool:
+    """Whether `password` is the one `phc` was made from. A hash that is not
+    one (a damaged file) raises argon2's InvalidHashError."""
+    from argon2.exceptions import VerifyMismatchError
+    try:
+        return _hasher().verify(phc, account_password(password))
+    except VerifyMismatchError:
+        return False
+
+
+def read_account(d: Path) -> Optional[dict]:
+    """The account file of the identity folder `d`, None when there is none.
+    A file that is not JSON raises: it is the account, and a node must not
+    take it for no account and offer the setup over it."""
+    try:
+        text = (d / ACCOUNT_FILENAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return json.loads(text)
+
+
+def write_account(d: Path, account: dict) -> None:
+    """The account file, replaced whole: written under a temporary name
+    readable by the node's user alone, synced, renamed over."""
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f".{ACCOUNT_FILENAME}.{secrets.token_hex(6)}"
+    fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(account, f, indent=2)
+            f.flush()
+            _sync(f.fileno())
+        os.replace(tmp, d / ACCOUNT_FILENAME)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def new_account(username: str, password: str, *, source: str, email: str = "",
+                anonymous: bool = False) -> dict:
+    """An account's file before its key: the id, the hash (none for an
+    account with no password anyone knows), the key to come. `source`:
+    "form" (the Web UI's setup), "wizard" (the launcher's), "console" (a
+    command's random identity, identity_file.new_identity — the master's),
+    "file" (an identity file's import, identity_file.place)."""
     validate_username(username)
-    seed = derive_seed(username, password)
-    private_key = Ed25519PrivateKey.from_private_bytes(seed)
-    pub_raw = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    node_id = pub_raw.hex()
-    invite_code = make_invite_code(username, pub_raw)
+    return {
+        "v": 1,
+        "account_id": secrets.token_hex(16),
+        "username": username,
+        "signin": None if anonymous else signin_hash(password),
+        "pubkey": None,
+        "source": source,
+        "anonymous": anonymous,
+        "email": email,
+        "created_at": datetime.datetime.now(datetime.timezone.utc).replace(
+            microsecond=0).isoformat().replace("+00:00", "Z"),
+    }
 
-    info = {
-        "node_id": node_id,
-        "public_key_hex": node_id,
+
+def account_info(username: str, private_key, *, email: str = "", email_verified: bool = False,
+                 anonymous: bool = False) -> dict:
+    """node_info.json's account fields for `private_key`."""
+    pub_raw = bytes.fromhex(public_hex(private_key))
+    return {
+        "node_id": pub_raw.hex(),
+        "public_key_hex": pub_raw.hex(),
         "algorithm": "Ed25519",
         "username": username,
-        "invite_code": invite_code,
+        "invite_code": make_invite_code(username, pub_raw),
         "email": email,
         "email_verified": email_verified,
         "anonymous": anonymous,
     }
-    _save_keypair(private_key, info)
-    logger.info(f"Account created: {username} (invite: {invite_code})")
+
+
+def place_account_key(d: Path, private_key, account: dict) -> dict:
+    """The account's key, made, into the folder `d` beside its account file:
+    the key placed, never over one (place_key: FileExistsError), its info
+    (node_info.json) and the account file's `pubkey`. An info the folder kept
+    of this same key — only the key was lost — stays: it holds what the pair
+    does not derive (the keys it retired, its email). Returns the info."""
+    pubkey = public_hex(private_key)
+    try:
+        left = json.loads((d / "node_info.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        left = None
+    except ValueError:
+        left = {}                       # unreadable: moved aside like another identity's
+    kept = left is not None and str(left.get("public_key_hex", "")).lower() == pubkey
+    place_key(d, private_key.private_bytes(
+        encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()), keep_info=kept)
+    (d / "node_ed25519.pub").write_bytes(private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM, format=serialization.PublicFormat.SubjectPublicKeyInfo))
+    if kept:
+        info = left
+        logger.info("identity brought back: %s (invite %s), its info kept",
+                    info.get("username"), info.get("invite_code"))
+    else:
+        info = account_info(account["username"], private_key, email=account.get("email") or "",
+                            anonymous=bool(account.get("anonymous")))
+        (d / "node_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+        logger.info("account's key placed: %s (invite %s)", info["username"], info["invite_code"])
+    for name in ("tls_cert.pem", "tls_key.pem"):     # made again, bound to this key
+        (d / name).unlink(missing_ok=True)
+    write_account(d, {**account, "pubkey": pubkey})
     return info
 
 
-def has_account() -> bool:
-    """Check if an account (not just random node identity) exists."""
-    info_path = _identity_dir() / "node_info.json"
-    if not info_path.exists():
-        return False
-    try:
-        data = json.loads(info_path.read_text(encoding="utf-8"))
-        return "username" in data
-    except Exception:
-        return False
+def anonymous_account(d: Path, username: str, *, source: str, email: str = "",
+                      email_verified: bool = False) -> dict:
+    """An account made with no password: a random key at once (the owner's
+    word, SEC-S5 §15) — nothing would ever derive it again, so a derivation
+    would buy nothing. Such an identity comes back neither from memory nor
+    from its pair: only from its identity file. Returns the info."""
+    if (d / ACCOUNT_FILENAME).exists():
+        raise FileExistsError(str(d / ACCOUNT_FILENAME))
+    account = new_account(username, "", source=source, email=email, anonymous=True)
+    key = Ed25519PrivateKey.generate()
+    info = place_account_key(d, key, account)
+    if email_verified:
+        info["email_verified"] = True
+        (d / "node_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
+    return info
 
 
 def get_account_info() -> Optional[dict]:
@@ -769,10 +936,26 @@ def parse_rotation_notice(message: bytes, old_signature: bytes,
     return payload
 
 
-def rotate_identity(identity_dir: Path, username: str, password: str,
-                    anonymous: bool) -> dict:
-    """Replace the identity in `identity_dir` with the one (username,
-    password) derives, archiving the old one under previous/.
+def check_rotation_name(identity_dir: Path, username: str) -> dict:
+    """The name a rotation takes: the shape, and the reservation — an
+    identity that holds the reserved nickname keeps it, no other takes it.
+    Asked before the new key is made (minutes) and again by the rotation.
+    Returns the identity's info."""
+    validate_username(username)
+    old_info = json.loads((identity_dir / "node_info.json").read_text(encoding="utf-8"))
+    if (is_reserved_username(username)
+            and username_skeleton(username) != username_skeleton(old_info["username"])):
+        raise ValueError(RESERVED_REFUSAL)
+    return old_info
+
+
+def rotate_identity(identity_dir: Path, username: str, new_private, anonymous: bool,
+                    signin: Optional[str]) -> dict:
+    """Replace the identity in `identity_dir` with `new_private` — the key
+    (username, password) derived (identity_birth), or a random one for an
+    account with no password — archiving the old one under previous/; the
+    account file takes the new name, key and sign-in hash (`signin`, None
+    with no password), and keeps its id.
 
     Returns {"info": new node_info, "rotation": the signed notice}. The
     notice is written into the archive too — delivery to friends happens
@@ -781,17 +964,11 @@ def rotate_identity(identity_dir: Path, username: str, password: str,
     memory, so a crash mid-way leaves the old identity whole."""
     if not HAS_CRYPTO:
         raise RuntimeError("cryptography package required")
-    validate_username(username)
-
-    old_info = json.loads((identity_dir / "node_info.json").read_text(encoding="utf-8"))
-    if (is_reserved_username(username)
-            and username_skeleton(username) != username_skeleton(old_info["username"])):
-        raise ValueError(RESERVED_REFUSAL)
+    old_info = check_rotation_name(identity_dir, username)
     old_private = serialization.load_pem_private_key(
         (identity_dir / "node_ed25519.key").read_bytes(), password=None)
     old_pub = old_info["public_key_hex"].lower()
 
-    new_private = Ed25519PrivateKey.from_private_bytes(derive_seed(username, password))
     new_pub_raw = new_private.public_key().public_bytes(
         encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
     new_pub = new_pub_raw.hex()
@@ -849,6 +1026,9 @@ def rotate_identity(identity_dir: Path, username: str, password: str,
         }],
     }
     _save_keypair(new_private, new_info, identity_dir)
+    account = read_account(identity_dir)
+    write_account(identity_dir, {**account, "username": username, "signin": signin,
+                                 "pubkey": new_pub, "anonymous": anonymous})
     logger.info("Identity rotated: %s… → %s… (%s)", old_pub[:16], new_pub[:16], username)
     return {"info": new_info, "rotation": rotation}
 

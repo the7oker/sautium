@@ -1,15 +1,16 @@
 """The Web UI's "Back up now" (backend/backup_job.py): the making only.
 
-- POST /api/backup — the account's password, through the credential box
-  (routers/auth.boxed) and the signed door's count (step_up): a device token
-  alone starts nothing, and a wrong password is counted as at any door.
+- POST /api/backup — start the job. Nothing to type: the file is keyed on
+  the node's own seed (SEC-S5), and the request is signed like every other
+  (§14 Q9: no step-up — the job is single-flight, the file stays on the
+  node).
 - GET /api/backup — the job's state and the folder's files.
 - POST /api/backup/cancel, POST /api/backup/keep-newest — the latter the
   owner's confirmed removal of all but the newest few.
 
-No route of this app serves a backup file: it holds the node's identity
-under the password's strength alone, and never crosses the LAN by HTTP (the
-owner's answer of 2026-11-15). A test holds the whole app to that.
+No route of this app serves a backup file: it holds the node's whole
+database, and never crosses the LAN by HTTP (the owner's answer of
+2026-11-15). A test holds the whole app to that.
 """
 
 import logging
@@ -18,7 +19,6 @@ from typing import Any, Dict
 from fastapi import APIRouter, HTTPException
 
 import backup_job
-from routers.auth import StepUp, boxed, step_up
 
 logger = logging.getLogger(__name__)
 
@@ -31,19 +31,10 @@ def get_backup() -> Dict[str, Any]:
 
 
 @router.post("")
-async def post_backup(opened=boxed(StepUp)) -> Dict[str, Any]:
-    """Start a backup, on the account's password. An account whose password
-    nobody knows has no key to give a backup: the job itself says so."""
-    req, reply = opened
-    await step_up(req)
-    if not req.password:
-        # The host's pairing code vouched (an anonymous account): there is
-        # no password to key the file on
-        raise HTTPException(status_code=409, detail="This account has no password: set one in "
-                                                    "Profile, then back up")
-    if not backup_job.start(req.password):
+def post_backup() -> Dict[str, Any]:
+    if not backup_job.start():
         raise HTTPException(status_code=409, detail="A backup is running")
-    return reply(backup_job.state())
+    return backup_job.state()
 
 
 @router.post("/cancel")

@@ -671,20 +671,22 @@ def undumpable() -> None:
         raise OSError(ctypes.get_errno(), "prctl(PR_SET_DUMPABLE) failed")
 
 
-def hold_secrets() -> None:
+def hold_secrets() -> frozenset:
     """What a process that starts agent CLIs does first — the app's lifespan,
     the gear research worker's CLI: become undumpable, and drop
     config.SECRET_ENV from its environment, in any case (the settings read
     names case-insensitively); the settings, built at import, keep the
     values. A child it starts — an agent CLI, ffmpeg, pg_restore — inherits
     none of them, so none shows in a /proc/<pid>/environ the CLIs' user can
-    read. The backup CLI starts no agent: it reads its password by name
-    (`--password-env P2P_PASSWORD`), drops that variable alone and is
-    undumpable from its main()."""
+    read. The backup CLI does the same first, though it starts no agent: it
+    holds the node's seed, and its children are pg_dump and pg_restore.
+    Returns the names dropped."""
     undumpable()
     from config import SECRET_ENV
-    for name in [n for n in os.environ if n.upper() in SECRET_ENV]:
+    dropped = [n for n in os.environ if n.upper() in SECRET_ENV]
+    for name in dropped:
         del os.environ[name]
+    return frozenset(n.upper() for n in dropped)
 
 
 def heard_until_served() -> None:

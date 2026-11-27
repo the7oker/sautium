@@ -111,8 +111,7 @@ def _settings_rows(conn):
 
 
 def _settings(d: Path, **kw):
-    base = dict(p2p_identity_dir=str(d), p2p_username="", p2p_password="", p2p_email="",
-                sautium_master=False, p2p_trusted_front=False)
+    base = dict(p2p_identity_dir=str(d), sautium_master=False, p2p_trusted_front=False)
     return SimpleNamespace(**{**base, **kw})
 
 
@@ -148,20 +147,6 @@ def test_both_signals_are_named_and_a_record_of_its_own_key_does_not_lift_the_fl
             in p2p_identity.master_refusal(_settings(d, sautium_master=True)))
 
 
-def test_a_name_the_nickname_rule_refuses_is_named_not_raised(db, pin, tmp_path):
-    """A keyboard's layout switched mid-word (a Cyrillic "і") is a B-113 of the
-    name: the refusal names it as given, with no traceback and no second
-    derivation."""
-    _record(db, pin.pub)
-    (tmp_path / "id").mkdir()
-    name = "Saut\u0456um"
-    words = p2p_identity.master_refusal(_settings(tmp_path / "id", p2p_username=name,
-                                                  p2p_password="the master's, maybe"))
-    key = p2p_identity.derive_private_key(name, "the master's, maybe")
-    code = node_identity.make_invite_code(name, key.public_key().public_bytes_raw())
-    assert f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD" in words
-
-
 def test_a_folder_whose_info_names_no_one_is_named_by_its_key(db, pin, tmp_path):
     other = _Node(Ed25519PrivateKey.generate())
     d = other.place(tmp_path / "id")
@@ -175,7 +160,7 @@ def test_a_master_with_no_key_at_all_is_refused(db, pin, tmp_path):
     _record(db, pin.pub)
     (tmp_path / "id").mkdir()
     words = p2p_identity.master_refusal(_settings(tmp_path / "id"))
-    assert "but it has no key: neither its identity folder nor P2P_USERNAME and P2P_PASSWORD give one" in words
+    assert "but it has no key: its identity folder holds none." in words
 
 
 @pytest.mark.parametrize("flag", [False, True])
@@ -255,17 +240,14 @@ def _snapshot(conn, d: Path):
 def test_the_lifespan_refuses_before_anything_writes_and_again_at_the_restart(db, scratch_dsn, pin,
                                                                               tmp_path):
     from urllib.parse import urlparse
-    username, password = "Sautium", "a-password-one-character-off"
-    derived = p2p_identity.derive_identity(username, password)["invite_code"]
-    d = tmp_path / "id"
-    d.mkdir()
+    other = _Node(Ed25519PrivateKey.generate())      # a master's folder that is not the master's
+    d = other.place(tmp_path / "id")
     (d / "birth_certificate.json").write_text('{"the master\'s": "certificate"}')
     _record(db, pin.pub)
     url = urlparse(scratch_dsn)
     env = dict(os.environ, POSTGRES_HOST=url.hostname, POSTGRES_PORT=str(url.port),
                POSTGRES_USER=url.username, POSTGRES_PASSWORD=url.password,
-               POSTGRES_DB=url.path.lstrip("/"), P2P_IDENTITY_DIR=str(d),
-               P2P_USERNAME=username, P2P_PASSWORD=password, SAUTIUM_MASTER="0")
+               POSTGRES_DB=url.path.lstrip("/"), P2P_IDENTITY_DIR=str(d), SAUTIUM_MASTER="0")
     before = _snapshot(db, d)
     for _attempt in range(2):
         run = subprocess.run([sys.executable, "-c", _DRIVER, str(BACKEND), str(ROOT), pin.pub, pin.code],
@@ -278,5 +260,5 @@ def test_the_lifespan_refuses_before_anything_writes_and_again_at_the_restart(db
         assert len(refusals) == 1, out[-3000:]
         assert " - ERROR - " in refusals[0]
         assert f"its database records {pin.code} as its key" in refusals[0]
-        assert f"but its credentials derive {derived}. Check P2P_USERNAME and P2P_PASSWORD" in refusals[0]
+        assert f"but its identity folder holds {other.code}. Check that the folder is" in refusals[0]
         assert _snapshot(db, d) == before

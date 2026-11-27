@@ -273,7 +273,7 @@ def structural_sections(conn, album_ids: list[str], track_ids: list[str],
         FROM artists WHERE id = ANY(%s::uuid[]) ORDER BY id""", [artist_ids])
     yield "albums", albums
     yield "tracks", q(conn, """
-        SELECT id::text AS id, title, title_latin
+        SELECT id::text AS id, title, title_latin, occurrence
         FROM tracks WHERE id = ANY(%s::uuid[]) ORDER BY id""", [track_ids])
     yield "album_tracks", album_tracks
     yield "track_artists", q(conn, """

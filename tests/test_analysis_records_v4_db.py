@@ -693,7 +693,6 @@ def test_the_nodes_keys_are_the_signing_one_and_those_it_retired(tmp_path, monke
     assert OWN_KEYS() == frozenset({pub(OWN), pub(RETIRED)})
     monkeypatch.setattr(p2p_identity, "_signing_key_cache", None)
     monkeypatch.setattr(settings, "p2p_identity_dir", None)
-    monkeypatch.setattr(settings, "p2p_username", "")
     assert OWN_KEYS() == frozenset()
 
 

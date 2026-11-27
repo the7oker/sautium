@@ -98,7 +98,9 @@ def _hydrate_blocks(blocks: list[dict]) -> list[dict]:
             hydrated = hydrate_artists(ids)
         elif kind == "album":
             ids = [it.get("album_id") for it in items if it.get("album_id")]
-            hydrated = hydrate_albums(ids)
+            # the tiles keep no mark of what opens here: a block is kept and
+            # drawn again long after (B-152's marks are a page's, at its time)
+            hydrated = [{k: v for k, v in t.items() if k != "not_here"} for t in hydrate_albums(ids)]
         elif kind == "tracks":
             ids = [it.get("track_id") for it in items if it.get("track_id")]
             hydrated = hydrate_tracks(ids)

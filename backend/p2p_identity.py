@@ -1,20 +1,23 @@
 """
-P2P identity for Docker backend.
+P2P identity for the backend — the key this node signs with, and the identity
+dict every reader resolves.
 
-Derives deterministic Ed25519 keypair from username+password using the same
-Argon2id algorithm as the desktop launcher. This makes the Docker backend
-a regular P2P peer with a stable identity and invite code.
-
-Identity is derived in-memory at startup (no files saved).
+The key is never derived here (SEC-S5): every identity is the identity
+folder's (node_ed25519.key beside node_info.json and account.json) — made by
+the account's creation (the Web UI's setup, the launcher's wizard, its key
+derived once in the background by desktop/identity_birth), brought by an
+identity file (desktop/identity_file), or a random key for an account with no
+password (the master's among them, SEC-S5 §18). Until a key is there, every
+reader here says None, which each already reads as "no identity yet".
 """
 
 import hashlib
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 
-from desktop.node_identity import (ARGON2_HASH_LEN, ARGON2_MEMORY_COST, ARGON2_PARALLELISM,
-                                   ARGON2_TIME_COST, CERT_FILENAME, validate_username)
+from desktop.node_identity import CERT_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -48,73 +51,8 @@ def verify_invite_code(invite_code: str, public_key_hex: str) -> bool:
     return digest.hex().upper() == hash_part
 
 
-def derive_identity(username: str, password: str, email: str = "") -> dict:
-    """
-    Derive P2P identity from username + password.
-
-    Returns: {node_id, public_key_hex, username, invite_code}
-    """
-    from argon2.low_level import hash_secret_raw, Type
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-    from cryptography.hazmat.primitives import serialization
-
-    validate_username(username)
-
-    # Derive seed (same algorithm as desktop)
-    salt = f"{username}:sautium".encode("utf-8")
-    seed = hash_secret_raw(
-        secret=password.encode("utf-8"),
-        salt=salt,
-        time_cost=ARGON2_TIME_COST,
-        memory_cost=ARGON2_MEMORY_COST,
-        parallelism=ARGON2_PARALLELISM,
-        hash_len=ARGON2_HASH_LEN,
-        type=Type.ID,
-    )
-
-    # Generate Ed25519 keypair from seed
-    private_key = Ed25519PrivateKey.from_private_bytes(seed)
-    pub_raw = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    node_id = pub_raw.hex()
-
-    invite_code = make_invite_code(username, pub_raw)
-
-    logger.info(f"P2P identity: {username} ({invite_code})")
-    return {
-        "node_id": node_id,
-        "public_key_hex": node_id,
-        "username": username,
-        "invite_code": invite_code,
-        "email": email,
-    }
-
-
-def derive_private_key(username: str, password: str):
-    """The Ed25519 private key for this account — same Argon2id derivation as
-    derive_identity, exposed for signing (enrichment records, requests)."""
-    from argon2.low_level import hash_secret_raw, Type
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    salt = f"{username}:sautium".encode("utf-8")
-    seed = hash_secret_raw(
-        secret=password.encode("utf-8"),
-        salt=salt,
-        time_cost=ARGON2_TIME_COST,
-        memory_cost=ARGON2_MEMORY_COST,
-        parallelism=ARGON2_PARALLELISM,
-        hash_len=ARGON2_HASH_LEN,
-        type=Type.ID,
-    )
-    return Ed25519PrivateKey.from_private_bytes(seed)
-
-
-# Cached on success only: identity sources are fixed for the process
-# lifetime, but a web-first-run account can appear mid-process — a cached
-# None would then hide it until restart. Argon2id costs ~1-2 s per
-# derivation, so uncached per-call use is not an option.
+# Cached on success only: a key can appear mid-process (an account's key
+# derived in the background), and a cached None would hide it.
 _signing_key_cache = None
 _identity_cache = None
 _identity_cache_mtime = None
@@ -133,8 +71,9 @@ def on_change(follower) -> None:
 
 
 async def changed() -> None:
-    """Said by the two places that make or change the identity
-    (routers/auth.create_account, device_auth._after_rotation)."""
+    """Said where the identity's key lands or changes under a running
+    process: device_auth._key_arrived (a key made, here or by the launcher)
+    and device_auth._after_rotation."""
     for follower in list(_followers):
         try:
             await follower()
@@ -153,10 +92,9 @@ def forget_cached() -> None:
 
 
 def load_signing_key(settings):
-    """The node's Ed25519 signing key — desktop PEM or docker-derived — or
-    None when no identity is configured."""
-    from pathlib import Path
-
+    """The node's Ed25519 signing key — the identity folder's — or None
+    while there is none (no account, or its key not made yet). Never
+    derives."""
     from cryptography.hazmat.primitives import serialization
 
     global _signing_key_cache
@@ -168,30 +106,22 @@ def load_signing_key(settings):
         if key_path.exists():
             _signing_key_cache = serialization.load_pem_private_key(
                 key_path.read_bytes(), password=None)
-            return _signing_key_cache
-    if settings.p2p_username and settings.p2p_password:
-        _signing_key_cache = derive_private_key(
-            settings.p2p_username, settings.p2p_password)
     return _signing_key_cache
 
 
 def resolve_identity(settings) -> Optional[dict]:
-    """The node's account identity dict — node_info.json (desktop mode)
-    first, env-derived (Docker mode) second, None without either. The
+    """The node's account identity dict — node_info.json's — or None. The
     single resolution point mirrored by main.py's lifespan and
     routers/p2p._get_identity."""
-    import json
-    from pathlib import Path
-
     global _identity_cache, _identity_cache_mtime
 
     if settings.p2p_identity_dir:
-        # Desktop mode: node_info.json is written by the launcher AND by
-        # this backend (email changes) while we run — the cache is keyed
-        # on the file's mtime, so an edit is seen on the next call and a
-        # stale copy can never claim "no email configured" after one was
-        # just saved (the bug this replaced: two independent caches, one
-        # invalidated, the other not).
+        # node_info.json is written by the launcher AND by this backend
+        # (email changes) while we run — the cache is keyed on the file's
+        # mtime, so an edit is seen on the next call and a stale copy can
+        # never claim "no email configured" after one was just saved (the
+        # bug this replaced: two independent caches, one invalidated, the
+        # other not).
         info_path = Path(settings.p2p_identity_dir) / "node_info.json"
         if info_path.exists():
             try:
@@ -211,11 +141,6 @@ def resolve_identity(settings) -> Optional[dict]:
                     return _identity_cache
             except Exception as e:
                 logger.warning(f"Failed to read node_info.json: {e}")
-    if _identity_cache is not None:
-        return _identity_cache
-    if settings.p2p_username and settings.p2p_password:
-        _identity_cache = derive_identity(
-            settings.p2p_username, settings.p2p_password, settings.p2p_email)
     return _identity_cache
 
 
@@ -263,14 +188,11 @@ def master_refusal(settings) -> Optional[str]:
         meant = f"its database records {pin} as its key"
     else:
         meant = f"SAUTIUM_MASTER=1: its key is {pin}"
-    # The code is made from the key and the name as given, never derived or
-    # validated again: a name with a character the nickname rule refuses is
-    # exactly the accident to name (and it would cost a second Argon2id)
     folder = Path(settings.p2p_identity_dir) if settings.p2p_identity_dir else None
     if pubkey is None:
-        held = ("but it has no key: neither its identity folder nor P2P_USERNAME and "
-                "P2P_PASSWORD give one. Check both in .env.")
-    elif folder is not None and (folder / "node_ed25519.key").exists():
+        held = ("but it has no key: its identity folder holds none. Check that the folder is the "
+                "master's (P2P_IDENTITY_DIR), or import the master's identity file into it.")
+    else:
         try:
             info = json.loads((folder / "node_info.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -278,10 +200,6 @@ def master_refusal(settings) -> Optional[str]:
         name = info.get("username") if isinstance(info, dict) else None
         code = make_invite_code(name, bytes.fromhex(pubkey)) if name else f"the key {pubkey[:16]}…"
         held = f"but its identity folder holds {code}. Check that the folder is the master's."
-    else:
-        code = make_invite_code(settings.p2p_username, bytes.fromhex(pubkey))
-        held = (f"but its credentials derive {code}. Check P2P_USERNAME and P2P_PASSWORD "
-                f"in .env — one changed character is another key.")
     return (f"This backend is the Sautium master ({meant}), {held} "
             f"Nothing was written, signed or announced; not starting.")
 
@@ -289,11 +207,11 @@ def master_refusal(settings) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Identity documents on disk: certificate + proof
 # ---------------------------------------------------------------------------
-# The Docker node derives its KEY in memory, but the certificate (a Worker
-# fact) and the proof (minutes of mining) are worth keeping: p2p_identity_dir
-# is a bind mount (./data/node_identity), so both survive container
-# recreation and the node never re-mines. Same file names as the launcher —
-# the export/import bundle moves between the two unchanged.
+# The certificate (a Worker fact) and the proof (minutes of mining) live
+# beside the key in p2p_identity_dir, a bind mount (./data/node_identity) on
+# a Docker node, so they survive container recreation and the node never
+# re-mines. Same file names as the launcher — the identity file
+# (desktop/identity_file) moves them between the two unchanged.
 
 
 def identity_dir(settings):

@@ -6,10 +6,10 @@ Tools › Backup & Restore runs `python -m backup create|export|import|merge`
 backend interpreter with the backend's own environment
 (service_manager.backend_env → backend.env: the DSN, the identity dir,
 BACKUP_DIR=<data_dir>/backup, PG_BIN=pgsql/bin), and reads its progress as
-JSON lines. The account password travels in the child's environment
-(`--password-env`), never on a command line where a process list would show
-it; cancel is a line on the child's stdin (`--cancel-on-stdin`), and the end
-of that pipe — the launcher going away — ends the job too, so a quit
+JSON lines. Nothing is typed: a backup is keyed on the node's own seed and
+opened by the seeds the node holds (SEC-S5), so no password reaches the
+child. Cancel is a line on the child's stdin (`--cancel-on-stdin`), and the
+end of that pipe — the launcher going away — ends the job too, so a quit
 mid-backup leaves no half-written file.
 """
 
@@ -24,9 +24,6 @@ from typing import Callable, Optional
 from desktop import node_backup as nb
 
 logger = logging.getLogger(__name__)
-
-PASSWORD_ENV = "SAUTIUM_BACKUP_PASSWORD"
-
 
 def backup_dir() -> Path:
     from desktop.config_manager import get_data_dir
@@ -138,10 +135,9 @@ class CliRun:
     that dies without one gets an `error` synthesised from its exit code."""
 
     def __init__(self, service_manager, args: list, on_event: Callable[[dict], None],
-                 *, password: Optional[str] = None, job: str = "Backup"):
+                 *, job: str = "Backup"):
         self._sm = service_manager
         self._args = list(args)
-        self._password = password
         self._on_event = on_event
         self.job = job
         self._proc: Optional[subprocess.Popen] = None
@@ -150,9 +146,8 @@ class CliRun:
         self.result: Optional[dict] = None
 
     @classmethod
-    def backup(cls, service_manager, password: str, on_event) -> "CliRun":
-        return cls(service_manager, ["create", "--password-env", PASSWORD_ENV],
-                   on_event, password=password, job="Backup")
+    def backup(cls, service_manager, on_event) -> "CliRun":
+        return cls(service_manager, ["create"], on_event, job="Backup")
 
     @classmethod
     def export(cls, service_manager, scope: str, artists: list, on_event) -> "CliRun":
@@ -161,9 +156,8 @@ class CliRun:
         return cls(service_manager, args, on_event, job="Export")
 
     @classmethod
-    def merge(cls, service_manager, path, password: str, on_event) -> "CliRun":
-        return cls(service_manager, ["merge", str(path), "--password-env", PASSWORD_ENV],
-                   on_event, password=password, job="Merge")
+    def merge(cls, service_manager, path, on_event) -> "CliRun":
+        return cls(service_manager, ["merge", str(path)], on_event, job="Merge")
 
     @classmethod
     def plan_export(cls, service_manager, on_event) -> "CliRun":
@@ -184,9 +178,6 @@ class CliRun:
 
     def start(self) -> None:
         env = self._sm.backend_env()
-        if self._password is not None:
-            env[PASSWORD_ENV] = self._password
-            self._password = None
         cmd = ([self._sm._get_backend_python(), "-m", "backup"] + self._args
                + ["--progress-json", "--cancel-on-stdin"])
         # stderr rides the same pipe as the events: a second pipe nobody

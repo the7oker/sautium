@@ -103,6 +103,7 @@ ASSISTANT_ROLE = "sautium_assistant_" + SESSION_DATABASE.removeprefix("sautium_"
 def pytest_configure(config):
     config.addinivalue_line("markers", "models_switch: the test reads the owner's switch "
                                        '"AI models on this machine" from its own database')
+    config.addinivalue_line("markers", "real_key_cost: the product's Argon2 constants, unpatched")
 
 
 @pytest.fixture(autouse=True)
@@ -130,6 +131,22 @@ def _role_decided(monkeypatch):
     the role itself, a test of the decision starts from none."""
     from desktop.p2p import master_node
     monkeypatch.setattr(master_node, "_role", False)
+
+
+@pytest.fixture(autouse=True)
+def _library_folders_as_read(request, monkeypatch):
+    """The library's folders as a process holds them (library_root's rows,
+    read once and dropped at each write): a test on a scratch database
+    starts with none read — its own rows are read at first use —, and a test
+    with no database behind it runs as a node whose table holds no row (the
+    folder its .env names is still one: library_root.given)."""
+    library_root = sys.modules.get("library_root")
+    if library_root is None:
+        try:
+            import library_root
+        except ImportError:
+            return                  # a test with no backend on its path reads no folder
+    monkeypatch.setattr(library_root, "_rows", None if "scratch_dsn" in request.fixturenames else [])
 
 
 @pytest.fixture(autouse=True)
@@ -188,3 +205,54 @@ def scratch_dsn(request):
     conn.close()
     yield f"postgresql://{PG['user']}:{PG['password']}@{PG['host']}:{PG['port']}/{name}"
     _recreate(name, create=False)
+
+
+@pytest.fixture(autouse=True)
+def cheap_key_cost(request, monkeypatch):
+    """Every test derives at a cost of a few milliseconds: the product's
+    t=8000 over 128 MiB is minutes a key (desktop/node_identity), and the
+    sign-in hash a second. One module holds the constants every road reads
+    (node_identity: the key, the sign-in hash, identity_birth's estimate), so
+    patching it covers both runtimes; the password estimate keeps the
+    product's rate. A test that reads the product's own
+    values asks for them by `@pytest.mark.real_key_cost`."""
+    if request.node.get_closest_marker("real_key_cost"):
+        return
+    from desktop import node_identity, password_strength
+    # The estimate a door holds a password to stays the product's: what the
+    # tests pass or refuse is what a node passes or refuses
+    rate = password_strength.guesses_per_second()
+    monkeypatch.setattr(password_strength, "guesses_per_second", lambda: rate)
+    monkeypatch.setattr(node_identity, "ARGON2_TIME_COST", 1)
+    monkeypatch.setattr(node_identity, "ARGON2_MEMORY_COST", 8 * 1024)
+    monkeypatch.setattr(node_identity, "SIGNIN_TIME_COST", 1)
+    monkeypatch.setattr(node_identity, "SIGNIN_MEMORY_COST", 8 * 1024)
+
+
+@pytest.fixture
+def births(monkeypatch):
+    """The account key's worker (device_auth._start_birth), held: each start
+    recorded ({username, password, purpose, done}) and ended by the test —
+    `births.finish()` derives the last start's seed and runs its end in the
+    test's own thread; a start while one is unfinished is refused, as the
+    worker refuses it."""
+    import device_auth
+    from desktop import node_identity
+
+    class Started(list):
+        def finish(self, i=-1):
+            birth = self[i]
+            birth["finished"] = True
+            birth["done"](node_identity.derive_seed(birth["username"], birth["password"]))
+
+    started = Started()
+
+    def start(username, password, purpose, done):
+        if any(not b.get("finished") for b in started):
+            return False
+        started.append({"username": username, "password": password, "purpose": purpose,
+                        "done": done})
+        return True
+
+    monkeypatch.setattr(device_auth, "_start_birth", start)
+    return started

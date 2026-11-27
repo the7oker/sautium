@@ -154,3 +154,28 @@ def test_an_event_neither_the_database_nor_the_disk_takes_costs_only_itself(tmp_
     assert diag_events.record_or_spool("postgresql://x:y@127.0.0.1:1/z", not_a_dir,
                                        "backend.crashed", {"rc": 1}) is False
     assert "backend.crashed lost — neither the database nor the spool took it" in caplog.text
+
+
+def test_the_library_in_a_silent_bundle_carries_no_folder_name_or_label():
+    """LIBRARY-FOLDERS-1, review round 1 (M3): the jobs scope leaves without
+    the person's tick, so the Library's folders go as states and counts —
+    a disk's label and a folder's name are the person's own words."""
+    library = {"total_tracks": 3,
+               "folders": [{"id": 1, "path": "/media/sautium/4A21/Music", "name": "Grandma's stick · Music",
+                            "label": "Grandma's stick", "connected": False, "disk": True, "albums": 2,
+                            "tracks": 9, "away_copies": 0, "forgettable": True, "pullable": False}],
+               "new_disks": [{"path": "/media/sautium/77AA", "uuid": "77AA", "label": "Bob's party mix",
+                              "audio_files": 40, "capped": False}],
+               "scan": {"progress": "Scan complete — Grandma's stick · Music was not scanned: it is not connected",
+                        "prune_plan": {"id": "p", "kind": "folder", "name": "Grandma's stick · Music"}}}
+    scan = {"progress": "Forget Bob's party mix waits for your answer",
+            "prune_plan": {"id": "p", "kind": "folder", "name": "Grandma's stick · Music"}}
+    lib, sc = diag_bundle._without_folder_names(library, scan)
+    text = repr((lib, sc))
+    for word in ("Grandma", "Bob", "4A21", "77AA"):
+        assert word not in text, word
+    assert lib["folders"] == [{"connected": False, "disk": True, "albums": 2, "tracks": 9, "away_copies": 0}]
+    assert lib["new_disks"] == 1 and lib["total_tracks"] == 3
+    assert lib["scan"]["progress"] == "Scan complete — <folder> was not scanned: it is not connected"
+    assert sc["progress"] == "Forget <folder> waits for your answer"
+    assert diag_bundle._without_folder_names(None, None) == (None, None)

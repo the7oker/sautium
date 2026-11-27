@@ -108,21 +108,21 @@ def _scan_done(act) -> dict:
 
 @cli.command()
 @click.option("--no-skip", is_flag=True, help="Read every file again, changed or not")
-@click.option("--path", "-p", type=str, default=None, help="Scan specific subdirectory (e.g., 'Electronic/Berlin School/Klaus Schulze')")
+@click.option("--path", "-p", type=str, default=None,
+              help="Scan one folder inside a folder of the library (its full path, e.g. '/media/sautium/4A21-0000/Music/Jazz')")
 @click.option("--prune", is_flag=True, help="Remove DB records for files that no longer exist on disk (asks first)")
 @click.option("--yes", is_flag=True, help="With --prune: remove without asking")
 def scan(no_skip, path, prune, yes):
     """Scan the music library — through the running backend's one scan queue."""
     import urllib.parse
     click.echo(f"🎵 Starting library scan...")
-    click.echo(f"📁 Library path: {settings.music_library_path}")
     if path:
-        click.echo(f"📂 Subdirectory: {path}")
+        click.echo(f"📂 Folder: {path}")
     if no_skip:
         click.echo(f"⚠️  Reading every file again")
     query = urllib.parse.urlencode({"skip_existing": str(not no_skip).lower(),
                                     "prune": str(prune).lower(),
-                                    **({"subpath": path} if path else {})})
+                                    **({"scope": path} if path else {})})
     started = {}
     status = _scan_done(lambda: started.update(_backend("POST", f"/scan/start?{query}")))
     if started.get("queued"):

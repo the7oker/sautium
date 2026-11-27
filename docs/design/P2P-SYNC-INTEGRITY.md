@@ -811,8 +811,8 @@ the ceiling and collapsed the planned tiers into one task.
   (lifespan task): the proof `{v, pubkey, cert_sig, nonce, difficulty,
   params_version, mined_at}` lives in `identity_proof.json` beside
   `birth_certificate.json` (launcher identity dir; Docker
-  `./data/node_identity` bind mount) and travels in the export/import
-  bundle. Policy: `method: email` → nothing to mine; a stored proof that
+  `./data/node_identity` bind mount) and travels in the identity file with
+  the key and the certificate (`desktop/identity_file.py`, since 2026-11-26). Policy: `method: email` → nothing to mine; a stored proof that
   binds to the certificate is re-verified once in the background (a
   corrupt proof must never be presented — a failed proof blacklists its
   presenter); otherwise mine at below-normal thread priority behind a

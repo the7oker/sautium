@@ -242,7 +242,20 @@ See:
   `uuid_utils.IDENTITY_RULE` with it: every node's backend re-normalizes at
   its next start (`db_migrate`, marker `identity_rule_v{N}`,
   `canon.migrations.renormalize_identities`); the seals bind the uuids and
-  get re-signed.
+  get re-signed. **A title's place in its tracklist is an input of a
+  track's id** (since 2026-11-26, CANON-TRACKS-1): the k-th position of a
+  title in one copy or one release is `song:{artist}:{title}#k`
+  (`track_uuid`'s `occurrence`, stored as `tracks.occurrence`; the first
+  keeps the plain key; a copy is a folder or its sibling disc folders, a
+  position (disc, track, cue start)), so two movements titled alike are two
+  tracks (`canon.occurrence`: the scanner's import and re-read, the mint,
+  the slots, a copy held in part completed from its bound release); every
+  rule that recomputes an id from a row takes it. And one performance in two copies is one track
+  (`canon.content.fold_copy_twins`): their prints one material within 2 s,
+  and MusicBrainz's word (one recording) or the album's (one position of two
+  copies, titles alike once folded) — the print alone is no such word; the
+  keeper of every fold is `content._keeper` (the recording's name, else the
+  smallest uuid).
 - **A composer is a credit, never an artist role** (since 2026-11-18,
   CREDITS-1): `track_credits` (`track_credit_role`, `composer` alone so far;
   `source` `tag` | `mb` — what the file says is the floor, MusicBrainz's work
@@ -268,8 +281,11 @@ See:
   (`Debussy, Claude`) is one name as written — not in an unspaced script
   or beside `Traditional`/`Anonymous` —, and a generational suffix
   (`Ray Parker, Jr.`) is part of the name before it (since 2026-11-23,
-  LIBRARY-FIXES-1); the comma tracks that would now read otherwise are
-  derived again whenever MB rows arrive or go. Owned through a credit is owned
+  LIBRARY-FIXES-1); inside a comma list the last part's ` & ` / ` and ` is
+  the list's (`Hans Zimmer, Klaus Badelt & Lisa Gerrard` is three) unless
+  that part is known whole, a value without a comma a team (`Lennon &
+  McCartney`; since 2026-11-26, B-136); the comma tracks that would now
+  read otherwise are derived again whenever MB rows arrive or go. Owned through a credit is owned
   (`sql_queries.ARTIST_OWNED`), never engaged. Nothing of it travels.
 - **Album has no `artist_id`.** Artists derived via `track_artists` —
   compilations, features and collaborations work without nullable FKs.
@@ -413,7 +429,8 @@ See:
   while a copy of the track is here (it moves to that copy). Since
   2026-11-24 a slot's way in is also read again when the folder its file
   lies in stops or starts answering (`scanner.gone_prefixes`, the process's
-  recorded observation; its change is the queue's event,
+  recorded observation — one look a folder of the library since
+  2026-11-26, LIBRARY-FOLDERS-1; its change is the queue's event,
   `PlaybackManager.reach_changed` — the slot the output sounds is read when
   the output leaves it), and a file that does not open here now — its
   folder not answering, its copy away, or the file itself not found by the
@@ -658,15 +675,20 @@ See:
   seal-verification gate, the carry SQL, the DHT announce query, the walk —
   lives there and is imported, not copied.
 - Identity documents: `./data/node_identity` → `/app/data/node_identity`
-  (`birth_certificate.json` + `identity_proof.json` — the Docker node derives
-  its KEY in memory, but the Worker-issued certificate and the mined
-  proof-of-work must survive container recreation; same file names as the
-  launcher so the export/import bundle moves between the two). Neither file
+  — the identity itself (`node_ed25519.key`, `node_info.json`, `account.json`)
+  with its `birth_certificate.json` + `identity_proof.json`, the same file
+  names as the launcher's. An identity is the identity folder's alone, on
+  every node (since 2026-11-26, SEC-S5 §18): made by the account's creation,
+  brought by an identity file, or a random key — no environment variable
+  names one, the master's included. The key, the documents and the keys it
+  retired move together as the identity file (`desktop/identity_file.py`: an
+  optional passphrase at the key's cost; Settings › Export/Import identity…,
+  `./sautium identity export|import`, never the Web UI). Neither document
   is written over with another key's (since 2026-11-22, B-113):
   `node_identity.write_identity_document` is their one writer on both
-  runtimes — the worker, the email road, a bundle's import, a restore — and
-  moves a document of another key whole to `replaced-<when>/` with an
-  `error` naming both keys.
+  runtimes — the worker, the email road, an identity file's import, a
+  restore — and moves a document of another key whole to `replaced-<when>/`
+  with an `error` naming both keys.
 - HQPlayer Desktop's data folder: `${HQPLAYER_DATA_DIR}` → `/hqplayer:ro` in
   every compose file (since 2026-10-02; four since 2026-11-09, with the Linux
   arm64 `docker-compose.pi.yml`) — the playback diagnostics read
@@ -679,12 +701,35 @@ See:
   `COMPOSE_FILE`; `./host/` is bound into no container) binds each root —
   a folder named with `--music`, the automount's `/media/sautium` — read-only
   at its own host path, `rslave`, and lists them in `SAUTIUM_LIBRARY_ROOTS`;
-  the owner picks the library's folder under them in the Web UI (a row of
-  `library_roots`), and `MUSIC_LIBRARY_PATH` then names an empty folder. A
-  path a page names — the folder picked, a scan's scope — is resolved and
-  must stay under a root; under roots the scanner follows no link out of
-  them. An install whose `.env` names `MUSIC_LIBRARY_PATH` itself (made by
-  hand) keeps that line and gets no roots: its files keep their paths. A disk plugged in later is seen by a
+  the owner adds the library's folders under them in the Web UI, and
+  `MUSIC_LIBRARY_PATH` then names an empty folder. **The library is every
+  folder the person has given it, several at once** (since 2026-11-26,
+  LIBRARY-FOLDERS-1; before it one chosen folder, and a second disk's albums
+  read "away" while it was in): a row of `library_folders` a folder, its
+  `path` as `media_files.file_path` spells it and its identity (under the
+  disks' folder it carries the filesystem's UUID); added under the roots
+  here, in the launcher's window there (the OS's dialog: the route takes a
+  host-signed call alone), named in `.env` on a Docker node made by hand
+  (made sure of at every start); no folder inside another (the inner
+  refused, the outer takes them in). Each folder answers or not by its own
+  look (`scanner.folder_unreachable`); a scan walks the folders that answer
+  and names the others, and its judges — the Rescan's plan, "Scan for new"'s
+  set-aside, the yes's check — judge only what was walked: **away** is a file
+  a Rescan did not find where its folder answers, and a folder that does not
+  answer is **not connected** (its albums play as a phantom does, a warning
+  toast at its onset, its dimmed row in Settings › Library). A folder leaves
+  only by the owner's confirmed "Forget this disk and its albums", connected
+  or not — what only its files held goes, as every removal takes; listens and
+  a heard or analysed track stay. A disk plugged in that the library never had
+  is counted once a mount and offered for one tap (a toast's "Add to library",
+  the list's Add), never joined by itself; nothing of one passed over is
+  kept. The one folder of before became the first rows once
+  (`db_migrate`'s `library_folders_v1`; its leftovers under no folder are
+  "Elsewhere", forgotten by the owner). A path a page names — a folder
+  added, a scan's scope — is resolved and must stay under a root; under
+  roots the scanner follows no link out of them. An install whose `.env`
+  names `MUSIC_LIBRARY_PATH` itself (made by hand) keeps that line and gets
+  no roots: its files keep their paths. A disk plugged in later is seen by a
   `poll()` on the mount table (`backend/mount_watch.py`), never a timer. The
   setup never runs `sudo`: it prints root steps (lingering; the automount,
   not beside a desktop that mounts disks itself; the `/etc/fstab` line for a
@@ -889,8 +934,8 @@ below bind with or without it.
    the node and outlast "Sign out everywhere" — the account email, an
    invite link with rights or any widening of a link, the AI key, an
    agent's sign-in — take the
-   account's password through it (on an anonymous launcher account the
-   host's pairing code), `routers/auth.step_up`. Signing
+   account's password through it (on an account with no password, on any
+   node, the host's pairing code), `routers/auth.step_up`. Signing
    itself never needed the transport — the token never travels. Do
    not add a self-signed listener back "for security": it adds a
    warning and no protection the box does not give. TLS for the Web
@@ -999,11 +1044,11 @@ toast takes no pointer events and never blocks the user (see
 
 | File | Purpose |
 |------|---------|
-| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release — never one older than the version HEAD's tree states, and none at all once the host agent is installed: then the release is the agent's, since 2026-11-25 —, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `update`, `remove`; the automount's rule, unit and script, and the `/etc/fstab` line that mounts one music disk at the automount's own point for it, since 2026-11-24): standard library, never root, root steps printed and never run |
-| `backend/library_root.py` + `backend/mount_watch.py` | The library's folder as the owner's choice under mounted roots (the boundary every named path is resolved against, the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —, the stored choice), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type — or, since 2026-11-24, `ambivalent` / `unknown` for a volume no one filesystem is found on —, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
-| `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, the password through the credential box and the signed door, the file kept on the node — no route serves it |
+| `scripts/setup.py` (`./sautium`) + `desktop/machine_tier.py` | The console setup of a Linux Docker node (checks, the release — never one older than the version HEAD's tree states, and none at all once the host agent is installed: then the release is the agent's, since 2026-11-25 —, the birth preset read off the machine by the one tier rule the backend and the launcher share, `.env`, the roots override, the build, the host agent, the start, the last screen with the setup code and its QR; `status`, `roots` (since 2026-11-22), `pair`, `identity export|import` (since 2026-11-26), `update`, `remove` — every QR drawn by `backend/pairing.present`, its value as text under it; the automount's rule, unit and script, and the `/etc/fstab` line that mounts one music disk at the automount's own point for it, since 2026-11-24): standard library, never root, root steps printed and never run |
+| `backend/library_root.py` + `backend/mount_watch.py` | The library's folders (`library_folders`, several at once since 2026-11-26: given, added — the inner refused, the outer merged —, named; the roots, the boundary every named path is resolved against; the picker's listing — a disk is a point a whole filesystem is mounted at, "safe to pull" the superblock's read-only word —; a disk the library never had, counted once a mount and offered for one tap), the mount table's wake for a disk plugged in later and, since 2026-11-22, the automount's word of a volume nothing mounted (`<the automount's folder>/.unread/<kernel name>`: the boot, the type — or, since 2026-11-24, `ambivalent` / `unknown` for a volume no one filesystem is found on —, the label, read bounded and never through a link; its folder watched by inotify; the notice `disk.unread.<name>` and the folder sheet's row) |
+| `backend/backup_job.py` + `backend/routers/backup.py` | "Back up now" in the Web UI: the backup CLI as a child of the backend, no password and no step-up (the file is keyed on the node's own seed, since 2026-11-26), the file kept on the node — no route serves it |
 | `scripts/host_agent.py` + `backend/host_channel.py` + `backend/routers/host.py` | The host agent of a Linux Docker node (check, update, diagnostics by names alone; the requests folder drained by handles; the verifier the installed tree's own `updater.survey_fetched` in a container with no network; the starter and its update; the user units) and the node's side (the request writer, the answer under the channel's key, `host_requests`) |
-| `backend/device_auth.py` | Device tokens (derived from the epoch + node key, never stored) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides, padded to a whole bucket both ways; `step_up` (the password, or an anonymous account's host code) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8); the new password's edge at every door (`check_new_password`), the time said once at a sign-in (`told_once`), the 140-bit pairing code nobody types |
+| `backend/device_auth.py` | Device tokens (derived from the epoch + the account's random id, `account.json`'s — born with the account, before its key — never stored); a password checked by the account's sign-in hash, never by deriving the key; the account made at once and its key made in the background and followed on its arrival (`create_account`, `rotate_identity`, `decide_new_identity`, `_key_arrived`; desktop/identity_birth) and the boxed credential channel every login/pair/create-account/logout-all/change-identity exchange — and every secret typed in the Web UI — rides, padded to a whole bucket both ways; `step_up` (the password, or the host's code for an account with no password) and the grants a multi-step flow quotes — the Web UI has no TLS (rule 8); the new password's edge at every door (`check_new_password`), the time said once at a sign-in (`told_once`), the 140-bit pairing code nobody types |
 | `desktop/password_strength.py` + `desktop/password_lists/` | The one password estimate (since 2026-11-25, SEC-S2): zxcvbn 4.5.0 pinned, widened language-free (years to 2050, the account's own words, EFF's list at its uniform rank, Wikidata's famous phrases, a separators pass), turned into the time one GPU takes at the key's actual cost (`node_identity.ONE_GPU_GUESSES_PER_SECOND`, scaled by t·m); refused under an hour, the person's word under a year; the four-word EFF phrase drawn by `secrets`. Every door, the wizard and the Web UI's meter (asked through the box) read it; the lists come from `scripts/make_password_lists.py` under pinned digests |
 | `desktop/agent_login.py` | Headless CLI sign-in driver (`claude auth login`, `codex login [--device-auth]` over pipes) shared by the wizard and the backend's `/api/settings/ai/<agent>/signin` — no console, completion is an event |
 | `docs/design/POSITIONING.md` | Product positioning + UI design principles (source of truth) |
@@ -1018,8 +1063,9 @@ toast takes no pointer events and never blocks the user (see
 | `desktop/p2p/lb_slice_queries.py` + `desktop/p2p/lb_slice_cycle.py` | The LB slice protocol (per-artist-MBID signed blobs, versioned serve/verify/import, the pending pool — an opened page's MBIDs and a random draw of the owned and engaged) and the requester cycle shared by the launcher's P2PManager and the Docker backend (sources through `slice_sources.py`, `min_version`, one request to a source a minute, an opened page's MBIDs asked at once) |
 | `backend/assistant_queries.py` | Catalog queries + result formatting SHARED by both assistant tool surfaces (MCP + `backend/tools/definitions.py`) — one copy, so neither drifts owned-only |
 | `backend/notary.py` + `backend/sign_audio.py` | The sealing owner (one thread, woken by every producer of signable state) and its two stages: `sign()` author-signs at once, `stamp()` Merkle-batches + Worker-timestamps on the notary's cadence |
-| `desktop/node_backup.py` | Node backup format v1 (`.sbk`: Argon2id KEK in its own salt domain, per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore, identity write, selftest — shared by launcher and backend (`docs/design/BACKUP.md`) |
-| `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest\|export\|import\|merge` on either interpreter (loads `<data_dir>/backend.env` under the launcher), password check via `device_auth.verify_password`, the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create --password-env P2P_PASSWORD` — a contract. The Web UI makes one and downloads none (`backend/backup_job.py`, since 2026-11-19) |
+| `desktop/node_backup.py` | Node backup format v2 (`.sbk`: KEK = HKDF-SHA256 of the identity's seed, bound to its public key — whoever holds the seed opens its backups, since 2026-11-26; v1 refused with its words; per-file data key, chunked XChaCha20-Poly1305 with the header as AAD, framed members) + `pg_dump`/`pg_restore` drivers, staged restore opened by the seeds the node holds, the identity folder completed from its own key's backup, selftest on a throwaway seed — shared by launcher and backend (`docs/design/BACKUP.md`) |
+| `desktop/node_identity.py` + `desktop/identity_birth.py` + `desktop/identity_file.py` | The identity: `derive_seed`, the ONE derivation (NFKC, Argon2id t=8000 over 128 MiB — minutes, since 2026-11-26), the account file (`account.json`: the sign-in hash, the token's id, the key to come), a random key wherever no password was given; the worker that makes a key once, in the background, its estimate said at its start and its end an event; the identity file (the key, the documents, the retired keys; an optional passphrase), `python -m desktop.identity_file new` the master's random identity |
+| `backend/backup.py` | The node binding and the ONE "make a backup": `python -m backup create\|inspect\|restore\|selftest\|export\|import\|merge` on either interpreter (loads `<data_dir>/backend.env` under the launcher), the node's seed from `p2p_identity.load_signing_key` (restore/inspect/merge open with the seeds the node holds, current and retired), the playback signal as a PostgreSQL session advisory lock (`PlaybackSignal` held by the backend, `PlaybackHold` waited on by the job). The weekly task calls `create` (no password) — a contract. The Web UI makes one and downloads none (`backend/backup_job.py`, since 2026-11-19) |
 | `backend/share.py` | Share export/import (BACKUP.md Product B): gzip'd JSON lines with a signed trailer, streamed both ways; every sealed record the node holds under its author's seal, structural rows from the seed builders; import through `SyncClient._import_items` (the gate) after a verify pass, default (add phantoms) or `--existing-only` (create no artist/album/track) |
 | `backend/life_merge.py` | Own life-data merge (BACKUP.md Product C): `python -m backup merge <own .sbk>` — same-account rule, the dump streamed once through `pg_restore --data-only -t …` into a scratch schema in the live database, keyed union (listens, sessions, friends, messages, chats, gear, comparisons by ear, allowlisted settings, rotation records) in one transaction, unknown tracks wait; `--dry-run` = rollback |
 | `backend/play_stats.py` | `local_play_stats` is DERIVED from `listening_history` — the one statement the play tracker and the merge share; never increment those counters in place. Also the one "same listen" rule (`same_listen`, `LISTENS_LOCK_KEY`) and the repair of pre-2026-09-24 naive listen starts |
