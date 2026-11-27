@@ -2695,7 +2695,8 @@ for a Last.fm cooldown (30 min doubling to 24 h) that reads as "Idle".
   lit by the guidance trail until visited, and the consequence explained
   where it shows (the bare card says the discography is on its way and
   why it waits). A toast that nobody saw costs nothing
-  because the other two layers still hold the fact.
+  because the other two layers still hold the fact. (Since 2026-11-27 the
+  rows hold the network's lines alone — "Each notice in its own domain".)
 - **`pointer-events: none` for the passive toast.** A tap goes to what is
   beneath, so a toast never blocks a control and the second tap of a
   double-tap cannot be hijacked into "open Sync". The toast is narrower
@@ -4950,6 +4951,39 @@ Musicians: …": 27 rows for 14 positions (B-134). CANON-TRACKS-1-PROPOSAL
   uuid. `MATCHER_VERSION` stays 2: the matcher's choices do not change; a
   binding follows a renamed or folded track by `ON UPDATE CASCADE`, and a
   moved file's as above.
+
+### Each notice in its own domain (2026-11-27)
+
+The rows of 2026-09-13 were never filtered: every domain's notice since —
+a disk plugged in, "Updated to 0.2.20", HQPlayer's refusals, the
+providers, wrong passwords — stood among Sync & P2P's rows, a second
+channel beside the toasts (the owner's shots on the box, 2026-11-26). And
+the timed toast of a lasting condition was the gap the rows filled: the
+evening's "not connected" toast stood 9 s, unseen from the other room.
+
+- **The domain is one field, named where the notice is derived**
+  (`_notice_items`); the page keeps the domain → screen map, never a key
+  list. MusicBrainz's cooldown is the network's (it confirms other nodes'
+  slices); Last.fm's and Deezer's are the background enrichment's.
+- **A state lives on its own screen; its toast lasts while it does.**
+  Fifteen states already had their screen; eight gained one (the
+  enrichment line's pauses in place of "Idle", an unread disk in Settings ›
+  Library, the media tools under Analyse library, the stream providers on
+  the Streaming library, the Benchmark's marks with their Leave), each
+  drawn from the channel itself, not derived again.
+- **A report's seen moved from the visit to its toast.** With the rows gone
+  the visit could no longer be the seen; the close is, on every page, and an
+  unseen report is the one thing the connect-time snapshot toasts. One
+  statement merges the seen map, so two pages closing two reports keep both.
+- **The trail lights for two states alone** (`update`, `support_request`):
+  the ones a page opened after their onset would never tell. Network lines
+  need no attention, so they light nothing.
+- **The other surfaces against the one design**: dialogs for what merely
+  happened became toasts (a sign-out everywhere, a scan refused, a send or
+  delete that failed, an agent's install), form results moved under their
+  button (Add device, a pasted sign-in code), a chip that cannot act is drawn
+  disabled instead of a dialog at the tap, and Friends' hint line lost the
+  timer that put its text back.
 
 ## Known Gotchas
 

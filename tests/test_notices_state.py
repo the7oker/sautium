@@ -117,7 +117,7 @@ def test_the_rate_check_notice_is_the_hqplayer_backends_own(cur, monkeypatch):
         return {i["key"]: i for i in settings_router._notice_items()}.get("hqplayer.rate_check")
 
     assert served(types.SimpleNamespace(id="hqplayer", rate_notice=lambda: held)) == {
-        "key": "hqplayer.rate_check", "kind": "warning", "since": ONSET, "until": None,
+        "key": "hqplayer.rate_check", "kind": "warning", "domain": "hqplayer", "since": ONSET, "until": None,
         "data": held["data"], "seen": False}
     assert served(types.SimpleNamespace(id="hqplayer", rate_notice=lambda: None)) is None
     assert served(types.SimpleNamespace(id="local")) is None
@@ -213,8 +213,10 @@ def test_a_tab_toasts_an_onset_once_through_a_gap_and_a_reload():
 
 
 _ROWS = r"""
-const notices = { list: () => [{ key: 'hqplayer.rate_check', kind: 'warning' }, { key: 'x"<y', kind: 'info' },
-                               { key: 'cooldown.lastfm', kind: 'info' }, { key: 'both', kind: 'error' }] };
+const notices = { list: () => [{ key: 'hqplayer.rate_check', kind: 'warning', domain: 'network' },
+                               { key: 'x"<y', kind: 'info', domain: 'network' },
+                               { key: 'cooldown.lastfm', kind: 'info', domain: 'network' },
+                               { key: 'both', kind: 'error', domain: 'network' }] };
 function noticeCopy(n) {
   if (n.key === 'cooldown.lastfm') return { title: 'Last.fm paused', text: 'Rate-limited' };
   const copy = { title: 'A title', text: 'Its text' };
@@ -335,7 +337,8 @@ def test_a_provider_that_stepped_aside_is_a_notice_in_its_own_voice(cur, monkeyp
     items = _streaming_items()
     assert sorted(items) == ["streaming.aside.cat", "streaming.silent.cat"]
     assert items["streaming.aside.cat"] == {
-        "key": "streaming.aside.cat", "kind": "warning", "since": ONSET, "until": None, "seen": False,
+        "key": "streaming.aside.cat", "kind": "warning", "domain": "streaming", "since": ONSET, "until": None,
+        "seen": False,
         "data": {"provider": "cat", "name": "Lossless-X", "code": "no_tier",
                  "title": "Lossless-X: this account no longer has the tier",
                  "text": "Tracks stream from another provider.", "detail": "the tier ended"}}
@@ -478,3 +481,74 @@ def test_the_aside_notice_draws_the_modules_words_and_check_again_answers_the_ta
             checking,
             {"kind": "error", "title": "The provider could not be checked", "text": "no &lt;route&gt;",
              "action": None, "key": key}]}, out
+
+
+def test_a_report_is_seen_at_its_toast_and_a_state_never_is(cur, monkeypatch):
+    """A report's seen keeps that onset (the channel drops it everywhere, a
+    later onset is news); two reports seen one after the other are both kept
+    — one statement merges the map; a state is refused: it ends with its
+    source, never by being looked at. The pairing codes' record starts again."""
+    from fastapi import HTTPException
+    from device_auth import PIN_FAILURES_KEY
+    import device_auth
+    woken, restarted = [], []
+    monkeypatch.setattr(device_auth, "pin_failures_seen", lambda: restarted.append(1))
+    _setting(cur, "auth.login_failures", {"count": 2, "since": ONSET, "last": ONSET})
+    _setting(cur, PIN_FAILURES_KEY, {"count": 1, "since": ONSET, "last": ONSET})
+
+    def served():
+        return {n["key"]: n for n in settings_router._notices_state()["items"] if n["key"].startswith("auth.")}
+    assert {k: (n["report"], n["seen"], n["domain"]) for k, n in served().items()} == {
+        "auth.login_failures": (True, False, "account"), PIN_FAILURES_KEY: (True, False, "account")}
+    seen = settings_router.NoticeSeen(since=ONSET)
+    settings_router.post_notice_seen("auth.login_failures", seen)
+    assert list(served()) == [PIN_FAILURES_KEY] and restarted == []
+    settings_router.post_notice_seen(PIN_FAILURES_KEY, seen)
+    assert served() == {} and restarted == [1]
+    settings_router.post_notice_seen(PIN_FAILURES_KEY, seen)          # again: nothing moves
+    assert restarted == [1]
+    cur.execute("SELECT value FROM user_settings WHERE key = 'notice.seen'")
+    assert cur.fetchone()[0] == {"auth.login_failures": ONSET, PIN_FAILURES_KEY: ONSET}
+    # a later failure is news again
+    cur.execute("UPDATE user_settings SET value = jsonb_set(value, '{last}', '\"2026-10-08T00:00:00+00:00\"') "
+                "WHERE key = 'auth.login_failures'")
+    assert list(served()) == ["auth.login_failures"]
+    with pytest.raises(HTTPException) as refused:
+        settings_router.post_notice_seen("tools.missing", seen)
+    assert refused.value.status_code == 400
+
+
+def test_the_trail_lights_for_an_offered_release_and_a_waiting_request_alone(cur, monkeypatch):
+    """No notice lights the trail as such (a network line, a folder out, a
+    cooldown: nothing). A release offered lights `update` until the Profile's
+    visit retires it — again for a newer release; a support request waiting
+    lights `support_request` while it waits, whatever is visited."""
+    import types
+    # The trail's other tasks read the workers' state and the hardware: not this test's
+    monkeypatch.setitem(sys.modules, "main", types.SimpleNamespace(
+        _scan_state={"running": True}, _enrich_state={"running": True}))
+    items = []
+    monkeypatch.setattr(settings_router, "_notices_state", lambda: {"items": items})
+    from routers import host as host_router
+    offered = {"release": "v0.3.1", "since": ONSET}
+    monkeypatch.setattr(host_router, "offered_release", lambda: offered)
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
+
+    def tasks():
+        return [t for t in settings_router._guidance_state()["tasks"] if t in ("update", "support_request", "notices")]
+    items[:] = [{"key": k, "domain": d, "seen": False, "since": ONSET, "data": {}}
+                for k, d in (("mb_slice.deferred", "network"), ("library.folder_out.3", "library"),
+                             ("cooldown.lastfm", "enrichment"))]
+    assert tasks() == []
+    items.append({"key": "update.available", "domain": "node", "seen": False, "since": ONSET,
+                  "data": {"release": "v0.3.1"}})
+    items.append({"key": "support.request.9", "domain": "support", "seen": False, "since": ONSET, "data": {}})
+    assert tasks() == ["update", "support_request"]
+    settings_router.post_guidance_seen("update")
+    assert tasks() == ["support_request"]
+    items[-2] = {**items[-2], "data": {"release": "v0.3.2"}}
+    assert tasks() == ["update", "support_request"]
+    items.pop()
+    assert tasks() == ["update"]
+    with pytest.raises(Exception):
+        settings_router.post_guidance_seen("notices")

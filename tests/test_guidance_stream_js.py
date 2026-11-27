@@ -181,7 +181,7 @@ vm.runInContext(%(objects)s.replace('}, 200);', '}, 20);') + '\nthis.libraryWake
     for (let i = 0; i < 10; i++) { say('', {}); await sleep(50); }
     out.afterWakes = { gets: log.filter(l => l === 'GET /api/settings/guidance').length, wakes: heard.wakes };
     // a task appears: said on the stream, painted, nothing asked
-    node.tasks.push('notices');
+    node.tasks.push('support_request');
     say('guidance', answer());
     await sleep(60);
     out.appeared = [...g.guide.tasks];
@@ -196,7 +196,7 @@ vm.runInContext(%(objects)s.replace('}, 200);', '}, 20);') + '\nthis.libraryWake
     out.seen = [...g.guide.tasks];
   } else if (scenario === 'late-read') {
     // The first read is computed, and held by the network; the trail changes and the stream says so
-    node.tasks = ['notices'];
+    node.tasks = ['support_request'];
     say('guidance', answer());
     await sleep(60);
     out.streamed = [...g.guide.tasks];
@@ -229,11 +229,11 @@ def test_the_page_asks_for_the_trail_once_and_never_at_a_wake():
     assert out["first"] == ["audio_output"]
     # ten wakes after the connect's own: every one reached the screens, none asked for the trail
     assert out["afterWakes"] == {"gets": 1, "wakes": 11}
-    assert out["appeared"] == ["audio_output", "notices"]
+    assert out["appeared"] == ["audio_output", "support_request"]
     # the page said its interest once the stream named its connection, and was sent the snapshot at once
     assert out["load"] == {"heard": [{"load": {"headroom": 1}, "gate": None},
                                      {"load": {"headroom": 0.7}, "gate": None}], "wakes": 0}
-    assert out["seen"] == ["notices"]
+    assert out["seen"] == ["support_request"]
     assert out["log"].count("GET /api/settings/guidance") == 1
     assert out["log"].count("GET /api/settings/library/stream") == 1
 
@@ -256,8 +256,8 @@ def test_the_page_says_which_connection_shows_the_load_and_no_other_is_sent_it()
 def test_an_answer_computed_earlier_never_paints_over_a_later_one():
     out = _run("late-read")
     assert out["first"] == []                       # nothing said yet: the read is held
-    assert out["streamed"] == ["notices"]
-    assert out["afterLate"] == ["notices"]          # the held read was computed before it
+    assert out["streamed"] == ["support_request"]
+    assert out["afterLate"] == ["support_request"]          # the held read was computed before it
     assert out["restarted"] == ["music_folder"]
 
 
@@ -279,6 +279,7 @@ const fetched = [];
 const _fetchSyncState = async () => { fetched.push(hash); return { load: null }; };
 const _renderSync = () => 'the block, drawn again';
 const _wireSyncActions = () => {};
+const guide = { paint() {} };
 const window = new EventTarget();
 const libraryWake = {
   wakes: new Set(), named: new Map(),

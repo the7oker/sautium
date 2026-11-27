@@ -2755,6 +2755,21 @@ def _run_restored():
                  if n["key"] == "hqplayer.run_restored"), None)
 
 
+def _seen_kept(monkeypatch):
+    """The run's settings stand in for the database, but for the seen map a
+    report's seen writes there in one statement (post_notice_seen)."""
+    from db_pool import db_query_one
+    from routers import settings as settings_router
+    stand_in = settings_router._read
+
+    def read(key):
+        if key != "notice.seen":
+            return stand_in(key)
+        row = db_query_one("SELECT value FROM user_settings WHERE key = 'notice.seen'")
+        return row and row["value"]
+    monkeypatch.setattr(settings_router, "_read", read)
+
+
 def test_a_run_hqplayer_restarted_under_is_put_back_whole_its_volume_with_it(run, monkeypatch):
     """HQPlayer went away mid-run and boots back in the mode it saved (PCM),
     its volume where the run lowered it: no one changed a knob — what it
@@ -2791,16 +2806,14 @@ def test_a_run_hqplayer_restarted_under_louder_is_lowered_to_the_owners_level(ru
 
 def test_the_restored_notice_is_gone_once_seen(run, monkeypatch):
     """The notice of a run put back after a restart is a report: once the
-    owner saw it — the rows of notices visited — it is gone."""
+    owner saw it — its toast closed, on any page — it is gone."""
     from routers import settings as settings_router
     _gone_mid_run(run, monkeypatch, boot_mode=1)
-    store = {"output.type": "hqplayer"}
-    monkeypatch.setattr(settings_router, "_read", store.get)
-    monkeypatch.setattr(settings_router, "_write", store.__setitem__)
-    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {"tasks": []})
-    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
-    assert _run_restored() is not None
-    settings_router.post_guidance_seen("notices")
+    _seen_kept(monkeypatch)
+    report = _run_restored()
+    assert report is not None and report["report"] and report["domain"] == "hqplayer"
+    settings_router.post_notice_seen("hqplayer.run_restored",
+                                     settings_router.NoticeSeen(since=report["since"]))
     assert _run_restored() is None
 
 
@@ -3265,21 +3278,17 @@ def test_a_lost_run_that_switched_modes_back_in_the_mode_it_found_is_put_back_wh
 
 
 def test_a_restored_notice_once_seen_stays_gone_at_a_later_visit(run, monkeypatch):
-    """The restored notice is seen and dropped; later another notice arrives
-    and the owner visits the rows again: the report stays seen — the seen
-    map is written from what the notices derive, not from what is served."""
+    """The restored notice is seen and dropped; later another report is seen
+    too: the first stays seen — a seen is kept per report, the map merged,
+    never written over with what the channel serves."""
     from routers import settings as settings_router
     _gone_mid_run(run, monkeypatch, boot_mode=1)
-    store = {"output.type": "hqplayer"}
-    monkeypatch.setattr(settings_router, "_read", store.get)
-    monkeypatch.setattr(settings_router, "_write", store.__setitem__)
-    monkeypatch.setattr(settings_router, "_guidance_state", lambda: {"tasks": []})
-    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
-    settings_router.post_guidance_seen("notices")
+    _seen_kept(monkeypatch)
+    settings_router.post_notice_seen("hqplayer.run_restored",
+                                     settings_router.NoticeSeen(since=_run_restored()["since"]))
     assert _run_restored() is None
-    run.q("""INSERT INTO external_api_cooldown (source, strikes, updated_at, cooldown_until, reason)
-             VALUES ('lastfm', 1, now(), now() + interval '1 hour', 'test') RETURNING source""")
-    settings_router.post_guidance_seen("notices")
+    settings_router.post_notice_seen("power.undervoltage",
+                                     settings_router.NoticeSeen(since="2026-11-27T10:00:00+00:00"))
     assert _run_restored() is None
 
 

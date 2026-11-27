@@ -4414,13 +4414,14 @@
       group.querySelectorAll('.f-chip').forEach(chip => {
         chip.addEventListener('click', () => {
           if (chip.classList.contains('is-disabled')) {
-            // Only the MB scope chip disables (no dump) — tapping it must
-            // say why instead of dying silently.
+            // Only the MB scope chip disables (no dump) — tapping it says
+            // why, as a toast: an explanation asked for, no decision. With
+            // sharing off its one thing to do is the switch on Sync & P2P.
             if (chip.id === 'discoveryMbChip') {
-              window.notifyDialog({
-                title: 'MusicBrainz search', kind: 'info',
-                message: mbScopeWords(chip.dataset.mbState, dumpsOffered()),
-              });
+              const off = chip.dataset.mbState === 'off';
+              notices.toast({ kind: 'info', key: 'discovery.mb_scope', title: 'MusicBrainz search',
+                              text: mbScopeWords(chip.dataset.mbState, dumpsOffered()),
+                              action: off ? { label: 'Sync & P2P', run: () => navigate('more/sync') } : null });
             }
             return;
           }
@@ -4492,7 +4493,7 @@
       panel.querySelectorAll('.filter-chips[data-filter-multi] .f-chip')
         .forEach(c => c.classList.remove('is-active'));
       const seedChip = panel.querySelector('#discoverySeedChip');
-      if (seedChip) seedChip.classList.remove('is-active');
+      if (seedChip) { seedChip.classList.remove('is-active'); if (seedChip._paint) seedChip._paint(); }
       const seedName = panel.querySelector('#discoverySeedName');
       if (seedName) seedName.textContent = '';
       if (bpmMin) bpmMin.value = '';
@@ -4658,25 +4659,29 @@
 
   // Similar-to-now-playing context: one toggle chip. The seed track id is read
   // off window.currentStatus AT SEARCH TIME (appendFilterParams), so it follows
-  // playback; the label just shows what it latched onto when toggled.
+  // playback; the label just shows what it latched onto when toggled. With
+  // nothing playing it cannot be turned on: drawn disabled — the chip's own
+  // state, repainted by the player's status — never a dialog at the tap.
   function wireSeedFilter(screen, panel) {
     const chip = panel.querySelector('#discoverySeedChip');
     const name = panel.querySelector('#discoverySeedName');
     if (!chip || !name) return;
+    const playing = () => !!(window.currentStatus && window.currentStatus.track_id);
+    chip._paint = () => chip.classList.toggle('is-disabled', !chip.classList.contains('is-active') && !playing());
+    chip._paint();
+    const onStatus = () => {
+      if (!document.contains(chip)) { document.removeEventListener('np-update', onStatus); return; }
+      chip._paint();
+    };
+    document.addEventListener('np-update', onStatus);
     chip.addEventListener('click', () => {
       const st = window.currentStatus;
-      if (!chip.classList.contains('is-active') && !(st && st.track_id)) {
-        window.notifyDialog({
-          title: 'Nothing playing',
-          message: 'Start playback to search around the current track.',
-          kind: 'info',
-        });
-        return;
-      }
+      if (!chip.classList.contains('is-active') && !playing()) return;
       const on = chip.classList.toggle('is-active');
       screen._filters.seed = on;
       name.textContent = on
         ? [(st.artist || ''), (st.song || '')].filter(Boolean).join(' — ') : '';
+      chip._paint();
     });
   }
 
@@ -4978,6 +4983,12 @@
         if (queryId !== getActiveId()) return;
         searching.hidden = true;
         console.warn('mb search failed:', err);
+        // The search's result, said in its own empty block
+        const mbBtn = empty.querySelector('#dEmptyMbBtn');
+        if (mbBtn) mbBtn.hidden = true;
+        const emptyP = empty.querySelector('p');
+        if (emptyP) emptyP.textContent = 'The MusicBrainz search did not answer. Search again to retry.';
+        empty.hidden = false;
       });
   }
 
@@ -8670,8 +8681,12 @@
 
   function friendRowInner(friend) {
     const name = friend.display_name || friend.username || friend.invite_code || '?';
+    // A friend's invite whose handshake has not completed has no thread yet
+    // (onRowClick opens nothing): the row says so as its state
     const status = friend.source === 'master'
       ? `<div class="friend-status">${escapeHtml(supportLine(friend))}</div>`
+      : !friendUrlKey(friend)
+        ? '<div class="friend-status">waiting for the handshake — chat once both sides accept</div>'
       : friend.is_online
         ? `<div class="friend-status online"><span class="status-dot"></span>online</div>`
         : `<div class="friend-status">${escapeHtml(offlineLabel(friend))}</div>`;
@@ -8847,17 +8862,23 @@
     const emailInput = emailRow.querySelector('input[name="email"]');
     const emailBtn = emailRow.querySelector('button');
 
-    // The hint doubles as a transient feedback line ("Adding…",
-    // "Friend added.") and reverts to a steady context-aware text
-    // afterwards. We compute that default once email status is known
-    // so the user sees an honest reason if email invites are off.
+    // The hint under the two forms is their result where the person acts
+    // ("Adding…", "Friend added.") and goes back to its steady, context-aware
+    // text at the next keystroke in either — never on a timer. The default
+    // is computed once the email status is known, so the user sees an honest
+    // reason if email invites are off. What happens elsewhere on the screen
+    // (a copy, a request added back) is a toast.
     let defaultHint = 'Add by invite code or by email.';
-    function showHint(text, transient) {
+    let hintSaid = false;
+    function showHint(text) {
       hintEl.textContent = text;
-      if (transient) {
-        setTimeout(() => { hintEl.textContent = defaultHint; }, 2500);
-      }
+      hintSaid = true;
     }
+    screen.addEventListener('input', e => {
+      if (!hintSaid || !e.target.closest('form, [data-action="add-by-email"]')) return;
+      hintSaid = false;
+      hintEl.textContent = defaultHint;
+    });
 
     // Account + email-verification status in parallel; either failing
     // shouldn't block the other.
@@ -9014,13 +9035,7 @@
       const key = row.dataset.friendKey;
       // A friend's pending invite has no thread yet — there's nothing to
       // open until the handshake completes (Support's has one: chat_key).
-      if (!key) {
-        showHint(
-          'Waiting for handshake — you can chat once both sides accept.',
-          true,
-        );
-        return;
-      }
+      if (!key) return;
       navigateToEntity('chat', key);
     }
     listEl.addEventListener('click', onRowClick);
@@ -9080,17 +9095,21 @@
           const resp = await fetch(`/api/p2p/friend-requests/${id}/${add ? 'add' : 'dismiss'}`,
                                    {method: 'POST'});
           if (!resp.ok) {
-            showHint(add ? 'Could not add back.' : 'Could not dismiss.', true);
+            notices.toast({ kind: 'error', key: 'friends.request', title: add ? 'Not added back' : 'Not dismissed',
+                            text: 'The node did not take it. Try again.' });
             return;
           }
           acted.set(id, {req, done: add ? 'Added back' : 'Dismissed'});
           paintRequests();
           if (add) {
-            showHint(`${name} added back. You can chat once ${name}'s Sautium answers.`, true);
+            notices.toast({ kind: 'success', key: 'friends.request', title: `${escapeHtml(name)} added back`,
+                            text: `You can chat once ${escapeHtml(name)}'s Sautium answers.` });
             refreshFriends();
           }
-        } catch (_) {
-          showHint(add ? 'Could not add back.' : 'Could not dismiss.', true);
+        } catch (err) {
+          console.warn('friend request action failed', err);
+          notices.toast({ kind: 'error', key: 'friends.request', title: add ? 'Not added back' : 'Not dismissed',
+                          text: 'The node is not answering right now. Try again.' });
         }
       });
     });
@@ -9122,7 +9141,7 @@
     screen.querySelector('[data-action="copy-invite"]').addEventListener('click', async () => {
       const code = codeEl.textContent;
       if (!code || code.startsWith('—') || code === 'unavailable') return;
-      if (await copyText(code)) showHint('Invite code copied to clipboard.', true);
+      if (await copyText(code)) notices.toast({ kind: 'success', key: 'friends.copy', title: 'Invite code copied', text: '' });
     });
 
     // Add by code.
@@ -9132,22 +9151,22 @@
       const code = (input.value || '').trim();
       if (!code) return;
       onceInFlight(e.target, async () => {
-      showHint('Adding…', false);
+      showHint('Adding…');
       try {
         // A link or a mailed invite carries another node's bearer token:
         // the string rides the box (routers/p2p.add_friend)
         const resp = await window.Sautium.auth.boxed('/api/p2p/friends/add', {invite_code: code});
         if (!resp.ok) {
-          showHint(resp.status === 422 ? 'That is not an invite code.' : (resp.error || 'Could not add friend.'), true);
+          showHint(resp.status === 422 ? 'That is not an invite code.' : (resp.error || 'Could not add friend.'));
           return;
         }
         const data = resp.data;
         input.value = '';
-        if (data.invite) showHint(inviteOutcomeHint(data), false);
-        else showHint('Friend added.', true);
+        if (data.invite) showHint(inviteOutcomeHint(data));
+        else showHint('Friend added.');
         refreshFriends();
       } catch (err) {
-        showHint('Network error.', true);
+        showHint('The node is not answering right now. Try again.');
       }
       });
     });
@@ -9162,7 +9181,7 @@
       emailInput.disabled = true;
       const sendBtn = emailRow.querySelector('button[type="submit"], button');
       if (sendBtn) sendBtn.disabled = true;
-      showHint('Sending…', false);
+      showHint('Sending…');
       try {
         const resp = await fetch('/api/p2p/invite-by-email', {
           method: 'POST',
@@ -9171,13 +9190,13 @@
         });
         if (!resp.ok) {
           const err = await resp.json().catch(() => ({}));
-          showHint(err.detail || 'Could not send invite.', true);
+          showHint(err.detail || 'Could not send invite.');
           return;
         }
         emailInput.value = '';
-        showHint('Invite sent.', true);
+        showHint('Invite sent.');
       } catch (err) {
-        showHint('Network error.', true);
+        showHint('The node is not answering right now. Try again.');
       } finally {
         emailInput.disabled = false;
         if (sendBtn) sendBtn.disabled = false;
@@ -10002,7 +10021,7 @@
               <span class="more-hint" id="outputHint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/profile" data-guide="verify_email this_node">
+            <button class="more-row" type="button" data-go="more/profile" data-guide="verify_email this_node update">
               <span class="more-icon">${ICON_PROFILE}</span>
               <span class="more-label">Profile</span>
               <span class="more-hint"></span>
@@ -10032,7 +10051,7 @@
               <span class="more-hint"></span>
               <span class="more-chev">${CHEV}</span>
             </button>
-            <button class="more-row" type="button" data-go="more/sync" data-guide="notices">
+            <button class="more-row" type="button" data-go="more/sync" data-guide="support_request">
               <span class="more-icon">${ICON_SYNC}</span>
               <span class="more-label">Sync &amp; P2P</span>
               <span class="more-hint"></span>
@@ -10747,6 +10766,7 @@
         ${host}
         ${chips.trim() ? `<div class="hqp-fav-strip">${chips}</div>` : ''}
         <p class="hqp-row-hint is-left" data-hqp-bench-hint>${hint}</p>
+        ${noticeState('benchmark-marks')}
       </section>`;
   }
 
@@ -11529,7 +11549,8 @@
           const r = await fetch('/api/settings/library/hqp-forget' + endpointQ, { method: 'POST' });
           if (!r.ok) {
             const out = await r.json().catch(() => ({}));
-            notices.toast({ key: 'hqp-forget', text: escapeProfileHtml(out.detail || 'Could not forget the library.') });
+            notices.toast({ kind: 'error', key: 'hqp-forget', title: 'Library not forgotten',
+                            text: escapeProfileHtml(out.detail || 'Could not forget the library.') });
           }
         },
         'cancel-library': () => fetch('/api/settings/library/hqp-sync/cancel', { method: 'POST' }),
@@ -11579,6 +11600,13 @@
           });
         },
       };
+      // The marks are drawn again in place at every notice: one listener on
+      // the block that holds them
+      const marks = body.querySelector('[data-notice-state="benchmark-marks"]');
+      if (marks) marks.addEventListener('click', e => {
+        const el = e.target.closest('[data-action="bench-leave"]');
+        if (el) onceInFlight(el, () => hqpLeaveAction({ refused: true, run: Number(el.dataset.run) }).action.run());
+      });
       Object.entries(benchActions).forEach(([action, fn]) => {
         body.querySelectorAll(`[data-action="${action}"]`).forEach(el => {
           el.addEventListener('click', () => onceInFlight(el, async () => {
@@ -11591,6 +11619,12 @@
       // ...opened as the person's own tap on its row opens it; a control
       // that waits (a build, a list HQPlayer did not give) opens nothing
       // With the two filter rows apart, the one of the slot the track plays in
+      // A failing run's toast asks for the Diagnostics block: brought into view
+      if (pickerWanted === 'diagnostics') {
+        const diag = body.querySelector('[data-hqp-diag]');
+        if (diag) diag.scrollIntoView({ block: 'start' });
+        return;
+      }
       const opener = pickerWanted && ((pickerWanted === 'filter' && playingSlot
         && body.querySelector(`${HQP_PICKER_OPENERS.filter}[data-slot="${playingSlot}"]`))
         || body.querySelector(HQP_PICKER_OPENERS[pickerWanted]));
@@ -13891,9 +13925,10 @@
       });
       if (!ok) return;
       const done = await window.Sautium.auth.logoutEverywhere();
-      await notifyDialog(done
-        ? { title: 'Done', kind: 'success', message: 'All other devices were signed out.' }
-        : { title: 'Failed', kind: 'error', message: 'Could not sign devices out.' });
+      notices.toast(done
+        ? { kind: 'success', key: 'auth.logout_all', title: 'Other devices signed out', text: '' }
+        : { kind: 'error', key: 'auth.logout_all', title: 'Devices not signed out',
+            text: 'The node did not take it. Try again.' });
     }));
 
     const scrobBtn = root.querySelector('[data-action="scrobble-toggle"]');
@@ -14099,13 +14134,16 @@
      beneath it.
 
      The server publishes the whole ACTIVE SET on /api/events ('notice')
-     — a snapshot, never single events — and this side diffs it: an onset
-     (a key with its `since`) the tab has not met before toasts once; a key
-     that goes away just leaves the rows, and one that comes back with the
-     same onset is no news (notices._news). The connect-time snapshot is
-     flagged `initial` and paints state only — its onsets become known
-     without a toast — so a tab that slept through a change wakes to the
-     rows and the trail, not to a burst of stale toasts.
+     — a snapshot, never single events — and this side diffs it. Each notice
+     names its `domain`: `network` is a line of Sync & P2P (its rows, a timed
+     toast at its onset); every other state is a lasting toast at its onset,
+     gone with the snapshot that no longer carries it, and its standing state
+     shows on its own domain's screen. An onset the tab has met is no news
+     (notices._news), and the connect-time snapshot (`initial`) toasts no
+     state: a page opened later shows the state, not a stale message. A
+     `report` is an event the server keeps until it is seen: unseen, it
+     toasts whatever the snapshot, and its toast's close or button is its
+     seen (POST /api/settings/notices/{key}/seen) on every page.
 
      Copy lives here, facts come from the server: a notice carries `key`,
      `kind`, `since`, `until` (ISO, or null) and `data`; NOTICE_COPY turns
@@ -14132,9 +14170,11 @@
       title: 'Last.fm paused',
       text: `Rate-limited${noticeStrikes(n)} — bios, tags and similar artists resume ${fmtUntil(n.until)}.`,
     }),
+    // Draft words for the words sitting (NOTICES-HOME-1 C1): the source is
+    // shared by the artist photos and the catalog's 30-second excerpts
     'cooldown.deezer': n => ({
-      title: 'Artist photos paused',
-      text: `Deezer rate-limited${noticeStrikes(n)} — photos resume ${fmtUntil(n.until)}.`,
+      title: 'Photos and excerpts paused',
+      text: `Deezer rate-limited${noticeStrikes(n)} — artist photos and 30-second excerpts resume ${fmtUntil(n.until)}.`,
     }),
     // Armed only on a node without the MusicBrainz database, whose canon
     // re-makes other nodes' slices on MusicBrainz's answers (backend/mb_answers.py).
@@ -14202,6 +14242,7 @@
   NOTICE_COPY['hqplayer.failing'] = n => ({
     title: 'HQPlayer is not playing',
     text: `${escapeHtml((n.data && n.data.title) || 'Plays fail')} — <span class="num">${(n.data && n.data.count) || 3}</span> plays in a row. More → HQPlayer → Diagnostics has the cause and what to do.`,
+    action: { label: 'Diagnostics', run: () => openHqpSettingsAt('diagnostics') },
   });
   // A benchmark run cut short whose put-back the owner's own change
   // superseded (playback/hqp_benchmark.py): what HQPlayer still holds of its
@@ -14368,7 +14409,8 @@
       ? (jobs ? `The assistant and ${jobs} wait` : 'The assistant waits')
       : `${jobs} wait${d.waiting === 1 ? 's' : ''}`;
     return { title: 'Claude Code is signed out',
-             text: `${who} for a new sign-in — More → AI assistant.` };
+             text: `${who} for a new sign-in — More → AI assistant.`,
+             action: { label: 'Sign in', run: () => navigate('more/ai') } };
   };
   // Wrong passwords at the login door since the owner last saw this
   // (backend/device_auth.py login_refused): a report, gone once seen.
@@ -14435,6 +14477,7 @@
   NOTICE_COPY['codex.signed_out'] = () => ({
     title: 'Codex is signed out',
     text: 'The assistant waits for a new sign-in — More → AI assistant.',
+    action: { label: 'Sign in', run: () => navigate('more/ai') },
   });
   // A provider that stepped aside by its own word (streaming/base.py
   // SteppedAside, routers/settings.py _notice_items): the title and the text
@@ -14514,7 +14557,8 @@
                text: albums
                  ? `Its <span class="num">${fmtNum(albums)}</span> album${albums === 1 ? '' : 's'} `
                    + `${d.streams ? (albums === 1 ? 'streams' : 'stream') : 'cannot play'} until it is back.`
-                 : 'Its music cannot play until it is back.' };
+                 : 'Its music cannot play until it is back.',
+               action: { label: 'Library', run: () => navigate('more/library') } };
     }
     // A disk plugged in that the library never had (LIBRARY-FOLDERS-1 §3.2):
     // its one tap — the whole disk; a folder on it is chosen in Settings ›
@@ -14559,7 +14603,14 @@
 
     apply(snapshot) {
       const next = new Map((snapshot.items || []).map(n => [n.key, n]));
+      // A lasting toast goes with its condition: the key left the set, or it
+      // stands again at another onset (a toast of its own, below)
+      this.items.forEach((prev, key) => {
+        const n = next.get(key);
+        if (prev.domain !== 'network' && (!n || n.since !== prev.since)) this.resolve(key, prev.since);
+      });
       next.forEach((n, key) => {
+        if (n.report) { this._report(n); return; }
         const prev = this.items.get(key);
         if (prev && prev.since === n.since) return;
         // The connect-time snapshot paints state only: its onsets, older than
@@ -14567,10 +14618,42 @@
         if (!this._news(key, n.since) || snapshot.initial) return;
         const c = noticeCopy(n);
         this.toast({ kind: n.kind, title: c.title, text: c.text, why: c.why || null,
-                     action: c.action || null, key });
+                     action: c.action || null, key,
+                     ...(n.domain === 'network' ? {} : { lasting: true, tag: n.since }) });
       });
       this.items = next;
       window.dispatchEvent(new CustomEvent('sautium:notices-changed'));
+    },
+
+    /* A report the server keeps until it is seen: told once per onset in
+       this page — whatever the snapshot, a connect-time one included — and
+       seen where it is told. `update.result` is over ("Updated to 0.2.20"):
+       a timed toast, seen as it is told. Every other one stays until its
+       close or button, which is its seen on every page of the person's. */
+    _report(n) {
+      if (this._told.get(n.key) === n.since) return;
+      this._told.set(n.key, n.since);
+      const c = noticeCopy(n);
+      const seen = () => this._seen(n.key, n.since);
+      const over = n.key === 'update.result';
+      this.toast({ kind: n.kind, title: c.title, text: c.text, why: c.why || null,
+                   action: c.action || null, key: n.key,
+                   ...(over ? {} : { lasting: true, tag: n.since, heard: seen }) });
+      if (over) seen();
+    },
+    _told: new Map(),
+
+    async _seen(key, since) {
+      try {
+        const r = await fetch(`/api/settings/notices/${encodeURIComponent(key)}/seen`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ since }),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      } catch (err) {
+        // Not seen: the next page tells it again
+        console.warn('notice seen not kept', key, err);
+      }
     },
 
     /* Whether this tab meets this onset for the first time — from now on it
@@ -14591,18 +14674,6 @@
       return true;
     },
 
-    /* The rows were on screen: retire the trail for exactly these
-       armings. Straight to the server — guide.seen() gates on the trail
-       it last read, which may not have caught up with this snapshot yet. */
-    async markSeen() {
-      if (!this.list().some(n => !n.seen)) return;
-      this.list().forEach(n => { n.seen = true; });
-      try {
-        const r = await fetch('/api/settings/guidance/notices/seen', { method: 'POST' });
-        if (r.ok) guide._take(await r.json());
-      } catch (_) { /* the stream's word from the write repaints the trail */ }
-    },
-
     /* kind: info | warning | error | success. At most two buttons, in one
        order everywhere: `why` (a function — the Why? button, the
        explanation) and `action` = { label, run } (the one thing to do
@@ -14614,10 +14685,12 @@
        names what it was raised for, so that party ends its own toast and
        no newer one under the key. A lasting toast has a close unless
        `passive`: a condition that ends by itself (a build, a reconnect)
-       takes no taps and goes with it. */
+       takes no taps and goes with it. `heard` runs when the person takes the
+       toast away — its close, Why? or action — never when its party ends it
+       (a report's seen). */
     toast({ kind = 'info', title = '', text = '', action = null, why = null, key = null, ttl = null,
-            lasting = false, passive = false, tag = null } = {}) {
-      const say = { kind, title, text, action, why, lasting, passive, tag };
+            lasting = false, passive = false, tag = null, heard = null } = {}) {
+      const say = { kind, title, text, action, why, lasting, passive, tag, heard };
       const live = key && this._shown.find(t => t.key === key);
       if (live) { this._fill(live, say); this._arm(live); return; }
       let item = key && this._queue.find(t => t.key === key);
@@ -14651,7 +14724,7 @@
                         tag: next = tag }) {
       const t = [...this._shown, ...this._queue].find(x => x.key === key && x.tag === tag);
       if (!t) return;
-      const say = { kind, title, text, action, why, lasting: true, passive, tag: next };
+      const say = { kind, title, text, action, why, lasting: true, passive, tag: next, heard: null };
       if (t.el) this._fill(t, say); else Object.assign(t, say);
     },
 
@@ -14670,7 +14743,7 @@
     amend(key, tag, { kind = 'info', title = '', text = '', action = null, why = null, passive = false }) {
       const t = [...this._shown, ...this._queue].find(x => x.key === key && x.tag === tag);
       if (!t || (t.title === title && t.text === text && t.kind === kind)) return;
-      const say = { kind, title, text, action, why, lasting: true, passive, tag };
+      const say = { kind, title, text, action, why, lasting: true, passive, tag, heard: t.heard };
       if (t.el) this._fill(t, say); else Object.assign(t, say);
     },
 
@@ -14680,7 +14753,7 @@
     act(key, which = 'action') {
       this._queue = this._queue.filter(t => t.key !== key);
       const live = this._shown.find(t => t.key === key);
-      if (live) this._dismiss(live);
+      if (live) { this._dismiss(live); if (live.heard) live.heard(); }
       const c = noticeCopy(this.get(key));
       if (which === 'why') c.why(); else c.action.run();
     },
@@ -14710,8 +14783,8 @@
       }
     },
 
-    _fill(t, { kind, title, text, action, why, lasting, passive, tag }) {
-      Object.assign(t, { kind, title, text, action, why, lasting, passive, tag });
+    _fill(t, { kind, title, text, action, why, lasting, passive, tag, heard }) {
+      Object.assign(t, { kind, title, text, action, why, lasting, passive, tag, heard });
       const el = t.el;
       const tappable = !!(action || why) || (lasting && !passive);
       const wasIn = el.classList.contains('is-in');
@@ -14735,6 +14808,7 @@
         if (b) b.addEventListener('click', () => {
           if (!this._shown.includes(t) || t.el !== el) return;
           this._dismiss(t);
+          if (t.heard) t.heard();
           run();
         });
       };
@@ -14791,12 +14865,14 @@
   };
   window.notices = notices;
 
-  /* Rows for Sync & P2P — the place the facts live. A copy's buttons are the
-     row's too, beside the title in the toast's order (Why?, then its
-     action); renderSync runs them, from one listener on the block the rows
-     are redrawn in. */
+  /* The network's lines, Sync & P2P's rows — its own background conditions
+     (the slices, MusicBrainz's confirmations), needing no attention. Every
+     other domain's notice is a toast and its state on its own screen, never
+     a row here. A copy's buttons are the row's too, beside the title in the
+     toast's order (Why?, then its action); renderSync runs them, from one
+     listener on the block the rows are redrawn in. */
   function _renderNoticeRows() {
-    const items = notices.list();
+    const items = notices.list().filter(n => n.domain === 'network');
     if (!items.length) return '';
     return `
       <div class="form-group" data-notice-rows>
@@ -14815,6 +14891,82 @@
           </div>`;
         }).join('')}
       </div>`;
+  }
+
+  /* A state the notices channel holds, shown on its own domain's screen as
+     that screen's state: an element `data-notice-state="<name>"` is drawn
+     from the channel, and drawn again in place at every snapshot
+     (sautium:notices-changed) — the screen keeps its DOM. Draft words for
+     the words sitting (NOTICES-HOME-1 C2, C3). */
+  const NOTICE_STATES = {
+    // Settings › Library, beside the disks offered: a volume nothing mounted
+    // (the automount's word, disk.unread.*) — as the folder sheet says it
+    'unread-disks': () => {
+      const rows = notices.list().filter(n => n.key.startsWith('disk.unread.')).map(n => {
+      const c = unreadDiskCopy(n.data || {});
+      return `
+      <div class="form-row stacked folder-row is-unread">
+        <div class="row-stack"><span class="row-stack-label">${c.named || (n.data.label ? escapeHtml(n.data.label) : 'USB disk')}</span></div>
+        <div class="row-stack-value"><span class="folder-state">${c.row}</span></div>
+        <div class="row-stack-sub">${c.sub}</div>
+      </div>`;
+      }).join('');
+      return rows ? `<div class="form-group">${rows}</div>` : '';
+    },
+    // Settings › Library, under Analyse library: why no analysis runs here
+    tools: () => {
+      const lines = [];
+      const missing = notices.get('tools.missing');
+      if (missing) {
+        lines.push(`${escapeHtml(((missing.data && missing.data.tools) || []).join(', '))} not found — audio `
+          + 'analysis and fingerprinting are skipped until they are installed.');
+      }
+      if (notices.get('tools.fingerprint')) {
+        lines.push('fpcalc failed its self-test — no audio analysis runs until one that passes is installed.');
+      }
+      return lines.map(line => `<div class="helper-line">${line}</div>`).join('');
+    },
+    // HQPlayer › Benchmark: a run's mark not judged yet, or a check that left
+    // HQPlayer in the measured mode — the notices' own words — with "Leave
+    // it as it is" where HQPlayer at rest refused the judgement
+    'benchmark-marks': () => {
+      const leave = new Set();
+      return ['hqplayer.run_stayed', 'hqplayer.run_unchecked'].map(key => notices.get(key)).filter(Boolean)
+        .map(n => {
+          const c = noticeCopy(n);
+          const d = n.data || {};
+          const button = c.action && !leave.has(d.run)
+            ? ` <button class="btn-link" type="button" data-action="bench-leave" data-run="${Number(d.run)}">${escapeHtml(c.action.label)}</button>` : '';
+          leave.add(d.run);
+          return `<p class="hqp-row-hint is-left">${c.text}${button}</p>`;
+        }).join('');
+    },
+    // Streaming library › Providers: each provider not answering, or that
+    // stepped aside in its own words with its Check again; none, no block
+    providers: () => {
+      const rows = notices.list().filter(n => n.domain === 'streaming').map(n => {
+        if (n.key.startsWith('streaming.aside.')) {
+          const c = asideNoticeCopy(n);
+          return `
+          <div class="form-row stacked">
+            <div class="row-stack"><span class="row-stack-label">${c.title}</span>
+              <span class="notice-row-buttons"><button class="btn-link" type="button" data-action="provider-check" data-provider="${escapeHtml(n.data.provider)}">Check again</button></span></div>
+            <div class="row-stack-sub">${c.text}</div>
+          </div>`;
+        }
+        const d = n.data || {};
+        return `
+          <div class="form-row stacked">
+            <div class="row-stack"><span class="row-stack-label">${escapeHtml(d.name || d.provider || '')}</span>
+              <span class="row-stack-value">not answering</span></div>
+            <div class="row-stack-sub">Streamed tracks fall back to another provider or wait${d.reason ? ` (${escapeHtml(d.reason)})` : ''}.</div>
+          </div>`;
+      }).join('');
+      return rows ? `<div class="profile-group-label">Providers</div><div class="form-group">${rows}</div>` : '';
+    },
+  };
+  function noticeState(name) {
+    return `<div data-notice-state="${name}">${NOTICE_STATES[name]()}</div>`;
   }
 
   /* The in-place note on a bare artist card — the consequence explained
@@ -14976,11 +15128,8 @@
     }
     if (!sent) return;
     if (!sent.ok) {
-      await notifyDialog({
-        title: 'Could not send verification code',
-        message: escapeProfileHtml(sent.error),
-        kind: 'error',
-      });
+      notices.toast({ kind: 'error', key: 'email.verify', title: 'Verification code not sent',
+                      text: escapeProfileHtml(sent.error) });
       return;
     }
     const sentTo = sent.data.email || '';
@@ -16024,7 +16173,7 @@
           <button class="profile-btn secondary" data-action="add-friend">Add as friend</button>
         </div>
 
-        <p class="gear-visibility-note" style="margin-top:calc(28*var(--px));">Audio chain sharing is private for now (Phase 2).</p>
+        <p class="gear-visibility-note" style="margin-top:calc(28*var(--px));">Your audio chain is not shared.</p>
       </section>
     `;
 
@@ -16633,7 +16782,8 @@
           <div class="signin-code-row">
             <input class="add-gear-input" id="ccSigninCode" type="text" placeholder="Paste the code" autocomplete="off" autocapitalize="off" spellcheck="false">
             <button class="btn btn-primary" data-action="cc-signin-code">Submit</button>
-          </div>` : '';
+          </div>
+          <div class="helper-line" data-cc-code-msg hidden></div>` : '';
     return `
         <div class="form-row stacked">
           <div class="row-stack">
@@ -16896,13 +17046,39 @@
     return `Syncs automatically every ${interval} min · next ${mins <= 0 ? 'any moment' : 'in ' + mins + ' min'}`;
   }
 
+  // The external services' pauses (the cooldown notices, routers/settings.py
+  // _notice_items, domain `enrichment`) are the enrichment's own state, read
+  // from the channel: the screen is drawn again at every notice. Last.fm's
+  // stands in place of "Idle"; Deezer's — artist photos and the 30-second
+  // excerpts, fetched as they are needed — whatever the switch says.
+  // Draft words for the words sitting (NOTICES-HOME-1 C1).
+  function _cooldownLine(n, what) {
+    return `${what} · ${escapeHtml(n.data.source === 'lastfm' ? 'Last.fm' : n.data.source === 'deezer' ? 'Deezer'
+      : n.data.source)} asked to slow down${noticeStrikes(n)} — ${what.includes(' and ') ? 'resume' : 'resumes'} ${fmtUntil(n.until)}`;
+  }
+  function _bgPauseLines(enabled) {
+    return notices.list().filter(n => n.domain === 'enrichment'
+                                      && (enabled || n.key !== 'cooldown.lastfm'))
+      .map(n => n.key === 'cooldown.lastfm' ? null
+        : _cooldownLine(n, n.key === 'cooldown.deezer' ? 'Artist photos and 30-second excerpts paused'
+          : `${escapeHtml(n.data.source)} paused`))
+      .filter(Boolean)
+      .map(line => `
+        <div class="form-row stacked" data-bg-pause>
+          <div class="row-stack-sub" style="color:var(--color-text-dim);font-size:calc(11.5*var(--px));">${line}</div>
+        </div>`).join('');
+  }
+
   function _bgEnrichStatusLine(s, enabled) {
-    // Status under the Background enrichment toggle. Three states:
+    // Status under the Background enrichment toggle. Four states:
     //   - toggle off → nothing (the row above already says "off")
     //   - on + idle → "Idle · last run X min ago · 17 stats, 4 lyrics"
+    //   - on + Last.fm cooled down → "Paused · Last.fm asked to slow down — resumes at …"
     //   - on + busy → "Working on track stats · 17 stats, 4 lyrics so far"
     //   - on + draining a backlog → "Catching up · fetching lyrics"
-    if (!enabled || !s) return '';
+    // and under it, whatever the switch, every other service's pause.
+    const pauses = _bgPauseLines(enabled);
+    if (!enabled || !s) return pauses;
     const totals = s.totals || {};
     const partsArr = [];
     if (totals.lyrics)      partsArr.push(totals.lyrics      + ' lyrics');
@@ -16931,23 +17107,26 @@
     const step = stepLabels[s.current_step] || s.current_step;
     const isWorking = s.current_step && s.current_step !== 'idle' && s.current_step !== '';
 
+    const lastfm = notices.get('cooldown.lastfm');
     let primary;
-    if (isWorking) {
-      primary = (s.draining ? 'Catching up · ' : 'Working · ') + step;
+    if (lastfm) {
+      primary = _cooldownLine(lastfm, 'Paused');
+    } else if (isWorking) {
+      primary = escapeHtml((s.draining ? 'Catching up · ' : 'Working · ') + step);
     } else if (s.last_run_at) {
-      primary = 'Idle · last batch ' + fmtRelative(s.last_run_at);
+      primary = escapeHtml('Idle · last batch ' + fmtRelative(s.last_run_at));
     } else {
       primary = 'Idle · awaiting first batch';
     }
 
     return `
-        <div class="form-row stacked">
+        <div class="form-row stacked" data-bg-status>
           <div class="row-stack">
-            <span class="row-stack-label" style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${escapeProfileHtml(primary)}</span>
+            <span class="row-stack-label" style="color:var(--color-text-muted);font-size:calc(12*var(--px));">${primary}</span>
             <span></span>
           </div>
           <div class="row-stack-sub" style="color:var(--color-text-dim);font-size:calc(11.5*var(--px));">${escapeProfileHtml(totalsLine)}</div>
-        </div>`;
+        </div>${pauses}`;
   }
 
   function _renderSync(sync) {
@@ -17004,7 +17183,7 @@
         <div class="form-row">
           <span class="form-label">Support</span>
           ${waiting
-            ? `<button class="btn-link" type="button" data-action="review-support">${escapeProfileHtml(supportLabel(sync.support))}</button>`
+            ? `<button class="btn-link" type="button" data-action="review-support" data-guide="support_request" data-guide-scroll>${escapeProfileHtml(supportLabel(sync.support))}</button>`
             : `<span class="form-value mono" title="${escapeProfileHtml(supportDetail(sync.support))}">${escapeProfileHtml(supportLabel(sync.support))}</span>`}
         </div>
         ${sync.host_agent ? `<div class="form-row">
@@ -17967,11 +18146,8 @@
       return false;
     }
     if (body.refused === 'here') {
-      await window.notifyDialog({
-        title: 'Nothing to import',
-        message: `<b>${escapeProfileHtml(body.name || body.endpoint)}</b> runs on this computer: it reads this node's own music, so its library is yours already. A library of its own is what an HQPlayer on another machine has.`,
-        kind: 'info',
-      });
+      notices.toast({ kind: 'info', key: 'hqp-sync', title: 'Nothing to import',
+        text: `<b>${escapeProfileHtml(body.name || body.endpoint)}</b> runs on this computer: it reads this node's own music, so its library is yours already. A library of its own is what an HQPlayer on another machine has.` });
       return false;
     }
     if (body.preview) {
@@ -18058,7 +18234,8 @@
           const r = await fetch('/api/settings/library/hqp-forget?endpoint_id=' + encodeURIComponent(el.dataset.endpointId), { method: 'POST' });
           if (!r.ok) {
             const out = await r.json().catch(() => ({}));
-            notices.toast({ key: 'hqp-forget', text: escapeProfileHtml(out.detail || 'Could not forget it.') });
+            notices.toast({ kind: 'error', key: 'hqp-forget', title: 'HQPlayer not forgotten',
+                            text: escapeProfileHtml(out.detail || 'Could not forget it.') });
           }
           renderOutputSettings(root);
         });
@@ -18159,6 +18336,7 @@
           </label>
           <div style="font-size:calc(11.5*var(--px));color:var(--color-text-muted);line-height:1.5;">An HQPlayer (Desktop or Embedded, with "Allow control from network" on) or a DLNA renderer — Sautium works out which.</div>
         </div>
+        <div data-msg style="font-size:calc(12*var(--px));color:var(--color-negative);min-height:calc(16*var(--px));"></div>
         <button class="profile-btn primary" data-save>Add</button>
       </div>`;
     document.body.appendChild(overlay);
@@ -18166,6 +18344,10 @@
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
     overlay.querySelector('[data-cancel]').addEventListener('click', close);
     const input = overlay.querySelector('[data-dlna-url]');
+    // The sheet's result where the person acts: under its Add, cleared at
+    // the next keystroke
+    const msg = overlay.querySelector('[data-msg]');
+    input.addEventListener('input', () => { msg.textContent = ''; });
     input.focus();
     overlay.querySelector('[data-save]').addEventListener('click', async () => {
       const url = (input.value || '').trim();
@@ -18181,11 +18363,7 @@
         });
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          await window.notifyDialog({
-            title: 'Add device',
-            message: escapeProfileHtml(err.detail || 'Nothing answered at that address'),
-            kind: 'error',
-          });
+          msg.textContent = err.detail || 'Nothing answered at that address';
           btn.disabled = false;
           btn.textContent = 'Add';
           return;
@@ -18193,7 +18371,9 @@
         const info = await r.json();
         close();
         if (onAdded) await onAdded(info);
-      } catch (_) {
+      } catch (err) {
+        console.warn('add device failed', err);
+        msg.textContent = 'The node is not answering right now. Try again.';
         btn.disabled = false;
         btn.textContent = 'Add';
       }
@@ -18357,8 +18537,8 @@
       const r = await fetch(`${base}/delete`, { method: 'POST' });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        await window.notifyDialog({ title: 'Could not delete', kind: 'error',
-          message: escapeProfileHtml(d.detail || 'Unknown error') });
+        notices.toast({ kind: 'error', key: 'dump.delete', title: 'Not deleted',
+                        text: escapeProfileHtml(d.detail || 'Unknown error') });
         return;
       }
       render();
@@ -18561,7 +18741,7 @@
         sub = 'Updating… Sautium will stop and come back.';
       } else {
         control = offered
-          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
+          ? `<button class="profile-btn primary" type="button" data-action="host-update" data-guide="update" data-guide-scroll data-release="${escapeProfileHtml(offered)}">Update to ${escapeProfileHtml(offered)}</button>`
           : `<button class="profile-btn secondary" type="button" data-action="host-check"${waits(check) ? ' disabled' : ''}>${waits(check) ? 'Checking…' : 'Check for updates'}</button>`;
         const newest = [check, update].filter(r => r.answered_at)
           .sort((a, b) => (a.answered_at < b.answered_at ? 1 : -1))[0];
@@ -18662,6 +18842,9 @@
       // and the Email row's line knows which node this is
       guide.paint();
       guide.seen('this_node');
+      // A release offered is shown with its Update: its mark is retired
+      // until a newer one is offered
+      if (host.offered) guide.seen('update');
       const emailLine = root.querySelector('[data-email-line]');
       if (emailLine && emailLine.dataset.nano !== (hw.nano ? '1' : '0')) {
         emailLine.dataset.nano = hw.nano ? '1' : '0';
@@ -18955,6 +19138,7 @@
         <div class="form-row stacked"><div class="row-stack-sub" data-radio-streamed-line>${_radioStreamedLine(!!ph.enabled)}</div></div>
         ${ph.demo_runtime === false ? `<div class="form-row stacked"><div class="row-stack-sub">This install was set up without the full-length channel's runtime: tracks stream as 30-second excerpts. On the machine, run ./sautium setup --preset full</div></div>` : ''}
       </div>
+      ${noticeState('providers')}
       <div data-phantom-actions>${actions}</div>`;
   }
 
@@ -18998,7 +19182,9 @@
       const el = e.target.closest('[data-action]');
       if (!el || !block.contains(el)) return;
       const action = el.getAttribute('data-action');
-      if (action === 'phantom-toggle') {
+      if (action === 'provider-check') {
+        checkProviderAgain(el.dataset.provider);
+      } else if (action === 'phantom-toggle') {
         const want = !el.classList.contains('on');
         el.classList.toggle('on', want);                 // optimistic flip, no render
         el.setAttribute('aria-pressed', want ? 'true' : 'false');
@@ -19323,6 +19509,7 @@
       <div data-library-folders data-library-drawn="${_libraryDrawn(lib)}">
         <div class="profile-group-label" style="margin-top:calc(14*var(--px));">Music folders</div>
         ${rows ? `<div class="form-group">${rows}</div>` : ''}
+        ${noticeState('unread-disks')}
         ${add}
       </div>`;
   }
@@ -19651,6 +19838,7 @@
         <button class="btn btn-secondary" data-action="enrich"
                 data-guide="analyse_library" data-guide-scroll>Analyse library</button>
       </div>
+      ${noticeState('tools')}
     `;
 
     const libraryStats = isEmpty ? '' : `
@@ -19785,8 +19973,8 @@
       const r = await fetch('/api/settings/library/scan' + query, { method: 'POST' });
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
-        await window.notifyDialog({ title: 'Scan not started', kind: 'error',
-          message: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
+        notices.toast({ kind: 'error', key: 'library.scan', title: 'Scan not started',
+                        text: escapeProfileHtml(d.detail || `HTTP ${r.status}`) });
       }
       render();
     });
@@ -20209,9 +20397,11 @@
 
     // Claude Code state actions
     onAction('[data-action="cc-refresh"]', () => render());
+    // What an install or a sign-in's start did not do is what happened: a
+    // toast, one key for the agents' setup
     const _ccError = async (title, r, err) => {
       const msg = err ? String(err) : await _errorMessage(r);
-      await notifyDialog({ title, message: escapeProfileHtml(msg), kind: 'error' });
+      notices.toast({ kind: 'error', key: 'ai.setup', title: escapeProfileHtml(title), text: escapeProfileHtml(msg) });
     };
     onAction('[data-action="cc-install"]', async () => {
       try {
@@ -20246,11 +20436,20 @@
       } catch (err) {
         res = { ok: false, error: 'Could not reach the node — try again.' };
       }
-      if (!res.ok) { await _ccError('Claude Code sign-in failed', null, res.error); return; }
+      if (!res.ok) {
+        // The pasted code's result, under its field
+        const line = root.querySelector('[data-cc-code-msg]');
+        if (line) { line.textContent = `Not signed in: ${res.error || 'the code was refused'}`; line.hidden = false; }
+        return;
+      }
       render();
     });
     const ccCode = root.querySelector('#ccSigninCode');
     if (ccCode) {
+      ccCode.addEventListener('input', () => {
+        const line = root.querySelector('[data-cc-code-msg]');
+        if (line) line.hidden = true;
+      });
       ccCode.addEventListener('keydown', (e) => {
         if (e.key !== 'Enter') return;
         e.preventDefault();
@@ -20338,6 +20537,7 @@
     `;
     _wireBack(root);
     _wireSyncActions(root, sync);
+    guide.paint();
     // A notice row's button (_renderNoticeRows) does what its toast's button
     // does (notices.act). The rows are redrawn inside this block on every
     // snapshot and every refresh, so the block holds the one listener
@@ -20346,7 +20546,6 @@
       if (btn) notices.act(btn.dataset.noticeAction, btn.dataset.which);
     });
     _subscribeSyncStream(root);
-    notices.markSeen();
   }
 
   async function _fetchSyncState() {
@@ -20432,6 +20631,7 @@
       contentDiv.innerHTML = _renderSync(sync);
 
       _wireSyncActions(root, sync);
+      guide.paint();
     }
 
     function paintLoad(said) {
@@ -20566,6 +20766,9 @@
       // Targeted updates only — the open screen keeps its DOM.
       const note = document.querySelector('[data-discography-pending]');
       if (note) note.innerHTML = discographyPendingText();
+      document.querySelectorAll('[data-notice-state]').forEach(el => {
+        el.innerHTML = NOTICE_STATES[el.dataset.noticeState]();
+      });
       if (parseHash().startsWith('more/sync')) {
         const content = screenRoot() && screenRoot().querySelector('[data-sync-content]');
         if (content) {
@@ -20573,7 +20776,6 @@
           const html = _renderNoticeRows();
           if (rows) rows.outerHTML = html; else content.insertAdjacentHTML('afterbegin', html);
         }
-        notices.markSeen();
       }
     });
     document.addEventListener('np-update', e => {

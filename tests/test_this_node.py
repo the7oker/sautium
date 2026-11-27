@@ -639,7 +639,7 @@ const document = { querySelectorAll: () => els };
 const attachGuidePuck = () => {}, detachGuidePuck = () => {};
 %s
 const out = {};
-for (const tasks of [[], ['verify_email'], ['this_node'], ['music_folder'], ['notices']]) {
+for (const tasks of [[], ['verify_email'], ['this_node'], ['music_folder'], ['support_request']]) {
   guide._apply(tasks);
   out[tasks.join() || 'none'] = els.map(el => el.on);
 }
@@ -656,9 +656,9 @@ process.stdout.write(JSON.stringify(out));
         "verify_email": [True, True, False, True],
         "this_node": [True, True, False, False],
         "music_folder": [True, False, True, False],
-        "notices": [True, False, False, False]}
+        "support_request": [True, False, False, False]}
     # The drawer's rows and the controls carry the marks
-    assert 'data-go="more/profile" data-guide="verify_email this_node"' in SOURCE
+    assert 'data-go="more/profile" data-guide="verify_email this_node update"' in SOURCE
     assert 'data-go="more/library" data-guide="analyse_library music_folder"' in SOURCE
     assert 'data-action="add-folder" data-guide="music_folder"' in SOURCE
     assert '<div class="form-group" data-guide="this_node">' in SOURCE

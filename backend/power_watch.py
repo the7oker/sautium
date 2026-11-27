@@ -89,4 +89,4 @@ def notice() -> Optional[dict]:
     start on."""
     if _since is None:
         return None
-    return {"key": "power.undervoltage", "kind": "warning", "since": _since, "until": None, "data": {}}
+    return {"key": "power.undervoltage", "kind": "warning", "domain": "node", "since": _since, "until": None, "data": {}}

@@ -1428,7 +1428,7 @@ def _audio_output_state() -> Dict[str, Any]:
 # control itself) and a trail whose steps disagree points nowhere.
 # The client owns only the route each id maps to.
 
-_GUIDANCE_DISMISSIBLE = {"audio_output", "notices", "hqp_library", "this_node"}
+_GUIDANCE_DISMISSIBLE = {"audio_output", "update", "hqp_library", "this_node"}
 _SIGNIN_NOTICES = {"claude_code.signed_out", "codex.signed_out"}
 
 
@@ -1530,12 +1530,19 @@ def _guidance_state() -> Dict[str, Any]:
                 and _synced_since_scan() and _analysis_pending()):
             tasks.append("analyse_library")
 
-    # A background condition the user has not been shown yet — the More
-    # tab and the Sync & P2P row light up until the screen with the rows
-    # is visited. A re-armed condition (new `since`) lights it again.
+    # A notice lights no trail of its own: a network line needs no attention,
+    # and every other state shows on its own domain's screen. Two of them ask
+    # something of the person that a page opened after their onset (no toast
+    # then) would never tell: a release offered — More tab, the Profile row,
+    # the Update button, retired by the visit, again for a newer release —
+    # and a support request waiting for its review — More tab, the Sync row,
+    # the Support row's Review, done when it is answered or expires.
     notices = _notices_state()["items"]
-    if any(not n["seen"] for n in notices):
-        tasks.append("notices")
+    offered = next((n for n in notices if n["key"] == "update.available"), None)
+    if offered is not None and _read("guidance.update_seen") != offered["data"]["release"]:
+        tasks.append("update")
+    if any(n["key"].startswith("support.request.") for n in notices):
+        tasks.append("support_request")
 
     # An agent the node needs has lost its sign-in (the notices name it):
     # the trail leads to its Sign in button — More tab, the AI assistant
@@ -1593,14 +1600,23 @@ def _derived(key: str, active: bool) -> Optional[str]:
 
 def _notices_state() -> Dict[str, Any]:
     """What the notices channel serves: every derived notice (_notice_items)
-    but a report the owner has seen (the restored run's, the wrong
-    passwords'), which is dropped."""
-    return {"items": [it for it in _notice_items()
-                      if not (it["key"] in _REPORTS and it["seen"])]}
+    but a report the person has seen (the restored run's, the wrong
+    passwords'), which is dropped. A report is seen where it is told — its
+    toast's close or button (post_notice_seen)."""
+    items = []
+    for it in _notice_items():
+        it["report"] = it["key"] in _REPORTS
+        if not (it["report"] and it["seen"]):
+            items.append(it)
+    return {"items": items}
 
 
 _REPORTS = ("hqplayer.run_restored", "hqplayer.ab_refused", "auth.login_failures",
             "auth.pin_failures", "power.undervoltage", "update.result")
+# MusicBrainz's web service is asked to confirm what other nodes' slices
+# propose (mb_answers): its pause is the network's line. Last.fm's and
+# Deezer's are the background enrichment's state.
+_COOLDOWN_DOMAIN = {"musicbrainz": "network"}
 
 
 def _failures_notice(key: str) -> Optional[Dict[str, Any]]:
@@ -1611,7 +1627,7 @@ def _failures_notice(key: str) -> Optional[Dict[str, Any]]:
     failures = _read(key)
     if not failures:
         return None
-    return {"key": key, "kind": "warning", "since": failures["last"], "until": None,
+    return {"key": key, "kind": "warning", "domain": "account", "since": failures["last"], "until": None,
             "data": {"count": failures["count"], "first": failures["since"], "last": failures["last"]}}
 
 
@@ -1629,10 +1645,12 @@ def _notice_items() -> List[Dict[str, Any]]:
     so no stream hangs on a dead network mount, and the derivation never
     wakes the channel itself.
 
-    Each item: `key` (stable — what toasts coalesce on), `kind`, `since`
-    (a re-arm bumps it, which re-lights the trail), `until` (when the
-    condition clears or is retried, or null), `data` (facts for the copy),
-    `seen` (the trail already led the user to it)."""
+    Each item: `key` (stable — what toasts coalesce on), `kind`, `domain`
+    (whose screen holds it: `network` alone is a row of Sync & P2P; every
+    other state shows on its own domain's screen), `since` (the onset: a
+    re-arm bumps it), `until` (when the condition clears or is retried, or
+    null), `data` (facts for the copy), `seen` (a report the person has
+    seen at this onset: _REPORTS, dropped by _notices_state)."""
     items: List[Dict[str, Any]] = []
     for row in db_query("""
         SELECT source, strikes, updated_at, cooldown_until, reason
@@ -1643,6 +1661,7 @@ def _notice_items() -> List[Dict[str, Any]]:
         items.append({
             "key": f"cooldown.{row['source']}",
             "kind": "warning",
+            "domain": _COOLDOWN_DOMAIN.get(row["source"], "enrichment"),
             "since": row["updated_at"].isoformat(),
             "until": row["cooldown_until"].isoformat(),
             "data": {"source": row["source"], "strikes": row["strikes"],
@@ -1657,6 +1676,7 @@ def _notice_items() -> List[Dict[str, Any]]:
             items.append({
                 "key": f"{family}.deferred",
                 "kind": "info",
+                "domain": "network",
                 "since": slices.get("since"),
                 "until": slices.get("next_attempt_at"),
                 "data": {k: slices.get(k) for k in
@@ -1682,7 +1702,8 @@ def _notice_items() -> List[Dict[str, Any]]:
         key = f"library.folder_out.{folder['id'] if folder['id'] is not None else 'env'}"
         keys.add(key)
         from playback import substitute
-        items.append({"key": key, "kind": "warning", "since": _derived(key, True), "until": None,
+        items.append({"key": key, "kind": "warning", "domain": "library",
+                      "since": _derived(key, True), "until": None,
                       "data": {"name": library_root.folder_name(folder),
                                "albums": int(held.get(folder["path"].rstrip("/") + "/", 0)),
                                "streams": substitute.streams()}})
@@ -1699,7 +1720,8 @@ def _notice_items() -> List[Dict[str, Any]]:
     for disk in (d for d in library_root.new_disks() if d["plugged"]):
         key = f"disk.new.{disk['uuid']}"
         keys.add(key)
-        items.append({"key": key, "kind": "info", "since": _derived(key, True), "until": None,
+        items.append({"key": key, "kind": "info", "domain": "library",
+                      "since": _derived(key, True), "until": None,
                       "data": {k: disk[k] for k in ("path", "label", "audio_files", "capped")}})
     for key in [k for k in _derived_since if k.startswith("disk.new.") and k not in keys]:
         _derived(key, False)
@@ -1708,13 +1730,13 @@ def _notice_items() -> List[Dict[str, Any]]:
     # gone with the disk. Its onset is the file's, so the same disk plugged
     # in again is news.
     for volume in library_root.unread():
-        items.append({"key": f"disk.unread.{volume['device']}", "kind": "warning",
+        items.append({"key": f"disk.unread.{volume['device']}", "kind": "warning", "domain": "library",
                       "since": volume["since"], "until": None,
                       "data": {k: volume[k] for k in ("label", "format", "mounts", "driver", "unclear")}})
     missing = [t for t in _MEDIA_TOOLS if not shutil.which(t)]
     since = _derived("tools.missing", bool(missing))
     if since:
-        items.append({"key": "tools.missing", "kind": "warning",
+        items.append({"key": "tools.missing", "kind": "warning", "domain": "library",
                       "since": since, "until": None, "data": {"tools": missing}})
     # An fpcalc that is there and fails the fingerprint self-test (a missing
     # one is tools.missing): analysis refuses while it lasts
@@ -1722,13 +1744,13 @@ def _notice_items() -> List[Dict[str, Any]]:
     verdict = provenance.fingerprinter()
     since = _derived("tools.fingerprint", verdict.state in ("failed", "mismatch"))
     if since:
-        items.append({"key": "tools.fingerprint", "kind": "warning",
+        items.append({"key": "tools.fingerprint", "kind": "warning", "domain": "library",
                       "since": since, "until": None,
                       "data": {"state": verdict.state, "detail": verdict.detail,
                                "path": verdict.path}})
     from streaming import service as streaming_service
     for pid, health in sorted(streaming_service.provider_health.items()):
-        items.append({"key": f"streaming.silent.{pid}", "kind": "warning",
+        items.append({"key": f"streaming.silent.{pid}", "kind": "warning", "domain": "streaming",
                       "since": health["silent_since"], "until": None,
                       "data": {"provider": pid,
                                "name": streaming_service.provider_name(pid),
@@ -1738,7 +1760,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     # id — never the shared upstream's health key above, which any provider
     # on that upstream clears by answering. The words are the module's.
     for prov, aside in streaming_service.providers_aside():
-        items.append({"key": f"streaming.aside.{prov.manifest.id}", "kind": "warning",
+        items.append({"key": f"streaming.aside.{prov.manifest.id}", "kind": "warning", "domain": "streaming",
                       "since": aside.since, "until": None,
                       "data": {"provider": prov.manifest.id, "name": prov.manifest.name,
                                "code": aside.code, "title": aside.title,
@@ -1749,7 +1771,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     from playback import hqp_diagnostics
     run = hqp_diagnostics.failing_run()
     if run and _read("output.type") == "hqplayer":
-        items.append({"key": "hqplayer.failing", "kind": "error",
+        items.append({"key": "hqplayer.failing", "kind": "error", "domain": "hqplayer",
                       "since": run["since"], "until": None,
                       "data": {"code": run["code"], "count": run["count"],
                                "title": run["title"]}})
@@ -1757,7 +1779,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     # batch, its causes worded where it is shown
     refused = hqp_diagnostics.refused()
     if refused and _read("output.type") == "hqplayer":
-        items.append({"key": "hqplayer.refused", "kind": "warning",
+        items.append({"key": "hqplayer.refused", "kind": "warning", "domain": "hqplayer",
                       "since": refused["since"], "until": None,
                       "data": {k: refused[k] for k in ("what", "count", "total", "stream")}})
     # A queue that meets a rate HQPlayer cannot reach, or may not (hqp_rate_check): said
@@ -1769,7 +1791,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     active = manager.active
     rate = active.rate_notice() if active is not None and active.id == "hqplayer" else None
     if rate is not None:
-        items.append({"key": "hqplayer.rate_check", "kind": "warning",
+        items.append({"key": "hqplayer.rate_check", "kind": "warning", "domain": "hqplayer",
                       "since": rate["since"], "until": None, "data": rate["data"]})
     # A benchmark run cut short whose put-back the owner's own change
     # superseded: what HQPlayer still holds of its test settings — the volume
@@ -1780,7 +1802,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     from playback import hqp_benchmark
     left = hqp_benchmark.left_notice()
     if left is not None:
-        items.append({"key": "hqplayer.run_left", "kind": "warning",
+        items.append({"key": "hqplayer.run_left", "kind": "warning", "domain": "hqplayer",
                       "since": left["since"].isoformat(), "until": None,
                       "data": {"items": left["items"]}})
     # A comparison's put-back HQPlayer refused twice alike, left to the
@@ -1788,7 +1810,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     from playback import hqp_ab
     ab_refused = hqp_ab.refused_notice()
     if ab_refused is not None:
-        items.append({"key": "hqplayer.ab_refused", "kind": "warning",
+        items.append({"key": "hqplayer.ab_refused", "kind": "warning", "domain": "hqplayer",
                       "since": ab_refused["since"].isoformat(), "until": None,
                       "data": ab_refused["data"]})
     # One put back after HQPlayer went away under it, or answered nothing
@@ -1796,7 +1818,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     # (_notices_state)
     restored = hqp_benchmark.restored_notice()
     if restored is not None:
-        items.append({"key": "hqplayer.run_restored", "kind": "info",
+        items.append({"key": "hqplayer.run_restored", "kind": "info", "domain": "hqplayer",
                       "since": restored["since"].isoformat(), "until": None,
                       "data": {"run_at": restored["run_at"].isoformat(),
                                "volume_left": restored["volume_left"],
@@ -1810,7 +1832,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     # is never judged)
     unchecked = hqp_benchmark.unchecked_notice()
     if unchecked is not None:
-        items.append({"key": "hqplayer.run_unchecked", "kind": "info",
+        items.append({"key": "hqplayer.run_unchecked", "kind": "info", "domain": "hqplayer",
                       "since": unchecked["since"].isoformat(), "until": None,
                       "data": {"mode": unchecked["mode"], "run": unchecked["run"],
                                "refused": unchecked["refused"]}})
@@ -1820,7 +1842,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     # seen, and anew once HQPlayer at rest refused it (`refused`)
     stayed = hqp_benchmark.stayed_notice()
     if stayed is not None:
-        items.append({"key": "hqplayer.run_stayed", "kind": "warning",
+        items.append({"key": "hqplayer.run_stayed", "kind": "warning", "domain": "hqplayer",
                       "since": stayed["since"].isoformat(), "until": None,
                       "data": {"mode": stayed["mode"], "run": stayed["run"],
                                "unchecked": stayed["unchecked"], "refused": stayed["refused"],
@@ -1842,12 +1864,12 @@ def _notice_items() -> List[Dict[str, Any]]:
             """)["n"]
         assistant = provider == "claude_code"
         if waiting or assistant:
-            items.append({"key": "claude_code.signed_out", "kind": "error",
+            items.append({"key": "claude_code.signed_out", "kind": "error", "domain": "assistant",
                           "since": agent["since"], "until": None,
                           "data": {"waiting": waiting, "assistant": assistant}})
     agent = codex_cli.auth.verdict()
     if agent is not None and not agent["signed_in"] and provider == "codex":
-        items.append({"key": "codex.signed_out", "kind": "error",
+        items.append({"key": "codex.signed_out", "kind": "error", "domain": "assistant",
                       "since": agent["since"], "until": None, "data": {}})
     # A support request that names the person's conversations, logs or
     # playback traces waits for their own decision on the request sheet
@@ -1857,7 +1879,7 @@ def _notice_items() -> List[Dict[str, Any]]:
     with get_conn() as conn:
         waiting = diag_events.waiting_warrants(conn)
     for row in waiting:
-        items.append({"key": f"support.request.{row['id']}", "kind": "info",
+        items.append({"key": f"support.request.{row['id']}", "kind": "info", "domain": "support",
                       "since": row["received_at"], "until": row["expires_at"],
                       "data": _support_request(row)})
     for key in (device_auth.LOGIN_FAILURES_KEY, device_auth.PIN_FAILURES_KEY):
@@ -1870,13 +1892,13 @@ def _notice_items() -> List[Dict[str, Any]]:
     from routers import host as host_router
     offered = host_router.offered_release()
     if offered is not None:
-        items.append({"key": "update.available", "kind": "info", "since": offered["since"],
+        items.append({"key": "update.available", "kind": "info", "domain": "node", "since": offered["since"],
                       "until": None, "data": {"release": offered["release"]}})
     # How the last update ended (the node on the new release, or back on the
     # one before): a report, dropped once seen
     updated = host_router.update_report()
     if updated is not None:
-        items.append({"key": "update.result",
+        items.append({"key": "update.result", "domain": "node",
                       "kind": "info" if updated["outcome"] == "updated" else "warning",
                       "since": updated["since"], "until": None,
                       "data": {"outcome": updated["outcome"], "release": updated["release"],
@@ -1905,6 +1927,35 @@ def get_notices() -> Dict[str, Any]:
     return _notices_state()
 
 
+class NoticeSeen(BaseModel):
+    since: str
+
+
+@router.post("/notices/{key}/seen")
+def post_notice_seen(key: str, body: NoticeSeen) -> Dict[str, Any]:
+    """A report seen where it was told — its toast closed, or its button
+    pressed, on any of the person's pages: that onset is kept, so the
+    channel drops it everywhere and a later onset of it is news again. Only a
+    report: a state ends with its source, never by being looked at."""
+    if key not in _REPORTS:
+        raise HTTPException(status_code=400, detail=f"not a report: {key}")
+    # One statement: two pages closing two reports at once keep both
+    moved = db_execute("""
+        INSERT INTO user_settings (key, value) VALUES ('notice.seen', jsonb_build_object(%(k)s, %(s)s))
+        ON CONFLICT (key) DO UPDATE
+            SET value = CASE jsonb_typeof(user_settings.value) WHEN 'object' THEN user_settings.value
+                             ELSE '{}'::jsonb END || EXCLUDED.value,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_settings.value -> %(k)s IS DISTINCT FROM to_jsonb(%(s)s::text)
+        RETURNING 1 AS moved""", {"k": key, "s": body.since})
+    if moved:
+        if key == device_auth.PIN_FAILURES_KEY:
+            # The wrong pairing codes' record starts again at the next one
+            device_auth.pin_failures_seen()
+        db_execute("NOTIFY sautium_notices")
+    return {"key": key, "since": body.since}
+
+
 @router.post("/streaming/providers/{provider_id}/check")
 def post_stream_provider_check(provider_id: str) -> Dict[str, Any]:
     """The person's "Check again" on a provider that stepped aside: the
@@ -1930,14 +1981,12 @@ def post_guidance_seen(task: str) -> Dict[str, Any]:
     completion is a human's judgement rather than a state we can read."""
     if task not in _GUIDANCE_DISMISSIBLE:
         raise HTTPException(status_code=400, detail=f"not dismissible: {task}")
-    if task == "notices":
-        # Seen is per condition AND per arming: the map keeps the `since`
-        # that was shown, so the same key re-armed later lights the trail
-        # again while a lingering row stays retired — every derived row,
-        # a seen report the channel no longer serves among them.
-        _write("notice.seen", {n["key"]: n["since"] for n in _notice_items()})
-        # The wrong pairing codes' record starts again at the next one
-        device_auth.pin_failures_seen()
+    if task == "update":
+        # per release: a newer one offered later lights the trail again
+        from routers import host as host_router
+        offered = host_router.offered_release()
+        if offered is not None:
+            _write("guidance.update_seen", offered["release"])
     elif task == "hqp_library":
         # per HQPlayer: another one chosen later lights the trail again
         import hqp_library
