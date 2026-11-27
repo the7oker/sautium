@@ -2,9 +2,11 @@
 note to the file PROBE_LOG names and answers "pong", so a test sees which
 calls an agent CLI actually let through. With PROBE_SEES set it also writes,
 at start, the value of the variable PROBE_SEES names to the file PROBE_SEEN
-names — what the CLI started it with."""
+names — what the CLI started it with. PROBE_START_DELAY (seconds) holds its
+first answer back, as the assistant's own server's imports do."""
 
 import os
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -24,4 +26,5 @@ def ping(note: str = "") -> str:
 
 
 if __name__ == "__main__":
+    time.sleep(float(os.environ.get("PROBE_START_DELAY") or 0))
     server.run()

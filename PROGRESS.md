@@ -892,7 +892,13 @@ implementation details live in the code, DB and git history.
   `features.code_mode.direct_only_tool_namespaces=["mcp__<server>"...]` —
   codex 0.149 otherwise defers every MCP tool behind its code-mode
   `exec` JS host, where the model greps `ALL_TOOLS` by regex before it
-  can call anything (the ENABLE_TOOL_SEARCH=false analog); reasoning
+  can call anything (the ENABLE_TOOL_SEARCH=false analog) — and, since
+  2026-11-27, offered from the first request: codex sends it after 1 s
+  without a server still starting, the assistant's answers after ~1.2 s,
+  so a fresh turn's first step had no library tool and the model's call
+  came back "unsupported call"; `mcp_optional_startup_grace_ms=0` waits
+  for each server's own startup timeout (codex 0.151+; 0.149's 1 s was
+  fixed, and the tests' probe server started fast enough to hide it); reasoning
   effort `medium` — at `low` terra ran the tag SQL and gave up without
   naming one candidate from its own knowledge, at `medium` it named
   three and verified them in a single parallel mb_resolve round (+4s);
