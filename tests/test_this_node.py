@@ -636,13 +636,17 @@ const els = %s.map(g => ({ dataset: { guide: g }, on: false, hasAttribute: () =>
                            classList: { toggle(_c, on) { this.el.on = on; } } }));
 els.forEach(el => { el.classList.el = el; });
 const document = { querySelectorAll: () => els };
-const attachGuidePuck = () => {}, detachGuidePuck = () => {};
+const detached = [];
+const attachGuidePuck = () => {}, detachGuidePuck = (t) => { detached.push(t.name); _guidePucks.delete(t); };
+// a control drawn again in place left its puck with the old element: the next paint takes it away
+const _guidePucks = new Map([[{ name: 'gone', isConnected: false }, {}], [{ name: 'here', isConnected: true }, {}]]);
 %s
 const out = {};
-for (const tasks of [[], ['verify_email'], ['this_node'], ['music_folder'], ['notices']]) {
+for (const tasks of [[], ['verify_email'], ['this_node'], ['music_folder'], ['support_request']]) {
   guide._apply(tasks);
   out[tasks.join() || 'none'] = els.map(el => el.on);
 }
+out.detached = detached.filter(n => n !== undefined);
 process.stdout.write(JSON.stringify(out));
 """
     start = SOURCE.index("\n  const guide = {") + 1
@@ -656,9 +660,10 @@ process.stdout.write(JSON.stringify(out));
         "verify_email": [True, True, False, True],
         "this_node": [True, True, False, False],
         "music_folder": [True, False, True, False],
-        "notices": [True, False, False, False]}
+        "support_request": [True, False, False, False],
+        "detached": ["gone"]}
     # The drawer's rows and the controls carry the marks
-    assert 'data-go="more/profile" data-guide="verify_email this_node"' in SOURCE
+    assert 'data-go="more/profile" data-guide="verify_email this_node update"' in SOURCE
     assert 'data-go="more/library" data-guide="analyse_library music_folder"' in SOURCE
     assert 'data-action="add-folder" data-guide="music_folder"' in SOURCE
     assert '<div class="form-group" data-guide="this_node">' in SOURCE
@@ -737,3 +742,33 @@ const settle = () => new Promise(r => setTimeout(r, 0));
         ["restarted, its state not read yet", ["/api/host", "/api/settings/hardware"], 0, False, False],
         ["the node restarted", ["/api/host", "/api/settings/hardware"], 1, True, True],
         ["quiet again", host_only, 0, True, True]]
+
+
+def test_an_offer_is_dated_by_its_first_answer_and_a_daily_check_is_no_news(agent, monkeypatch):
+    """The daily check offering the same release again moves the check's row,
+    never the offer's onset: its lasting toast is not raised again every day.
+    A newer release is a new onset."""
+    import asyncio
+    import types
+    host = pytest.importorskip("routers.host")
+    c, _ = agent
+    settings_router = pytest.importorskip("routers.settings")
+    monkeypatch.setattr(settings_router, "notify_library_subscribers", lambda: None)
+    req = types.SimpleNamespace(state=types.SimpleNamespace(signer="host-agent"))
+
+    def answer(release):
+        asyncio.run(host.answer(host.Answer(verb="check", outcome="offered", release=release), req))
+        return host.offered_release()
+    first = answer("v0.3.1")
+    c.execute("UPDATE host_requests SET answered_at = answered_at + interval '1 day' WHERE verb = 'check'")
+    again = answer("v0.3.1")
+    assert again == first
+    newer = answer("v0.3.2")
+    assert newer["release"] == "v0.3.2" and newer["since"] != first["since"]
+    # a check that did not run says nothing of the offer: made again, the same onset
+    asyncio.run(host.answer(host.Answer(verb="check", outcome="failed", detail="no network"), req))
+    assert answer("v0.3.2")["since"] == newer["since"]
+    # an offer that stopped and is made again later is a new onset
+    asyncio.run(host.answer(host.Answer(verb="check", outcome="current"), req))
+    assert host.offered_release() is None
+    assert answer("v0.3.2")["since"] != newer["since"]

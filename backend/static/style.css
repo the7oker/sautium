@@ -7917,6 +7917,27 @@ html { -webkit-tap-highlight-color: transparent; }
 }
 /* On amber ground the mark takes the label's colour, or it would vanish. */
 .btn-primary.is-guided::after { background: currentColor; }
+/* A link or a profile button the trail ends on (the Support row's Review,
+   Profile's Update): the same dot after its label, in flow. */
+.btn-link.is-guided::after,
+.profile-btn.is-guided::after {
+  content: '';
+  display: inline-block;
+  vertical-align: middle;
+  width: calc(7 * var(--px));
+  height: calc(7 * var(--px));
+  margin-left: calc(7 * var(--px));
+  border-radius: 50%;
+  background: var(--color-amber);
+}
+.profile-btn.primary.is-guided::after { background: currentColor; }
+/* Raised over the puck, which slides under them (an opaque ground for the link) */
+.btn-link.is-guided,
+.profile-btn.is-guided {
+  position: relative;
+  z-index: 21;
+}
+.btn-link.is-guided { background: var(--color-surface); }
 
 /* The rail is an out-of-flow strip from the top of the screen down to the
    target's centre (height measured in attachGuidePuck). Its only job is to

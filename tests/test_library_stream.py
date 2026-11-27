@@ -240,23 +240,23 @@ def test_the_stream_says_the_trail_at_connect_and_when_its_set_changes(trail):
         await page.nothing_more()
 
         # a task appears with a notice: no Library wake, and the trail said once
-        trail.rules.append("notices")
+        trail.rules.append("support_request")
         settings_router._on_sync_notify([Note("sautium_notices")])
         assert trail._moved.is_set()
         await asyncio.to_thread(trail.compute)
         appeared = await page.named("guidance")
-        assert appeared["tasks"] == ["audio_output", "notices"] and appeared["seq"] > first["seq"]
+        assert appeared["tasks"] == ["audio_output", "support_request"] and appeared["seq"] > first["seq"]
 
         # a task goes with the identity's state
         trail.rules.remove("audio_output")
         settings_router._on_sync_notify([Note("sautium_identity")])
         await asyncio.to_thread(trail.compute)
         gone = await page.named("guidance")
-        assert gone["tasks"] == ["notices"] and gone["seq"] > appeared["seq"]
+        assert gone["tasks"] == ["support_request"] and gone["seq"] > appeared["seq"]
 
         # a page that connects now is told what stands
         other = await Page().open()
-        assert (await other.named("guidance"))["tasks"] == ["notices"]
+        assert (await other.named("guidance"))["tasks"] == ["support_request"]
         # ... and the first page hears nothing of that connect's computation
         await page.nothing_more()
         await page.close()
@@ -368,7 +368,7 @@ def test_a_computation_that_fails_is_said_and_the_next_wake_computes(trail, monk
         if trail.computed == 1:
             raise RuntimeError("no database")
         done.set()
-        return {"tasks": ["notices"]}
+        return {"tasks": ["support_request"]}
     monkeypatch.setattr(settings_router, "_guidance_state", state)
     trail.start()
     trail.moved()
@@ -377,4 +377,4 @@ def test_a_computation_that_fails_is_said_and_the_next_wake_computes(trail, monk
     assert done.wait(5)
     trail.stop()
     assert "The guidance trail was not computed" in caplog.text
-    assert told == ["guidance"] and trail.said["tasks"] == ["notices"]
+    assert told == ["guidance"] and trail.said["tasks"] == ["support_request"]

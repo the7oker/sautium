@@ -314,6 +314,16 @@ A task whose completion is a judgement rather than a state we can
 read (visiting a screen IS the whole of it) is retired with
 `guide.seen(id)` and must be listed in `_GUIDANCE_DISMISSIBLE`.
 
+**A notice lights no trail as such** (since 2026-11-27, NOTICES-HOME-1):
+a network line needs no attention, and every other state shows on its
+own domain's screen. A notice whose state asks something of the person
+that a page opened after its onset would never tell gets a task of its
+own pointing at its control: `update` (a release offered — More tab, the
+Profile row, the Update button; retired by the visit, again for a newer
+release) and `support_request` (a support request waiting — More tab, the
+Sync row, the Support row's Review; done when answered or expired), beside
+`ai_signin` (an agent signed out). There is no `notices` task.
+
 A control that sits past the fold also gets `data-guide-scroll`.
 That attaches the **puck**: a handle that rides the bottom of the
 viewport while the target is out of sight, lands exactly on it as it
@@ -491,7 +501,7 @@ If a design page or a prompt asks for a message on Now Playing, say so
 and stop for the design session.
 
 - **`notices.toast({ kind, title, text, why?, action?, key?, lasting?,
-  passive?, tag? })`** — the passive toast (no button) takes **no
+  passive?, tag?, heard? })`** — the passive toast (no button) takes **no
   pointer events**: a tap goes to whatever is beneath it, so it never
   blocks a control and the second tap of a double-tap cannot land on
   it. It is narrower than the screen header (272 design-px, centred) so
@@ -537,11 +547,37 @@ and stop for the design session.
   through `--strip-h`, the one measurement (a `ResizeObserver` in
   `init`), so it covers nothing. Gone the moment the party that raised
   it clears its key.
-- **The rows on Sync & P2P** — where the fact lives. Toasts are
-  signals, not storage; a toast nobody saw costs nothing because the
-  row and the guidance trail (`data-guide="notices"` on the More tab
-  and the Sync row) still lead there. Visiting the screen retires
-  the trail for exactly the armings shown.
+- **Each notice in its own domain** (since 2026-11-27, NOTICES-HOME-1;
+  the owner's find of 2026-11-26: a disk and "Updated to 0.2.20" among
+  Sync & P2P's rows). Every derived notice names its `domain` where the
+  server derives it (`_notice_items`: `network`, `enrichment`, `library`,
+  `streaming`, `hqplayer`, `assistant`, `support`, `account`, `node`) —
+  the page keeps no list of keys. **Sync & P2P draws the network's lines
+  alone** (`_renderNoticeRows`: the slices, MusicBrainz's confirmations —
+  its own background conditions, needing no attention, a timed toast at
+  their onset). **Every other state is a lasting toast at its onset**
+  (`tag` = its onset), gone with the snapshot that no longer carries it,
+  and **its standing state shows on its own domain's screen as that
+  screen's state**: the folder's row and the disks in Settings › Library,
+  the media tools under Analyse library, the providers on the Streaming
+  library, the Benchmark's marks and Diagnostics on HQPlayer, the
+  sign-in on AI assistant, the Update on Profile, the Support row's
+  Review, the services' pauses on Background enrichment's line. A state
+  the channel holds is drawn there from the channel itself
+  (`noticeState(name)` → `NOTICE_STATES`, drawn again in place at every
+  snapshot), never derived a second time. The connect-time snapshot
+  toasts no state: a page opened later shows the state, not a stale
+  message. `tests/test_notices_home.py::
+  test_sync_and_p2p_draws_no_notice_of_another_domain` fails when a
+  notice of another domain comes back to Sync & P2P.
+- **A report is seen at its toast.** A `report` (`_REPORTS`: a run put
+  back, a comparison not put back, wrong passwords or pairing codes, an
+  update's end, an under-voltage) is an event the server keeps until it is
+  seen: unseen, it toasts whatever the snapshot — the connect-time one
+  included — lasting, and its close or button posts `POST
+  /api/settings/notices/{key}/seen {since}` (`toast({ heard })`), so every
+  page drops it. "Updated to 0.2.20" is over: a timed toast, seen as it is
+  told.
 - **Explain at the point of consequence** where one exists: the bare
   artist card carries `[data-discography-pending]`, not only a toast.
 
@@ -579,13 +615,13 @@ notice (`hqplayer.rate_check`), whose words are the rate check's own
 its `data` as phrases its `NOTICE_COPY` entry draws, and for a provider that
 stepped aside (`streaming.aside.<id>`), whose title and text are its module's,
 carried in `data` as plain text `asideNoticeCopy` escapes. A copy may name an
-`action` (`{ label, run }`): the notice's toast carries it, and so does its
-row on Sync & P2P (since 2026-10-21), as a `.btn-link` beside the title —
-the toast's label, doing what the toast's button does (the rate check's Why?
-opens the HQPlayer screen); the row's text still names the reason itself.
-`renderSync` runs a row's action from one listener on the block the rows are
-redrawn in, through `notices.act`: the notice's toast, shown or queued, goes
-as its own button would close it, and the action runs. A condition with no
+`action` (`{ label, run }`): the notice's toast carries it, and a network
+line's row on Sync & P2P too (since 2026-10-21), as a `.btn-link` beside the
+title — the toast's label, doing what the toast's button does; the row's
+text still names the reason itself. `renderSync` runs a row's action from
+one listener on the block the rows are redrawn in, through `notices.act`:
+the notice's toast, shown or queued, goes as its own button would close it,
+and the action runs. A condition with no
 ledger
 keeps its `since` in `_derived_since` (`routers/settings.py`); its
 producers wake the channel on the bad AND the good transition. The music
@@ -607,8 +643,9 @@ that appears or re-arms toasts once — so `since` is the condition's
 ONSET, stable while it lasts: a producer that restamps it per run
 re-raises the same toast on every run (the slice rows did, every few
 seconds — `lb_slice_cycle.publish_status` keeps it now); the connect-time snapshot is
-`initial` and paints state only, so a tab that slept through a change
-wakes to the rows, never to a burst of stale toasts. The tab remembers
+`initial` and paints state only (an unseen report aside), so a tab that
+slept through a change wakes to the screens' states, never to a burst of
+stale toasts. The tab remembers
 each onset it has met (`notices._news`: sessionStorage, memory where it is
 refused) — toasted, or painted by the connect-time snapshot — so a notice
 that goes and comes back with the same `since` (a gap; a reload, while
